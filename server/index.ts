@@ -22,6 +22,7 @@ import {
   type MarketQuery,
   type ReadOnlyMarketFeature,
 } from "./market.js";
+import { OrderHistoryQueryError, type OrderHistoryQuery } from "./orders.js";
 import { TossApiError, TossClient } from "./toss.js";
 
 const config = loadConfig();
@@ -133,10 +134,12 @@ app.get("/api/portfolio", requireSession, async (request, response) => {
     const account = typeof request.query.account === "string" ? request.query.account : undefined;
     const force = request.query.refresh === "1";
     const portfolio = await toss.getPortfolio(account, force);
-    try {
-      historyStore.recordPortfolio(portfolio);
-    } catch (historyError) {
-      console.error("[history] 일별 스냅샷 저장 실패:", historyError instanceof Error ? historyError.message : historyError);
+    if (request.query.snapshot !== "0") {
+      try {
+        historyStore.recordPortfolio(portfolio);
+      } catch (historyError) {
+        console.error("[history] 일별 스냅샷 저장 실패:", historyError instanceof Error ? historyError.message : historyError);
+      }
     }
     response.json(portfolio);
   } catch (error) {
@@ -173,7 +176,7 @@ function compatibleMarketQuery(request: Request): MarketQuery {
 }
 
 function compatibleApiError(response: Response, error: unknown, fallback: string): void {
-  if (error instanceof MarketQueryError) {
+  if (error instanceof MarketQueryError || error instanceof OrderHistoryQueryError) {
     response.status(400).json({ error: { code: "invalid-request", message: error.message } });
     return;
   }
@@ -246,19 +249,51 @@ app.get("/api/v1/accounts", requireReadOnlyApiToken, async (_request, response) 
   }
 });
 
-app.get("/api/v1/holdings", requireReadOnlyApiToken, async (request, response) => {
-  setNoStore(response);
+function compatibleAccountId(request: Request, response: Response): string | undefined {
   const accountId = request.get("X-Tossinvest-Account")?.trim() ?? "";
-  if (!accountId || accountId.length > 128) {
+  if (!/^\d{1,19}$/.test(accountId)) {
     response.status(400).json({
       error: { code: "account-header-required", message: "X-Tossinvest-Account 헤더가 필요합니다." },
     });
-    return;
+    return undefined;
   }
+  return accountId;
+}
+
+app.get("/api/v1/holdings", requireReadOnlyApiToken, async (request, response) => {
+  setNoStore(response);
+  const accountId = compatibleAccountId(request, response);
+  if (!accountId) return;
   try {
     response.json(await toss.getCompatibleHoldings(accountId));
   } catch (error) {
     compatibleApiError(response, error, "토스증권 보유 자산을 불러오지 못했습니다.");
+  }
+});
+
+app.get("/api/v1/orders", requireReadOnlyApiToken, async (request, response) => {
+  setNoStore(response);
+  const accountId = compatibleAccountId(request, response);
+  if (!accountId) return;
+  try {
+    response.json(await toss.getCompatibleOrders(accountId, compatibleMarketQuery(request) as OrderHistoryQuery));
+  } catch (error) {
+    compatibleApiError(response, error, "토스증권 거래 내역을 불러오지 못했습니다.");
+  }
+});
+
+app.get("/api/v1/orders/:orderId", requireReadOnlyApiToken, async (request, response) => {
+  setNoStore(response);
+  const accountId = compatibleAccountId(request, response);
+  if (!accountId) return;
+  try {
+    response.json(await toss.getCompatibleOrder(
+      accountId,
+      String(request.params.orderId ?? ""),
+      compatibleMarketQuery(request) as OrderHistoryQuery,
+    ));
+  } catch (error) {
+    compatibleApiError(response, error, "토스증권 거래 상세를 불러오지 못했습니다.");
   }
 });
 
@@ -267,7 +302,7 @@ app.all("/api/v1/{*path}", requireReadOnlyApiToken, (_request, response) => {
   response.status(404).json({
     error: {
       code: "operation-not-supported",
-      message: "이 호환 API는 거래를 제외한 조회 전용 기능만 제공합니다.",
+      message: "이 호환 API는 허용된 조회 전용 기능만 제공합니다.",
     },
   });
 });

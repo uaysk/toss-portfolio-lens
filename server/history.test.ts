@@ -197,4 +197,31 @@ describe("PortfolioHistoryStore", () => {
     );
     expect(afterSale.series.map((item) => item.symbol)).toEqual(["KEEP"]);
   });
+
+  it("현재 해외 보유가 없어도 과거 USD 종목 기록을 반환한다", () => {
+    const store = new PortfolioHistoryStore(":memory:");
+    stores.push(store);
+    store.replaceHistoricalSnapshots("account-1", [
+      {
+        date: "2026-01-02",
+        capturedAt: Date.parse("2026-01-02T14:59:59.999Z"),
+        items: [{
+          symbol: "PAST-US",
+          name: "과거 해외 종목",
+          market: "NASDAQ",
+          currency: "USD",
+          evaluationAmount: 250,
+        }],
+      },
+      {
+        date: "2026-01-03",
+        capturedAt: Date.parse("2026-01-03T14:59:59.999Z"),
+        items: [],
+      },
+    ], "2026-01-04");
+
+    const history = store.getHistory("account-1", "USD", "all");
+    expect(history.series).toEqual([expect.objectContaining({ symbol: "PAST-US", market: "NASDAQ" })]);
+    expect(history.points.map((point) => point.totalValue)).toEqual([250, 0]);
+  });
 });

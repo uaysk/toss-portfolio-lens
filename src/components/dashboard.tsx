@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -26,7 +26,9 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { buildAllocation } from "@/lib/allocation";
 import { formatMoney, formatPercent, formatQuantity, formatSignedMoney, formatSyncTime } from "@/lib/format";
+import { PORTFOLIO_REFRESH_INTERVAL_MS, portfolioRequestUrl } from "@/lib/portfolio-refresh";
 import { holdingKey, stockColor, stockForeground } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import {
@@ -216,7 +218,7 @@ function PortfolioHero({ portfolio }: { portfolio: Portfolio }) {
               </p>
             ) : null}
           </div>
-          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">LIVE</span>
+          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">LIVE · 5초</span>
         </div>
 
         <div className="mt-auto grid grid-cols-2 gap-x-5 gap-y-5 pt-12 lg:grid-cols-4 lg:gap-8">
@@ -323,19 +325,7 @@ function AllocationCard({ portfolio, theme }: { portfolio: Portfolio; theme: The
   }, [currencies, selectedCurrency]);
 
   const allocation = useMemo(() => {
-    const sorted = portfolio.holdings
-      .filter((holding) => holding.currency === selectedCurrency && holding.evaluationAmount > 0)
-      .slice()
-      .sort((a, b) => b.evaluationAmount - a.evaluationAmount);
-    const top = sorted.slice(0, 5).map((holding) => ({
-      key: holdingKey(holding),
-      name: holding.name,
-      symbol: holding.symbol,
-      value: holding.evaluationAmount,
-    }));
-    const rest = sorted.slice(5).reduce((sum, holding) => sum + holding.evaluationAmount, 0);
-    if (rest > 0) top.push({ key: "OTHER", name: "기타", symbol: "OTHER", value: rest });
-    return top;
+    return buildAllocation(portfolio.holdings, selectedCurrency);
   }, [portfolio.holdings, selectedCurrency]);
   const total = allocation.reduce((sum, item) => sum + item.value, 0);
 
@@ -656,6 +646,10 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   const [error, setError] = useState<{ message: string; requestId?: string }>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historySeries, setHistorySeries] = useState<PortfolioHistorySeries[]>([]);
+  const portfolioRef = useRef<Portfolio | undefined>(undefined);
+  const backgroundRefreshInFlight = useRef(false);
+  const foregroundRequestsInFlight = useRef(0);
+  const latestPortfolioRequest = useRef(0);
   const [hiddenStockKeys, setHiddenStockKeys] = useState<Set<string>>(
     () => new Set(parseHiddenStockKeys(window.localStorage.getItem(HIDDEN_STOCKS_STORAGE_KEY))),
   );
@@ -668,17 +662,20 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
     }
   }, [hiddenStockKeys]);
 
-  const loadPortfolio = useCallback(async (account?: string, force = false) => {
-    if (force) setRefreshing(true);
-    else if (!portfolio) setLoading(true);
-    setError(undefined);
+  const loadPortfolio = useCallback(async (account?: string, force = false, background = false) => {
+    if (background && (backgroundRefreshInFlight.current || foregroundRequestsInFlight.current > 0)) return;
+    if (background) backgroundRefreshInFlight.current = true;
+    else foregroundRequestsInFlight.current += 1;
+    const requestNumber = latestPortfolioRequest.current + 1;
+    latestPortfolioRequest.current = requestNumber;
+    if (force && !background) setRefreshing(true);
+    else if (!portfolioRef.current && !background) setLoading(true);
+    if (!background) setError(undefined);
 
     try {
-      const params = new URLSearchParams();
-      if (account) params.set("account", account);
-      if (force) params.set("refresh", "1");
-      const url = "/api/portfolio" + (params.size ? "?" + params.toString() : "");
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(portfolioRequestUrl(account, force, !background), {
+        headers: { Accept: "application/json" },
+      });
       const payload = await readPayload<Portfolio & ApiError>(response);
       if (response.status === 401 && payload.error?.code === "authentication-required") {
         onUnauthorized();
@@ -689,24 +686,42 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           requestId: payload.error?.requestId,
         });
       }
+      if (requestNumber !== latestPortfolioRequest.current) return;
+      portfolioRef.current = payload;
       setPortfolio(payload);
+      if (background) setError(undefined);
     } catch (caught) {
       const requestId = typeof caught === "object" && caught && "requestId" in caught
         ? String((caught as { requestId?: string }).requestId || "")
         : undefined;
-      setError({
-        message: caught instanceof Error ? caught.message : "포트폴리오를 불러오지 못했습니다.",
-        ...(requestId ? { requestId } : {}),
-      });
+      if (!background && requestNumber === latestPortfolioRequest.current) {
+        setError({
+          message: caught instanceof Error ? caught.message : "포트폴리오를 불러오지 못했습니다.",
+          ...(requestId ? { requestId } : {}),
+        });
+      }
     } finally {
       setLoading(false);
-      setRefreshing(false);
+      if (!background) setRefreshing(false);
+      if (background) backgroundRefreshInFlight.current = false;
+      else foregroundRequestsInFlight.current = Math.max(0, foregroundRequestsInFlight.current - 1);
     }
-  }, [onUnauthorized, portfolio]);
+  }, [onUnauthorized]);
 
   useEffect(() => {
     void loadPortfolio();
-  }, []);
+  }, [loadPortfolio]);
+
+  useEffect(() => {
+    const account = portfolio?.selectedAccountId;
+    if (!account) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadPortfolio(account, false, true);
+      }
+    }, PORTFOLIO_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [loadPortfolio, portfolio?.selectedAccountId]);
 
   useEffect(() => {
     setHistorySeries([]);
