@@ -4,6 +4,7 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Customized,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -18,9 +19,10 @@ import {
   seoulDateString,
   type CalendarDateRange,
 } from "@/lib/date-range";
+import { layoutAreaLabels } from "@/lib/allocation-labels";
 import { formatMoney } from "@/lib/format";
-import { buildValueChartData, filterPortfolioHistory } from "@/lib/history-chart";
-import { stockColor } from "@/lib/stock-appearance";
+import { buildValueChartData, filterPortfolioHistory, type ValueChartPoint } from "@/lib/history-chart";
+import { stockColor, stockForeground } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   ApiError,
@@ -38,6 +40,116 @@ const ranges: Array<{ value: HistoryRange; label: string }> = [
   { value: "90d", label: "90일" },
   { value: "all", label: "전체" },
 ];
+
+type ActiveAreaLabelsProps = {
+  hoveredPoint?: { index: number; x: number };
+  offset?: { left?: number; top?: number; width?: number; height?: number };
+  yAxisMap?: Record<string, { scale?: unknown }>;
+  chartData: ValueChartPoint[];
+  series: PortfolioHistorySeries[];
+  theme: Theme;
+};
+
+function estimateLabelWidth(name: string): number {
+  return [...name].reduce((width, character) => (
+    width + (/^[\u0000-\u00ff]$/.test(character) ? 6.2 : 10.4)
+  ), 0);
+}
+
+function ActiveAreaLabels({
+  hoveredPoint,
+  offset,
+  yAxisMap,
+  chartData,
+  series,
+  theme,
+}: ActiveAreaLabelsProps) {
+  if (!hoveredPoint) return null;
+  const row = chartData[hoveredPoint.index];
+  const yAxis = Object.values(yAxisMap ?? {}).find((axis) => typeof axis.scale === "function");
+  const scale = yAxis?.scale;
+  const plotLeft = offset?.left;
+  const plotTop = offset?.top;
+  const plotWidth = offset?.width;
+  const plotHeight = offset?.height;
+  const activeX = hoveredPoint.x;
+  if (
+    !row
+    || typeof scale !== "function"
+    || plotLeft === undefined
+    || plotTop === undefined
+    || plotWidth === undefined
+    || plotHeight === undefined
+  ) return null;
+
+  const plotRight = plotLeft + plotWidth;
+  const plotBottom = plotTop + plotHeight;
+  const labels = layoutAreaLabels(
+    series.map((item, index) => ({
+      key: item.key,
+      name: item.name,
+      value: Number(row[`series${index}`] ?? 0),
+    })),
+    { scale: scale as (value: number) => number, plotTop, plotBottom },
+  );
+  const calloutToLeft = activeX > plotLeft + plotWidth / 2;
+
+  return (
+    <g className="allocation-hover-labels" pointerEvents="none" aria-hidden="true">
+      {labels.map((label) => {
+        const color = stockColor(label.key, theme);
+        if (label.placement === "inside") {
+          const halfWidth = estimateLabelWidth(label.name) / 2;
+          const textX = Math.min(Math.max(activeX, plotLeft + halfWidth + 4), plotRight - halfWidth - 4);
+          return (
+            <text
+              key={label.key}
+              x={textX}
+              y={label.labelY}
+              dy="0.35em"
+              textAnchor="middle"
+              fill={stockForeground(label.key, theme)}
+              fontSize={11}
+              fontWeight={800}
+            >
+              {label.name}
+            </text>
+          );
+        }
+
+        const textWidth = estimateLabelWidth(label.name);
+        const textX = calloutToLeft ? plotLeft + 4 : plotRight - 4;
+        const lineEndX = calloutToLeft
+          ? Math.min(activeX - 12, textX + textWidth + 5)
+          : Math.max(activeX + 12, textX - textWidth - 5);
+        const elbowX = activeX + (calloutToLeft ? -10 : 10);
+        return (
+          <g key={label.key}>
+            <polyline
+              points={`${activeX},${label.anchorY} ${elbowX},${label.anchorY} ${lineEndX},${label.labelY}`}
+              fill="none"
+              stroke={color}
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <text
+              x={textX}
+              y={label.labelY}
+              dy="0.35em"
+              textAnchor={calloutToLeft ? "start" : "end"}
+              fill={color}
+              fontSize={10.5}
+              fontWeight={800}
+            >
+              {label.name}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
 
 function displayDate(value: string, withYear = false): string {
   const date = new Date(`${value}T00:00:00+09:00`);
@@ -74,6 +186,7 @@ export function AllocationHistoryChart({
   const [retryKey, setRetryKey] = useState(0);
   const [backfill, setBackfill] = useState<BackfillStatus>();
   const [statusRefreshKey, setStatusRefreshKey] = useState(0);
+  const [hoveredPoint, setHoveredPoint] = useState<{ index: number; x: number }>();
 
   useEffect(() => {
     let active = true;
@@ -407,7 +520,22 @@ export function AllocationHistoryChart({
         ) : (
           <div className="mt-7 h-[300px] w-full sm:h-[370px]" aria-label="일별 종목 평가금 누적 영역 차트">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 4, bottom: 0, left: 0 }}>
+              <AreaChart
+                data={chartData}
+                margin={{ top: 10, right: 4, bottom: 0, left: 0 }}
+                onMouseMove={(state) => {
+                  const index = state?.activeTooltipIndex;
+                  const x = state?.activeCoordinate?.x;
+                  if (state?.isTooltipActive && typeof index === "number" && typeof x === "number") {
+                    setHoveredPoint((current) => (
+                      current?.index === index && current.x === x ? current : { index, x }
+                    ));
+                  } else {
+                    setHoveredPoint(undefined);
+                  }
+                }}
+                onMouseLeave={() => setHoveredPoint(undefined)}
+              >
                 <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
                 <XAxis
                   dataKey="date"
@@ -425,26 +553,7 @@ export function AllocationHistoryChart({
                   width={64}
                   tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11, fontWeight: 600 }}
                 />
-                <Tooltip
-                  formatter={(value, name, entry) => {
-                    const amount = Number(value);
-                    const totalValue = Number(entry.payload?.totalValue ?? 0);
-                    const weight = totalValue > 0 ? (amount / totalValue) * 100 : 0;
-                    return [`${formatMoney(amount, "KRW")} · ${weight.toFixed(1)}%`, String(name)];
-                  }}
-                  labelFormatter={(label) => displayDate(String(label), true)}
-                  contentStyle={{
-                    border: 0,
-                    borderRadius: 16,
-                    background: "hsl(var(--card))",
-                    color: "hsl(var(--card-foreground))",
-                    boxShadow: "0 16px 48px rgba(0,0,0,.2)",
-                    fontSize: 12,
-                    fontWeight: 700,
-                  }}
-                  itemStyle={{ color: "hsl(var(--foreground))" }}
-                  labelStyle={{ color: "hsl(var(--muted-foreground))", marginBottom: 6 }}
-                />
+                <Tooltip cursor={false} content={() => null} />
                 {series.map((item, index) => (
                   <Area
                     key={item.key}
@@ -459,6 +568,16 @@ export function AllocationHistoryChart({
                     isAnimationActive={false}
                   />
                 ))}
+                <Customized
+                  component={(
+                    <ActiveAreaLabels
+                      chartData={chartData}
+                      hoveredPoint={hoveredPoint}
+                      series={series}
+                      theme={theme}
+                    />
+                  )}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>

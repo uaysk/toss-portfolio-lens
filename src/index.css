@@ -184,16 +184,6 @@
     background: #111;
   }
 
-  .hero-glow {
-    position: absolute;
-    top: -22%;
-    right: -8%;
-    width: min(46vw, 580px);
-    aspect-ratio: 1;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.045);
-  }
-
   .holding-grid {
     display: grid;
     grid-template-columns: minmax(210px, 1.45fr) minmax(140px, 0.9fr) minmax(110px, 0.75fr) minmax(130px, 0.9fr) minmax(130px, 0.85fr);
@@ -252,11 +242,6 @@
   .portfolio-hero {
     min-height: 400px;
     border-radius: 26px;
-  }
-
-  .hero-glow {
-    width: 360px;
-    right: -42%;
   }
 
   .login-panel {

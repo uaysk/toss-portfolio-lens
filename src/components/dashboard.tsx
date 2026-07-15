@@ -257,7 +257,6 @@ function PortfolioHero({ portfolio }: { portfolio: Portfolio }) {
   const secondaryCurrency = primaryCurrency === "KRW" && summary.evaluationAmount.USD !== 0 ? "USD" : undefined;
   return (
     <section id="overview" className="portfolio-hero animate-fade-up scroll-mt-5" aria-labelledby="portfolio-total-title">
-      <div className="hero-glow" aria-hidden="true" />
       <div className="relative z-10 flex h-full flex-col">
         <div className="flex items-start justify-between gap-4">
           <div>
