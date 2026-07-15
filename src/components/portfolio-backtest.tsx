@@ -28,6 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ReportGenerateButton } from "@/components/report-generate-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
@@ -382,6 +383,30 @@ export function PortfolioBacktestView({
 
       {result ? (
         <>
+          <Card className="bg-secondary p-5 sm:p-7">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="max-w-2xl">
+                <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">AI REPORT</p>
+                <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">백테스트 평가 보고서</h3>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">동일한 종목·비중·기간·현금흐름 조건을 다시 실행하고, 성과와 위험을 고정 템플릿으로 평가합니다.</p>
+              </div>
+              <ReportGenerateButton
+                key={result.generatedAt}
+                endpoint="/api/reports/backtest"
+                requestBody={{
+                  assets: result.config.assets,
+                  startDate: result.config.startDate,
+                  endDate: result.config.endDate,
+                  initialAmount: result.config.initialAmount,
+                  monthlyCashFlow: result.config.monthlyCashFlow,
+                  rebalanceFrequency: result.config.rebalanceFrequency,
+                  benchmark: result.config.benchmark,
+                }}
+                onUnauthorized={onUnauthorized}
+              />
+            </div>
+          </Card>
+
           <Card className="bg-secondary p-5 sm:p-7">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>

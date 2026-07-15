@@ -66,4 +66,44 @@ describe("MySQL environment configuration", () => {
       expect.stringContaining("모두 필요합니다"),
     );
   });
+
+  it("공개 URL과 OpenAI 보고서 설정을 정규화한다", () => {
+    Object.assign(process.env, {
+      PUBLIC_APP_URL: "tpl.uaysk.com/",
+      OPENAI_API_ENDPOINT: "https://api.openai.com/v1/",
+      OPENAI_API_KEY: "test-openai-key",
+      OPENAI_MODEL: "test-model",
+      OPENAI_TIMEOUT_MS: "45000",
+      REPORTS_PATH: "/tmp/portfolio-reports",
+    });
+    const config = loadConfig();
+    expect(config.publicAppUrl).toBe("https://tpl.uaysk.com");
+    expect(config.openAi).toEqual({
+      endpoint: "https://api.openai.com/v1",
+      apiKey: "test-openai-key",
+      model: "test-model",
+      timeoutMs: 45_000,
+    });
+    expect(config.reportStorage).toEqual({ kind: "local", directory: "/tmp/portfolio-reports" });
+  });
+
+  it("S3_BUCKET이 있으면 S3 보고서 저장소를 선택한다", () => {
+    Object.assign(process.env, {
+      S3_BUCKET: "portfolio-reports",
+      S3_REGION: "ap-northeast-2",
+      S3_PREFIX: "/lens/reports/",
+      S3_ENDPOINT: "http://minio.internal:9000/",
+      S3_ACCESS_KEY_ID: "access-key",
+      S3_SECRET_ACCESS_KEY: "secret-key",
+    });
+    expect(loadConfig().reportStorage).toEqual({
+      kind: "s3",
+      bucket: "portfolio-reports",
+      region: "ap-northeast-2",
+      prefix: "lens/reports",
+      endpoint: "http://minio.internal:9000",
+      forcePathStyle: true,
+      credentials: { accessKeyId: "access-key", secretAccessKey: "secret-key" },
+    });
+  });
 });

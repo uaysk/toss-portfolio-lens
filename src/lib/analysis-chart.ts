@@ -19,7 +19,7 @@ function round(value: number, digits = 4): number {
   return Math.round(value * scale) / scale;
 }
 
-export function buildAnalysisChartData(analysis: PortfolioAnalysis): AnalysisChartPoint[] {
+export function buildAnalysisChartData(analysis: Pick<PortfolioAnalysis, "candles" | "benchmarks">): AnalysisChartPoint[] {
   const sortedCandles = [...analysis.candles].sort((left, right) => left.date.localeCompare(right.date));
   const portfolioBase = sortedCandles[0]?.close ?? 0;
   const states = new Map(analysis.benchmarks.map((benchmark) => [benchmark.key, {

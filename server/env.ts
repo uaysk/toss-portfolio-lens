@@ -1,5 +1,31 @@
 import type { MySqlConnectionConfig } from "./database.js";
 
+export type OpenAiConfig = {
+  endpoint: string;
+  apiKey: string;
+  model?: string;
+  timeoutMs: number;
+};
+
+export type S3ReportStorageConfig = {
+  kind: "s3";
+  bucket: string;
+  region: string;
+  prefix: string;
+  endpoint?: string;
+  forcePathStyle: boolean;
+  credentials?: {
+    accessKeyId: string;
+    secretAccessKey: string;
+    sessionToken?: string;
+  };
+};
+
+export type ReportStorageConfig = S3ReportStorageConfig | {
+  kind: "local";
+  directory: string;
+};
+
 export type AppConfig = {
   clientId: string;
   clientSecret: string;
@@ -12,6 +38,9 @@ export type AppConfig = {
   mysql?: MySqlConnectionConfig;
   snapshotRefreshHours: number;
   nodeEnv: string;
+  publicAppUrl: string;
+  openAi?: OpenAiConfig;
+  reportStorage: ReportStorageConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -110,6 +139,65 @@ function readSnapshotRefreshHours(): number {
   return value;
 }
 
+function readBoundedInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const value = Number.parseInt(process.env[name] ?? String(fallback), 10);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new Error(`${name}는 ${minimum}~${maximum} 범위의 숫자여야 합니다.`);
+  }
+  return value;
+}
+
+function normalizedHttpUrl(value: string, name: string): string {
+  const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  const parsed = new URL(withProtocol);
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`${name}은 올바른 HTTP(S) 주소여야 합니다.`);
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function readOpenAiConfig(): OpenAiConfig | undefined {
+  const endpoint = optional("OPENAI_API_ENDPOINT");
+  const apiKey = optional("OPENAI_API_KEY");
+  if (!endpoint && !apiKey) return undefined;
+  if (!endpoint || !apiKey) {
+    console.warn("[reports] OPENAI_API_ENDPOINT와 OPENAI_API_KEY를 모두 설정해야 AI 보고서를 생성할 수 있습니다.");
+    return undefined;
+  }
+  return {
+    endpoint: normalizedHttpUrl(endpoint, "OPENAI_API_ENDPOINT"),
+    apiKey,
+    model: optional("OPENAI_MODEL"),
+    timeoutMs: readBoundedInteger("OPENAI_TIMEOUT_MS", 60_000, 5_000, 180_000),
+  };
+}
+
+function readReportStorage(): ReportStorageConfig {
+  const bucket = optional("S3_BUCKET");
+  if (!bucket) {
+    return { kind: "local", directory: optional("REPORTS_PATH") || "./data/reports" };
+  }
+  const accessKeyId = optional("S3_ACCESS_KEY_ID") || optional("AWS_ACCESS_KEY_ID");
+  const secretAccessKey = optional("S3_SECRET_ACCESS_KEY") || optional("AWS_SECRET_ACCESS_KEY");
+  const sessionToken = optional("S3_SESSION_TOKEN") || optional("AWS_SESSION_TOKEN");
+  if (Boolean(accessKeyId) !== Boolean(secretAccessKey)) {
+    throw new Error("S3 액세스 키와 시크릿 키는 함께 설정해야 합니다.");
+  }
+  const endpoint = optional("S3_ENDPOINT");
+  return {
+    kind: "s3",
+    bucket,
+    region: optional("S3_REGION") || optional("AWS_REGION") || "us-east-1",
+    prefix: (optional("S3_PREFIX") || "portfolio-reports").replace(/^\/+|\/+$/g, "") || "portfolio-reports",
+    ...(endpoint ? { endpoint: normalizedHttpUrl(endpoint, "S3_ENDPOINT") } : {}),
+    forcePathStyle: readBoolean("S3_FORCE_PATH_STYLE", Boolean(endpoint)),
+    ...(accessKeyId && secretAccessKey ? {
+      credentials: { accessKeyId, secretAccessKey, ...(sessionToken ? { sessionToken } : {}) },
+    } : {}),
+  };
+}
+
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
@@ -121,17 +209,25 @@ export function loadConfig(): AppConfig {
     throw new Error("SESSION_SECRET은 32자 이상이어야 합니다.");
   }
 
+  const host = process.env.HOST?.trim() || "0.0.0.0";
+  const port = readPort();
+  const configuredPublicUrl = optional("PUBLIC_APP_URL") || optional("APP_URL");
   return {
     clientId: required("CLIENT_ID"),
     clientSecret: required("CLIENT_SECRET"),
     dashboardPassword,
     sessionSecret,
-    host: process.env.HOST?.trim() || "0.0.0.0",
-    port: readPort(),
+    host,
+    port,
     tossApiBaseUrl: process.env.TOSS_API_BASE_URL?.trim() || "https://openapi.tossinvest.com",
     databasePath: process.env.DATABASE_PATH?.trim() || "./data/portfolio-history.sqlite",
     mysql: readMySqlConfig(),
     snapshotRefreshHours: readSnapshotRefreshHours(),
     nodeEnv: process.env.NODE_ENV?.trim() || "development",
+    publicAppUrl: configuredPublicUrl
+      ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
+      : `http://localhost:${port}`,
+    openAi: readOpenAiConfig(),
+    reportStorage: readReportStorage(),
   };
 }

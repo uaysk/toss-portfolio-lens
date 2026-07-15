@@ -12,6 +12,7 @@
     "test:mysql": "tsx scripts/verify-mysql-storage.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1087.0",
     "@radix-ui/react-select": "2.2.5",
     "@radix-ui/react-slot": "1.2.3",
     "class-variance-authority": "0.7.1",

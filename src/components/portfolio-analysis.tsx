@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ReportGenerateButton } from "@/components/report-generate-button";
 import {
   analysisComparisonDomain,
   analysisPeriodChange,
@@ -346,6 +347,27 @@ export function PortfolioAnalysisView({
             </button>
           ))}
         </div>
+
+        {analysis && !loading && !error ? (
+          <div className="mt-5 flex flex-col gap-3 rounded-[22px] bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-black">선택 기간 AI 평가</p>
+              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">화면의 기간과 선택한 비교 지수를 다시 계산해 고정 템플릿 보고서로 저장합니다.</p>
+            </div>
+            <ReportGenerateButton
+              key={`${analysis.generatedAt}:${Array.from(selectedBenchmarks).sort().join(",")}`}
+              endpoint="/api/reports/portfolio-analysis"
+              requestBody={{
+                account: portfolio.selectedAccountId,
+                range: analysis.range,
+                from: analysis.fromDate,
+                to: analysis.toDate,
+                benchmarks: Array.from(selectedBenchmarks).sort().join(","),
+              }}
+              onUnauthorized={onUnauthorized}
+            />
+          </div>
+        ) : null}
 
         {!loading && !error && chartData.length ? (
           <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-4" aria-label="평가금 일봉 요약">

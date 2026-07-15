@@ -36,6 +36,9 @@ import {
   type ReadOnlyMarketFeature,
 } from "./market.js";
 import { OrderHistoryQueryError, type OrderHistoryQuery } from "./orders.js";
+import { OpenAiReportWriter, ReportGenerationError } from "./report-ai.js";
+import { createReportStorage } from "./report-storage.js";
+import { isReportId, PortfolioReportService } from "./reports.js";
 import { openConfiguredHistoryStore } from "./storage.js";
 import { TossApiError, TossClient } from "./toss.js";
 
@@ -45,6 +48,12 @@ const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const portfolioBacktest = new PortfolioBacktestService(toss, historyStore);
+const reportStorage = createReportStorage(config.reportStorage);
+const portfolioReports = new PortfolioReportService(
+  reportStorage,
+  config.publicAppUrl,
+  config.openAi ? new OpenAiReportWriter(config.openAi) : undefined,
+);
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
@@ -61,7 +70,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
-app.use((_request, response, next) => {
+app.use((request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "no-referrer");
@@ -70,6 +79,9 @@ app.use((_request, response, next) => {
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   );
+  if (request.path.startsWith("/reports/") || request.path.startsWith("/api/reports/")) {
+    response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
   next();
 });
 
@@ -98,7 +110,13 @@ function requireReadOnlyApiToken(request: Request, response: Response, next: Nex
 }
 
 app.get("/api/health", (_request, response) => {
-  response.json({ status: "ok", service: "portfolio-lens", storage: historyStore.backend });
+  response.json({
+    status: "ok",
+    service: "portfolio-lens",
+    storage: historyStore.backend,
+    reportStorage: portfolioReports.storageBackend,
+    reportGeneration: portfolioReports.generationConfigured ? "configured" : "unavailable",
+  });
 });
 
 app.get("/api/auth/session", (request, response) => {
@@ -514,7 +532,16 @@ app.get("/api/portfolio/backtest/current", requireSession, async (request, respo
 
 app.post("/api/portfolio/backtest", requireSession, async (request, response) => {
   setNoStore(response);
-  const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
+  const payload = parseBacktestPayload(request.body);
+  try {
+    response.json(await portfolioBacktest.run(payload));
+  } catch (error) {
+    backtestError(response, error);
+  }
+});
+
+function parseBacktestPayload(value: unknown): BacktestRunRequest {
+  const body = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const assets: BacktestAssetInput[] = Array.isArray(body.assets)
     ? body.assets.map((value) => {
         const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -524,7 +551,7 @@ app.post("/api/portfolio/backtest", requireSession, async (request, response) =>
         };
       })
     : [];
-  const payload: BacktestRunRequest = {
+  return {
     assets,
     startDate: typeof body.startDate === "string" ? body.startDate : "",
     endDate: typeof body.endDate === "string" ? body.endDate : "",
@@ -535,10 +562,93 @@ app.post("/api/portfolio/backtest", requireSession, async (request, response) =>
       : "none",
     benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
   };
+}
+
+function reportError(response: Response, error: unknown): void {
+  if (error instanceof ReportGenerationError) {
+    response.status(error.retryable ? 503 : 422).json({
+      error: { code: "report-generation-failed", message: error.message },
+    });
+    return;
+  }
+  console.error("[reports] 보고서 처리 실패:", error instanceof Error ? error.message : error);
+  response.status(502).json({
+    error: { code: "report-unavailable", message: "보고서를 생성하거나 저장하지 못했습니다." },
+  });
+}
+
+app.post("/api/reports/portfolio-analysis", requireSession, async (request, response) => {
+  setNoStore(response);
+  const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
+  const accountId = typeof body.account === "string" ? body.account.trim() : "";
+  const range = ["30d", "90d", "1y", "all"].includes(String(body.range))
+    ? body.range as AnalysisRange
+    : undefined;
+  const fromDate = typeof body.from === "string" ? body.from.trim() : "";
+  const toDate = typeof body.to === "string" ? body.to.trim() : "";
+  if (!accountId || accountId.length > 128 || !range || !isHistoryDate(fromDate) || !isHistoryDate(toDate)
+    || fromDate > toDate || toDate > analysisToday()) {
+    response.status(400).json({
+      error: { code: "invalid-report-range", message: "계좌와 보고서 분석 기간을 확인해 주세요." },
+    });
+    return;
+  }
   try {
-    response.json(await portfolioBacktest.run(payload));
+    const benchmarkKeys = body.benchmarks === "" ? [] : parseBenchmarkKeys(body.benchmarks);
+    const analysis = await portfolioAnalysis.getAnalysis({ accountId, range, fromDate, toDate, benchmarkKeys });
+    const report = await portfolioReports.createAnalysis(analysis);
+    response.status(201).json({
+      id: report.id,
+      url: portfolioReports.publicUrl(report.id),
+      createdAt: report.createdAt,
+      storage: portfolioReports.storageBackend,
+    });
   } catch (error) {
-    backtestError(response, error);
+    if (error instanceof Error && error.message.startsWith("지원하는 비교 지수")) {
+      response.status(400).json({ error: { code: "invalid-benchmark", message: error.message } });
+      return;
+    }
+    reportError(response, error);
+  }
+});
+
+app.post("/api/reports/backtest", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const result = await portfolioBacktest.run(parseBacktestPayload(request.body));
+    const report = await portfolioReports.createBacktest(result);
+    response.status(201).json({
+      id: report.id,
+      url: portfolioReports.publicUrl(report.id),
+      createdAt: report.createdAt,
+      storage: portfolioReports.storageBackend,
+    });
+  } catch (error) {
+    if (error instanceof BacktestValidationError || error instanceof TossApiError) {
+      backtestError(response, error);
+      return;
+    }
+    reportError(response, error);
+  }
+});
+
+app.get("/api/reports/:reportId", async (request, response) => {
+  setNoStore(response);
+  const id = String(request.params.reportId ?? "");
+  if (!isReportId(id)) {
+    response.status(404).json({ error: { code: "report-not-found", message: "보고서를 찾을 수 없습니다." } });
+    return;
+  }
+  try {
+    const report = await portfolioReports.get(id);
+    if (!report) {
+      response.status(404).json({ error: { code: "report-not-found", message: "보고서를 찾을 수 없습니다." } });
+      return;
+    }
+    response.json(report);
+  } catch (error) {
+    console.error("[reports] 저장된 보고서 조회 실패:", error instanceof Error ? error.message : error);
+    response.status(500).json({ error: { code: "report-read-failed", message: "보고서를 불러오지 못했습니다." } });
   }
 });
 
