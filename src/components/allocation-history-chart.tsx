@@ -198,7 +198,6 @@ export function AllocationHistoryChart({
     onSeriesChange,
     onUnauthorized,
     period,
-    portfolio.asOf,
     portfolio.selectedAccountId,
     retryKey,
   ]);
@@ -239,7 +238,7 @@ export function AllocationHistoryChart({
             </div>
             <h2 id="history-title" className="text-2xl font-black tracking-[-0.04em]">종목별 포트폴리오 비중</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              KST 일 단위 · 영역 두께는 종목 비중, 전체 높이는 {currency} 평가금
+              KST 일 단위 · 영역 두께는 종목 비중, 전체 높이는 {currency} 평가금 · USD는 과거 해외주식 포함
             </p>
             {backfill ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -297,7 +296,7 @@ export function AllocationHistoryChart({
                       currency === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    {item}
+                      {item === "KRW" ? "KRW · 국내" : "USD · 해외/과거"}
                   </button>
                 ))}
               </div>

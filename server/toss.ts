@@ -1,5 +1,10 @@
 import type { AppConfig } from "./env.js";
 import { buildReadOnlyMarketPath, type MarketQuery, type ReadOnlyMarketFeature } from "./market.js";
+import {
+  buildReadOnlyOrderDetailPath,
+  buildReadOnlyOrderListPath,
+  type OrderHistoryQuery,
+} from "./orders.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -622,7 +627,7 @@ export class TossClient {
       holdings: normalized.holdings,
     };
 
-    this.portfolioCache.set(account.id, { value: portfolio, expiresAt: Date.now() + 20_000 });
+    this.portfolioCache.set(account.id, { value: portfolio, expiresAt: Date.now() + 4_000 });
     return portfolio;
   }
 
@@ -674,5 +679,13 @@ export class TossClient {
 
   async getCompatibleHoldings(accountId: string): Promise<unknown> {
     return this.get("/api/v1/holdings", accountId);
+  }
+
+  async getCompatibleOrders(accountId: string, query: OrderHistoryQuery): Promise<unknown> {
+    return this.get(buildReadOnlyOrderListPath(query), accountId);
+  }
+
+  async getCompatibleOrder(accountId: string, orderId: string, query: OrderHistoryQuery): Promise<unknown> {
+    return this.get(buildReadOnlyOrderDetailPath(orderId, query), accountId);
   }
 }
