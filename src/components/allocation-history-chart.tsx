@@ -408,14 +408,6 @@ export function AllocationHistoryChart({
           <div className="mt-7 h-[300px] w-full sm:h-[370px]" aria-label="일별 종목 평가금 누적 영역 차트">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData} margin={{ top: 10, right: 4, bottom: 0, left: 0 }}>
-                <defs>
-                  {series.map((item, index) => (
-                    <linearGradient key={item.key} id={`portfolio-area-${index}`} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={stockColor(item.key, theme)} stopOpacity={0.9} />
-                      <stop offset="100%" stopColor={stockColor(item.key, theme)} stopOpacity={0.42} />
-                    </linearGradient>
-                  ))}
-                </defs>
                 <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
                 <XAxis
                   dataKey="date"
@@ -460,10 +452,10 @@ export function AllocationHistoryChart({
                     dataKey={`series${index}`}
                     name={item.name}
                     stackId="portfolio"
-                    stroke={stockColor(item.key, theme)}
-                    fill={`url(#portfolio-area-${index})`}
-                    strokeWidth={2}
-                    fillOpacity={1}
+                    stroke="none"
+                    fill={stockColor(item.key, theme)}
+                    strokeWidth={0}
+                    fillOpacity={0.82}
                     isAnimationActive={false}
                   />
                 ))}

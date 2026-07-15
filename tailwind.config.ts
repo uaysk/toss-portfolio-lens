@@ -30,8 +30,7 @@ export default {
         "fade-up": {
           from: { opacity: "0", transform: "translateY(10px)" },
           to: { opacity: "1", transform: "translateY(0)" }
-        },
-        shimmer: { "100%": { transform: "translateX(100%)" } }
+        }
       },
       animation: {
         "fade-up": "fade-up 500ms cubic-bezier(.22,1,.36,1) both"
