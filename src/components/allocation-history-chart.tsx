@@ -479,7 +479,7 @@ export function AllocationHistoryChart({
               </p>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 {backfill?.status === "running" || backfill?.status === "idle"
-                  ? "체결 내역과 일봉을 읽어 SQLite에 저장한 뒤 차트가 자동으로 갱신됩니다."
+                  ? "체결 내역과 일봉을 읽어 데이터베이스에 저장한 뒤 차트가 자동으로 갱신됩니다."
                   : "동기화를 다시 시도하거나 토스증권 체결 내역을 확인해 주세요."}
               </p>
             </div>

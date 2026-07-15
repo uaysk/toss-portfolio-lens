@@ -181,7 +181,7 @@ function messageForResult(discrepancySymbols: number, failedSymbols: number, met
   }
   if (failedSymbols > 0) notes.push(`${failedSymbols}개 종목의 일부 일봉을 가져오지 못해 체결가 또는 최근 종가를 사용했습니다.`);
   if (metadataFailed) notes.push("일부 종목 정보는 보유 정보 또는 종목 코드로 표시합니다.");
-  return notes.join(" ") || "전체 체결 내역과 일봉을 SQLite에 저장하고 일별 포트폴리오를 복원했습니다.";
+  return notes.join(" ") || "전체 체결 내역과 일봉을 데이터베이스에 저장하고 일별 포트폴리오를 복원했습니다.";
 }
 
 export class HistoricalPortfolioBackfill {
@@ -196,7 +196,7 @@ export class HistoricalPortfolioBackfill {
     return this.running.has(accountId);
   }
 
-  getStatus(accountId: string): BackfillStatus {
+  getStatus(accountId: string): Promise<BackfillStatus> {
     return this.store.getBackfillStatus(accountId);
   }
 
@@ -227,19 +227,19 @@ export class HistoricalPortfolioBackfill {
   private async run(accountId: string, force: boolean): Promise<BackfillStatus> {
     const today = kstDateString(new Date());
     const yesterday = addDays(today, -1);
-    const previous = this.store.getBackfillStatus(accountId);
+    const previous = await this.store.getBackfillStatus(accountId);
     if (
       !force
       && (previous.status === "complete" || previous.status === "partial")
       && previous.lastBackfilledDate
       && previous.lastBackfilledDate >= yesterday
-      && !this.store.hasIncompleteDailyOhlc()
+      && !await this.store.hasIncompleteDailyOhlc()
     ) {
       return previous;
     }
 
     const startedAt = new Date().toISOString();
-    this.store.updateBackfillStatus(accountId, {
+    await this.store.updateBackfillStatus(accountId, {
       status: "running",
       phase: "orders",
       startedAt,
@@ -266,7 +266,7 @@ export class HistoricalPortfolioBackfill {
         if (pageIndex > 0) await sleep(API_PACING_MS);
         const page = await this.toss.getClosedOrders(accountId, cursor);
         fetchedOrders.push(...page.orders);
-        this.store.updateBackfillStatus(accountId, {
+        await this.store.updateBackfillStatus(accountId, {
           ordersImported: fetchedOrders.length,
           message: `체결 내역 ${fetchedOrders.length.toLocaleString("ko-KR")}건을 확인했습니다.`,
         });
@@ -279,7 +279,7 @@ export class HistoricalPortfolioBackfill {
         if (pageIndex === 199) throw new Error("체결 내역 페이지 수가 안전 한도를 초과했습니다.");
       }
       const uniqueOrders = Array.from(new Map(fetchedOrders.map((order) => [order.orderId, order])).values());
-      this.store.upsertOrders(accountId, uniqueOrders);
+      await this.store.upsertOrders(accountId, uniqueOrders);
 
       const filledOrders = uniqueOrders.filter((order) => order.symbol && order.filledQuantity > 0 && tradeDate(order));
       const dates = filledOrders.map(tradeDate).filter(Boolean).sort();
@@ -305,7 +305,7 @@ export class HistoricalPortfolioBackfill {
         ...current.keys(),
       ])).sort();
       const symbols = Array.from(new Set(keys.map((key) => key.slice(key.indexOf(":") + 1))));
-      this.store.updateBackfillStatus(accountId, {
+      await this.store.updateBackfillStatus(accountId, {
         phase: "instruments",
         firstTradeDate,
         symbolsTotal: keys.length,
@@ -335,23 +335,23 @@ export class HistoricalPortfolioBackfill {
           currency,
         });
       }
-      this.store.upsertInstruments(Array.from(instruments.values()));
+      await this.store.upsertInstruments(Array.from(instruments.values()));
 
       let pricesImported = 0;
       let symbolsProcessed = 0;
       let failedSymbols = 0;
-      this.store.updateBackfillStatus(accountId, {
+      await this.store.updateBackfillStatus(accountId, {
         phase: "prices",
         message: `일봉을 불러오는 중입니다 · 0/${keys.length}`,
       });
       for (const key of keys) {
         const symbol = key.slice(key.indexOf(":") + 1);
-        const cachedFirstDate = this.store.getEarliestDailyPriceDate(key);
-        const cachedLastDate = this.store.getLatestDailyPriceDate(key);
+        const cachedFirstDate = await this.store.getEarliestDailyPriceDate(key);
+        const cachedLastDate = await this.store.getLatestDailyPriceDate(key);
         const cacheCoversHistory = Boolean(
           cachedFirstDate
           && cachedFirstDate <= firstTradeDate
-          && !this.store.hasIncompleteDailyOhlc(key),
+          && !await this.store.hasIncompleteDailyOhlc(key),
         );
         const seenBefore = new Set<string>();
         let before: string | undefined;
@@ -359,7 +359,7 @@ export class HistoricalPortfolioBackfill {
           for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
             await sleep(API_PACING_MS);
             const page = await this.toss.getDailyCandles(symbol, before);
-            pricesImported += this.store.upsertDailyPrices(key, page.candles);
+            pricesImported += await this.store.upsertDailyPrices(key, page.candles);
             const oldestDate = page.candles.map((candle) => candle.date).sort()[0];
             const reachedCache = cacheCoversHistory
               && cachedLastDate
@@ -380,7 +380,7 @@ export class HistoricalPortfolioBackfill {
           console.warn("[backfill] 일봉 조회 실패:", error instanceof Error ? error.message : error);
         }
         symbolsProcessed += 1;
-        this.store.updateBackfillStatus(accountId, {
+        await this.store.updateBackfillStatus(accountId, {
           symbolsProcessed,
           pricesImported,
           failedSymbols,
@@ -388,11 +388,11 @@ export class HistoricalPortfolioBackfill {
         });
       }
 
-      this.store.updateBackfillStatus(accountId, {
+      await this.store.updateBackfillStatus(accountId, {
         phase: "reconstructing",
-        message: "일 단위 포트폴리오를 계산해 SQLite에 저장하는 중입니다.",
+        message: "일 단위 포트폴리오를 계산해 데이터베이스에 저장하는 중입니다.",
       });
-      const priceMap = this.store.getDailyPrices(keys, firstTradeDate, yesterday);
+      const priceMap = await this.store.getDailyPrices(keys, firstTradeDate, yesterday);
       const reconstruction = reconstructDailyPortfolio({
         orders: normalizedOrders,
         currentHoldings: portfolio.holdings,
@@ -401,16 +401,16 @@ export class HistoricalPortfolioBackfill {
         fromDate: firstTradeDate,
         toDate: yesterday,
       });
-      const snapshotsCreated = this.store.replaceHistoricalSnapshots(
+      const snapshotsCreated = await this.store.replaceHistoricalSnapshots(
         accountId,
         reconstruction.snapshots,
         today,
       );
-      this.store.recordPortfolio(portfolio);
+      await this.store.recordPortfolio(portfolio);
 
       const partial = reconstruction.discrepancySymbols > 0 || failedSymbols > 0 || metadataFailed;
       const completedAt = new Date().toISOString();
-      const result = this.store.updateBackfillStatus(accountId, {
+      const result = await this.store.updateBackfillStatus(accountId, {
         status: partial ? "partial" : "complete",
         phase: "complete",
         completedAt,

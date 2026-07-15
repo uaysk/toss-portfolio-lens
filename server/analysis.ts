@@ -42,7 +42,7 @@ export type PortfolioAnalysis = {
     key: BenchmarkKey;
     name: string;
     proxySymbol?: string;
-    points: ReturnType<PortfolioHistoryStore["getBenchmarkPrices"]>;
+    points: Awaited<ReturnType<PortfolioHistoryStore["getBenchmarkPrices"]>>;
   }>;
   benchmarkErrors: Array<{ key: BenchmarkKey; message: string }>;
   metrics: PortfolioAnalyticsMetrics;
@@ -178,16 +178,16 @@ export function combinePortfolioCandles(
   }).filter((candle) => candle.close > 0);
 }
 
-export function buildPositionWeightedReturns(
+export async function buildPositionWeightedReturns(
   history: PortfolioHistory,
   store: PortfolioHistoryStore,
   exchangeRates: ReadonlyMap<string, number>,
-): PortfolioDailyReturn[] {
+): Promise<PortfolioDailyReturn[]> {
   if (history.points.length < 2 || !history.series.length) return [];
   const fromDate = history.points[0].date;
   const toDate = history.points.at(-1)!.date;
   const instrumentKeys = history.series.map((series) => `${series.currency}:${series.symbol}`);
-  const dailyPrices = store.getDailyPrices(instrumentKeys, fromDate, toDate);
+  const dailyPrices = await store.getDailyPrices(instrumentKeys, fromDate, toDate);
   const latestPrices = new Map<string, number>();
   let previousPrices = new Map<string, number>();
   const returns: PortfolioDailyReturn[] = [];
@@ -247,8 +247,8 @@ export class PortfolioAnalysisService {
   }
 
   private async ensureExchangeRates(accountId: string, fromDate: string, toDate: string): Promise<Map<string, number>> {
-    const requiredDates = this.store.getRequiredExchangeRateDates(accountId, fromDate, toDate);
-    const cached = this.store.getExchangeRates(fromDate, toDate);
+    const requiredDates = await this.store.getRequiredExchangeRateDates(accountId, fromDate, toDate);
+    const cached = await this.store.getExchangeRates(fromDate, toDate);
     const missing = requiredDates.filter((date) => !cached.has(date));
     const workerCount = Math.min(2, missing.length);
     let cursor = 0;
@@ -276,8 +276,10 @@ export class PortfolioAnalysisService {
   }): Promise<PortfolioHistory> {
     const now = new Date();
     const dateRange = fromDate && toDate ? { from: fromDate, to: toDate } : undefined;
-    const krw = this.store.getHistory(accountId, "KRW", range, now, dateRange);
-    const usd = this.store.getHistory(accountId, "USD", range, now, dateRange);
+    const [krw, usd] = await Promise.all([
+      this.store.getHistory(accountId, "KRW", range, now, dateRange),
+      this.store.getHistory(accountId, "USD", range, now, dateRange),
+    ]);
     const effectiveFrom = fromDate ?? krw.points[0]?.date ?? usd.points[0]?.date ?? analysisToday(now);
     const effectiveTo = toDate ?? krw.points.at(-1)?.date ?? usd.points.at(-1)?.date ?? analysisToday(now);
     const exchangeRates = await this.ensureExchangeRates(accountId, effectiveFrom, effectiveTo);
@@ -286,7 +288,7 @@ export class PortfolioAnalysisService {
 
   private async refreshBenchmark(key: BenchmarkKey, fromDate: string): Promise<void> {
     const recentRefresh = this.refreshedAt.get(key) ?? 0;
-    const bounds = this.store.getBenchmarkPriceBounds(key);
+    const bounds = await this.store.getBenchmarkPriceBounds(key);
     if (
       bounds.earliest
       && bounds.earliest <= fromDate
@@ -308,7 +310,7 @@ export class PortfolioAnalysisService {
         const page = catalog.source === "indicator"
           ? await this.toss.getMarketIndicatorDailyCandles(catalog.symbol as "KOSPI" | "KOSDAQ", before)
           : await this.toss.getDailyCandles(catalog.symbol, before, true);
-        this.store.upsertBenchmarkPrices(key, page.candles);
+        await this.store.upsertBenchmarkPrices(key, page.candles);
         const dates = page.candles.map((candle) => candle.date).sort();
         const oldestDate = dates[0];
         const overlapsCache = Boolean(
@@ -358,33 +360,44 @@ export class PortfolioAnalysisService {
     }
 
     const exchangeRates = await this.ensureExchangeRates(accountId, fromDate, toDate);
-    const krwHistory = this.store.getHistory(accountId, "KRW", "all", new Date(), { from: fromDate, to: toDate });
-    const usdHistory = this.store.getHistory(accountId, "USD", "all", new Date(), { from: fromDate, to: toDate });
+    const [krwHistory, usdHistory] = await Promise.all([
+      this.store.getHistory(accountId, "KRW", "all", new Date(), { from: fromDate, to: toDate }),
+      this.store.getHistory(accountId, "USD", "all", new Date(), { from: fromDate, to: toDate }),
+    ]);
     const history = combinePortfolioHistories(krwHistory, usdHistory, exchangeRates);
-    const candles = combinePortfolioCandles(
+    const [krwCandles, usdCandles] = await Promise.all([
       this.store.getPortfolioAnalysisCandles(accountId, "KRW", fromDate, toDate),
       this.store.getPortfolioAnalysisCandles(accountId, "USD", fromDate, toDate),
+    ]);
+    const candles = combinePortfolioCandles(
+      krwCandles,
+      usdCandles,
       history,
       krwHistory,
       usdHistory,
       exchangeRates,
     );
-    const benchmarkData = benchmarkKeys.map((key) => {
+    const benchmarkData = await Promise.all(benchmarkKeys.map(async (key) => {
       const catalog = BENCHMARK_CATALOG[key];
       return {
         key,
         name: catalog.name,
         ...(catalog.proxy ? { proxySymbol: catalog.symbol } : {}),
-        points: this.store.getBenchmarkPrices(key, fromDate, toDate),
+        points: await this.store.getBenchmarkPrices(key, fromDate, toDate),
       };
-    });
+    }));
+    const [orders, returnSeries, ohlcIncomplete] = await Promise.all([
+      this.store.getOrders(accountId),
+      buildPositionWeightedReturns(history, this.store, exchangeRates),
+      this.store.hasIncompleteDailyOhlc(),
+    ]);
     const analytics = calculatePortfolioAnalytics({
       candles,
       history,
-      orders: this.store.getOrders(accountId),
+      orders,
       exchangeRates,
       benchmarks: benchmarkData,
-      returnSeries: buildPositionWeightedReturns(history, this.store, exchangeRates),
+      returnSeries,
     });
 
     return {
@@ -397,7 +410,7 @@ export class PortfolioAnalysisService {
       fromDate,
       toDate,
       estimatedOhlc: true,
-      ohlcBackfillComplete: !this.store.hasIncompleteDailyOhlc(),
+      ohlcBackfillComplete: !ohlcIncomplete,
       fxBackfillComplete: true,
       candles,
       benchmarks: benchmarkData,

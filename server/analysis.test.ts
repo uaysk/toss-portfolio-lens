@@ -62,18 +62,18 @@ describe("portfolio analysis query", () => {
     )).toEqual([{ date: "2026-07-01", open: 13_500, high: 16_500, low: 12_050, close: 15_000 }]);
   });
 
-  it("전일 국내·해외 비중으로 가격과 환율의 일간수익률을 가중한다", () => {
-    const store = new PortfolioHistoryStore(":memory:");
+  it("전일 국내·해외 비중으로 가격과 환율의 일간수익률을 가중한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
     try {
-      store.upsertInstruments([
+      await store.upsertInstruments([
         { symbol: "AAA", name: "국내", market: "KRX", currency: "KRW" },
         { symbol: "US", name: "해외", market: "NASDAQ", currency: "USD" },
       ]);
-      store.upsertDailyPrices("KRW:AAA", [
+      await store.upsertDailyPrices("KRW:AAA", [
         { symbol: "AAA", date: "2026-07-01", timestamp: "2026-07-01", currency: "KRW", openPrice: 100, highPrice: 100, lowPrice: 100, closePrice: 100 },
         { symbol: "AAA", date: "2026-07-02", timestamp: "2026-07-02", currency: "KRW", openPrice: 110, highPrice: 110, lowPrice: 110, closePrice: 110 },
       ]);
-      store.upsertDailyPrices("USD:US", [
+      await store.upsertDailyPrices("USD:US", [
         { symbol: "US", date: "2026-07-01", timestamp: "2026-07-01", currency: "USD", openPrice: 10, highPrice: 10, lowPrice: 10, closePrice: 10 },
         { symbol: "US", date: "2026-07-02", timestamp: "2026-07-02", currency: "USD", openPrice: 11, highPrice: 11, lowPrice: 11, closePrice: 11 },
       ]);
@@ -88,13 +88,13 @@ describe("portfolio analysis query", () => {
           { date: "2026-07-02", capturedAt: "2026-07-02", totalValue: 2_200, values: { "KRX:AAA": 50, "NASDAQ:US": 50 } },
         ],
       };
-      const result = buildPositionWeightedReturns(history, store, new Map([
+      const result = await buildPositionWeightedReturns(history, store, new Map([
         ["2026-07-01", 1_400], ["2026-07-02", 1_410],
       ]));
       expect(result).toHaveLength(1);
       expect(result[0].value).toBeCloseTo(0.10392857, 7);
     } finally {
-      store.close();
+      await store.close();
     }
   });
 });

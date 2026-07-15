@@ -8,7 +8,8 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:mysql": "tsx scripts/verify-mysql-storage.ts"
   },
   "dependencies": {
     "@radix-ui/react-select": "2.2.5",
@@ -17,6 +18,7 @@
     "clsx": "2.1.1",
     "express": "5.1.0",
     "lucide-react": "0.468.0",
+    "mysql2": "^3.23.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "recharts": "2.15.4",

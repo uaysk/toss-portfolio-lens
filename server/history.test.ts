@@ -44,8 +44,8 @@ function portfolio(holdings: Holding[]): Portfolio {
 describe("PortfolioHistoryStore", () => {
   const stores: PortfolioHistoryStore[] = [];
 
-  afterEach(() => {
-    stores.splice(0).forEach((store) => store.close());
+  afterEach(async () => {
+    await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
   it("KST 날짜 경계를 사용한다", () => {
@@ -54,24 +54,24 @@ describe("PortfolioHistoryStore", () => {
     expect(isHistoryDate("2026-02-29")).toBe(false);
   });
 
-  it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", () => {
-    const store = new PortfolioHistoryStore(":memory:");
+  it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
 
-    store.recordPortfolio(
+    await store.recordPortfolio(
       portfolio([holding("AAA", 60), holding("BBB", 40)]),
       new Date("2026-07-14T02:00:00.000Z"),
     );
-    store.recordPortfolio(
+    await store.recordPortfolio(
       portfolio([holding("AAA", 30), holding("BBB", 70)]),
       new Date("2026-07-14T10:00:00.000Z"),
     );
-    store.recordPortfolio(
+    await store.recordPortfolio(
       portfolio([holding("AAA", 50), holding("CCC", 50), holding("US1", 200, "USD")]),
       new Date("2026-07-15T10:00:00.000Z"),
     );
 
-    const history = store.getHistory("account-1", "KRW", "all", new Date("2026-07-16T00:00:00.000Z"));
+    const history = await store.getHistory("account-1", "KRW", "all", new Date("2026-07-16T00:00:00.000Z"));
     expect(history.points).toHaveLength(2);
     expect(history.series.map((item) => item.symbol)).toEqual(["AAA", "BBB", "CCC"]);
     expect(history.points[0]).toMatchObject({
@@ -86,8 +86,8 @@ describe("PortfolioHistoryStore", () => {
     });
   });
 
-  it("원본 주문·일봉·복원 상태와 계산된 과거 스냅샷을 저장한다", () => {
-    const store = new PortfolioHistoryStore(":memory:");
+  it("원본 주문·일봉·복원 상태와 계산된 과거 스냅샷을 저장한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
     const order: HistoricalOrder = {
       orderId: "order-1",
@@ -104,10 +104,10 @@ describe("PortfolioHistoryStore", () => {
       tax: 0,
     };
 
-    expect(store.upsertOrders("account-1", [order])).toBe(1);
-    expect(store.getOrders("account-1")).toEqual([order]);
-    store.upsertInstruments([{ symbol: "AAA", name: "에이", market: "KRX", currency: "KRW" }]);
-    store.upsertDailyPrices("KRW:AAA", [{
+    expect(await store.upsertOrders("account-1", [order])).toBe(1);
+    expect(await store.getOrders("account-1")).toEqual([order]);
+    await store.upsertInstruments([{ symbol: "AAA", name: "에이", market: "KRX", currency: "KRW" }]);
+    await store.upsertDailyPrices("KRW:AAA", [{
       symbol: "AAA",
       date: "2026-07-01",
       timestamp: "2026-07-01T00:00:00+09:00",
@@ -117,12 +117,12 @@ describe("PortfolioHistoryStore", () => {
       lowPrice: 95,
       closePrice: 110,
     }]);
-    expect(store.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-02").get("KRW:AAA")?.get("2026-07-01"))
+    expect((await store.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-02")).get("KRW:AAA")?.get("2026-07-01"))
       .toBe(110);
-    store.upsertExchangeRate("2026-07-01", 1387.25, "2026-07-01T15:30:00+09:00");
-    expect(store.getExchangeRates("2026-07-01", "2026-07-02").get("2026-07-01")).toBe(1387.25);
+    await store.upsertExchangeRate("2026-07-01", 1387.25, "2026-07-01T15:30:00+09:00");
+    expect((await store.getExchangeRates("2026-07-01", "2026-07-02")).get("2026-07-01")).toBe(1387.25);
 
-    expect(store.replaceHistoricalSnapshots("account-1", [{
+    expect(await store.replaceHistoricalSnapshots("account-1", [{
       date: "2026-07-01",
       capturedAt: Date.parse("2026-07-01T14:59:59.999Z"),
       items: [{
@@ -133,12 +133,12 @@ describe("PortfolioHistoryStore", () => {
         evaluationAmount: 220,
       }],
     }], "2026-07-02")).toBe(1);
-    expect(store.getHistory("account-1", "KRW", "all").points[0]).toMatchObject({
+    expect((await store.getHistory("account-1", "KRW", "all")).points[0]).toMatchObject({
       date: "2026-07-01",
       totalValue: 220,
       values: { "KRX:AAA": 100 },
     });
-    expect(store.getPortfolioAnalysisCandles(
+    expect(await store.getPortfolioAnalysisCandles(
       "account-1",
       "KRW",
       "2026-07-01",
@@ -151,7 +151,7 @@ describe("PortfolioHistoryStore", () => {
       close: 220,
     }]);
 
-    const status = store.updateBackfillStatus("account-1", {
+    const status = await store.updateBackfillStatus("account-1", {
       status: "complete",
       phase: "complete",
       firstTradeDate: "2026-07-01",
@@ -164,16 +164,16 @@ describe("PortfolioHistoryStore", () => {
       reconciledSymbols: 1,
     });
     expect(status).toMatchObject({ status: "complete", ordersImported: 1, snapshotsCreated: 1 });
-    expect(store.getBackfillStatus("account-1")).toMatchObject({
+    expect(await store.getBackfillStatus("account-1")).toMatchObject({
       firstTradeDate: "2026-07-01",
       lastBackfilledDate: "2026-07-01",
     });
   });
 
-  it("사용자가 지정한 시작일과 종료일을 포함해 조회하고 해당 기간의 과거 종목을 반환한다", () => {
-    const store = new PortfolioHistoryStore(":memory:");
+  it("사용자가 지정한 시작일과 종료일을 포함해 조회하고 해당 기간의 과거 종목을 반환한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
-    store.replaceHistoricalSnapshots("account-1", [
+    await store.replaceHistoricalSnapshots("account-1", [
       {
         date: "2026-07-01",
         capturedAt: Date.parse("2026-07-01T14:59:59.999Z"),
@@ -194,7 +194,7 @@ describe("PortfolioHistoryStore", () => {
       },
     ], "2026-07-04");
 
-    const selected = store.getHistory(
+    const selected = await store.getHistory(
       "account-1",
       "KRW",
       "all",
@@ -205,7 +205,7 @@ describe("PortfolioHistoryStore", () => {
     expect(selected.series.map((item) => item.symbol)).toEqual(["KEEP", "SOLD"]);
     expect(selected).toMatchObject({ fromDate: "2026-07-02", toDate: "2026-07-03" });
 
-    const afterSale = store.getHistory(
+    const afterSale = await store.getHistory(
       "account-1",
       "KRW",
       "all",
@@ -215,10 +215,10 @@ describe("PortfolioHistoryStore", () => {
     expect(afterSale.series.map((item) => item.symbol)).toEqual(["KEEP"]);
   });
 
-  it("현재 해외 보유가 없어도 과거 USD 종목 기록을 반환한다", () => {
-    const store = new PortfolioHistoryStore(":memory:");
+  it("현재 해외 보유가 없어도 과거 USD 종목 기록을 반환한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
-    store.replaceHistoricalSnapshots("account-1", [
+    await store.replaceHistoricalSnapshots("account-1", [
       {
         date: "2026-01-02",
         capturedAt: Date.parse("2026-01-02T14:59:59.999Z"),
@@ -237,7 +237,7 @@ describe("PortfolioHistoryStore", () => {
       },
     ], "2026-01-04");
 
-    const history = store.getHistory("account-1", "USD", "all");
+    const history = await store.getHistory("account-1", "USD", "all");
     expect(history.series).toEqual([expect.objectContaining({ symbol: "PAST-US", market: "NASDAQ" })]);
     expect(history.points.map((point) => point.totalValue)).toEqual([250, 0]);
   });

@@ -20,7 +20,6 @@ import { HistoricalPortfolioBackfill } from "./backfill.js";
 import { loadConfig } from "./env.js";
 import {
   isHistoryDate,
-  PortfolioHistoryStore,
   type HistoryCurrency,
   type HistoryRange,
 } from "./history.js";
@@ -30,11 +29,12 @@ import {
   type ReadOnlyMarketFeature,
 } from "./market.js";
 import { OrderHistoryQueryError, type OrderHistoryQuery } from "./orders.js";
+import { openConfiguredHistoryStore } from "./storage.js";
 import { TossApiError, TossClient } from "./toss.js";
 
 const config = loadConfig();
 const toss = new TossClient(config);
-const historyStore = new PortfolioHistoryStore(config.databasePath);
+const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const app = express();
@@ -90,7 +90,7 @@ function requireReadOnlyApiToken(request: Request, response: Response, next: Nex
 }
 
 app.get("/api/health", (_request, response) => {
-  response.json({ status: "ok", service: "portfolio-lens" });
+  response.json({ status: "ok", service: "portfolio-lens", storage: historyStore.backend });
 });
 
 app.get("/api/auth/session", (request, response) => {
@@ -144,7 +144,7 @@ app.get("/api/portfolio", requireSession, async (request, response) => {
     const portfolio = await toss.getPortfolio(account, force);
     if (request.query.snapshot !== "0") {
       try {
-        historyStore.recordPortfolio(portfolio);
+        await historyStore.recordPortfolio(portfolio);
       } catch (historyError) {
         console.error("[history] 일별 스냅샷 저장 실패:", historyError instanceof Error ? historyError.message : historyError);
       }
@@ -351,7 +351,7 @@ app.get("/api/portfolio/history", requireSession, async (request, response) => {
           range,
           ...(hasCustomRange ? { fromDate, toDate } : {}),
         })
-      : historyStore.getHistory(
+      : await historyStore.getHistory(
           accountId,
           currency as HistoryCurrency,
           range,
@@ -375,7 +375,7 @@ function requestedAccount(request: Request): string {
   return account.trim();
 }
 
-app.get("/api/portfolio/history/status", requireSession, (request, response) => {
+app.get("/api/portfolio/history/status", requireSession, async (request, response) => {
   setNoStore(response);
   const accountId = requestedAccount(request);
   if (!accountId || accountId.length > 128) {
@@ -384,7 +384,7 @@ app.get("/api/portfolio/history/status", requireSession, (request, response) => 
     });
     return;
   }
-  response.json(historicalBackfill.getStatus(accountId));
+  response.json(await historicalBackfill.getStatus(accountId));
 });
 
 app.post("/api/portfolio/history/backfill", requireSession, async (request, response) => {
@@ -407,7 +407,7 @@ app.post("/api/portfolio/history/backfill", requireSession, async (request, resp
     const started = historicalBackfill.start(accountId, true);
     response.status(202).json({
       started,
-      status: historicalBackfill.getStatus(accountId),
+      status: await historicalBackfill.getStatus(accountId),
     });
   } catch (error) {
     const message = error instanceof TossApiError ? error.message : "과거 데이터 동기화를 시작하지 못했습니다.";
@@ -440,7 +440,7 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
   try {
     const benchmarkKeys = parseBenchmarkKeys(request.query.benchmarks);
     const today = analysisToday();
-    const firstTradeDate = historyStore.getBackfillStatus(accountId).firstTradeDate;
+    const firstTradeDate = (await historyStore.getBackfillStatus(accountId)).firstTradeDate;
     const fromDate = hasCustomRange ? fromQuery : analysisStartDate(range, today, firstTradeDate);
     const toDate = hasCustomRange ? toQuery : today;
     response.json(await portfolioAnalysis.getAnalysis({
@@ -488,7 +488,7 @@ async function collectDailySnapshots(): Promise<void> {
     for (const account of accounts) {
       try {
         const portfolio = await toss.getPortfolio(account.id, true, false);
-        historyStore.recordPortfolio(portfolio);
+        await historyStore.recordPortfolio(portfolio);
       } catch (error) {
         console.warn(
           "[history] " + account.id + " 계좌 수집 실패:",
@@ -528,7 +528,7 @@ function shutdown(signal: string): void {
   clearInterval(collectionInterval);
   server.close(async () => {
     await historicalBackfill.waitForIdle();
-    historyStore.close();
+    await historyStore.close();
     console.info("Portfolio Lens stopped by " + signal);
     process.exit(0);
   });

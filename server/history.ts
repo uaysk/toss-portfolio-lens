@@ -1,6 +1,5 @@
-import { mkdirSync } from "node:fs";
-import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
+import { type DatabaseRow, type RelationalDatabase, SqliteDatabase } from "./database.js";
 import type { DailyCandle, HistoricalOrder, InstrumentInfo, Portfolio } from "./toss.js";
 
 export type HistoryCurrency = "KRW" | "USD";
@@ -96,6 +95,32 @@ type ItemRow = {
   weight_percent: number;
 };
 
+export type SqliteMigrationResult = {
+  skipped: boolean;
+  fingerprint: string;
+  rows: Record<string, number>;
+};
+
+async function batchUpsertMySql(
+  database: RelationalDatabase,
+  table: string,
+  columns: string[],
+  rows: DatabaseRow[],
+  updateClause: string,
+  batchSize = 400,
+): Promise<void> {
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const batch = rows.slice(offset, offset + batchSize);
+    if (!batch.length) continue;
+    const placeholders = batch.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
+    const parameters = batch.flatMap((row) => columns.map((column) => row[column]));
+    await database.run(
+      `INSERT INTO ${table} (${columns.join(", ")}) VALUES ${placeholders} ON DUPLICATE KEY UPDATE ${updateClause}`,
+      parameters,
+    );
+  }
+}
+
 function round(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
@@ -130,26 +155,258 @@ function seriesKey(market: string, symbol: string): string {
 }
 
 export class PortfolioHistoryStore {
-  private readonly db: DatabaseSync;
+  readonly backend: "sqlite" | "mysql";
 
-  constructor(databasePath: string) {
-    if (databasePath !== ":memory:") {
-      mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });
+  private constructor(private readonly db: RelationalDatabase) {
+    this.backend = db.dialect;
+  }
+
+  static async open(database: RelationalDatabase): Promise<PortfolioHistoryStore> {
+    const store = new PortfolioHistoryStore(database);
+    await store.initialize();
+    return store;
+  }
+
+  static async openSqlite(databasePath: string): Promise<PortfolioHistoryStore> {
+    return PortfolioHistoryStore.open(new SqliteDatabase(databasePath));
+  }
+
+  static async migrateSqliteData(
+    source: PortfolioHistoryStore,
+    target: PortfolioHistoryStore,
+    fingerprint: string,
+  ): Promise<SqliteMigrationResult> {
+    if (source.backend !== "sqlite" || target.backend !== "mysql") {
+      throw new Error("SQLite에서 MySQL로만 데이터를 마이그레이션할 수 있습니다.");
     }
-    this.db = new DatabaseSync(databasePath);
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    const [previous] = await target.db.query<{ meta_value: string }>(`
+      SELECT meta_value FROM portfolio_storage_meta WHERE meta_key = 'sqlite_migration_fingerprint_v1'
+    `);
+    if (previous?.meta_value === fingerprint) {
+      return { skipped: true, fingerprint, rows: {} };
+    }
+
+    const instruments = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_instruments");
+    const orders = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_orders");
+    const snapshots = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_snapshots");
+    const snapshotItems = await source.db.query<DatabaseRow>(`
+      SELECT snapshots.account_id, snapshots.snapshot_date,
+             snapshots.captured_at AS source_captured_at,
+             items.symbol, items.name, items.market, items.currency,
+             items.evaluation_amount, items.weight_percent
+      FROM portfolio_snapshot_items AS items
+      JOIN portfolio_snapshots AS snapshots ON snapshots.id = items.snapshot_id
+      ORDER BY snapshots.account_id, snapshots.snapshot_date
+    `);
+    const dailyPrices = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_daily_prices");
+    const benchmarkPrices = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_benchmark_prices");
+    const exchangeRates = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_exchange_rates");
+    const backfillStates = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_backfill_state");
+    const cashLedger = await source.hasTable("portfolio_cash_ledger")
+      ? await source.db.query<DatabaseRow>("SELECT * FROM portfolio_cash_ledger")
+      : [];
+    const rows = {
+      portfolio_instruments: instruments.length,
+      portfolio_orders: orders.length,
+      portfolio_snapshots: snapshots.length,
+      portfolio_snapshot_items: snapshotItems.length,
+      portfolio_daily_prices: dailyPrices.length,
+      portfolio_benchmark_prices: benchmarkPrices.length,
+      portfolio_exchange_rates: exchangeRates.length,
+      portfolio_backfill_state: backfillStates.length,
+      portfolio_cash_ledger: cashLedger.length,
+    };
+
+    await target.db.transaction(async (database) => {
+      await batchUpsertMySql(
+        database,
+        "portfolio_instruments",
+        ["instrument_key", "symbol", "name", "market", "currency", "updated_at"],
+        instruments,
+        `symbol = IF(VALUES(updated_at) >= updated_at, VALUES(symbol), symbol),
+         name = IF(VALUES(updated_at) >= updated_at, VALUES(name), name),
+         market = IF(VALUES(updated_at) >= updated_at, VALUES(market), market),
+         currency = IF(VALUES(updated_at) >= updated_at, VALUES(currency), currency),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_orders",
+        [
+          "account_id", "order_id", "symbol", "side", "currency", "status", "ordered_at", "filled_at",
+          "filled_quantity", "average_filled_price", "filled_amount", "commission", "tax", "fetched_at",
+        ],
+        orders,
+        `symbol = IF(VALUES(fetched_at) >= fetched_at, VALUES(symbol), symbol),
+         side = IF(VALUES(fetched_at) >= fetched_at, VALUES(side), side),
+         currency = IF(VALUES(fetched_at) >= fetched_at, VALUES(currency), currency),
+         status = IF(VALUES(fetched_at) >= fetched_at, VALUES(status), status),
+         ordered_at = IF(VALUES(fetched_at) >= fetched_at, VALUES(ordered_at), ordered_at),
+         filled_at = IF(VALUES(fetched_at) >= fetched_at, VALUES(filled_at), filled_at),
+         filled_quantity = IF(VALUES(fetched_at) >= fetched_at, VALUES(filled_quantity), filled_quantity),
+         average_filled_price = IF(VALUES(fetched_at) >= fetched_at, VALUES(average_filled_price), average_filled_price),
+         filled_amount = IF(VALUES(fetched_at) >= fetched_at, VALUES(filled_amount), filled_amount),
+         commission = IF(VALUES(fetched_at) >= fetched_at, VALUES(commission), commission),
+         tax = IF(VALUES(fetched_at) >= fetched_at, VALUES(tax), tax),
+         fetched_at = GREATEST(fetched_at, VALUES(fetched_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_snapshots",
+        ["account_id", "snapshot_date", "captured_at", "origin"],
+        snapshots,
+        `origin = IF(VALUES(captured_at) >= captured_at, VALUES(origin), origin),
+         captured_at = GREATEST(captured_at, VALUES(captured_at))`,
+      );
+
+      const targetSnapshots = await database.query<{
+        id: number;
+        account_id: string;
+        snapshot_date: string;
+        captured_at: number;
+      }>("SELECT id, account_id, snapshot_date, captured_at FROM portfolio_snapshots");
+      const targetByKey = new Map(targetSnapshots.map((snapshot) => [
+        `${snapshot.account_id}\u0000${snapshot.snapshot_date}`,
+        snapshot,
+      ]));
+      const authoritativeSnapshotIds = new Set<number>();
+      for (const snapshot of snapshots) {
+        const key = `${String(snapshot.account_id)}\u0000${String(snapshot.snapshot_date)}`;
+        const targetSnapshot = targetByKey.get(key);
+        if (targetSnapshot && Number(snapshot.captured_at) >= Number(targetSnapshot.captured_at)) {
+          authoritativeSnapshotIds.add(Number(targetSnapshot.id));
+        }
+      }
+      const migratedItems: DatabaseRow[] = [];
+      for (const item of snapshotItems) {
+        const key = `${String(item.account_id)}\u0000${String(item.snapshot_date)}`;
+        const targetSnapshot = targetByKey.get(key);
+        if (!targetSnapshot || Number(item.source_captured_at) < Number(targetSnapshot.captured_at)) continue;
+        authoritativeSnapshotIds.add(Number(targetSnapshot.id));
+        migratedItems.push({
+          snapshot_id: Number(targetSnapshot.id),
+          symbol: item.symbol,
+          name: item.name,
+          market: item.market,
+          currency: item.currency,
+          evaluation_amount: item.evaluation_amount,
+          weight_percent: item.weight_percent,
+        });
+      }
+      for (const snapshotId of authoritativeSnapshotIds) {
+        await database.run("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?", [snapshotId]);
+      }
+      await batchUpsertMySql(
+        database,
+        "portfolio_snapshot_items",
+        ["snapshot_id", "symbol", "name", "market", "currency", "evaluation_amount", "weight_percent"],
+        migratedItems,
+        `name = VALUES(name), evaluation_amount = VALUES(evaluation_amount), weight_percent = VALUES(weight_percent)`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_daily_prices",
+        [
+          "instrument_key", "price_date", "open_price", "high_price", "low_price", "close_price",
+          "currency", "timestamp", "updated_at",
+        ],
+        dailyPrices,
+        `open_price = IF(VALUES(updated_at) >= updated_at, VALUES(open_price), open_price),
+         high_price = IF(VALUES(updated_at) >= updated_at, VALUES(high_price), high_price),
+         low_price = IF(VALUES(updated_at) >= updated_at, VALUES(low_price), low_price),
+         close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
+         currency = IF(VALUES(updated_at) >= updated_at, VALUES(currency), currency),
+         timestamp = IF(VALUES(updated_at) >= updated_at, VALUES(timestamp), timestamp),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_benchmark_prices",
+        ["benchmark_key", "price_date", "close_price", "timestamp", "updated_at"],
+        benchmarkPrices,
+        `close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
+         timestamp = IF(VALUES(updated_at) >= updated_at, VALUES(timestamp), timestamp),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_exchange_rates",
+        ["rate_date", "base_currency", "quote_currency", "rate", "timestamp", "updated_at"],
+        exchangeRates,
+        `rate = IF(VALUES(updated_at) >= updated_at, VALUES(rate), rate),
+         timestamp = IF(VALUES(updated_at) >= updated_at, VALUES(timestamp), timestamp),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_backfill_state",
+        [
+          "account_id", "status", "phase", "started_at", "completed_at", "updated_at", "first_trade_date",
+          "last_backfilled_date", "orders_imported", "symbols_total", "symbols_processed", "prices_imported",
+          "snapshots_created", "reconciled_symbols", "discrepancy_symbols", "failed_symbols", "message",
+        ],
+        backfillStates,
+        `status = IF(VALUES(updated_at) >= updated_at, VALUES(status), status),
+         phase = IF(VALUES(updated_at) >= updated_at, VALUES(phase), phase),
+         started_at = IF(VALUES(updated_at) >= updated_at, VALUES(started_at), started_at),
+         completed_at = IF(VALUES(updated_at) >= updated_at, VALUES(completed_at), completed_at),
+         first_trade_date = IF(VALUES(updated_at) >= updated_at, VALUES(first_trade_date), first_trade_date),
+         last_backfilled_date = IF(VALUES(updated_at) >= updated_at, VALUES(last_backfilled_date), last_backfilled_date),
+         orders_imported = IF(VALUES(updated_at) >= updated_at, VALUES(orders_imported), orders_imported),
+         symbols_total = IF(VALUES(updated_at) >= updated_at, VALUES(symbols_total), symbols_total),
+         symbols_processed = IF(VALUES(updated_at) >= updated_at, VALUES(symbols_processed), symbols_processed),
+         prices_imported = IF(VALUES(updated_at) >= updated_at, VALUES(prices_imported), prices_imported),
+         snapshots_created = IF(VALUES(updated_at) >= updated_at, VALUES(snapshots_created), snapshots_created),
+         reconciled_symbols = IF(VALUES(updated_at) >= updated_at, VALUES(reconciled_symbols), reconciled_symbols),
+         discrepancy_symbols = IF(VALUES(updated_at) >= updated_at, VALUES(discrepancy_symbols), discrepancy_symbols),
+         failed_symbols = IF(VALUES(updated_at) >= updated_at, VALUES(failed_symbols), failed_symbols),
+         message = IF(VALUES(updated_at) >= updated_at, VALUES(message), message),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_cash_ledger",
+        [
+          "account_id", "entry_id", "transaction_date", "transaction_time", "occurred_at", "title",
+          "category", "kind", "currency", "amount", "balance", "instrument_name", "quantity", "source",
+          "imported_at",
+        ],
+        cashLedger,
+        `transaction_date = IF(VALUES(imported_at) >= imported_at, VALUES(transaction_date), transaction_date),
+         transaction_time = IF(VALUES(imported_at) >= imported_at, VALUES(transaction_time), transaction_time),
+         occurred_at = IF(VALUES(imported_at) >= imported_at, VALUES(occurred_at), occurred_at),
+         title = IF(VALUES(imported_at) >= imported_at, VALUES(title), title),
+         category = IF(VALUES(imported_at) >= imported_at, VALUES(category), category),
+         kind = IF(VALUES(imported_at) >= imported_at, VALUES(kind), kind),
+         currency = IF(VALUES(imported_at) >= imported_at, VALUES(currency), currency),
+         amount = IF(VALUES(imported_at) >= imported_at, VALUES(amount), amount),
+         balance = IF(VALUES(imported_at) >= imported_at, VALUES(balance), balance),
+         instrument_name = IF(VALUES(imported_at) >= imported_at, VALUES(instrument_name), instrument_name),
+         quantity = IF(VALUES(imported_at) >= imported_at, VALUES(quantity), quantity),
+         source = IF(VALUES(imported_at) >= imported_at, VALUES(source), source),
+         imported_at = GREATEST(imported_at, VALUES(imported_at))`,
+      );
+      await database.run(`
+        INSERT INTO portfolio_storage_meta (meta_key, meta_value, updated_at)
+        VALUES ('sqlite_migration_fingerprint_v1', ?, ?)
+        ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value), updated_at = VALUES(updated_at)
+      `, [fingerprint, new Date().toISOString()]);
+    });
+
+    return { skipped: false, fingerprint, rows };
+  }
+
+  private async initialize(): Promise<void> {
+    const sqliteSchema = [
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshots (
         id INTEGER PRIMARY KEY,
         account_id TEXT NOT NULL,
         snapshot_date TEXT NOT NULL,
         captured_at INTEGER NOT NULL,
         origin TEXT NOT NULL DEFAULT 'LIVE' CHECK(origin IN ('LIVE', 'HISTORICAL')),
         UNIQUE(account_id, snapshot_date)
-      );
-
-      CREATE TABLE IF NOT EXISTS portfolio_snapshot_items (
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshot_items (
         snapshot_id INTEGER NOT NULL REFERENCES portfolio_snapshots(id) ON DELETE CASCADE,
         symbol TEXT NOT NULL,
         name TEXT NOT NULL,
@@ -158,12 +415,10 @@ export class PortfolioHistoryStore {
         evaluation_amount REAL NOT NULL,
         weight_percent REAL NOT NULL,
         PRIMARY KEY(snapshot_id, market, symbol, currency)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_snapshots_account_date
-        ON portfolio_snapshots(account_id, snapshot_date);
-
-      CREATE TABLE IF NOT EXISTS portfolio_orders (
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_snapshots_account_date
+        ON portfolio_snapshots(account_id, snapshot_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_orders (
         account_id TEXT NOT NULL,
         order_id TEXT NOT NULL,
         symbol TEXT NOT NULL,
@@ -179,21 +434,18 @@ export class PortfolioHistoryStore {
         tax REAL NOT NULL,
         fetched_at INTEGER NOT NULL,
         PRIMARY KEY(account_id, order_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_orders_account_filled_at
-        ON portfolio_orders(account_id, filled_at);
-
-      CREATE TABLE IF NOT EXISTS portfolio_instruments (
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_orders_account_filled_at
+        ON portfolio_orders(account_id, filled_at)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_instruments (
         instrument_key TEXT PRIMARY KEY,
         symbol TEXT NOT NULL,
         name TEXT NOT NULL,
         market TEXT NOT NULL,
         currency TEXT NOT NULL,
         updated_at INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
         instrument_key TEXT NOT NULL REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE,
         price_date TEXT NOT NULL,
         open_price REAL,
@@ -204,24 +456,20 @@ export class PortfolioHistoryStore {
         timestamp TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(instrument_key, price_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
-        ON portfolio_daily_prices(instrument_key, price_date);
-
-      CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
+        ON portfolio_daily_prices(instrument_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
         benchmark_key TEXT NOT NULL,
         price_date TEXT NOT NULL,
         close_price REAL NOT NULL,
         timestamp TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(benchmark_key, price_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
-        ON portfolio_benchmark_prices(benchmark_key, price_date);
-
-      CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
+        ON portfolio_benchmark_prices(benchmark_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
         rate_date TEXT NOT NULL,
         base_currency TEXT NOT NULL,
         quote_currency TEXT NOT NULL,
@@ -229,12 +477,10 @@ export class PortfolioHistoryStore {
         timestamp TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(rate_date, base_currency, quote_currency)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date
-        ON portfolio_exchange_rates(base_currency, quote_currency, rate_date);
-
-      CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date
+        ON portfolio_exchange_rates(base_currency, quote_currency, rate_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
         account_id TEXT PRIMARY KEY,
         status TEXT NOT NULL,
         phase TEXT NOT NULL,
@@ -252,26 +498,197 @@ export class PortfolioHistoryStore {
         discrepancy_symbols INTEGER NOT NULL DEFAULT 0,
         failed_symbols INTEGER NOT NULL DEFAULT 0,
         message TEXT
-      );
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_storage_meta (
+        meta_key TEXT PRIMARY KEY,
+        meta_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ];
+    const mysqlSchema = [
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        account_id VARCHAR(128) NOT NULL,
+        snapshot_date CHAR(10) NOT NULL,
+        captured_at BIGINT NOT NULL,
+        origin VARCHAR(16) NOT NULL DEFAULT 'LIVE',
+        UNIQUE KEY uq_snapshots_account_date (account_id, snapshot_date),
+        KEY idx_snapshots_account_date (account_id, snapshot_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshot_items (
+        snapshot_id BIGINT UNSIGNED NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        market VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        evaluation_amount DOUBLE NOT NULL,
+        weight_percent DOUBLE NOT NULL,
+        PRIMARY KEY(snapshot_id, market, symbol, currency),
+        CONSTRAINT fk_snapshot_items_snapshot FOREIGN KEY(snapshot_id)
+          REFERENCES portfolio_snapshots(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_orders (
+        account_id VARCHAR(128) NOT NULL,
+        order_id VARCHAR(128) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        side VARCHAR(16) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        ordered_at VARCHAR(64) NOT NULL,
+        filled_at VARCHAR(64) NOT NULL,
+        filled_quantity DOUBLE NOT NULL,
+        average_filled_price DOUBLE NOT NULL,
+        filled_amount DOUBLE NOT NULL,
+        commission DOUBLE NOT NULL,
+        tax DOUBLE NOT NULL,
+        fetched_at BIGINT NOT NULL,
+        PRIMARY KEY(account_id, order_id),
+        KEY idx_orders_account_filled_at (account_id, filled_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_instruments (
+        instrument_key VARCHAR(96) NOT NULL PRIMARY KEY,
+        symbol VARCHAR(64) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        market VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        updated_at BIGINT NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
+        instrument_key VARCHAR(96) NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        open_price DOUBLE NULL,
+        high_price DOUBLE NULL,
+        low_price DOUBLE NULL,
+        close_price DOUBLE NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(instrument_key, price_date),
+        KEY idx_daily_prices_key_date (instrument_key, price_date),
+        CONSTRAINT fk_daily_prices_instrument FOREIGN KEY(instrument_key)
+          REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
+        benchmark_key VARCHAR(32) NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        close_price DOUBLE NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(benchmark_key, price_date),
+        KEY idx_benchmark_prices_key_date (benchmark_key, price_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
+        rate_date CHAR(10) NOT NULL,
+        base_currency VARCHAR(8) NOT NULL,
+        quote_currency VARCHAR(8) NOT NULL,
+        rate DOUBLE NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(rate_date, base_currency, quote_currency),
+        KEY idx_exchange_rates_pair_date (base_currency, quote_currency, rate_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
+        account_id VARCHAR(128) NOT NULL PRIMARY KEY,
+        status VARCHAR(16) NOT NULL,
+        phase VARCHAR(24) NOT NULL,
+        started_at VARCHAR(64) NULL,
+        completed_at VARCHAR(64) NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        first_trade_date CHAR(10) NULL,
+        last_backfilled_date CHAR(10) NULL,
+        orders_imported BIGINT NOT NULL DEFAULT 0,
+        symbols_total BIGINT NOT NULL DEFAULT 0,
+        symbols_processed BIGINT NOT NULL DEFAULT 0,
+        prices_imported BIGINT NOT NULL DEFAULT 0,
+        snapshots_created BIGINT NOT NULL DEFAULT 0,
+        reconciled_symbols BIGINT NOT NULL DEFAULT 0,
+        discrepancy_symbols BIGINT NOT NULL DEFAULT 0,
+        failed_symbols BIGINT NOT NULL DEFAULT 0,
+        message TEXT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_cash_ledger (
+        account_id VARCHAR(128) NOT NULL,
+        entry_id VARCHAR(128) NOT NULL,
+        transaction_date CHAR(10) NOT NULL,
+        transaction_time CHAR(5) NOT NULL,
+        occurred_at VARCHAR(64) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        category VARCHAR(64) NOT NULL,
+        kind VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        amount DOUBLE NOT NULL,
+        balance DOUBLE NOT NULL,
+        instrument_name VARCHAR(255) NULL,
+        quantity DOUBLE NULL,
+        source VARCHAR(32) NOT NULL DEFAULT 'WTS_PASTE',
+        imported_at BIGINT NOT NULL,
+        PRIMARY KEY(account_id, entry_id),
+        KEY idx_cash_ledger_account_date (account_id, transaction_date, transaction_time)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_storage_meta (
+        meta_key VARCHAR(191) NOT NULL PRIMARY KEY,
+        meta_value TEXT NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    ];
 
-    `);
-    const snapshotColumns = this.db.prepare("PRAGMA table_info(portfolio_snapshots)").all() as Array<{ name: string }>;
-    if (!snapshotColumns.some((column) => column.name === "origin")) {
-      this.db.exec("ALTER TABLE portfolio_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'LIVE'");
+    for (const statement of this.db.dialect === "mysql" ? mysqlSchema : sqliteSchema) {
+      await this.db.run(statement);
     }
-    const priceColumns = this.db.prepare("PRAGMA table_info(portfolio_daily_prices)").all() as Array<{ name: string }>;
+    if (this.db.dialect === "mysql") return;
+
+    const snapshotColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_snapshots)");
+    if (!snapshotColumns.some((column) => column.name === "origin")) {
+      await this.db.run("ALTER TABLE portfolio_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'LIVE'");
+    }
+    const priceColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_daily_prices)");
     for (const column of ["open_price", "high_price", "low_price"]) {
       if (!priceColumns.some((candidate) => candidate.name === column)) {
-        this.db.exec(`ALTER TABLE portfolio_daily_prices ADD COLUMN ${column} REAL`);
+        await this.db.run(`ALTER TABLE portfolio_daily_prices ADD COLUMN ${column} REAL`);
       }
     }
   }
 
-  close(): void {
-    this.db.close();
+  close(): Promise<void> {
+    return this.db.close();
   }
 
-  recordPortfolio(portfolio: Portfolio, capturedAt = new Date()): void {
+  private sql(sqlite: string, mysql: string): string {
+    return this.db.dialect === "mysql" ? mysql : sqlite;
+  }
+
+  private async hasTable(table: string): Promise<boolean> {
+    const rows = this.db.dialect === "mysql"
+      ? await this.db.query<DatabaseRow>(`
+          SELECT 1 AS present FROM information_schema.tables
+          WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1
+        `, [table])
+      : await this.db.query<DatabaseRow>(`
+          SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
+        `, [table]);
+    return rows.length > 0;
+  }
+
+  async migrationFingerprint(): Promise<string> {
+    const signatures = await Promise.all([
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value FROM portfolio_instruments"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(fetched_at), 0) AS max_value, COALESCE(SUM(filled_amount), 0) AS sum_value FROM portfolio_orders"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(captured_at), 0) AS max_value FROM portfolio_snapshots"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(SUM(evaluation_amount), 0) AS sum_value, COALESCE(SUM(weight_percent), 0) AS sum_weight FROM portfolio_snapshot_items"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_daily_prices"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_benchmark_prices"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(rate), 0) AS sum_value FROM portfolio_exchange_rates"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS max_value FROM portfolio_backfill_state"),
+    ]);
+    if (await this.hasTable("portfolio_cash_ledger")) {
+      signatures.push(await this.db.query<DatabaseRow>(
+        "SELECT COUNT(*) AS count, COALESCE(MAX(imported_at), 0) AS max_value, COALESCE(SUM(amount), 0) AS sum_value FROM portfolio_cash_ledger",
+      ));
+    }
+    return createHash("sha256").update(JSON.stringify(signatures.map(([row]) => row ?? {}))).digest("hex");
+  }
+
+  async recordPortfolio(portfolio: Portfolio, capturedAt = new Date()): Promise<void> {
     const snapshotDate = kstDateString(capturedAt);
     const capturedAtMs = capturedAt.getTime();
     const eligible = portfolio.holdings.filter(
@@ -285,31 +702,34 @@ export class PortfolioHistoryStore {
       { KRW: 0, USD: 0 },
     );
 
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare(`
+    await this.db.transaction(async (database) => {
+      await database.run(this.sql(`
         INSERT INTO portfolio_snapshots (account_id, snapshot_date, captured_at, origin)
         VALUES (?, ?, ?, 'LIVE')
         ON CONFLICT(account_id, snapshot_date)
         DO UPDATE SET captured_at = excluded.captured_at, origin = 'LIVE'
-      `).run(portfolio.selectedAccountId, snapshotDate, capturedAtMs);
+      `, `
+        INSERT INTO portfolio_snapshots (account_id, snapshot_date, captured_at, origin)
+        VALUES (?, ?, ?, 'LIVE')
+        ON DUPLICATE KEY UPDATE captured_at = VALUES(captured_at), origin = 'LIVE'
+      `), [portfolio.selectedAccountId, snapshotDate, capturedAtMs]);
 
-      const snapshot = this.db.prepare(`
+      const [snapshot] = await database.query<SnapshotRow & DatabaseRow>(`
         SELECT id, snapshot_date, captured_at
         FROM portfolio_snapshots
         WHERE account_id = ? AND snapshot_date = ?
-      `).get(portfolio.selectedAccountId, snapshotDate) as SnapshotRow | undefined;
+      `, [portfolio.selectedAccountId, snapshotDate]);
       if (!snapshot) throw new Error("일별 포트폴리오 스냅샷을 생성하지 못했습니다.");
 
-      this.db.prepare("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?").run(snapshot.id);
-      const insert = this.db.prepare(`
+      await database.run("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?", [snapshot.id]);
+      const insert = `
         INSERT INTO portfolio_snapshot_items (
           snapshot_id, symbol, name, market, currency, evaluation_amount, weight_percent
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
+      `;
       for (const holding of eligible) {
         const currency = holding.currency as HistoryCurrency;
-        insert.run(
+        await database.run(insert, [
           snapshot.id,
           holding.symbol,
           holding.name,
@@ -317,17 +737,13 @@ export class PortfolioHistoryStore {
           currency,
           holding.evaluationAmount,
           round((holding.evaluationAmount / totals[currency]) * 100),
-        );
+        ]);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
-  upsertOrders(accountId: string, orders: HistoricalOrder[], fetchedAt = Date.now()): number {
-    const statement = this.db.prepare(`
+  async upsertOrders(accountId: string, orders: HistoricalOrder[], fetchedAt = Date.now()): Promise<number> {
+    const statement = this.sql(`
       INSERT INTO portfolio_orders (
         account_id, order_id, symbol, side, currency, status, ordered_at, filled_at,
         filled_quantity, average_filled_price, filled_amount, commission, tax, fetched_at
@@ -345,11 +761,21 @@ export class PortfolioHistoryStore {
         commission = excluded.commission,
         tax = excluded.tax,
         fetched_at = excluded.fetched_at
+    `, `
+      INSERT INTO portfolio_orders (
+        account_id, order_id, symbol, side, currency, status, ordered_at, filled_at,
+        filled_quantity, average_filled_price, filled_amount, commission, tax, fetched_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        symbol = VALUES(symbol), side = VALUES(side), currency = VALUES(currency), status = VALUES(status),
+        ordered_at = VALUES(ordered_at), filled_at = VALUES(filled_at),
+        filled_quantity = VALUES(filled_quantity), average_filled_price = VALUES(average_filled_price),
+        filled_amount = VALUES(filled_amount), commission = VALUES(commission), tax = VALUES(tax),
+        fetched_at = VALUES(fetched_at)
     `);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    await this.db.transaction(async (database) => {
       for (const order of orders) {
-        statement.run(
+        await database.run(statement, [
           accountId,
           order.orderId,
           order.symbol,
@@ -364,24 +790,20 @@ export class PortfolioHistoryStore {
           order.commission,
           order.tax,
           fetchedAt,
-        );
+        ]);
       }
-      this.db.exec("COMMIT");
-      return orders.length;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
+    return orders.length;
   }
 
-  getOrders(accountId: string): HistoricalOrder[] {
-    const rows = this.db.prepare(`
+  async getOrders(accountId: string): Promise<HistoricalOrder[]> {
+    const rows = await this.db.query<Record<string, string | number>>(`
       SELECT order_id, symbol, side, currency, status, ordered_at, filled_at,
              filled_quantity, average_filled_price, filled_amount, commission, tax
       FROM portfolio_orders
       WHERE account_id = ?
       ORDER BY COALESCE(NULLIF(filled_at, ''), ordered_at) ASC, order_id ASC
-    `).all(accountId) as Array<Record<string, string | number>>;
+    `, [accountId]);
     return rows.map((row) => ({
       orderId: String(row.order_id),
       symbol: String(row.symbol),
@@ -398,37 +820,37 @@ export class PortfolioHistoryStore {
     }));
   }
 
-  upsertInstruments(instruments: InstrumentInfo[], updatedAt = Date.now()): number {
-    const statement = this.db.prepare(`
+  async upsertInstruments(instruments: InstrumentInfo[], updatedAt = Date.now()): Promise<number> {
+    const statement = this.sql(`
       INSERT INTO portfolio_instruments (instrument_key, symbol, name, market, currency, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(instrument_key) DO UPDATE SET
         name = excluded.name,
         market = excluded.market,
         updated_at = excluded.updated_at
+    `, `
+      INSERT INTO portfolio_instruments (instrument_key, symbol, name, market, currency, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        name = VALUES(name), market = VALUES(market), currency = VALUES(currency), updated_at = VALUES(updated_at)
     `);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    await this.db.transaction(async (database) => {
       for (const instrument of instruments) {
-        statement.run(
+        await database.run(statement, [
           `${instrument.currency}:${instrument.symbol}`,
           instrument.symbol,
           instrument.name || instrument.symbol,
           instrument.market || (instrument.currency === "USD" ? "미국" : "KRX"),
           instrument.currency,
           updatedAt,
-        );
+        ]);
       }
-      this.db.exec("COMMIT");
-      return instruments.length;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
+    return instruments.length;
   }
 
-  upsertDailyPrices(instrumentKey: string, candles: DailyCandle[], updatedAt = Date.now()): number {
-    const statement = this.db.prepare(`
+  async upsertDailyPrices(instrumentKey: string, candles: DailyCandle[], updatedAt = Date.now()): Promise<number> {
+    const statement = this.sql(`
       INSERT INTO portfolio_daily_prices (
         instrument_key, price_date, open_price, high_price, low_price, close_price, currency, timestamp, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -440,11 +862,18 @@ export class PortfolioHistoryStore {
         currency = excluded.currency,
         timestamp = excluded.timestamp,
         updated_at = excluded.updated_at
+    `, `
+      INSERT INTO portfolio_daily_prices (
+        instrument_key, price_date, open_price, high_price, low_price, close_price, currency, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        open_price = VALUES(open_price), high_price = VALUES(high_price), low_price = VALUES(low_price),
+        close_price = VALUES(close_price), currency = VALUES(currency), timestamp = VALUES(timestamp),
+        updated_at = VALUES(updated_at)
     `);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    await this.db.transaction(async (database) => {
       for (const candle of candles) {
-        statement.run(
+        await database.run(statement, [
           instrumentKey,
           candle.date,
           candle.openPrice,
@@ -454,59 +883,59 @@ export class PortfolioHistoryStore {
           candle.currency || instrumentKey.split(":", 1)[0],
           candle.timestamp,
           updatedAt,
-        );
+        ]);
       }
-      this.db.exec("COMMIT");
-      return candles.length;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
+    return candles.length;
   }
 
-  getLatestDailyPriceDate(instrumentKey: string): string | undefined {
-    const row = this.db.prepare(`
+  async getLatestDailyPriceDate(instrumentKey: string): Promise<string | undefined> {
+    const [row] = await this.db.query<{ latest: string | null }>(`
       SELECT MAX(price_date) AS latest FROM portfolio_daily_prices WHERE instrument_key = ?
-    `).get(instrumentKey) as { latest: string | null } | undefined;
+    `, [instrumentKey]);
     return row?.latest ?? undefined;
   }
 
-  getEarliestDailyPriceDate(instrumentKey: string): string | undefined {
-    const row = this.db.prepare(`
+  async getEarliestDailyPriceDate(instrumentKey: string): Promise<string | undefined> {
+    const [row] = await this.db.query<{ earliest: string | null }>(`
       SELECT MIN(price_date) AS earliest FROM portfolio_daily_prices WHERE instrument_key = ?
-    `).get(instrumentKey) as { earliest: string | null } | undefined;
+    `, [instrumentKey]);
     return row?.earliest ?? undefined;
   }
 
-  hasIncompleteDailyOhlc(instrumentKey?: string): boolean {
-    const row = instrumentKey
-      ? this.db.prepare(`
+  async hasIncompleteDailyOhlc(instrumentKey?: string): Promise<boolean> {
+    const [row] = instrumentKey
+      ? await this.db.query<{ count: number }>(`
           SELECT COUNT(*) AS count
           FROM portfolio_daily_prices
           WHERE instrument_key = ? AND (open_price IS NULL OR high_price IS NULL OR low_price IS NULL)
-        `).get(instrumentKey) as { count: number }
-      : this.db.prepare(`
+        `, [instrumentKey])
+      : await this.db.query<{ count: number }>(`
           SELECT COUNT(*) AS count
           FROM portfolio_daily_prices
           WHERE open_price IS NULL OR high_price IS NULL OR low_price IS NULL
-        `).get() as { count: number };
-    return Number(row.count) > 0;
+        `);
+    return Number(row?.count ?? 0) > 0;
   }
 
-  getDailyPrices(instrumentKeys: string[], fromDate: string, toDate: string): Map<string, Map<string, number>> {
+  async getDailyPrices(
+    instrumentKeys: string[],
+    fromDate: string,
+    toDate: string,
+  ): Promise<Map<string, Map<string, number>>> {
     const result = new Map<string, Map<string, number>>();
     if (!instrumentKeys.length) return result;
     const placeholders = instrumentKeys.map(() => "?").join(", ");
-    const rows = this.db.prepare(`
+    const rows = await this.db.query<{
+      instrument_key: string;
+      price_date: string;
+      close_price: number;
+    }>(`
       SELECT instrument_key, price_date, close_price
       FROM portfolio_daily_prices
       WHERE instrument_key IN (${placeholders}) AND price_date BETWEEN ? AND ?
       ORDER BY instrument_key ASC, price_date ASC
-    `).all(...instrumentKeys, fromDate, toDate) as Array<{
-      instrument_key: string;
-      price_date: string;
-      close_price: number;
-    }>;
+    `, [...instrumentKeys, fromDate, toDate]);
     for (const row of rows) {
       const prices = result.get(row.instrument_key) ?? new Map<string, number>();
       prices.set(row.price_date, row.close_price);
@@ -515,13 +944,24 @@ export class PortfolioHistoryStore {
     return result;
   }
 
-  getPortfolioAnalysisCandles(
+  async getPortfolioAnalysisCandles(
     accountId: string,
     currency: HistoryCurrency,
     fromDate: string,
     toDate: string,
-  ): PortfolioAnalysisCandle[] {
-    const rows = this.db.prepare(`
+  ): Promise<PortfolioAnalysisCandle[]> {
+    const instrumentExpression = this.db.dialect === "mysql"
+      ? "CONCAT(items.currency, ':', items.symbol)"
+      : "items.currency || ':' || items.symbol";
+    const rows = await this.db.query<{
+      snapshot_date: string;
+      evaluation_amount: number;
+      price_date: string | null;
+      open_price: number | null;
+      high_price: number | null;
+      low_price: number | null;
+      close_price: number | null;
+    }>(`
       SELECT
         snapshots.snapshot_date,
         items.evaluation_amount,
@@ -533,21 +973,13 @@ export class PortfolioHistoryStore {
       FROM portfolio_snapshots AS snapshots
       JOIN portfolio_snapshot_items AS items ON items.snapshot_id = snapshots.id
       LEFT JOIN portfolio_daily_prices AS prices
-        ON prices.instrument_key = items.currency || ':' || items.symbol
+        ON prices.instrument_key = ${instrumentExpression}
        AND prices.price_date = snapshots.snapshot_date
       WHERE snapshots.account_id = ?
         AND items.currency = ?
         AND snapshots.snapshot_date BETWEEN ? AND ?
       ORDER BY snapshots.snapshot_date ASC, items.symbol ASC
-    `).all(accountId, currency, fromDate, toDate) as Array<{
-      snapshot_date: string;
-      evaluation_amount: number;
-      price_date: string | null;
-      open_price: number | null;
-      high_price: number | null;
-      low_price: number | null;
-      close_price: number | null;
-    }>;
+    `, [accountId, currency, fromDate, toDate]);
 
     const byDate = new Map<string, PortfolioAnalysisCandle & { hasMarketData: boolean }>();
     for (const row of rows) {
@@ -591,8 +1023,12 @@ export class PortfolioHistoryStore {
       }));
   }
 
-  upsertBenchmarkPrices(benchmarkKey: string, candles: DailyCandle[], updatedAt = Date.now()): number {
-    const statement = this.db.prepare(`
+  async upsertBenchmarkPrices(
+    benchmarkKey: string,
+    candles: DailyCandle[],
+    updatedAt = Date.now(),
+  ): Promise<number> {
+    const statement = this.sql(`
       INSERT INTO portfolio_benchmark_prices (
         benchmark_key, price_date, close_price, timestamp, updated_at
       ) VALUES (?, ?, ?, ?, ?)
@@ -600,18 +1036,19 @@ export class PortfolioHistoryStore {
         close_price = excluded.close_price,
         timestamp = excluded.timestamp,
         updated_at = excluded.updated_at
+    `, `
+      INSERT INTO portfolio_benchmark_prices (
+        benchmark_key, price_date, close_price, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        close_price = VALUES(close_price), timestamp = VALUES(timestamp), updated_at = VALUES(updated_at)
     `);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    await this.db.transaction(async (database) => {
       for (const candle of candles) {
-        statement.run(benchmarkKey, candle.date, candle.closePrice, candle.timestamp, updatedAt);
+        await database.run(statement, [benchmarkKey, candle.date, candle.closePrice, candle.timestamp, updatedAt]);
       }
-      this.db.exec("COMMIT");
-      return candles.length;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
+    return candles.length;
   }
 
   upsertExchangeRate(
@@ -619,8 +1056,8 @@ export class PortfolioHistoryStore {
     rate: number,
     timestamp: string,
     updatedAt = Date.now(),
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    return this.db.run(this.sql(`
       INSERT INTO portfolio_exchange_rates (
         rate_date, base_currency, quote_currency, rate, timestamp, updated_at
       ) VALUES (?, 'USD', 'KRW', ?, ?, ?)
@@ -628,22 +1065,28 @@ export class PortfolioHistoryStore {
         rate = excluded.rate,
         timestamp = excluded.timestamp,
         updated_at = excluded.updated_at
-    `).run(rateDate, rate, timestamp, updatedAt);
+    `, `
+      INSERT INTO portfolio_exchange_rates (
+        rate_date, base_currency, quote_currency, rate, timestamp, updated_at
+      ) VALUES (?, 'USD', 'KRW', ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        rate = VALUES(rate), timestamp = VALUES(timestamp), updated_at = VALUES(updated_at)
+    `), [rateDate, rate, timestamp, updatedAt]).then(() => undefined);
   }
 
-  getExchangeRates(fromDate: string, toDate: string): Map<string, number> {
-    const rows = this.db.prepare(`
+  async getExchangeRates(fromDate: string, toDate: string): Promise<Map<string, number>> {
+    const rows = await this.db.query<{ rate_date: string; rate: number }>(`
       SELECT rate_date, rate
       FROM portfolio_exchange_rates
       WHERE base_currency = 'USD' AND quote_currency = 'KRW'
         AND rate_date BETWEEN ? AND ?
       ORDER BY rate_date ASC
-    `).all(fromDate, toDate) as Array<{ rate_date: string; rate: number }>;
+    `, [fromDate, toDate]);
     return new Map(rows.map((row) => [row.rate_date, Number(row.rate)]));
   }
 
-  getRequiredExchangeRateDates(accountId: string, fromDate: string, toDate: string): string[] {
-    const snapshotRows = this.db.prepare(`
+  async getRequiredExchangeRateDates(accountId: string, fromDate: string, toDate: string): Promise<string[]> {
+    const snapshotRows = await this.db.query<{ rate_date: string }>(`
       SELECT DISTINCT snapshots.snapshot_date AS rate_date
       FROM portfolio_snapshots AS snapshots
       JOIN portfolio_snapshot_items AS items ON items.snapshot_id = snapshots.id
@@ -652,9 +1095,9 @@ export class PortfolioHistoryStore {
         AND items.evaluation_amount > 0
         AND snapshots.snapshot_date BETWEEN ? AND ?
       ORDER BY snapshots.snapshot_date ASC
-    `).all(accountId, fromDate, toDate) as Array<{ rate_date: string }>;
+    `, [accountId, fromDate, toDate]);
     const dates = new Set(snapshotRows.map((row) => row.rate_date));
-    for (const order of this.getOrders(accountId)) {
+    for (const order of await this.getOrders(accountId)) {
       if (order.currency !== "USD") continue;
       const timestamp = order.filledAt || order.orderedAt;
       if (!timestamp) continue;
@@ -667,64 +1110,80 @@ export class PortfolioHistoryStore {
     return Array.from(dates).sort();
   }
 
-  getBenchmarkPriceBounds(benchmarkKey: string): { earliest?: string; latest?: string } {
-    const row = this.db.prepare(`
+  async getBenchmarkPriceBounds(benchmarkKey: string): Promise<{ earliest?: string; latest?: string }> {
+    const [row] = await this.db.query<{ earliest: string | null; latest: string | null }>(`
       SELECT MIN(price_date) AS earliest, MAX(price_date) AS latest
       FROM portfolio_benchmark_prices
       WHERE benchmark_key = ?
-    `).get(benchmarkKey) as { earliest: string | null; latest: string | null };
+    `, [benchmarkKey]);
     return {
-      ...(row.earliest ? { earliest: row.earliest } : {}),
-      ...(row.latest ? { latest: row.latest } : {}),
+      ...(row?.earliest ? { earliest: row.earliest } : {}),
+      ...(row?.latest ? { latest: row.latest } : {}),
     };
   }
 
-  getBenchmarkPrices(benchmarkKey: string, fromDate: string, toDate: string): BenchmarkPricePoint[] {
-    return (this.db.prepare(`
+  async getBenchmarkPrices(
+    benchmarkKey: string,
+    fromDate: string,
+    toDate: string,
+  ): Promise<BenchmarkPricePoint[]> {
+    const rows = await this.db.query<{ price_date: string; close_price: number }>(`
       SELECT price_date, close_price
       FROM portfolio_benchmark_prices
       WHERE benchmark_key = ? AND price_date BETWEEN ? AND ?
       ORDER BY price_date ASC
-    `).all(benchmarkKey, fromDate, toDate) as Array<{ price_date: string; close_price: number }>).map((row) => ({
+    `, [benchmarkKey, fromDate, toDate]);
+    return rows.map((row) => ({
       date: row.price_date,
       close: round(Number(row.close_price), 6),
     }));
   }
 
-  replaceHistoricalSnapshots(accountId: string, snapshots: HistoricalSnapshot[], beforeDate: string): number {
-    const insertSnapshot = this.db.prepare(`
+  async replaceHistoricalSnapshots(
+    accountId: string,
+    snapshots: HistoricalSnapshot[],
+    beforeDate: string,
+  ): Promise<number> {
+    const insertSnapshot = this.sql(`
       INSERT INTO portfolio_snapshots (account_id, snapshot_date, captured_at, origin)
       VALUES (?, ?, ?, 'HISTORICAL')
       ON CONFLICT(account_id, snapshot_date) DO UPDATE SET
         captured_at = excluded.captured_at,
         origin = 'HISTORICAL'
       WHERE portfolio_snapshots.origin = 'HISTORICAL'
+    `, `
+      INSERT INTO portfolio_snapshots (account_id, snapshot_date, captured_at, origin)
+      VALUES (?, ?, ?, 'HISTORICAL')
+      ON DUPLICATE KEY UPDATE
+        captured_at = IF(origin = 'HISTORICAL', VALUES(captured_at), captured_at),
+        origin = IF(origin = 'HISTORICAL', 'HISTORICAL', origin)
     `);
-    const selectSnapshot = this.db.prepare(`
+    const selectSnapshot = `
       SELECT id, snapshot_date, captured_at, origin
       FROM portfolio_snapshots
       WHERE account_id = ? AND snapshot_date = ?
-    `);
-    const deleteItems = this.db.prepare("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?");
-    const insertItem = this.db.prepare(`
+    `;
+    const insertItem = `
       INSERT INTO portfolio_snapshot_items (
         snapshot_id, symbol, name, market, currency, evaluation_amount, weight_percent
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    `;
 
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare(`
+    return this.db.transaction(async (database) => {
+      await database.run(`
         DELETE FROM portfolio_snapshots
         WHERE account_id = ? AND snapshot_date < ? AND origin = 'HISTORICAL'
-      `).run(accountId, beforeDate);
+      `, [accountId, beforeDate]);
       let written = 0;
       for (const snapshot of snapshots) {
         if (snapshot.date >= beforeDate) continue;
-        insertSnapshot.run(accountId, snapshot.date, snapshot.capturedAt);
-        const row = selectSnapshot.get(accountId, snapshot.date) as SnapshotRow | undefined;
+        await database.run(insertSnapshot, [accountId, snapshot.date, snapshot.capturedAt]);
+        const [row] = await database.query<SnapshotRow & DatabaseRow>(
+          selectSnapshot,
+          [accountId, snapshot.date],
+        );
         if (!row || row.origin !== "HISTORICAL") continue;
-        deleteItems.run(row.id);
+        await database.run("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?", [row.id]);
         const totals = snapshot.items.reduce<Record<HistoryCurrency, number>>(
           (sum, item) => {
             sum[item.currency] += item.evaluationAmount;
@@ -735,7 +1194,7 @@ export class PortfolioHistoryStore {
         for (const item of snapshot.items) {
           const total = totals[item.currency];
           if (item.evaluationAmount <= 0 || total <= 0) continue;
-          insertItem.run(
+          await database.run(insertItem, [
             row.id,
             item.symbol,
             item.name,
@@ -743,22 +1202,19 @@ export class PortfolioHistoryStore {
             item.currency,
             item.evaluationAmount,
             round((item.evaluationAmount / total) * 100),
-          );
+          ]);
         }
         written += 1;
       }
-      this.db.exec("COMMIT");
       return written;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
-  getBackfillStatus(accountId: string, now = new Date()): BackfillStatus {
-    const row = this.db.prepare(`SELECT * FROM portfolio_backfill_state WHERE account_id = ?`).get(accountId) as
-      | Record<string, string | number | null>
-      | undefined;
+  async getBackfillStatus(accountId: string, now = new Date()): Promise<BackfillStatus> {
+    const [row] = await this.db.query<Record<string, string | number | null>>(
+      "SELECT * FROM portfolio_backfill_state WHERE account_id = ?",
+      [accountId],
+    );
     if (!row) {
       return {
         accountId,
@@ -797,15 +1253,18 @@ export class PortfolioHistoryStore {
     };
   }
 
-  updateBackfillStatus(accountId: string, patch: Partial<Omit<BackfillStatus, "accountId">>): BackfillStatus {
-    const current = this.getBackfillStatus(accountId);
+  async updateBackfillStatus(
+    accountId: string,
+    patch: Partial<Omit<BackfillStatus, "accountId">>,
+  ): Promise<BackfillStatus> {
+    const current = await this.getBackfillStatus(accountId);
     const next: BackfillStatus = {
       ...current,
       ...patch,
       accountId,
       updatedAt: patch.updatedAt ?? new Date().toISOString(),
     };
-    this.db.prepare(`
+    await this.db.run(this.sql(`
       INSERT INTO portfolio_backfill_state (
         account_id, status, phase, started_at, completed_at, updated_at,
         first_trade_date, last_backfilled_date, orders_imported, symbols_total,
@@ -829,7 +1288,23 @@ export class PortfolioHistoryStore {
         discrepancy_symbols = excluded.discrepancy_symbols,
         failed_symbols = excluded.failed_symbols,
         message = excluded.message
-    `).run(
+    `, `
+      INSERT INTO portfolio_backfill_state (
+        account_id, status, phase, started_at, completed_at, updated_at,
+        first_trade_date, last_backfilled_date, orders_imported, symbols_total,
+        symbols_processed, prices_imported, snapshots_created, reconciled_symbols,
+        discrepancy_symbols, failed_symbols, message
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        status = VALUES(status), phase = VALUES(phase), started_at = VALUES(started_at),
+        completed_at = VALUES(completed_at), updated_at = VALUES(updated_at),
+        first_trade_date = VALUES(first_trade_date), last_backfilled_date = VALUES(last_backfilled_date),
+        orders_imported = VALUES(orders_imported), symbols_total = VALUES(symbols_total),
+        symbols_processed = VALUES(symbols_processed), prices_imported = VALUES(prices_imported),
+        snapshots_created = VALUES(snapshots_created), reconciled_symbols = VALUES(reconciled_symbols),
+        discrepancy_symbols = VALUES(discrepancy_symbols), failed_symbols = VALUES(failed_symbols),
+        message = VALUES(message)
+    `), [
       accountId,
       next.status,
       next.phase,
@@ -847,17 +1322,17 @@ export class PortfolioHistoryStore {
       next.discrepancySymbols,
       next.failedSymbols,
       next.message ?? null,
-    );
+    ]);
     return next;
   }
 
-  getHistory(
+  async getHistory(
     accountId: string,
     currency: HistoryCurrency,
     range: HistoryRange,
     now = new Date(),
     dateRange?: HistoryDateRange,
-  ): PortfolioHistory {
+  ): Promise<PortfolioHistory> {
     const startDate = dateRange?.from ?? startDateForRange(range, now);
     const endDate = dateRange?.to;
     const clauses = ["account_id = ?"];
@@ -870,12 +1345,12 @@ export class PortfolioHistoryStore {
       clauses.push("snapshot_date <= ?");
       parameters.push(endDate);
     }
-    const snapshots = this.db.prepare(`
+    const snapshots = await this.db.query<SnapshotRow & DatabaseRow>(`
       SELECT id, snapshot_date, captured_at
       FROM portfolio_snapshots
       WHERE ${clauses.join(" AND ")}
       ORDER BY snapshot_date ASC
-    `).all(...parameters) as SnapshotRow[];
+    `, parameters);
 
     if (!snapshots.length) {
       return {
@@ -890,12 +1365,12 @@ export class PortfolioHistoryStore {
     }
 
     const placeholders = snapshots.map(() => "?").join(", ");
-    const items = this.db.prepare(`
+    const items = await this.db.query<ItemRow & DatabaseRow>(`
       SELECT snapshot_id, symbol, name, market, evaluation_amount, weight_percent
       FROM portfolio_snapshot_items
       WHERE currency = ? AND snapshot_id IN (${placeholders})
       ORDER BY snapshot_id ASC, weight_percent DESC
-    `).all(currency, ...snapshots.map((snapshot) => snapshot.id)) as ItemRow[];
+    `, [currency, ...snapshots.map((snapshot) => snapshot.id)]);
 
     const itemsBySnapshot = new Map<number, ItemRow[]>();
     const seriesMap = new Map<string, {
