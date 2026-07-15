@@ -166,8 +166,25 @@ describe("과거 데이터 정규화", () => {
     });
 
     expect(normalizeInstrumentsPayload({
-      result: [{ symbol: "AAPL", name: "애플", market: "NASDAQ", currency: "USD" }],
-    })).toEqual([{ symbol: "AAPL", name: "애플", market: "NASDAQ", currency: "USD" }]);
+      result: [{
+        symbol: "AAPL",
+        name: "애플",
+        market: "NASDAQ",
+        currency: "USD",
+        listDate: "1980-12-12",
+        delistDate: null,
+        securityType: "STOCK",
+        status: "ACTIVE",
+      }],
+    })).toEqual([{
+      symbol: "AAPL",
+      name: "애플",
+      market: "NASDAQ",
+      currency: "USD",
+      listDate: "1980-12-12",
+      securityType: "STOCK",
+      status: "ACTIVE",
+    }]);
 
     expect(normalizeExchangeRatePayload({
       result: { baseCurrency: "USD", quoteCurrency: "KRW", rate: "1387.25", dateTime: "2026-07-01T15:30:00+09:00" },

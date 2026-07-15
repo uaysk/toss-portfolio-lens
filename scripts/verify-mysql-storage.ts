@@ -132,6 +132,16 @@ try {
     lowPrice: 90,
     closePrice: 110,
   }], 100);
+  await sqlite.upsertBacktestPrices("KRW:AAA", [{
+    symbol: "AAA",
+    date: "2026-07-01",
+    timestamp: "2026-07-01T15:30:00+09:00",
+    currency: "KRW",
+    openPrice: 100,
+    highPrice: 120,
+    lowPrice: 90,
+    closePrice: 108,
+  }], 100);
   await sqlite.upsertBenchmarkPrices("KOSPI", [{
     symbol: "KOSPI",
     date: "2026-07-01",
@@ -192,6 +202,9 @@ try {
   assert.equal((await mysql.getHistory("integration-account", "KRW", "all")).points.length, 2);
   assert.equal((await mysql.getOrders("integration-account")).length, 1);
   assert.equal((await mysql.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-01")).get("KRW:AAA")?.get("2026-07-01"), 110);
+  assert.deepEqual((await mysql.getBacktestPrices(["KRW:AAA"], "2026-07-01", "2026-07-01")).get("KRW:AAA"), [
+    { date: "2026-07-01", close: 108 },
+  ]);
   assert.equal((await mysql.getBenchmarkPrices("KOSPI", "2026-07-01", "2026-07-01"))[0]?.close, 3010);
   assert.equal((await mysql.getExchangeRates("2026-07-01", "2026-07-01")).get("2026-07-01"), 1400);
   assert.equal((await mysql.getBackfillStatus("integration-account")).status, "complete");

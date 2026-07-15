@@ -199,6 +199,7 @@ export class PortfolioHistoryStore {
       ORDER BY snapshots.account_id, snapshots.snapshot_date
     `);
     const dailyPrices = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_daily_prices");
+    const backtestPrices = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_backtest_prices");
     const benchmarkPrices = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_benchmark_prices");
     const exchangeRates = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_exchange_rates");
     const backfillStates = await source.db.query<DatabaseRow>("SELECT * FROM portfolio_backfill_state");
@@ -211,6 +212,7 @@ export class PortfolioHistoryStore {
       portfolio_snapshots: snapshots.length,
       portfolio_snapshot_items: snapshotItems.length,
       portfolio_daily_prices: dailyPrices.length,
+      portfolio_backtest_prices: backtestPrices.length,
       portfolio_benchmark_prices: benchmarkPrices.length,
       portfolio_exchange_rates: exchangeRates.length,
       portfolio_backfill_state: backfillStates.length,
@@ -315,6 +317,16 @@ export class PortfolioHistoryStore {
          high_price = IF(VALUES(updated_at) >= updated_at, VALUES(high_price), high_price),
          low_price = IF(VALUES(updated_at) >= updated_at, VALUES(low_price), low_price),
          close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
+         currency = IF(VALUES(updated_at) >= updated_at, VALUES(currency), currency),
+         timestamp = IF(VALUES(updated_at) >= updated_at, VALUES(timestamp), timestamp),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_backtest_prices",
+        ["instrument_key", "price_date", "close_price", "currency", "timestamp", "updated_at"],
+        backtestPrices,
+        `close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
          currency = IF(VALUES(updated_at) >= updated_at, VALUES(currency), currency),
          timestamp = IF(VALUES(updated_at) >= updated_at, VALUES(timestamp), timestamp),
          updated_at = GREATEST(updated_at, VALUES(updated_at))`,
@@ -459,6 +471,17 @@ export class PortfolioHistoryStore {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
         ON portfolio_daily_prices(instrument_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backtest_prices (
+        instrument_key TEXT NOT NULL,
+        price_date TEXT NOT NULL,
+        close_price REAL NOT NULL,
+        currency TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(instrument_key, price_date)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_backtest_prices_key_date
+        ON portfolio_backtest_prices(instrument_key, price_date)`,
       `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
         benchmark_key TEXT NOT NULL,
         price_date TEXT NOT NULL,
@@ -568,6 +591,16 @@ export class PortfolioHistoryStore {
         CONSTRAINT fk_daily_prices_instrument FOREIGN KEY(instrument_key)
           REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backtest_prices (
+        instrument_key VARCHAR(96) NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        close_price DOUBLE NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(instrument_key, price_date),
+        KEY idx_backtest_prices_key_date (instrument_key, price_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
         benchmark_key VARCHAR(32) NOT NULL,
         price_date CHAR(10) NOT NULL,
@@ -676,6 +709,7 @@ export class PortfolioHistoryStore {
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(captured_at), 0) AS max_value FROM portfolio_snapshots"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(SUM(evaluation_amount), 0) AS sum_value, COALESCE(SUM(weight_percent), 0) AS sum_weight FROM portfolio_snapshot_items"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_daily_prices"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_backtest_prices"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_benchmark_prices"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(rate), 0) AS sum_value FROM portfolio_exchange_rates"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS max_value FROM portfolio_backfill_state"),
@@ -940,6 +974,81 @@ export class PortfolioHistoryStore {
       const prices = result.get(row.instrument_key) ?? new Map<string, number>();
       prices.set(row.price_date, row.close_price);
       result.set(row.instrument_key, prices);
+    }
+    return result;
+  }
+
+  async upsertBacktestPrices(
+    instrumentKey: string,
+    candles: DailyCandle[],
+    updatedAt = Date.now(),
+  ): Promise<number> {
+    const statement = this.sql(`
+      INSERT INTO portfolio_backtest_prices (
+        instrument_key, price_date, close_price, currency, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(instrument_key, price_date) DO UPDATE SET
+        close_price = excluded.close_price,
+        currency = excluded.currency,
+        timestamp = excluded.timestamp,
+        updated_at = excluded.updated_at
+    `, `
+      INSERT INTO portfolio_backtest_prices (
+        instrument_key, price_date, close_price, currency, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        close_price = VALUES(close_price), currency = VALUES(currency),
+        timestamp = VALUES(timestamp), updated_at = VALUES(updated_at)
+    `);
+    await this.db.transaction(async (database) => {
+      for (const candle of candles) {
+        await database.run(statement, [
+          instrumentKey,
+          candle.date,
+          candle.closePrice,
+          candle.currency || instrumentKey.split(":", 1)[0],
+          candle.timestamp,
+          updatedAt,
+        ]);
+      }
+    });
+    return candles.length;
+  }
+
+  async getBacktestPriceBounds(instrumentKey: string): Promise<{ earliest?: string; latest?: string }> {
+    const [row] = await this.db.query<{ earliest: string | null; latest: string | null }>(`
+      SELECT MIN(price_date) AS earliest, MAX(price_date) AS latest
+      FROM portfolio_backtest_prices
+      WHERE instrument_key = ?
+    `, [instrumentKey]);
+    return {
+      ...(row?.earliest ? { earliest: row.earliest } : {}),
+      ...(row?.latest ? { latest: row.latest } : {}),
+    };
+  }
+
+  async getBacktestPrices(
+    instrumentKeys: string[],
+    fromDate: string,
+    toDate: string,
+  ): Promise<Map<string, Array<{ date: string; close: number }>>> {
+    const result = new Map<string, Array<{ date: string; close: number }>>();
+    if (!instrumentKeys.length) return result;
+    const placeholders = instrumentKeys.map(() => "?").join(", ");
+    const rows = await this.db.query<{
+      instrument_key: string;
+      price_date: string;
+      close_price: number;
+    }>(`
+      SELECT instrument_key, price_date, close_price
+      FROM portfolio_backtest_prices
+      WHERE instrument_key IN (${placeholders}) AND price_date BETWEEN ? AND ?
+      ORDER BY instrument_key ASC, price_date ASC
+    `, [...instrumentKeys, fromDate, toDate]);
+    for (const row of rows) {
+      const points = result.get(row.instrument_key) ?? [];
+      points.push({ date: row.price_date, close: Number(row.close_price) });
+      result.set(row.instrument_key, points);
     }
     return result;
   }

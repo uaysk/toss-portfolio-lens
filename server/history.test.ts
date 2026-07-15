@@ -119,6 +119,22 @@ describe("PortfolioHistoryStore", () => {
     }]);
     expect((await store.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-02")).get("KRW:AAA")?.get("2026-07-01"))
       .toBe(110);
+    await store.upsertBacktestPrices("KRW:AAA", [{
+      symbol: "AAA",
+      date: "2026-07-01",
+      timestamp: "2026-07-01T00:00:00+09:00",
+      currency: "KRW",
+      openPrice: 100,
+      highPrice: 115,
+      lowPrice: 95,
+      closePrice: 108,
+    }]);
+    expect(await store.getBacktestPriceBounds("KRW:AAA")).toEqual({
+      earliest: "2026-07-01",
+      latest: "2026-07-01",
+    });
+    expect((await store.getBacktestPrices(["KRW:AAA"], "2026-07-01", "2026-07-02")).get("KRW:AAA"))
+      .toEqual([{ date: "2026-07-01", close: 108 }]);
     await store.upsertExchangeRate("2026-07-01", 1387.25, "2026-07-01T15:30:00+09:00");
     expect((await store.getExchangeRates("2026-07-01", "2026-07-02")).get("2026-07-01")).toBe(1387.25);
 

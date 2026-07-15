@@ -102,6 +102,10 @@ export type InstrumentInfo = {
   name: string;
   market: string;
   currency: string;
+  listDate?: string;
+  delistDate?: string;
+  securityType?: string;
+  status?: string;
 };
 
 export type ReadOnlyMarketResponse = {
@@ -402,6 +406,10 @@ export function normalizeInstrumentsPayload(payload: unknown): InstrumentInfo[] 
       name: stringFrom(record, ["name", "stockName", "symbolName", "instrumentName", "securityName"]),
       market,
       currency: normalizeCurrency(stringFrom(record, ["currency", "currencyCode"]), market),
+      listDate: stringFrom(record, ["listDate", "listedAt", "listingDate"]) || undefined,
+      delistDate: stringFrom(record, ["delistDate", "delistedAt", "delistingDate"]) || undefined,
+      securityType: stringFrom(record, ["securityType", "instrumentType", "type"]) || undefined,
+      status: stringFrom(record, ["status", "listingStatus"]) || undefined,
     } satisfies InstrumentInfo;
   }).filter((instrument) => instrument.symbol);
 }

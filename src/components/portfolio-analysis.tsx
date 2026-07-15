@@ -425,11 +425,13 @@ export function PortfolioAnalysisView({
               <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">성과와 벤치마크</h3>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">전일 보유비중으로 가중한 종목·환율 수익률과 주요 시장지수를 비교합니다.</p>
             </div>
-            <div className="mt-5 grid grid-cols-2 gap-2 xl:grid-cols-4">
-              <MetricCard label="추정 운용수익률" value={metricPercent(analysis.metrics.estimatedReturnPercent)} detail="전일 보유비중으로 일간수익률 연결" />
+            <div className="mt-5 grid grid-cols-2 gap-2 xl:grid-cols-3 2xl:grid-cols-6">
+              <MetricCard label="보유주식 TWR" value={metricPercent(analysis.metrics.timeWeightedReturnPercent)} detail="입출금 영향 없이 일간수익률 연결" />
+              <MetricCard label="보유주식 XIRR" value={metricPercent(analysis.metrics.moneyWeightedReturnPercent)} detail="시작 평가액·체결·종료 평가액 기준 연율" />
               <MetricCard label="연환산 추정수익률" value={metricPercent(analysis.metrics.annualizedReturnPercent)} detail="252 거래일 기준 복리 환산" />
               <MetricCard label="KOSPI 대비" value={metricPercent(analysis.metrics.excessReturns.KOSPI)} detail={`KOSPI ${metricPercent(analysis.metrics.benchmarkReturns.KOSPI)}`} />
               <MetricCard label="나스닥 100 대비" value={metricPercent(analysis.metrics.excessReturns.NASDAQ100)} detail={`QQQ 프록시 ${metricPercent(analysis.metrics.benchmarkReturns.NASDAQ100)}`} />
+              <MetricCard label="기간 추정 손익" value={formatSignedMoney(analysis.metrics.estimatedProfitLoss, "KRW")} detail={`순투자 추정 ${formatMoney(analysis.metrics.netInvestedAmount, "KRW")}`} />
             </div>
           </Card>
 
@@ -444,6 +446,9 @@ export function PortfolioAnalysisView({
                 <MetricCard label="샤프지수" value={metricRatio(analysis.metrics.sharpeRatio)} detail="무위험수익률 0% 가정" />
                 <MetricCard label="소르티노지수" value={metricRatio(analysis.metrics.sortinoRatio)} detail="하방 변동성만 위험으로 반영" />
                 <MetricCard label="Calmar 비율" value={metricRatio(analysis.metrics.calmarRatio)} detail="연환산 수익률 ÷ MDD" />
+                <MetricCard label="최고 일간수익률" value={metricPercent(analysis.metrics.bestDailyReturnPercent)} detail="전일 보유비중 기준" />
+                <MetricCard label="최저 일간수익률" value={metricPercent(analysis.metrics.worstDailyReturnPercent)} detail="전일 보유비중 기준" />
+                <MetricCard label="상승일 비율" value={metricPercent(analysis.metrics.positiveDaysPercent)} detail="수익률이 0%보다 높은 거래일" />
               </div>
             </Card>
 
@@ -490,7 +495,7 @@ export function PortfolioAnalysisView({
 
           <div className="flex items-start gap-2 rounded-[18px] bg-secondary px-4 py-3 text-xs leading-5 text-muted-foreground">
             <Info className="mt-0.5 size-4 shrink-0" />
-            <p>입출금·배당 원장이 제공되지 않아 TWR·XIRR은 표시하지 않습니다. 추정 운용수익률은 전일 종목 비중과 가격·환율 수익률을 연결한 참고 지표이며, 기여도는 체결 순액을 이용한 추정치입니다. 세금·수수료는 별도로 표시합니다.</p>
+            <p>토스 OpenAPI에는 계좌 입출금·예수금·배당 원장이 없습니다. TWR은 전일 보유비중과 종목·환율 수익률을 연결하고, XIRR은 기간 시작 보유주식 평가액을 최초 투자, 매수·매도 체결을 현금흐름, 종료 평가액을 회수금으로 간주해 계산합니다. 따라서 계좌 전체 수익률이 아닌 보유주식 투자 성과이며 미투자 현금과 실제 입출금·배당은 포함되지 않습니다.</p>
           </div>
         </>
       ) : null}

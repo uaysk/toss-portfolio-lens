@@ -5,6 +5,7 @@ import {
   BarChart3,
   ChartNoAxesCombined,
   CircleGauge,
+  FlaskConical,
   Layers3,
   LayoutDashboard,
   ListFilter,
@@ -21,6 +22,7 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { AllocationHistoryChart } from "@/components/allocation-history-chart";
 import { Logo } from "@/components/logo";
 import { PortfolioAnalysisView } from "@/components/portfolio-analysis";
+import { PortfolioBacktestView } from "@/components/portfolio-backtest";
 import { StockVisibilitySettings } from "@/components/stock-visibility-settings";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -48,7 +50,7 @@ type DashboardProps = {
   onToggleTheme: () => void;
 };
 
-type DashboardView = "overview" | "analysis";
+type DashboardView = "overview" | "analysis" | "backtest";
 
 function formatAmountPair(amounts: { KRW: number; USD: number }, signed = false): string {
   const format = signed ? formatSignedMoney : formatMoney;
@@ -103,6 +105,7 @@ function Sidebar({
         {([
           { value: "overview" as const, label: "포트폴리오", icon: LayoutDashboard },
           { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
+          { value: "backtest" as const, label: "포트폴리오 백테스트", icon: FlaskConical },
         ]).map((item) => (
           <button
             key={item.value}
@@ -179,10 +182,10 @@ function DashboardHeader({
     <header className="dashboard-header">
       <div>
         <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-          {view === "overview" ? "PORTFOLIO OVERVIEW" : "PORTFOLIO ANALYSIS"}
+          {view === "overview" ? "PORTFOLIO OVERVIEW" : view === "analysis" ? "PORTFOLIO ANALYSIS" : "PORTFOLIO BACKTEST"}
         </p>
         <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
-          {view === "overview" ? "안녕하세요." : "포트폴리오 분석"}
+          {view === "overview" ? "안녕하세요." : view === "analysis" ? "포트폴리오 분석" : "포트폴리오 백테스트"}
         </h1>
       </div>
 
@@ -231,10 +234,11 @@ function DashboardHeader({
 
 function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (view: DashboardView) => void }) {
   return (
-    <div className="mb-3 grid grid-cols-2 rounded-full bg-secondary p-1 lg:hidden" aria-label="화면 선택">
+    <div className="mb-3 grid grid-cols-3 rounded-full bg-secondary p-1 lg:hidden" aria-label="화면 선택">
       {([
         { value: "overview" as const, label: "포트폴리오" },
         { value: "analysis" as const, label: "분석" },
+        { value: "backtest" as const, label: "백테스트" },
       ]).map((item) => (
         <button
           key={item.value}
@@ -695,7 +699,9 @@ function InitialError({
 }
 
 export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: DashboardProps) {
-  const [view, setView] = useState<DashboardView>(() => window.location.hash === "#analysis" ? "analysis" : "overview");
+  const [view, setView] = useState<DashboardView>(() => (
+    window.location.hash === "#analysis" ? "analysis" : window.location.hash === "#backtest" ? "backtest" : "overview"
+  ));
   const [portfolio, setPortfolio] = useState<Portfolio>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -711,7 +717,9 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   );
 
   useEffect(() => {
-    const updateFromHash = () => setView(window.location.hash === "#analysis" ? "analysis" : "overview");
+    const updateFromHash = () => setView(
+      window.location.hash === "#analysis" ? "analysis" : window.location.hash === "#backtest" ? "backtest" : "overview",
+    );
     window.addEventListener("hashchange", updateFromHash);
     return () => window.removeEventListener("hashchange", updateFromHash);
   }, []);
@@ -719,7 +727,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   const changeView = useCallback((nextView: DashboardView) => {
     setView(nextView);
     setSettingsOpen(false);
-    window.history.replaceState(null, "", nextView === "analysis" ? "#analysis" : "#overview");
+    window.history.replaceState(null, "", nextView === "analysis" ? "#analysis" : nextView === "backtest" ? "#backtest" : "#overview");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
@@ -928,8 +936,10 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
             <AllocationCard portfolio={visiblePortfolio} theme={theme} />
             <HoldingsCard portfolio={visiblePortfolio} theme={theme} hiddenCount={hiddenCurrentCount} />
           </div>
-        ) : (
+        ) : view === "analysis" ? (
           <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
+        ) : (
+          <PortfolioBacktestView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
         )}
 
         <footer className="mt-10 flex flex-col gap-2 pb-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">

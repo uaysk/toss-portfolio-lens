@@ -134,6 +134,8 @@ export type PortfolioAnalysis = {
   metrics: {
     valuationChangePercent: number;
     estimatedReturnPercent: number | null;
+    timeWeightedReturnPercent: number | null;
+    moneyWeightedReturnPercent: number | null;
     annualizedReturnPercent: number | null;
     annualizedVolatilityPercent: number | null;
     maxDrawdownPercent: number | null;
@@ -153,6 +155,11 @@ export type PortfolioAnalysis = {
     tax: number;
     turnoverPercent: number;
     tradeCount: number;
+    netInvestedAmount: number;
+    estimatedProfitLoss: number;
+    bestDailyReturnPercent: number | null;
+    worstDailyReturnPercent: number | null;
+    positiveDaysPercent: number | null;
     riskFreeRatePercent: 0;
   };
   contributions: Array<{
@@ -164,4 +171,93 @@ export type PortfolioAnalysis = {
     estimatedProfitLoss: number;
     contributionPercent: number;
   }>;
+};
+
+export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
+export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
+
+export type BacktestInstrument = {
+  symbol: string;
+  name: string;
+  market: string;
+  currency: "KRW" | "USD";
+  listDate: string;
+  securityType: string;
+  status: string;
+};
+
+export type BacktestAsset = BacktestInstrument & {
+  weight: number;
+  currentValueKrw?: number;
+};
+
+export type CurrentBacktestPortfolio = {
+  accountId: string;
+  assets: Array<BacktestAsset & { currentValueKrw: number }>;
+  defaultStartDate: string;
+  defaultEndDate: string;
+  initialAmount: number;
+};
+
+export type BacktestResult = {
+  generatedAt: string;
+  baseCurrency: "KRW";
+  currencyMethod: "LOCAL_RETURN";
+  requestedStartDate: string;
+  effectiveStartDate: string;
+  endDate: string;
+  config: {
+    assets: Array<{ symbol: string; weight: number }>;
+    startDate: string;
+    endDate: string;
+    initialAmount: number;
+    monthlyCashFlow: number;
+    rebalanceFrequency: BacktestRebalanceFrequency;
+    benchmark: BacktestBenchmarkKey;
+    requestedStartDate: string;
+    latestListDate: string;
+    effectiveStartDate: string;
+    effectiveEndDate: string;
+  };
+  assets: BacktestAsset[];
+  benchmark?: { key: BacktestBenchmarkKey; name: string };
+  warnings: string[];
+  points: Array<{
+    date: string;
+    balance: number;
+    growth: number;
+    benchmarkGrowth?: number;
+    drawdownPercent: number;
+  }>;
+  metrics: {
+    finalBalance: number;
+    totalContributions: number;
+    totalWithdrawals: number;
+    totalReturnPercent: number;
+    cagrPercent: number | null;
+    annualizedVolatilityPercent: number | null;
+    maxDrawdownPercent: number;
+    maxDrawdownDays: number;
+    sharpeRatio: number | null;
+    sortinoRatio: number | null;
+    bestYearPercent: number | null;
+    worstYearPercent: number | null;
+    positiveMonthsPercent: number | null;
+  };
+  annualReturns: Array<{ year: number; returnPercent: number }>;
+  contributions: Array<{
+    symbol: string;
+    name: string;
+    market: string;
+    currency: "KRW" | "USD";
+    weight: number;
+    endingValue: number;
+    profitLoss: number;
+    contributionPercent: number;
+    assetReturnPercent: number;
+  }>;
+  correlations: {
+    assets: Array<{ symbol: string; name: string }>;
+    values: Array<Array<number | null>>;
+  };
 };

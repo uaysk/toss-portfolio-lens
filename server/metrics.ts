@@ -13,6 +13,8 @@ export type BenchmarkMetricKey = "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
 export type PortfolioAnalyticsMetrics = {
   valuationChangePercent: number;
   estimatedReturnPercent: number | null;
+  timeWeightedReturnPercent: number | null;
+  moneyWeightedReturnPercent: number | null;
   annualizedReturnPercent: number | null;
   annualizedVolatilityPercent: number | null;
   maxDrawdownPercent: number | null;
@@ -32,6 +34,11 @@ export type PortfolioAnalyticsMetrics = {
   tax: number;
   turnoverPercent: number;
   tradeCount: number;
+  netInvestedAmount: number;
+  estimatedProfitLoss: number;
+  bestDailyReturnPercent: number | null;
+  worstDailyReturnPercent: number | null;
+  positiveDaysPercent: number | null;
   riskFreeRatePercent: 0;
 };
 
@@ -63,6 +70,50 @@ function safeRatio(value: number): number | null {
 
 function daysBetween(from: string, to: string): number {
   return Math.max(0, Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000));
+}
+
+export type DatedCashFlow = { date: string; amount: number };
+
+export function calculateXirr(cashFlows: DatedCashFlow[]): number | null {
+  const flows = cashFlows
+    .filter((flow) => isHistoryDateLike(flow.date) && Number.isFinite(flow.amount) && flow.amount !== 0)
+    .sort((left, right) => left.date.localeCompare(right.date));
+  if (flows.length < 2 || !flows.some((flow) => flow.amount < 0) || !flows.some((flow) => flow.amount > 0)) return null;
+  const firstTime = Date.parse(`${flows[0].date}T00:00:00Z`);
+  const npv = (rate: number) => flows.reduce((sum, flow) => {
+    const years = (Date.parse(`${flow.date}T00:00:00Z`) - firstTime) / (365.25 * 86_400_000);
+    return sum + flow.amount / ((1 + rate) ** years);
+  }, 0);
+  // 짧은 기간의 큰 손실은 연환산 수익률이 -100%에 매우 가까워질 수 있다.
+  let low = -0.999999999999999;
+  let high = 10;
+  let lowValue = npv(low);
+  let highValue = npv(high);
+  while (lowValue * highValue > 0 && high < 1_000_000) {
+    high *= 10;
+    highValue = npv(high);
+  }
+  if (!Number.isFinite(lowValue) || !Number.isFinite(highValue) || lowValue * highValue > 0) return null;
+  for (let iteration = 0; iteration < 160; iteration += 1) {
+    const middle = (low + high) / 2;
+    const middleValue = npv(middle);
+    if (!Number.isFinite(middleValue)) return null;
+    if (Math.abs(middleValue) < 0.000001) return middle;
+    if (lowValue * middleValue <= 0) {
+      high = middle;
+      highValue = middleValue;
+    } else {
+      low = middle;
+      lowValue = middleValue;
+    }
+  }
+  return (low + high) / 2;
+}
+
+function isHistoryDateLike(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 export function analysisOrderDate(order: HistoricalOrder): string {
@@ -236,6 +287,20 @@ export function calculatePortfolioAnalytics({
     .slice(0, 8);
 
   const concentration = concentrationMetrics(history);
+  const xirrCashFlows: DatedCashFlow[] = [];
+  const initialValue = firstCandle?.open ?? firstCandle?.close ?? 0;
+  const endingValue = lastCandle?.close ?? 0;
+  if (metricFromDate && initialValue > 0) xirrCashFlows.push({ date: metricFromDate, amount: -initialValue });
+  for (const { order, date } of periodOrders) {
+    if (date <= metricFromDate) continue;
+    const amount = convertedAmount(order.filledAmount, order.currency, date, exchangeRates);
+    const costs = convertedAmount(order.commission + order.tax, order.currency, date, exchangeRates);
+    xirrCashFlows.push({ date, amount: order.side === "SELL" ? amount - costs : -(amount + costs) });
+  }
+  if (metricToDate && endingValue > 0) xirrCashFlows.push({ date: metricToDate, amount: endingValue });
+  const moneyWeightedReturn = calculateXirr(xirrCashFlows);
+  const netInvestedAmount = initialValue + totalBuyAmount - totalSellAmount + commission + tax;
+  const dailyReturnValues = returns.map((item) => item.value);
   const annualizedVolatilityPercent = returns.length > 1 ? round(standardDeviation * Math.sqrt(TRADING_DAYS_PER_YEAR) * 100) : null;
   const sharpeRatio = returns.length > 1 && standardDeviation > 0
     ? safeRatio((mean / standardDeviation) * Math.sqrt(TRADING_DAYS_PER_YEAR))
@@ -251,6 +316,8 @@ export function calculatePortfolioAnalytics({
     metrics: {
       valuationChangePercent,
       estimatedReturnPercent,
+      timeWeightedReturnPercent: estimatedReturnPercent,
+      moneyWeightedReturnPercent: moneyWeightedReturn === null ? null : round(moneyWeightedReturn * 100),
       annualizedReturnPercent,
       annualizedVolatilityPercent,
       maxDrawdownPercent: returns.length ? round(maxDrawdown * 100) : null,
@@ -268,6 +335,13 @@ export function calculatePortfolioAnalytics({
       tax: round(tax, 2),
       turnoverPercent: averageValue > 0 ? round(((totalBuyAmount + totalSellAmount) / (2 * averageValue)) * 100) : 0,
       tradeCount: periodOrders.length,
+      netInvestedAmount: round(netInvestedAmount, 2),
+      estimatedProfitLoss: round(endingValue - netInvestedAmount, 2),
+      bestDailyReturnPercent: dailyReturnValues.length ? round(Math.max(...dailyReturnValues) * 100) : null,
+      worstDailyReturnPercent: dailyReturnValues.length ? round(Math.min(...dailyReturnValues) * 100) : null,
+      positiveDaysPercent: dailyReturnValues.length
+        ? round((dailyReturnValues.filter((value) => value > 0).length / dailyReturnValues.length) * 100)
+        : null,
       riskFreeRatePercent: 0,
     },
     contributions,

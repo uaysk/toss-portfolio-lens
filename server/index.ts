@@ -17,6 +17,13 @@ import {
   type AnalysisRange,
 } from "./analysis.js";
 import { HistoricalPortfolioBackfill } from "./backfill.js";
+import { BacktestValidationError } from "./backtest-engine.js";
+import {
+  PortfolioBacktestService,
+  type BacktestAssetInput,
+  type BacktestBenchmarkKey,
+  type BacktestRunRequest,
+} from "./backtest.js";
 import { loadConfig } from "./env.js";
 import {
   isHistoryDate,
@@ -37,6 +44,7 @@ const toss = new TossClient(config);
 const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
+const portfolioBacktest = new PortfolioBacktestService(toss, historyStore);
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
@@ -459,6 +467,78 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
     response.status(502).json({
       error: { code: "analysis-unavailable", message: "포트폴리오 분석 데이터를 불러오지 못했습니다." },
     });
+  }
+});
+
+function backtestError(response: Response, error: unknown): void {
+  if (error instanceof BacktestValidationError) {
+    response.status(400).json({ error: { code: "invalid-backtest", message: error.message } });
+    return;
+  }
+  if (error instanceof TossApiError) {
+    const status = error.status === 404 || error.status === 429 ? error.status : 502;
+    response.status(status).json({
+      error: { code: error.code, message: error.message, ...(error.requestId ? { requestId: error.requestId } : {}) },
+    });
+    return;
+  }
+  console.error("[backtest]", error instanceof Error ? error.message : error);
+  response.status(502).json({ error: { code: "backtest-unavailable", message: "백테스트 데이터를 계산하지 못했습니다." } });
+}
+
+app.get("/api/portfolio/backtest/instruments", requireSession, async (request, response) => {
+  setNoStore(response);
+  const symbols = typeof request.query.symbols === "string"
+    ? request.query.symbols.split(",").map((symbol) => symbol.trim()).filter(Boolean)
+    : [];
+  try {
+    response.json({ instruments: await portfolioBacktest.resolveInstruments(symbols) });
+  } catch (error) {
+    backtestError(response, error);
+  }
+});
+
+app.get("/api/portfolio/backtest/current", requireSession, async (request, response) => {
+  setNoStore(response);
+  const accountId = requestedAccount(request);
+  if (!accountId || accountId.length > 128) {
+    response.status(400).json({ error: { code: "invalid-account", message: "조회할 계좌를 선택해 주세요." } });
+    return;
+  }
+  try {
+    response.json(await portfolioBacktest.currentPortfolio(accountId));
+  } catch (error) {
+    backtestError(response, error);
+  }
+});
+
+app.post("/api/portfolio/backtest", requireSession, async (request, response) => {
+  setNoStore(response);
+  const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
+  const assets: BacktestAssetInput[] = Array.isArray(body.assets)
+    ? body.assets.map((value) => {
+        const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+        return {
+          symbol: typeof item.symbol === "string" ? item.symbol : "",
+          weight: typeof item.weight === "number" ? item.weight : Number.NaN,
+        };
+      })
+    : [];
+  const payload: BacktestRunRequest = {
+    assets,
+    startDate: typeof body.startDate === "string" ? body.startDate : "",
+    endDate: typeof body.endDate === "string" ? body.endDate : "",
+    initialAmount: typeof body.initialAmount === "number" ? body.initialAmount : Number.NaN,
+    monthlyCashFlow: typeof body.monthlyCashFlow === "number" ? body.monthlyCashFlow : Number.NaN,
+    rebalanceFrequency: typeof body.rebalanceFrequency === "string"
+      ? body.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"]
+      : "none",
+    benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
+  };
+  try {
+    response.json(await portfolioBacktest.run(payload));
+  } catch (error) {
+    backtestError(response, error);
   }
 });
 

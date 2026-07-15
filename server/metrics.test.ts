@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculatePortfolioAnalytics } from "./metrics.js";
+import { calculatePortfolioAnalytics, calculateXirr } from "./metrics.js";
 import type { PortfolioHistory } from "./history.js";
 
 describe("portfolio analytics", () => {
@@ -35,6 +35,13 @@ describe("portfolio analytics", () => {
     });
 
     expect(result.metrics.estimatedReturnPercent).toBeCloseTo(-1, 6);
+    expect(result.metrics.timeWeightedReturnPercent).toBeCloseTo(-1, 6);
+    expect(result.metrics.moneyWeightedReturnPercent).not.toBeNull();
+    expect(result.metrics.netInvestedAmount).toBe(151);
+    expect(result.metrics.estimatedProfitLoss).toBe(-7);
+    expect(result.metrics.bestDailyReturnPercent).toBe(10);
+    expect(result.metrics.worstDailyReturnPercent).toBe(-10);
+    expect(result.metrics.positiveDaysPercent).toBe(50);
     expect(result.metrics.maxDrawdownPercent).toBe(-10);
     expect(result.metrics.benchmarkReturns.KOSPI).toBe(5);
     expect(result.metrics.excessReturns.KOSPI).toBe(-6);
@@ -43,5 +50,13 @@ describe("portfolio analytics", () => {
     expect(result.metrics.tradeCount).toBe(1);
     expect(result.metrics.commission).toBe(1);
     expect(result.contributions[0].estimatedProfitLoss).toBe(-6);
+  });
+
+  it("날짜와 금액을 반영한 연환산 XIRR을 계산한다", () => {
+    expect(calculateXirr([
+      { date: "2025-01-01", amount: -100 },
+      { date: "2026-01-01", amount: 110 },
+    ])).toBeCloseTo(0.1, 3);
+    expect(calculateXirr([{ date: "2026-01-01", amount: -100 }])).toBeNull();
   });
 });
