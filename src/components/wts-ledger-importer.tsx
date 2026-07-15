@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ClipboardPaste, Database, LoaderCircle } from "lucide-react";
+import { AlertCircle, Check, ClipboardPaste, Database, LoaderCircle, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,7 @@ export function WtsLedgerImporter({
   const [summary, setSummary] = useState<CashLedgerSummary>();
   const [loadingSummary, setLoadingSummary] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -113,6 +114,35 @@ export function WtsLedgerImporter({
     }
   };
 
+  const deleteImportedEntries = async () => {
+    if (!summary?.total || deleting) return;
+    const confirmed = window.confirm(
+      `이 계좌에서 WTS 붙여넣기로 저장한 거래내역 ${summary.total.toLocaleString("ko-KR")}건을 모두 삭제할까요?\n토스 API의 체결 기록과 포트폴리오 데이터는 삭제되지 않습니다.`,
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/portfolio/cash-ledger?account=${encodeURIComponent(accountId)}`, {
+        method: "DELETE",
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json().catch(() => ({})) as { deleted?: number; total?: number } & ApiError;
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      if (!response.ok) throw new Error(payload.error?.message || "가져온 거래내역을 삭제하지 못했습니다.");
+      setSummary({ accountId, total: 0, entries: [] });
+      setNotice(`WTS에서 가져온 거래내역 ${payload.deleted ?? 0}건을 삭제했습니다.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "가져온 거래내역을 삭제하지 못했습니다.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <Card className="bg-secondary p-5 sm:p-7">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -125,9 +155,24 @@ export function WtsLedgerImporter({
             토스증권 WTS 거래내역 페이지에서 복사한 내용을 붙여넣으면 날짜·유형·금액·거래 후 잔액과 종목 수량을 자동으로 추출합니다.
           </p>
         </div>
-        <div className="flex min-h-10 items-center gap-2 self-start rounded-full bg-card px-4 text-xs font-bold text-muted-foreground">
-          {loadingSummary ? <LoaderCircle className="size-4 animate-spin" /> : <Database className="size-4" />}
-          SQLite에 {summary?.total.toLocaleString("ko-KR") ?? 0}건 저장됨
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          <div className="flex min-h-10 items-center gap-2 rounded-full bg-card px-4 text-xs font-bold text-muted-foreground">
+            {loadingSummary ? <LoaderCircle className="size-4 animate-spin" /> : <Database className="size-4" />}
+            SQLite에 {summary?.total.toLocaleString("ko-KR") ?? 0}건 저장됨
+          </div>
+          {summary?.total ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={deleting || saving}
+              onClick={deleteImportedEntries}
+              className="min-h-10 rounded-full bg-card px-4 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              {deleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
+              가져온 내역 삭제
+            </Button>
+          ) : null}
         </div>
       </div>
 

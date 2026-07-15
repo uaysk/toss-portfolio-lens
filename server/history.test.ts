@@ -79,6 +79,12 @@ describe("PortfolioHistoryStore", () => {
       latestDate: "2026-07-14",
       entries,
     });
+
+    store.importCashLedgerEntries("account-2", entries);
+    expect(store.deleteImportedCashLedger("account-1")).toBe(1);
+    expect(store.getCashLedgerSummary("account-1")).toMatchObject({ total: 0, entries: [] });
+    expect(store.getCashLedgerSummary("account-2")).toMatchObject({ total: 1, entries });
+    expect(store.deleteImportedCashLedger("account-1")).toBe(0);
   });
 
   it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", () => {

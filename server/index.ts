@@ -457,6 +457,23 @@ app.post("/api/portfolio/cash-ledger/import", requireSession, (request, response
   }
 });
 
+app.delete("/api/portfolio/cash-ledger", requireSession, (request, response) => {
+  setNoStore(response);
+  const accountId = requestedAccount(request);
+  if (!accountId || accountId.length > 128) {
+    response.status(400).json({ error: { code: "invalid-account", message: "삭제할 계좌를 선택해 주세요." } });
+    return;
+  }
+  try {
+    response.json({ deleted: historyStore.deleteImportedCashLedger(accountId), total: 0 });
+  } catch (error) {
+    console.error("[cash-ledger] 가져온 거래내역 삭제 실패:", error instanceof Error ? error.message : error);
+    response.status(500).json({
+      error: { code: "ledger-delete-unavailable", message: "WTS에서 가져온 거래내역을 삭제하지 못했습니다." },
+    });
+  }
+});
+
 app.get("/api/portfolio/history/status", requireSession, (request, response) => {
   setNoStore(response);
   const accountId = requestedAccount(request);

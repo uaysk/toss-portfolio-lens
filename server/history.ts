@@ -400,6 +400,14 @@ export class PortfolioHistoryStore {
     };
   }
 
+  deleteImportedCashLedger(accountId: string): number {
+    const result = this.db.prepare(`
+      DELETE FROM portfolio_cash_ledger
+      WHERE account_id = ? AND source = 'WTS_PASTE'
+    `).run(accountId);
+    return Number(result.changes);
+  }
+
   recordPortfolio(portfolio: Portfolio, capturedAt = new Date()): void {
     const snapshotDate = kstDateString(capturedAt);
     const capturedAtMs = capturedAt.getTime();
