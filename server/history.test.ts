@@ -112,6 +112,9 @@ describe("PortfolioHistoryStore", () => {
       date: "2026-07-01",
       timestamp: "2026-07-01T00:00:00+09:00",
       currency: "KRW",
+      openPrice: 100,
+      highPrice: 115,
+      lowPrice: 95,
       closePrice: 110,
     }]);
     expect(store.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-02").get("KRW:AAA")?.get("2026-07-01"))
@@ -133,6 +136,18 @@ describe("PortfolioHistoryStore", () => {
       totalValue: 220,
       values: { "KRX:AAA": 100 },
     });
+    expect(store.getPortfolioAnalysisCandles(
+      "account-1",
+      "KRW",
+      "2026-07-01",
+      "2026-07-01",
+    )).toEqual([{
+      date: "2026-07-01",
+      open: 200,
+      high: 230,
+      low: 190,
+      close: 220,
+    }]);
 
     const status = store.updateBackfillStatus("account-1", {
       status: "complete",

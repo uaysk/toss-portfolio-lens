@@ -9,6 +9,13 @@ import {
   passwordsMatch,
   setNoStore,
 } from "./auth.js";
+import {
+  analysisStartDate,
+  analysisToday,
+  parseBenchmarkKeys,
+  PortfolioAnalysisService,
+  type AnalysisRange,
+} from "./analysis.js";
 import { HistoricalPortfolioBackfill } from "./backfill.js";
 import { loadConfig } from "./env.js";
 import {
@@ -29,6 +36,7 @@ const config = loadConfig();
 const toss = new TossClient(config);
 const historyStore = new PortfolioHistoryStore(config.databasePath);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
+const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
@@ -392,6 +400,55 @@ app.post("/api/portfolio/history/backfill", requireSession, async (request, resp
   } catch (error) {
     const message = error instanceof TossApiError ? error.message : "과거 데이터 동기화를 시작하지 못했습니다.";
     response.status(502).json({ error: { code: "backfill-unavailable", message } });
+  }
+});
+
+app.get("/api/portfolio/analysis", requireSession, async (request, response) => {
+  setNoStore(response);
+  const accountId = requestedAccount(request);
+  const currency = request.query.currency === "USD" ? "USD" : request.query.currency === "KRW" ? "KRW" : undefined;
+  const range = ["30d", "90d", "1y", "all"].includes(String(request.query.range))
+    ? request.query.range as AnalysisRange
+    : undefined;
+  const fromQuery = typeof request.query.from === "string" ? request.query.from.trim() : "";
+  const toQuery = typeof request.query.to === "string" ? request.query.to.trim() : "";
+  const hasCustomRange = Boolean(fromQuery || toQuery);
+  const validCustomRange = !hasCustomRange
+    || (isHistoryDate(fromQuery) && isHistoryDate(toQuery) && fromQuery <= toQuery);
+
+  if (!accountId || accountId.length > 128 || !currency || !range || !validCustomRange) {
+    response.status(400).json({
+      error: {
+        code: "invalid-analysis-query",
+        message: "account, currency(KRW/USD), range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
+      },
+    });
+    return;
+  }
+
+  try {
+    const benchmarkKeys = parseBenchmarkKeys(request.query.benchmarks);
+    const today = analysisToday();
+    const firstTradeDate = historyStore.getBackfillStatus(accountId).firstTradeDate;
+    const fromDate = hasCustomRange ? fromQuery : analysisStartDate(range, today, firstTradeDate);
+    const toDate = hasCustomRange ? toQuery : today;
+    response.json(await portfolioAnalysis.getAnalysis({
+      accountId,
+      currency,
+      range,
+      fromDate,
+      toDate,
+      benchmarkKeys,
+    }));
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("지원하는 비교 지수")) {
+      response.status(400).json({ error: { code: "invalid-benchmark", message: error.message } });
+      return;
+    }
+    console.error("[analysis] 분석 데이터 조회 실패:", error instanceof Error ? error.message : error);
+    response.status(502).json({
+      error: { code: "analysis-unavailable", message: "포트폴리오 분석 데이터를 불러오지 못했습니다." },
+    });
   }
 });
 

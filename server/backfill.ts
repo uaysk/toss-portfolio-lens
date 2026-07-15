@@ -233,6 +233,7 @@ export class HistoricalPortfolioBackfill {
       && (previous.status === "complete" || previous.status === "partial")
       && previous.lastBackfilledDate
       && previous.lastBackfilledDate >= yesterday
+      && !this.store.hasIncompleteDailyOhlc()
     ) {
       return previous;
     }
@@ -347,7 +348,11 @@ export class HistoricalPortfolioBackfill {
         const symbol = key.slice(key.indexOf(":") + 1);
         const cachedFirstDate = this.store.getEarliestDailyPriceDate(key);
         const cachedLastDate = this.store.getLatestDailyPriceDate(key);
-        const cacheCoversHistory = Boolean(cachedFirstDate && cachedFirstDate <= firstTradeDate);
+        const cacheCoversHistory = Boolean(
+          cachedFirstDate
+          && cachedFirstDate <= firstTradeDate
+          && !this.store.hasIncompleteDailyOhlc(key),
+        );
         const seenBefore = new Set<string>();
         let before: string | undefined;
         try {

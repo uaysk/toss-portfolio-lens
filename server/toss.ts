@@ -80,6 +80,9 @@ export type DailyCandle = {
   date: string;
   timestamp: string;
   currency: string;
+  openPrice: number;
+  highPrice: number;
+  lowPrice: number;
   closePrice: number;
 };
 
@@ -337,12 +340,19 @@ export function normalizeCandlePage(payload: unknown, symbol: string): CandlePag
   const candles = records.map((record) => {
     const timestamp = normalizeTimestamp(pick(record, ["timestamp", "dateTime", "time", "date"]));
     const explicitDate = stringFrom(record, ["date", "businessDate", "tradeDate"]);
+    const closePrice = numberFrom(record, ["close", "closePrice", "closingPrice", "price"]);
+    const openPrice = numberFrom(record, ["open", "openPrice", "openingPrice"], closePrice);
+    const highPrice = numberFrom(record, ["high", "highPrice", "highestPrice"], Math.max(openPrice, closePrice));
+    const lowPrice = numberFrom(record, ["low", "lowPrice", "lowestPrice"], Math.min(openPrice, closePrice));
     return {
       symbol,
       date: dateFromTimestamp(explicitDate) || dateFromTimestamp(timestamp),
       timestamp,
       currency: stringFrom(record, ["currency", "currencyCode"]).toUpperCase(),
-      closePrice: numberFrom(record, ["close", "closePrice", "closingPrice", "price"]),
+      openPrice,
+      highPrice: Math.max(highPrice, openPrice, closePrice),
+      lowPrice: Math.min(lowPrice, openPrice, closePrice),
+      closePrice,
     } satisfies DailyCandle;
   }).filter((candle) => candle.date && candle.closePrice > 0);
   return {
@@ -637,15 +647,24 @@ export class TossClient {
     return normalizeOrderPage(await this.get("/api/v1/orders?" + params.toString(), accountId));
   }
 
-  async getDailyCandles(symbol: string, before?: string): Promise<CandlePage> {
+  async getDailyCandles(symbol: string, before?: string, adjusted = false): Promise<CandlePage> {
     const params = new URLSearchParams({
       symbol,
       interval: "1d",
       count: "200",
-      adjusted: "false",
+      adjusted: String(adjusted),
     });
     if (before) params.set("before", before);
     return normalizeCandlePage(await this.get("/api/v1/candles?" + params.toString()), symbol);
+  }
+
+  async getMarketIndicatorDailyCandles(symbol: "KOSPI" | "KOSDAQ", before?: string): Promise<CandlePage> {
+    const params = new URLSearchParams({ interval: "1d", count: "200" });
+    if (before) params.set("before", before);
+    return normalizeCandlePage(
+      await this.get(`/api/v1/market-indicators/${symbol}/candles?${params.toString()}`),
+      symbol,
+    );
   }
 
   async getInstruments(symbols: string[]): Promise<InstrumentInfo[]> {

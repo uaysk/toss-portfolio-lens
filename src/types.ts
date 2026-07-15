@@ -55,6 +55,8 @@ export type ApiError = {
 export type Theme = "dark" | "light";
 export type HistoryCurrency = "KRW" | "USD";
 export type HistoryRange = "7d" | "30d" | "90d" | "all";
+export type AnalysisRange = "30d" | "90d" | "1y" | "all";
+export type BenchmarkKey = "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
 
 export type PortfolioHistorySeries = {
   key: string;
@@ -99,4 +101,29 @@ export type BackfillStatus = {
   discrepancySymbols: number;
   failedSymbols: number;
   message?: string;
+};
+
+export type PortfolioAnalysis = {
+  accountId: string;
+  currency: HistoryCurrency;
+  range: AnalysisRange;
+  generatedAt: string;
+  fromDate: string;
+  toDate: string;
+  estimatedOhlc: true;
+  ohlcBackfillComplete: boolean;
+  candles: Array<{
+    date: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+  }>;
+  benchmarks: Array<{
+    key: BenchmarkKey;
+    name: string;
+    proxySymbol?: string;
+    points: Array<{ date: string; close: number }>;
+  }>;
+  benchmarkErrors: Array<{ key: BenchmarkKey; message: string }>;
 };

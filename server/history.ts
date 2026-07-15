@@ -65,6 +65,19 @@ export type HistoricalSnapshot = {
   }>;
 };
 
+export type PortfolioAnalysisCandle = {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
+
+export type BenchmarkPricePoint = {
+  date: string;
+  close: number;
+};
+
 type SnapshotRow = {
   id: number;
   snapshot_date: string;
@@ -181,6 +194,9 @@ export class PortfolioHistoryStore {
       CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
         instrument_key TEXT NOT NULL REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE,
         price_date TEXT NOT NULL,
+        open_price REAL,
+        high_price REAL,
+        low_price REAL,
         close_price REAL NOT NULL,
         currency TEXT NOT NULL,
         timestamp TEXT NOT NULL,
@@ -190,6 +206,18 @@ export class PortfolioHistoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
         ON portfolio_daily_prices(instrument_key, price_date);
+
+      CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
+        benchmark_key TEXT NOT NULL,
+        price_date TEXT NOT NULL,
+        close_price REAL NOT NULL,
+        timestamp TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(benchmark_key, price_date)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
+        ON portfolio_benchmark_prices(benchmark_key, price_date);
 
       CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
         account_id TEXT PRIMARY KEY,
@@ -214,6 +242,12 @@ export class PortfolioHistoryStore {
     const snapshotColumns = this.db.prepare("PRAGMA table_info(portfolio_snapshots)").all() as Array<{ name: string }>;
     if (!snapshotColumns.some((column) => column.name === "origin")) {
       this.db.exec("ALTER TABLE portfolio_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'LIVE'");
+    }
+    const priceColumns = this.db.prepare("PRAGMA table_info(portfolio_daily_prices)").all() as Array<{ name: string }>;
+    for (const column of ["open_price", "high_price", "low_price"]) {
+      if (!priceColumns.some((candidate) => candidate.name === column)) {
+        this.db.exec(`ALTER TABLE portfolio_daily_prices ADD COLUMN ${column} REAL`);
+      }
     }
   }
 
@@ -380,9 +414,12 @@ export class PortfolioHistoryStore {
   upsertDailyPrices(instrumentKey: string, candles: DailyCandle[], updatedAt = Date.now()): number {
     const statement = this.db.prepare(`
       INSERT INTO portfolio_daily_prices (
-        instrument_key, price_date, close_price, currency, timestamp, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        instrument_key, price_date, open_price, high_price, low_price, close_price, currency, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(instrument_key, price_date) DO UPDATE SET
+        open_price = excluded.open_price,
+        high_price = excluded.high_price,
+        low_price = excluded.low_price,
         close_price = excluded.close_price,
         currency = excluded.currency,
         timestamp = excluded.timestamp,
@@ -394,6 +431,9 @@ export class PortfolioHistoryStore {
         statement.run(
           instrumentKey,
           candle.date,
+          candle.openPrice,
+          candle.highPrice,
+          candle.lowPrice,
           candle.closePrice,
           candle.currency || instrumentKey.split(":", 1)[0],
           candle.timestamp,
@@ -422,6 +462,21 @@ export class PortfolioHistoryStore {
     return row?.earliest ?? undefined;
   }
 
+  hasIncompleteDailyOhlc(instrumentKey?: string): boolean {
+    const row = instrumentKey
+      ? this.db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM portfolio_daily_prices
+          WHERE instrument_key = ? AND (open_price IS NULL OR high_price IS NULL OR low_price IS NULL)
+        `).get(instrumentKey) as { count: number }
+      : this.db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM portfolio_daily_prices
+          WHERE open_price IS NULL OR high_price IS NULL OR low_price IS NULL
+        `).get() as { count: number };
+    return Number(row.count) > 0;
+  }
+
   getDailyPrices(instrumentKeys: string[], fromDate: string, toDate: string): Map<string, Map<string, number>> {
     const result = new Map<string, Map<string, number>>();
     if (!instrumentKeys.length) return result;
@@ -442,6 +497,129 @@ export class PortfolioHistoryStore {
       result.set(row.instrument_key, prices);
     }
     return result;
+  }
+
+  getPortfolioAnalysisCandles(
+    accountId: string,
+    currency: HistoryCurrency,
+    fromDate: string,
+    toDate: string,
+  ): PortfolioAnalysisCandle[] {
+    const rows = this.db.prepare(`
+      SELECT
+        snapshots.snapshot_date,
+        items.evaluation_amount,
+        prices.price_date,
+        prices.open_price,
+        prices.high_price,
+        prices.low_price,
+        prices.close_price
+      FROM portfolio_snapshots AS snapshots
+      JOIN portfolio_snapshot_items AS items ON items.snapshot_id = snapshots.id
+      LEFT JOIN portfolio_daily_prices AS prices
+        ON prices.instrument_key = items.currency || ':' || items.symbol
+       AND prices.price_date = snapshots.snapshot_date
+      WHERE snapshots.account_id = ?
+        AND items.currency = ?
+        AND snapshots.snapshot_date BETWEEN ? AND ?
+      ORDER BY snapshots.snapshot_date ASC, items.symbol ASC
+    `).all(accountId, currency, fromDate, toDate) as Array<{
+      snapshot_date: string;
+      evaluation_amount: number;
+      price_date: string | null;
+      open_price: number | null;
+      high_price: number | null;
+      low_price: number | null;
+      close_price: number | null;
+    }>;
+
+    const byDate = new Map<string, PortfolioAnalysisCandle & { hasMarketData: boolean }>();
+    for (const row of rows) {
+      const current = byDate.get(row.snapshot_date) ?? {
+        date: row.snapshot_date,
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        hasMarketData: false,
+      };
+      const evaluationAmount = Number(row.evaluation_amount);
+      const dailyClose = Number(row.close_price ?? 0);
+      if (row.price_date && dailyClose > 0) {
+        const quantity = evaluationAmount / dailyClose;
+        const openPrice = Number(row.open_price ?? dailyClose);
+        const highPrice = Number(row.high_price ?? Math.max(openPrice, dailyClose));
+        const lowPrice = Number(row.low_price ?? Math.min(openPrice, dailyClose));
+        current.open += quantity * openPrice;
+        current.high += quantity * Math.max(highPrice, openPrice, dailyClose);
+        current.low += quantity * Math.min(lowPrice, openPrice, dailyClose);
+        current.close += evaluationAmount;
+        current.hasMarketData = true;
+      } else {
+        current.open += evaluationAmount;
+        current.high += evaluationAmount;
+        current.low += evaluationAmount;
+        current.close += evaluationAmount;
+      }
+      byDate.set(row.snapshot_date, current);
+    }
+
+    return Array.from(byDate.values())
+      .filter((candle) => candle.hasMarketData && candle.close > 0)
+      .map(({ hasMarketData: _hasMarketData, ...candle }) => ({
+        date: candle.date,
+        open: round(candle.open, 4),
+        high: round(Math.max(candle.high, candle.open, candle.close), 4),
+        low: round(Math.min(candle.low, candle.open, candle.close), 4),
+        close: round(candle.close, 4),
+      }));
+  }
+
+  upsertBenchmarkPrices(benchmarkKey: string, candles: DailyCandle[], updatedAt = Date.now()): number {
+    const statement = this.db.prepare(`
+      INSERT INTO portfolio_benchmark_prices (
+        benchmark_key, price_date, close_price, timestamp, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(benchmark_key, price_date) DO UPDATE SET
+        close_price = excluded.close_price,
+        timestamp = excluded.timestamp,
+        updated_at = excluded.updated_at
+    `);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const candle of candles) {
+        statement.run(benchmarkKey, candle.date, candle.closePrice, candle.timestamp, updatedAt);
+      }
+      this.db.exec("COMMIT");
+      return candles.length;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getBenchmarkPriceBounds(benchmarkKey: string): { earliest?: string; latest?: string } {
+    const row = this.db.prepare(`
+      SELECT MIN(price_date) AS earliest, MAX(price_date) AS latest
+      FROM portfolio_benchmark_prices
+      WHERE benchmark_key = ?
+    `).get(benchmarkKey) as { earliest: string | null; latest: string | null };
+    return {
+      ...(row.earliest ? { earliest: row.earliest } : {}),
+      ...(row.latest ? { latest: row.latest } : {}),
+    };
+  }
+
+  getBenchmarkPrices(benchmarkKey: string, fromDate: string, toDate: string): BenchmarkPricePoint[] {
+    return (this.db.prepare(`
+      SELECT price_date, close_price
+      FROM portfolio_benchmark_prices
+      WHERE benchmark_key = ? AND price_date BETWEEN ? AND ?
+      ORDER BY price_date ASC
+    `).all(benchmarkKey, fromDate, toDate) as Array<{ price_date: string; close_price: number }>).map((row) => ({
+      date: row.price_date,
+      close: round(Number(row.close_price), 6),
+    }));
   }
 
   replaceHistoricalSnapshots(accountId: string, snapshots: HistoricalSnapshot[], beforeDate: string): number {

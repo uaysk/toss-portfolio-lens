@@ -142,6 +142,9 @@ describe("과거 데이터 정규화", () => {
         nextBefore: "older",
         candles: [{
           timestamp: "2026-07-01T00:00:00+09:00",
+          openPrice: "72000",
+          highPrice: "74000",
+          lowPrice: "71500",
           closePrice: "73500",
           currency: "KRW",
         }],
@@ -154,6 +157,9 @@ describe("과거 데이터 정규화", () => {
         date: "2026-07-01",
         timestamp: "2026-07-01T00:00:00+09:00",
         currency: "KRW",
+        openPrice: 72000,
+        highPrice: 74000,
+        lowPrice: 71500,
         closePrice: 73500,
       }],
     });

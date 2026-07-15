@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
+  BarChart3,
   ChartNoAxesCombined,
   CircleGauge,
   Layers3,
@@ -19,6 +20,7 @@ import {
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { AllocationHistoryChart } from "@/components/allocation-history-chart";
 import { Logo } from "@/components/logo";
+import { PortfolioAnalysisView } from "@/components/portfolio-analysis";
 import { StockVisibilitySettings } from "@/components/stock-visibility-settings";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -45,6 +47,8 @@ type DashboardProps = {
   theme: Theme;
   onToggleTheme: () => void;
 };
+
+type DashboardView = "overview" | "analysis";
 
 function formatAmountPair(amounts: { KRW: number; USD: number }, signed = false): string {
   const format = signed ? formatSignedMoney : formatMoney;
@@ -75,9 +79,18 @@ function GainIndicator({ value, inverse = false }: { value: number; inverse?: bo
   );
 }
 
-function Sidebar({ portfolio, onLogout }: { portfolio?: Portfolio; onLogout: () => void }) {
-  const items = [
-    { href: "#overview", label: "요약", icon: LayoutDashboard },
+function Sidebar({
+  portfolio,
+  onLogout,
+  view = "overview",
+  onViewChange = () => undefined,
+}: {
+  portfolio?: Portfolio;
+  onLogout: () => void;
+  view?: DashboardView;
+  onViewChange?: (view: DashboardView) => void;
+}) {
+  const sections = [
     { href: "#history", label: "비중 추이", icon: ChartNoAxesCombined },
     { href: "#allocation", label: "자산 구성", icon: CircleGauge },
     { href: "#holdings", label: "보유 종목", icon: Layers3 },
@@ -87,19 +100,32 @@ function Sidebar({ portfolio, onLogout }: { portfolio?: Portfolio; onLogout: () 
     <aside className="dashboard-sidebar">
       <Logo inverse />
       <nav className="mt-14 space-y-1" aria-label="대시보드 탐색">
-        {items.map((item, index) => (
-          <a
-            key={item.href}
-            href={item.href}
+        {([
+          { value: "overview" as const, label: "포트폴리오", icon: LayoutDashboard },
+          { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
+        ]).map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            onClick={() => onViewChange(item.value)}
             className={cn(
-              "flex items-center gap-3 rounded-2xl px-3.5 py-3 text-sm font-semibold transition-colors",
-              index === 0 ? "bg-white text-black" : "text-white/60 hover:bg-white/10 hover:text-white",
+              "flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-left text-sm font-semibold transition-colors",
+              view === item.value ? "bg-white text-black" : "text-white/60 hover:bg-white/10 hover:text-white",
             )}
           >
             <item.icon className="size-[18px]" aria-hidden="true" />
             {item.label}
-          </a>
+          </button>
         ))}
+        {view === "overview" ? (
+          <div className="space-y-0.5 pb-2 pl-4 pt-2">
+            {sections.map((item) => (
+              <a key={item.href} href={item.href} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold text-white/40 transition-colors hover:bg-white/10 hover:text-white/80">
+                <item.icon className="size-3.5" aria-hidden="true" />{item.label}
+              </a>
+            ))}
+          </div>
+        ) : null}
       </nav>
 
       <div className="mt-auto space-y-3">
@@ -135,6 +161,7 @@ function DashboardHeader({
   settingsOpen,
   hiddenCount,
   onToggleSettings,
+  view,
 }: {
   portfolio: Portfolio;
   refreshing: boolean;
@@ -146,12 +173,17 @@ function DashboardHeader({
   settingsOpen: boolean;
   hiddenCount: number;
   onToggleSettings: () => void;
+  view: DashboardView;
 }) {
   return (
     <header className="dashboard-header">
       <div>
-        <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">PORTFOLIO OVERVIEW</p>
-        <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">안녕하세요.</h1>
+        <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
+          {view === "overview" ? "PORTFOLIO OVERVIEW" : "PORTFOLIO ANALYSIS"}
+        </p>
+        <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
+          {view === "overview" ? "안녕하세요." : "포트폴리오 분석"}
+        </h1>
       </div>
 
       <div className="flex items-center justify-end gap-2">
@@ -168,22 +200,24 @@ function DashboardHeader({
           </SelectContent>
         </Select>
         <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-        <Button
-          variant="secondary"
-          size="icon"
-          className="relative"
-          onClick={onToggleSettings}
-          aria-label={settingsOpen ? "표시 설정 닫기" : "표시 설정 열기"}
-          aria-expanded={settingsOpen}
-          aria-controls="display-settings"
-        >
-          <Settings2 />
-          {hiddenCount ? (
-            <span className="absolute -right-1 -top-1 grid size-5 place-items-center rounded-full bg-primary text-[10px] font-black text-primary-foreground">
-              {hiddenCount > 9 ? "9+" : hiddenCount}
-            </span>
-          ) : null}
-        </Button>
+        {view === "overview" ? (
+          <Button
+            variant="secondary"
+            size="icon"
+            className="relative"
+            onClick={onToggleSettings}
+            aria-label={settingsOpen ? "표시 설정 닫기" : "표시 설정 열기"}
+            aria-expanded={settingsOpen}
+            aria-controls="display-settings"
+          >
+            <Settings2 />
+            {hiddenCount ? (
+              <span className="absolute -right-1 -top-1 grid size-5 place-items-center rounded-full bg-primary text-[10px] font-black text-primary-foreground">
+                {hiddenCount > 9 ? "9+" : hiddenCount}
+              </span>
+            ) : null}
+          </Button>
+        ) : null}
         <Button variant="secondary" size="icon" onClick={onRefresh} disabled={refreshing} aria-label="포트폴리오 새로고침">
           <RefreshCw className={cn(refreshing && "animate-spin")} />
         </Button>
@@ -192,6 +226,28 @@ function DashboardHeader({
         </Button>
       </div>
     </header>
+  );
+}
+
+function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (view: DashboardView) => void }) {
+  return (
+    <div className="mb-3 grid grid-cols-2 rounded-full bg-secondary p-1 lg:hidden" aria-label="화면 선택">
+      {([
+        { value: "overview" as const, label: "포트폴리오" },
+        { value: "analysis" as const, label: "분석" },
+      ]).map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          aria-pressed={view === item.value}
+          onClick={() => onChange(item.value)}
+          className={cn(
+            "rounded-full px-4 py-2.5 text-xs font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            view === item.value ? "bg-primary text-primary-foreground" : "text-muted-foreground",
+          )}
+        >{item.label}</button>
+      ))}
+    </div>
   );
 }
 
@@ -640,6 +696,7 @@ function InitialError({
 }
 
 export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: DashboardProps) {
+  const [view, setView] = useState<DashboardView>(() => window.location.hash === "#analysis" ? "analysis" : "overview");
   const [portfolio, setPortfolio] = useState<Portfolio>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -653,6 +710,19 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   const [hiddenStockKeys, setHiddenStockKeys] = useState<Set<string>>(
     () => new Set(parseHiddenStockKeys(window.localStorage.getItem(HIDDEN_STOCKS_STORAGE_KEY))),
   );
+
+  useEffect(() => {
+    const updateFromHash = () => setView(window.location.hash === "#analysis" ? "analysis" : "overview");
+    window.addEventListener("hashchange", updateFromHash);
+    return () => window.removeEventListener("hashchange", updateFromHash);
+  }, []);
+
+  const changeView = useCallback((nextView: DashboardView) => {
+    setView(nextView);
+    setSettingsOpen(false);
+    window.history.replaceState(null, "", nextView === "analysis" ? "#analysis" : "#overview");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
 
   useEffect(() => {
     try {
@@ -789,7 +859,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
 
   return (
     <div className="dashboard-frame">
-      <Sidebar portfolio={portfolio} onLogout={() => void handleLogout()} />
+      <Sidebar portfolio={portfolio} onLogout={() => void handleLogout()} view={view} onViewChange={changeView} />
       <main className="dashboard-main">
         <DashboardHeader
           portfolio={portfolio}
@@ -802,7 +872,10 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           settingsOpen={settingsOpen}
           hiddenCount={hiddenDisplayCount}
           onToggleSettings={() => setSettingsOpen((value) => !value)}
+          view={view}
         />
+
+        <MobileViewTabs view={view} onChange={changeView} />
 
         {portfolio.accounts.length > 1 ? (
           <div className="mb-3 sm:hidden">
@@ -821,7 +894,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           </div>
         ) : null}
 
-        {settingsOpen ? (
+        {view === "overview" && settingsOpen ? (
           <StockVisibilitySettings
             stocks={visibilityStocks}
             hiddenStockKeys={hiddenStockKeys}
@@ -841,20 +914,24 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           </div>
         ) : null}
 
-        <div className="space-y-3">
-          <PortfolioHero portfolio={visiblePortfolio} />
-          <SummaryCards portfolio={visiblePortfolio} hiddenCount={hiddenCurrentCount} />
-          <AllocationHistoryChart
-            key={portfolio.selectedAccountId}
-            portfolio={portfolio}
-            theme={theme}
-            hiddenStockKeys={hiddenStockKeys}
-            onUnauthorized={onUnauthorized}
-            onSeriesChange={handleHistorySeriesChange}
-          />
-          <AllocationCard portfolio={visiblePortfolio} theme={theme} />
-          <HoldingsCard portfolio={visiblePortfolio} theme={theme} hiddenCount={hiddenCurrentCount} />
-        </div>
+        {view === "overview" ? (
+          <div className="space-y-3">
+            <PortfolioHero portfolio={visiblePortfolio} />
+            <SummaryCards portfolio={visiblePortfolio} hiddenCount={hiddenCurrentCount} />
+            <AllocationHistoryChart
+              key={portfolio.selectedAccountId}
+              portfolio={portfolio}
+              theme={theme}
+              hiddenStockKeys={hiddenStockKeys}
+              onUnauthorized={onUnauthorized}
+              onSeriesChange={handleHistorySeriesChange}
+            />
+            <AllocationCard portfolio={visiblePortfolio} theme={theme} />
+            <HoldingsCard portfolio={visiblePortfolio} theme={theme} hiddenCount={hiddenCurrentCount} />
+          </div>
+        ) : (
+          <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
+        )}
 
         <footer className="mt-10 flex flex-col gap-2 pb-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <p>마지막 동기화 {formatSyncTime(portfolio.asOf)}</p>
