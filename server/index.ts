@@ -21,8 +21,6 @@ import { loadConfig } from "./env.js";
 import {
   isHistoryDate,
   PortfolioHistoryStore,
-  type CashLedgerEntry,
-  type CashLedgerKind,
   type HistoryCurrency,
   type HistoryRange,
 } from "./history.js";
@@ -54,7 +52,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
-app.use(express.json({ limit: "256kb" }));
+app.use(express.json({ limit: "16kb" }));
 app.use((_request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
@@ -376,103 +374,6 @@ function requestedAccount(request: Request): string {
       : "";
   return account.trim();
 }
-
-const cashLedgerKinds = new Set<CashLedgerKind>([
-  "BUY", "SELL", "DEPOSIT", "WITHDRAWAL", "EXCHANGE_IN",
-  "EXCHANGE_OUT", "DIVIDEND", "FEE", "OTHER",
-]);
-
-function validatedCashLedgerEntries(value: unknown): CashLedgerEntry[] | undefined {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 1_000) return undefined;
-  const entries: CashLedgerEntry[] = [];
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== "object") return undefined;
-    const item = candidate as Record<string, unknown>;
-    const date = typeof item.date === "string" ? item.date.trim() : "";
-    const time = typeof item.time === "string" ? item.time.trim() : "";
-    const title = typeof item.title === "string" ? item.title.trim() : "";
-    const category = typeof item.category === "string" ? item.category.trim() : "";
-    const kind = item.kind as CashLedgerKind;
-    const currency = item.currency;
-    const amount = Number(item.amount);
-    const balance = Number(item.balance);
-    const instrumentName = typeof item.instrumentName === "string" ? item.instrumentName.trim() : undefined;
-    const quantity = item.quantity === undefined || item.quantity === null ? undefined : Number(item.quantity);
-    if (
-      !isHistoryDate(date)
-      || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)
-      || !title || title.length > 160
-      || !category || category.length > 80
-      || !cashLedgerKinds.has(kind)
-      || (currency !== "KRW" && currency !== "USD")
-      || !Number.isFinite(amount) || Math.abs(amount) > 1e15
-      || !Number.isFinite(balance) || Math.abs(balance) > 1e15
-      || (instrumentName !== undefined && (!instrumentName || instrumentName.length > 120))
-      || (quantity !== undefined && (!Number.isFinite(quantity) || quantity < 0 || quantity > 1e12))
-    ) return undefined;
-    entries.push({
-      date,
-      time,
-      occurredAt: `${date}T${time}:00+09:00`,
-      title,
-      category,
-      kind,
-      currency,
-      amount,
-      balance,
-      ...(instrumentName ? { instrumentName } : {}),
-      ...(quantity !== undefined ? { quantity } : {}),
-    });
-  }
-  return entries;
-}
-
-app.get("/api/portfolio/cash-ledger", requireSession, (request, response) => {
-  setNoStore(response);
-  const accountId = requestedAccount(request);
-  if (!accountId || accountId.length > 128) {
-    response.status(400).json({ error: { code: "invalid-account", message: "조회할 계좌를 선택해 주세요." } });
-    return;
-  }
-  response.json(historyStore.getCashLedgerSummary(accountId));
-});
-
-app.post("/api/portfolio/cash-ledger/import", requireSession, (request, response) => {
-  setNoStore(response);
-  const accountId = requestedAccount(request);
-  const entries = validatedCashLedgerEntries(request.body?.entries);
-  if (!accountId || accountId.length > 128 || !entries) {
-    response.status(400).json({
-      error: { code: "invalid-ledger-import", message: "계좌와 추출된 거래내역(최대 1,000건)을 확인해 주세요." },
-    });
-    return;
-  }
-  try {
-    response.json(historyStore.importCashLedgerEntries(accountId, entries));
-  } catch (error) {
-    console.error("[cash-ledger] 거래내역 저장 실패:", error instanceof Error ? error.message : error);
-    response.status(500).json({
-      error: { code: "ledger-import-unavailable", message: "추출한 거래내역을 저장하지 못했습니다." },
-    });
-  }
-});
-
-app.delete("/api/portfolio/cash-ledger", requireSession, (request, response) => {
-  setNoStore(response);
-  const accountId = requestedAccount(request);
-  if (!accountId || accountId.length > 128) {
-    response.status(400).json({ error: { code: "invalid-account", message: "삭제할 계좌를 선택해 주세요." } });
-    return;
-  }
-  try {
-    response.json({ deleted: historyStore.deleteImportedCashLedger(accountId), total: 0 });
-  } catch (error) {
-    console.error("[cash-ledger] 가져온 거래내역 삭제 실패:", error instanceof Error ? error.message : error);
-    response.status(500).json({
-      error: { code: "ledger-delete-unavailable", message: "WTS에서 가져온 거래내역을 삭제하지 못했습니다." },
-    });
-  }
-});
 
 app.get("/api/portfolio/history/status", requireSession, (request, response) => {
   setNoStore(response);

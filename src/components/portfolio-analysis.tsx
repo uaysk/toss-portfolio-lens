@@ -13,7 +13,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { WtsLedgerImporter } from "@/components/wts-ledger-importer";
 import {
   analysisComparisonDomain,
   analysisPeriodChange,
@@ -495,7 +494,6 @@ export function PortfolioAnalysisView({
           </div>
         </>
       ) : null}
-      <WtsLedgerImporter accountId={portfolio.selectedAccountId} onUnauthorized={onUnauthorized} />
     </section>
   );
 }

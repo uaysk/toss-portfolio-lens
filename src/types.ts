@@ -58,28 +58,6 @@ export type HistoryRange = "7d" | "30d" | "90d" | "all";
 export type AnalysisRange = "30d" | "90d" | "1y" | "all";
 export type BenchmarkKey = "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
 
-export type CashLedgerEntry = {
-  date: string;
-  time: string;
-  occurredAt: string;
-  title: string;
-  category: string;
-  kind: "BUY" | "SELL" | "DEPOSIT" | "WITHDRAWAL" | "EXCHANGE_IN" | "EXCHANGE_OUT" | "DIVIDEND" | "FEE" | "OTHER";
-  currency: HistoryCurrency;
-  amount: number;
-  balance: number;
-  instrumentName?: string;
-  quantity?: number;
-};
-
-export type CashLedgerSummary = {
-  accountId: string;
-  total: number;
-  earliestDate?: string;
-  latestDate?: string;
-  entries: CashLedgerEntry[];
-};
-
 export type PortfolioHistorySeries = {
   key: string;
   symbol: string;
