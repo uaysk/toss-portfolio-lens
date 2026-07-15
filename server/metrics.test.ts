@@ -59,4 +59,39 @@ describe("portfolio analytics", () => {
     ])).toBeCloseTo(0.1, 3);
     expect(calculateXirr([{ date: "2026-01-01", amount: -100 }])).toBeNull();
   });
+
+  it("성과 기여도를 절댓값이 아닌 실제 손익 내림차순으로 정렬한다", () => {
+    const history: PortfolioHistory = {
+      accountId: "account-1",
+      currency: "KRW",
+      range: "all",
+      generatedAt: "2026-07-03T00:00:00.000Z",
+      fromDate: "2026-07-01",
+      toDate: "2026-07-03",
+      series: [
+        { key: "KRX:GAIN", symbol: "GAIN", name: "수익 종목", market: "KRX", currency: "KRW", averageWeight: 75 },
+        { key: "KRX:LOSS", symbol: "LOSS", name: "손실 종목", market: "KRX", currency: "KRW", averageWeight: 25 },
+      ],
+      points: [
+        { date: "2026-07-01", capturedAt: "2026-07-01T00:00:00Z", totalValue: 200, values: { "KRX:GAIN": 50, "KRX:LOSS": 50 } },
+        { date: "2026-07-03", capturedAt: "2026-07-03T00:00:00Z", totalValue: 160, values: { "KRX:GAIN": 100, "KRX:LOSS": 0 } },
+      ],
+    };
+
+    const result = calculatePortfolioAnalytics({
+      history,
+      candles: [
+        { date: "2026-07-01", open: 200, high: 200, low: 200, close: 200 },
+        { date: "2026-07-03", open: 160, high: 160, low: 160, close: 160 },
+      ],
+      orders: [],
+      exchangeRates: new Map(),
+      benchmarks: [],
+    });
+
+    expect(result.contributions.map((item) => [item.symbol, item.estimatedProfitLoss])).toEqual([
+      ["GAIN", 60],
+      ["LOSS", -100],
+    ]);
+  });
 });

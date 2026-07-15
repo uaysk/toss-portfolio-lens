@@ -283,7 +283,7 @@ export function calculatePortfolioAnalytics({
       contributionPercent: baseValue > 0 ? round((estimatedProfitLoss / baseValue) * 100) : 0,
     } satisfies PortfolioContribution;
   }).filter((item) => Math.abs(item.estimatedProfitLoss) >= 0.01)
-    .sort((left, right) => Math.abs(right.estimatedProfitLoss) - Math.abs(left.estimatedProfitLoss))
+    .sort((left, right) => right.estimatedProfitLoss - left.estimatedProfitLoss)
     .slice(0, 8);
 
   const concentration = concentrationMetrics(history);
