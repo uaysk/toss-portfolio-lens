@@ -1,0 +1,102 @@
+export type Account = {
+  id: string;
+  name: string;
+  label: string;
+  type: string;
+};
+
+export type Holding = {
+  symbol: string;
+  name: string;
+  market: string;
+  currency: string;
+  quantity: number;
+  availableQuantity: number;
+  averagePrice: number;
+  currentPrice: number;
+  purchaseAmount: number;
+  evaluationAmount: number;
+  profitLoss: number;
+  profitRate: number;
+  dailyProfitLoss: number;
+  dailyProfitRate: number;
+};
+
+export type CurrencyAmounts = {
+  KRW: number;
+  USD: number;
+};
+
+export type Portfolio = {
+  asOf: string;
+  accounts: Account[];
+  selectedAccountId: string;
+  account: Account;
+  summary: {
+    evaluationAmount: CurrencyAmounts;
+    purchaseAmount: CurrencyAmounts;
+    profitLoss: CurrencyAmounts;
+    dailyProfitLoss: CurrencyAmounts;
+    profitRate: number;
+    dailyProfitRate: number;
+    positionCount: number;
+  };
+  holdings: Holding[];
+};
+
+export type ApiError = {
+  error?: {
+    code?: string;
+    message?: string;
+    requestId?: string;
+  };
+};
+
+export type Theme = "dark" | "light";
+export type HistoryCurrency = "KRW" | "USD";
+export type HistoryRange = "7d" | "30d" | "90d" | "all";
+
+export type PortfolioHistorySeries = {
+  key: string;
+  symbol: string;
+  name: string;
+  market: string;
+  averageWeight: number;
+};
+
+export type PortfolioHistory = {
+  accountId: string;
+  currency: HistoryCurrency;
+  range: HistoryRange;
+  generatedAt: string;
+  firstSnapshotDate?: string;
+  fromDate?: string;
+  toDate?: string;
+  series: PortfolioHistorySeries[];
+  points: Array<{
+    date: string;
+    capturedAt: string;
+    totalValue: number;
+    values: Record<string, number>;
+  }>;
+};
+
+export type BackfillStatus = {
+  accountId: string;
+  status: "idle" | "running" | "complete" | "partial" | "error";
+  phase: "waiting" | "orders" | "instruments" | "prices" | "reconstructing" | "complete";
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+  firstTradeDate?: string;
+  lastBackfilledDate?: string;
+  ordersImported: number;
+  symbolsTotal: number;
+  symbolsProcessed: number;
+  pricesImported: number;
+  snapshotsCreated: number;
+  reconciledSymbols: number;
+  discrepancySymbols: number;
+  failedSymbols: number;
+  message?: string;
+};

@@ -1,0 +1,287 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 6%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 6%;
+    --primary: 0 0% 6%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 60 4% 93%;
+    --secondary-foreground: 0 0% 8%;
+    --muted: 60 4% 93%;
+    --muted-foreground: 0 0% 43%;
+    --accent: 60 4% 93%;
+    --accent-foreground: 0 0% 8%;
+    --destructive: 0 0% 18%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 88%;
+    --input: 0 0% 88%;
+    --ring: 0 0% 14%;
+    --radius: 1rem;
+    --shell: #ececea;
+    --panel: #ffffff;
+    --chart-grid: 0 0% 78%;
+  }
+
+  .dark {
+    --background: 0 0% 5%;
+    --foreground: 0 0% 94%;
+    --card: 0 0% 9%;
+    --card-foreground: 0 0% 94%;
+    --primary: 0 0% 94%;
+    --primary-foreground: 0 0% 5%;
+    --secondary: 0 0% 14%;
+    --secondary-foreground: 0 0% 94%;
+    --muted: 0 0% 13%;
+    --muted-foreground: 0 0% 63%;
+    --accent: 0 0% 17%;
+    --accent-foreground: 0 0% 94%;
+    --destructive: 0 0% 82%;
+    --destructive-foreground: 0 0% 5%;
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 0 0% 72%;
+    --shell: #050505;
+    --panel: #0d0d0d;
+    --chart-grid: 0 0% 25%;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    background: var(--shell);
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+    background: var(--shell);
+    color: hsl(var(--foreground));
+    font-family: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    font-feature-settings: "tnum" 1, "ss01" 1;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button,
+  input {
+    font: inherit;
+  }
+
+  ::selection {
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+  }
+}
+
+@layer components {
+  .login-stage {
+    min-height: 100vh;
+    padding: 14px;
+    background: var(--shell);
+  }
+
+  .login-shell {
+    display: grid;
+    grid-template-columns: minmax(420px, 0.82fr) minmax(0, 1.18fr);
+    min-height: calc(100vh - 28px);
+    max-width: 1680px;
+    margin: 0 auto;
+    overflow: hidden;
+    border-radius: 34px;
+    background: var(--panel);
+  }
+
+  .login-panel {
+    display: flex;
+    flex-direction: column;
+    padding: clamp(28px, 4vw, 58px);
+    background: var(--panel);
+  }
+
+  .login-visual {
+    position: relative;
+    min-height: 680px;
+    overflow: hidden;
+    margin: 8px;
+    padding: clamp(28px, 4vw, 58px);
+    border-radius: 28px;
+    background:
+      radial-gradient(circle at 76% 10%, rgba(255, 255, 255, 0.12), transparent 28%),
+      #111;
+  }
+
+  .visual-orbit {
+    position: absolute;
+    border-radius: 999px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.01));
+    filter: blur(0.2px);
+  }
+
+  .visual-orbit-one {
+    top: 16%;
+    right: -12%;
+    width: min(42vw, 620px);
+    aspect-ratio: 1;
+  }
+
+  .visual-orbit-two {
+    top: 29%;
+    right: 6%;
+    width: min(25vw, 360px);
+    aspect-ratio: 1;
+    background: #242424;
+  }
+
+  .dashboard-frame {
+    display: grid;
+    grid-template-columns: 236px minmax(0, 1fr);
+    gap: 12px;
+    min-height: 100vh;
+    padding: 12px;
+    background: var(--shell);
+  }
+
+  .dashboard-sidebar {
+    position: sticky;
+    top: 12px;
+    display: flex;
+    height: calc(100vh - 24px);
+    flex-direction: column;
+    padding: 24px 18px 18px;
+    border-radius: 30px;
+    background:
+      radial-gradient(circle at 40% 4%, rgba(255, 255, 255, 0.09), transparent 22%),
+      #111;
+  }
+
+  .dashboard-main {
+    min-width: 0;
+    padding: clamp(24px, 3.2vw, 52px);
+    overflow: hidden;
+    border-radius: 30px;
+    background: var(--panel);
+  }
+
+  .dashboard-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 28px;
+  }
+
+  .portfolio-hero {
+    position: relative;
+    min-height: 360px;
+    overflow: hidden;
+    padding: clamp(24px, 4vw, 44px);
+    border-radius: 30px;
+    background:
+      radial-gradient(circle at 78% 12%, rgba(255, 255, 255, 0.13), transparent 24%),
+      #111;
+  }
+
+  .hero-glow {
+    position: absolute;
+    top: -22%;
+    right: -8%;
+    width: min(46vw, 580px);
+    aspect-ratio: 1;
+    border-radius: 999px;
+    background:
+      radial-gradient(circle at 36% 38%, rgba(255, 255, 255, 0.15), transparent 28%),
+      rgba(255, 255, 255, 0.035);
+  }
+
+  .holding-grid {
+    display: grid;
+    grid-template-columns: minmax(210px, 1.45fr) minmax(140px, 0.9fr) minmax(110px, 0.75fr) minmax(130px, 0.9fr) minmax(130px, 0.85fr);
+    gap: 18px;
+  }
+}
+
+@media (max-width: 1023px) {
+  .dashboard-frame {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .dashboard-sidebar {
+    display: none;
+  }
+
+  .dashboard-main {
+    min-height: calc(100vh - 16px);
+    border-radius: 26px;
+  }
+}
+
+@media (max-width: 880px) {
+  .login-shell {
+    display: block;
+    min-height: calc(100vh - 20px);
+    border-radius: 28px;
+  }
+
+  .login-stage {
+    padding: 10px;
+  }
+
+  .login-panel {
+    min-height: calc(100vh - 20px);
+  }
+
+  .login-visual {
+    display: none;
+  }
+}
+
+@media (max-width: 639px) {
+  .dashboard-main {
+    padding: 22px 16px;
+    border-radius: 24px;
+  }
+
+  .dashboard-header {
+    align-items: stretch;
+    flex-direction: column;
+    margin-bottom: 22px;
+  }
+
+  .portfolio-hero {
+    min-height: 400px;
+    border-radius: 26px;
+  }
+
+  .hero-glow {
+    width: 360px;
+    right: -42%;
+  }
+
+  .login-panel {
+    padding: 26px 22px 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

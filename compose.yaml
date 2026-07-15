@@ -1,0 +1,29 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3200"
+      DATABASE_PATH: /app/data/portfolio-history.sqlite
+      SNAPSHOT_REFRESH_HOURS: "6"
+      TZ: Asia/Seoul
+    ports:
+      - "0.0.0.0:3200:3200"
+    restart: unless-stopped
+    init: true
+    volumes:
+      - portfolio_data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  portfolio_data:

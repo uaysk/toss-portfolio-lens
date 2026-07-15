@@ -1,0 +1,436 @@
+import express, { type NextFunction, type Request, type Response } from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  clearSessionCookie,
+  createSessionCookie,
+  hasValidReadOnlyApiSecret,
+  hasValidSession,
+  passwordsMatch,
+  setNoStore,
+} from "./auth.js";
+import { HistoricalPortfolioBackfill } from "./backfill.js";
+import { loadConfig } from "./env.js";
+import {
+  isHistoryDate,
+  PortfolioHistoryStore,
+  type HistoryCurrency,
+  type HistoryRange,
+} from "./history.js";
+import {
+  MarketQueryError,
+  type MarketQuery,
+  type ReadOnlyMarketFeature,
+} from "./market.js";
+import { TossApiError, TossClient } from "./toss.js";
+
+const config = loadConfig();
+const toss = new TossClient(config);
+const historyStore = new PortfolioHistoryStore(config.databasePath);
+const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
+const app = express();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clientDirectory = path.resolve(__dirname, "../client");
+
+type AttemptState = {
+  count: number;
+  resetAt: number;
+};
+
+const loginAttempts = new Map<string, AttemptState>();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 5;
+
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(express.json({ limit: "16kb" }));
+app.use((_request, response, next) => {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  );
+  next();
+});
+
+function clientIp(request: Request): string {
+  return request.ip || request.socket.remoteAddress || "unknown";
+}
+
+function requireSession(request: Request, response: Response, next: NextFunction): void {
+  if (!hasValidSession(request, config.sessionSecret)) {
+    setNoStore(response);
+    response.status(401).json({ error: { code: "authentication-required", message: "로그인이 필요합니다." } });
+    return;
+  }
+  next();
+}
+
+function requireReadOnlyApiToken(request: Request, response: Response, next: NextFunction): void {
+  if (!hasValidReadOnlyApiSecret(request.get("authorization"), config.dashboardPassword)) {
+    setNoStore(response);
+    response.status(401).json({
+      error: { code: "invalid-token", message: "DASHBOARD_PASSWORD Bearer 토큰이 필요합니다." },
+    });
+    return;
+  }
+  next();
+}
+
+app.get("/api/health", (_request, response) => {
+  response.json({ status: "ok", service: "portfolio-lens" });
+});
+
+app.get("/api/auth/session", (request, response) => {
+  setNoStore(response);
+  response.json({ authenticated: hasValidSession(request, config.sessionSecret) });
+});
+
+app.post("/api/auth/login", (request, response) => {
+  setNoStore(response);
+  const ip = clientIp(request);
+  const now = Date.now();
+  const previous = loginAttempts.get(ip);
+  const attempts = previous && previous.resetAt > now ? previous : { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+
+  if (attempts.count >= MAX_LOGIN_ATTEMPTS) {
+    const retryAfter = Math.max(1, Math.ceil((attempts.resetAt - now) / 1000));
+    response.setHeader("Retry-After", String(retryAfter));
+    response.status(429).json({
+      error: {
+        code: "too-many-attempts",
+        message: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+      },
+    });
+    return;
+  }
+
+  const password = typeof request.body?.password === "string" ? request.body.password : "";
+  if (!passwordsMatch(password, config.dashboardPassword)) {
+    attempts.count += 1;
+    loginAttempts.set(ip, attempts);
+    response.status(401).json({ error: { code: "invalid-password", message: "비밀번호가 올바르지 않습니다." } });
+    return;
+  }
+
+  loginAttempts.delete(ip);
+  response.setHeader("Set-Cookie", createSessionCookie(request, config.sessionSecret));
+  response.json({ authenticated: true });
+});
+
+app.post("/api/auth/logout", (request, response) => {
+  setNoStore(response);
+  response.setHeader("Set-Cookie", clearSessionCookie(request));
+  response.json({ authenticated: false });
+});
+
+app.get("/api/portfolio", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const account = typeof request.query.account === "string" ? request.query.account : undefined;
+    const force = request.query.refresh === "1";
+    const portfolio = await toss.getPortfolio(account, force);
+    try {
+      historyStore.recordPortfolio(portfolio);
+    } catch (historyError) {
+      console.error("[history] 일별 스냅샷 저장 실패:", historyError instanceof Error ? historyError.message : historyError);
+    }
+    response.json(portfolio);
+  } catch (error) {
+    if (error instanceof TossApiError) {
+      const status = error.status === 400 || error.status === 404 || error.status === 429
+        ? error.status
+        : 502;
+      response.status(status).json({
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.requestId ? { requestId: error.requestId } : {}),
+        },
+      });
+      return;
+    }
+    const message = error instanceof Error && error.name === "TimeoutError"
+      ? "토스증권 응답 시간이 초과되었습니다."
+      : "포트폴리오를 불러오는 중 예기치 못한 오류가 발생했습니다.";
+    console.error("[portfolio]", error instanceof Error ? error.message : error);
+    response.status(502).json({ error: { code: "portfolio-unavailable", message } });
+  }
+});
+
+function compatibleMarketQuery(request: Request): MarketQuery {
+  const query: MarketQuery = {};
+  for (const [key, value] of Object.entries(request.query)) {
+    if (typeof value !== "string") {
+      throw new MarketQueryError(`${key} 조회 조건의 형식이 올바르지 않습니다.`);
+    }
+    query[key] = value;
+  }
+  return query;
+}
+
+function compatibleApiError(response: Response, error: unknown, fallback: string): void {
+  if (error instanceof MarketQueryError) {
+    response.status(400).json({ error: { code: "invalid-request", message: error.message } });
+    return;
+  }
+  if (error instanceof TossApiError) {
+    const status = [400, 404, 429].includes(error.status) ? error.status : 502;
+    response.status(status).json({
+      error: {
+        code: error.code,
+        message: error.message,
+        ...(error.requestId ? { requestId: error.requestId } : {}),
+      },
+    });
+    return;
+  }
+  console.error("[compatible-api] 조회 실패:", error instanceof Error ? error.message : error);
+  response.status(502).json({ error: { code: "upstream-unavailable", message: fallback } });
+}
+
+async function compatibleMarket(
+  feature: ReadOnlyMarketFeature,
+  request: Request,
+  response: Response,
+  pathQuery: MarketQuery = {},
+): Promise<void> {
+  setNoStore(response);
+  try {
+    const query = { ...compatibleMarketQuery(request), ...pathQuery };
+    const result = await toss.getReadOnlyMarketData(feature, query);
+    response.json(result.data);
+  } catch (error) {
+    compatibleApiError(response, error, "토스증권 시장 데이터를 불러오지 못했습니다.");
+  }
+}
+
+const compatibleMarketRoutes: Array<{ path: string; feature: ReadOnlyMarketFeature }> = [
+  { path: "/api/v1/orderbook", feature: "orderbook" },
+  { path: "/api/v1/prices", feature: "prices" },
+  { path: "/api/v1/trades", feature: "trades" },
+  { path: "/api/v1/price-limits", feature: "price-limits" },
+  { path: "/api/v1/candles", feature: "candles" },
+  { path: "/api/v1/stocks", feature: "stocks" },
+  { path: "/api/v1/exchange-rate", feature: "exchange-rate" },
+  { path: "/api/v1/rankings", feature: "rankings" },
+  { path: "/api/v1/market-indicators/prices", feature: "indicator-prices" },
+];
+
+for (const route of compatibleMarketRoutes) {
+  app.get(route.path, requireReadOnlyApiToken, (request, response) => compatibleMarket(route.feature, request, response));
+}
+
+app.get("/api/v1/stocks/:symbol/warnings", requireReadOnlyApiToken, (request, response) => (
+  compatibleMarket("warnings", request, response, { symbol: String(request.params.symbol ?? "") })
+));
+app.get("/api/v1/market-calendar/:country", requireReadOnlyApiToken, (request, response) => (
+  compatibleMarket("market-calendar", request, response, { country: String(request.params.country ?? "") })
+));
+app.get("/api/v1/market-indicators/:symbol/candles", requireReadOnlyApiToken, (request, response) => (
+  compatibleMarket("indicator-candles", request, response, { symbol: String(request.params.symbol ?? "") })
+));
+app.get("/api/v1/market-indicators/:symbol/investor-trading", requireReadOnlyApiToken, (request, response) => (
+  compatibleMarket("investor-trading", request, response, { symbol: String(request.params.symbol ?? "") })
+));
+
+app.get("/api/v1/accounts", requireReadOnlyApiToken, async (_request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await toss.getCompatibleAccounts());
+  } catch (error) {
+    compatibleApiError(response, error, "토스증권 계좌 목록을 불러오지 못했습니다.");
+  }
+});
+
+app.get("/api/v1/holdings", requireReadOnlyApiToken, async (request, response) => {
+  setNoStore(response);
+  const accountId = request.get("X-Tossinvest-Account")?.trim() ?? "";
+  if (!accountId || accountId.length > 128) {
+    response.status(400).json({
+      error: { code: "account-header-required", message: "X-Tossinvest-Account 헤더가 필요합니다." },
+    });
+    return;
+  }
+  try {
+    response.json(await toss.getCompatibleHoldings(accountId));
+  } catch (error) {
+    compatibleApiError(response, error, "토스증권 보유 자산을 불러오지 못했습니다.");
+  }
+});
+
+app.all("/api/v1/{*path}", requireReadOnlyApiToken, (_request, response) => {
+  setNoStore(response);
+  response.status(404).json({
+    error: {
+      code: "operation-not-supported",
+      message: "이 호환 API는 거래를 제외한 조회 전용 기능만 제공합니다.",
+    },
+  });
+});
+
+app.get("/api/portfolio/history", requireSession, (request, response) => {
+  setNoStore(response);
+  const accountId = typeof request.query.account === "string" ? request.query.account.trim() : "";
+  const currency = request.query.currency === "USD" ? "USD" : request.query.currency === "KRW" ? "KRW" : undefined;
+  const range = ["7d", "30d", "90d", "all"].includes(String(request.query.range))
+    ? request.query.range as HistoryRange
+    : undefined;
+  const fromDate = typeof request.query.from === "string" ? request.query.from.trim() : "";
+  const toDate = typeof request.query.to === "string" ? request.query.to.trim() : "";
+  const hasCustomRange = Boolean(fromDate || toDate);
+  const validCustomRange = !hasCustomRange
+    || (isHistoryDate(fromDate) && isHistoryDate(toDate) && fromDate <= toDate);
+
+  if (!accountId || !currency || !range || !validCustomRange) {
+    response.status(400).json({
+      error: {
+        code: "invalid-history-query",
+        message: "account, currency(KRW/USD), range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
+      },
+    });
+    return;
+  }
+
+  try {
+    response.json(historyStore.getHistory(
+      accountId,
+      currency as HistoryCurrency,
+      range,
+      new Date(),
+      hasCustomRange ? { from: fromDate, to: toDate } : undefined,
+    ));
+  } catch (error) {
+    console.error("[history] 일별 기록 조회 실패:", error instanceof Error ? error.message : error);
+    response.status(500).json({
+      error: { code: "history-unavailable", message: "일별 포트폴리오 기록을 불러오지 못했습니다." },
+    });
+  }
+});
+
+function requestedAccount(request: Request): string {
+  const account = typeof request.query.account === "string"
+    ? request.query.account
+    : typeof request.body?.account === "string"
+      ? request.body.account
+      : "";
+  return account.trim();
+}
+
+app.get("/api/portfolio/history/status", requireSession, (request, response) => {
+  setNoStore(response);
+  const accountId = requestedAccount(request);
+  if (!accountId || accountId.length > 128) {
+    response.status(400).json({
+      error: { code: "invalid-account", message: "조회할 계좌를 선택해 주세요." },
+    });
+    return;
+  }
+  response.json(historicalBackfill.getStatus(accountId));
+});
+
+app.post("/api/portfolio/history/backfill", requireSession, async (request, response) => {
+  setNoStore(response);
+  const accountId = requestedAccount(request);
+  if (!accountId || accountId.length > 128) {
+    response.status(400).json({
+      error: { code: "invalid-account", message: "동기화할 계좌를 선택해 주세요." },
+    });
+    return;
+  }
+  try {
+    const accounts = await toss.getAccounts();
+    if (!accounts.some((account) => account.id === accountId)) {
+      response.status(404).json({
+        error: { code: "invalid-account", message: "선택한 계좌를 찾을 수 없습니다." },
+      });
+      return;
+    }
+    const started = historicalBackfill.start(accountId, true);
+    response.status(202).json({
+      started,
+      status: historicalBackfill.getStatus(accountId),
+    });
+  } catch (error) {
+    const message = error instanceof TossApiError ? error.message : "과거 데이터 동기화를 시작하지 못했습니다.";
+    response.status(502).json({ error: { code: "backfill-unavailable", message } });
+  }
+});
+
+app.use(
+  express.static(clientDirectory, {
+    index: false,
+    maxAge: config.nodeEnv === "production" ? "1y" : 0,
+    immutable: config.nodeEnv === "production",
+  }),
+);
+
+app.get("/{*path}", (_request, response) => {
+  response.setHeader("Cache-Control", "no-cache");
+  response.sendFile(path.join(clientDirectory, "index.html"));
+});
+
+const server = app.listen(config.port, config.host, () => {
+  console.info("Portfolio Lens listening on http://" + config.host + ":" + config.port);
+});
+
+let collectingSnapshots = false;
+async function collectDailySnapshots(): Promise<void> {
+  if (collectingSnapshots) return;
+  collectingSnapshots = true;
+  try {
+    const accounts = await toss.getAccounts(true);
+    for (const account of accounts) {
+      try {
+        const portfolio = await toss.getPortfolio(account.id, true, false);
+        historyStore.recordPortfolio(portfolio);
+      } catch (error) {
+        console.warn(
+          "[history] " + account.id + " 계좌 수집 실패:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  } catch (error) {
+    console.warn("[history] 계좌 목록 수집 실패:", error instanceof Error ? error.message : error);
+  } finally {
+    collectingSnapshots = false;
+  }
+}
+
+async function collectInitialData(): Promise<void> {
+  await collectDailySnapshots();
+  try {
+    await historicalBackfill.runAll();
+  } catch (error) {
+    console.warn("[backfill] 초기 동기화 시작 실패:", error instanceof Error ? error.message : error);
+  }
+}
+
+const initialCollectionTimer = setTimeout(() => void collectInitialData(), 2_000);
+initialCollectionTimer.unref();
+const collectionInterval = setInterval(
+  () => void collectDailySnapshots(),
+  config.snapshotRefreshHours * 60 * 60 * 1000,
+);
+collectionInterval.unref();
+
+let shuttingDown = false;
+function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearTimeout(initialCollectionTimer);
+  clearInterval(collectionInterval);
+  server.close(async () => {
+    await historicalBackfill.waitForIdle();
+    historyStore.close();
+    console.info("Portfolio Lens stopped by " + signal);
+    process.exit(0);
+  });
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
