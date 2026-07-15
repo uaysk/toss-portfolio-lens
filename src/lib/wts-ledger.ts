@@ -85,12 +85,9 @@ function normalizeTime(hour: string, minute: string): string | undefined {
 
 export function parseWtsLedger(
   input: string,
-  options: { baseYear?: number; leadingDate?: string } = {},
+  options: { baseYear?: number } = {},
 ): WtsLedgerParseResult {
   const baseYear = options.baseYear ?? new Date().getFullYear();
-  const leadingDate = options.leadingDate && /^\d{4}-\d{2}-\d{2}$/.test(options.leadingDate)
-    ? options.leadingDate
-    : undefined;
   const lines = input
     .replace(/\r/g, "")
     .split("\n")
@@ -119,7 +116,7 @@ export function parseWtsLedger(
       continue;
     }
 
-    const date = cursor?.date ?? leadingDate;
+    const date = cursor?.date;
     if (!date) {
       unresolvedEntries += 1;
       index += 4;

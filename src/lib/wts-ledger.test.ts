@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseWtsLedger } from "@/lib/wts-ledger";
 
 const fixture = `
+7.15
+
 샘플전자 12주
 09:14 ㅣ 구매
 -120,600원
@@ -31,7 +33,7 @@ const fixture = `
 
 describe("parseWtsLedger", () => {
   it("주문·이체·환전을 추출하고 연도 경계를 역순으로 추론한다", () => {
-    const result = parseWtsLedger(fixture, { baseYear: 2026, leadingDate: "2026-07-15" });
+    const result = parseWtsLedger(fixture, { baseYear: 2026 });
     expect(result.unresolvedEntries).toBe(0);
     expect(result.entries).toHaveLength(4);
     expect(result.entries[0]).toMatchObject({
@@ -49,9 +51,9 @@ describe("parseWtsLedger", () => {
   });
 
   it("첫 날짜 머리글보다 앞선 거래는 날짜 지정 전까지 보류한다", () => {
-    const unresolved = parseWtsLedger(fixture, { baseYear: 2026 });
+    const unresolved = parseWtsLedger(`샘플전자 12주\n09:14 ㅣ 구매\n-120,600원\n879,400원\n7.14\n예금주A\n15:10 ㅣ 이체입금\n300,000원\n1,000,000원`, { baseYear: 2026 });
     expect(unresolved.unresolvedEntries).toBe(1);
-    expect(unresolved.entries).toHaveLength(3);
+    expect(unresolved.entries).toHaveLength(1);
   });
 
   it("파이프 문자와 달러 표시를 허용한다", () => {

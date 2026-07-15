@@ -22,7 +22,6 @@ export function WtsLedgerImporter({
   const today = useMemo(() => seoulDateString(), []);
   const [rawText, setRawText] = useState("");
   const [baseYear, setBaseYear] = useState(today.slice(0, 4));
-  const [leadingDate, setLeadingDate] = useState("");
   const [summary, setSummary] = useState<CashLedgerSummary>();
   const [loadingSummary, setLoadingSummary] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -30,21 +29,13 @@ export function WtsLedgerImporter({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const parsedWithoutLeadingDate = useMemo(
+  const parsed = useMemo(
     () => parseWtsLedger(rawText, { baseYear: Number(baseYear) || Number(today.slice(0, 4)) }),
     [baseYear, rawText, today],
   );
-  const parsed = useMemo(
-    () => parseWtsLedger(rawText, {
-      baseYear: Number(baseYear) || Number(today.slice(0, 4)),
-      ...(leadingDate ? { leadingDate } : {}),
-    }),
-    [baseYear, leadingDate, rawText, today],
-  );
-  const needsLeadingDate = parsedWithoutLeadingDate.unresolvedEntries > 0;
   const canImport = parsed.entries.length > 0
     && parsed.entries.length <= 1_000
-    && (!needsLeadingDate || Boolean(leadingDate))
+    && parsed.unresolvedEntries === 0
     && !saving;
   const previewEntries = rawText ? parsed.entries : summary?.entries ?? [];
 
@@ -104,7 +95,6 @@ export function WtsLedgerImporter({
       if (!response.ok) throw new Error(payload.error?.message || "거래내역을 저장하지 못했습니다.");
       setNotice(`${payload.imported ?? 0}건 저장 · 중복 ${payload.skipped ?? 0}건 제외`);
       setRawText("");
-      setLeadingDate("");
       const controller = loadSummary();
       window.setTimeout(() => controller.abort(), 10_000);
     } catch (caught) {
@@ -178,9 +168,9 @@ export function WtsLedgerImporter({
 
       <div className="mt-6 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
         <div className="rounded-[24px] bg-card p-4 sm:p-5">
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="max-w-xs">
             <label>
-              <span className="mb-1.5 block px-1 text-[10px] font-bold text-muted-foreground">목록 맨 위 기준 연도</span>
+              <span className="mb-1.5 block px-1 text-[10px] font-bold text-muted-foreground">맨 위 거래내역 연도</span>
               <Input
                 type="number"
                 min="2000"
@@ -189,18 +179,6 @@ export function WtsLedgerImporter({
                 onChange={(event) => setBaseYear(event.target.value)}
                 className="h-10 rounded-xl bg-secondary px-3 text-xs font-bold"
                 aria-label="거래내역 기준 연도"
-              />
-            </label>
-            <label className={needsLeadingDate ? "" : "opacity-55"}>
-              <span className="mb-1.5 block px-1 text-[10px] font-bold text-muted-foreground">첫 날짜 제목 이전 거래일</span>
-              <Input
-                type="date"
-                max={today}
-                value={leadingDate}
-                disabled={!needsLeadingDate}
-                onChange={(event) => setLeadingDate(event.target.value)}
-                className="h-10 rounded-xl bg-secondary px-3 text-xs font-bold"
-                aria-label="첫 거래 묶음 날짜"
               />
             </label>
           </div>
@@ -229,10 +207,10 @@ export function WtsLedgerImporter({
               추출 내역 저장
             </Button>
           </div>
-          {needsLeadingDate && !leadingDate ? (
+          {parsed.unresolvedEntries > 0 ? (
             <div className="mt-3 flex items-start gap-2 rounded-[16px] bg-amber-400/10 px-3 py-2.5 text-xs leading-5 text-amber-700 dark:text-amber-300">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              날짜 제목보다 앞선 거래 {parsedWithoutLeadingDate.unresolvedEntries}건이 있습니다. 해당 묶음의 실제 거래일을 선택해 주세요.
+              맨 위 날짜 제목보다 앞선 거래 {parsed.unresolvedEntries}건은 날짜를 알 수 없습니다. WTS에서 해당 거래의 날짜 제목(M.D, 예: 7.6)부터 포함해 다시 붙여넣어 주세요.
             </div>
           ) : null}
           {parsed.entries.length > 1_000 ? <p className="mt-3 text-xs font-bold text-destructive">한 번에 최대 1,000건까지 저장할 수 있습니다. 내용을 나누어 붙여넣어 주세요.</p> : null}
