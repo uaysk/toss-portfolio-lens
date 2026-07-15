@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analysisPeriodChange, buildAnalysisChartData } from "@/lib/analysis-chart";
+import { analysisComparisonDomain, analysisPeriodChange, buildAnalysisChartData } from "@/lib/analysis-chart";
 import type { PortfolioAnalysis } from "@/types";
 
 describe("analysis chart data", () => {
@@ -20,14 +20,21 @@ describe("analysis chart data", () => {
         { date: "2026-07-01", open: 100, high: 112, low: 95, close: 110 },
         { date: "2026-07-03", open: 110, high: 125, low: 108, close: 120 },
       ],
-      benchmarks: [{
-        key: "KOSPI",
-        name: "KOSPI",
-        points: [
-          { date: "2026-07-01", close: 1000 },
-          { date: "2026-07-02", close: 1050 },
-        ],
-      }],
+      benchmarks: [
+        {
+          key: "KOSPI",
+          name: "KOSPI",
+          points: [
+            { date: "2026-07-01", close: 1000 },
+            { date: "2026-07-02", close: 1050 },
+          ],
+        },
+        {
+          key: "NASDAQ100",
+          name: "나스닥 100",
+          points: [{ date: "2026-07-02", close: 500 }],
+        },
+      ],
       benchmarkErrors: [],
       metrics: {
         valuationChangePercent: 20,
@@ -57,8 +64,18 @@ describe("analysis chart data", () => {
     };
 
     const points = buildAnalysisChartData(analysis);
-    expect(points[0]).toMatchObject({ candleRange: [95, 112], benchmarkValues: { KOSPI: 0 } });
-    expect(points[1]).toMatchObject({ benchmarkValues: { KOSPI: 5 } });
+    expect(points[0]).toMatchObject({
+      normalizedClose: 0,
+      candleRange: [-13.6364, 1.8182],
+      benchmarkValues: { KOSPI: 0, NASDAQ100: 0 },
+    });
+    expect(points[1]).toMatchObject({
+      normalizedClose: 9.0909,
+      benchmarkValues: { KOSPI: 5, NASDAQ100: 0 },
+    });
     expect(analysisPeriodChange(points)).toBe(20);
+    const domain = analysisComparisonDomain(points, new Set(["KOSPI", "NASDAQ100"]));
+    expect(domain[0]).toBeLessThan(points[0].normalizedLow);
+    expect(domain[1]).toBeGreaterThan(points[1].normalizedHigh);
   });
 });

@@ -13,7 +13,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { analysisPeriodChange, buildAnalysisChartData, type AnalysisChartPoint } from "@/lib/analysis-chart";
+import {
+  analysisComparisonDomain,
+  analysisPeriodChange,
+  buildAnalysisChartData,
+  type AnalysisChartPoint,
+} from "@/lib/analysis-chart";
 import {
   isValidCalendarRange,
   seoulDateString,
@@ -72,15 +77,15 @@ type CandleShapeProps = {
 function CandleShape(input: unknown) {
   const { x = 0, y = 0, width = 0, height = 0, payload } = input as CandleShapeProps;
   if (!payload) return <g />;
-  const rising = payload.close >= payload.open;
+  const rising = payload.normalizedClose >= payload.normalizedOpen;
   const color = rising ? "#22c55e" : "#ef4444";
-  const spread = payload.high - payload.low;
+  const spread = payload.normalizedHigh - payload.normalizedLow;
   const pixelsPerUnit = spread > 0 ? height / spread : 0;
   const bodyTop = spread > 0
-    ? y + (payload.high - Math.max(payload.open, payload.close)) * pixelsPerUnit
+    ? y + (payload.normalizedHigh - Math.max(payload.normalizedOpen, payload.normalizedClose)) * pixelsPerUnit
     : y;
   const bodyBottom = spread > 0
-    ? y + (payload.high - Math.min(payload.open, payload.close)) * pixelsPerUnit
+    ? y + (payload.normalizedHigh - Math.min(payload.normalizedOpen, payload.normalizedClose)) * pixelsPerUnit
     : y;
   const center = x + width / 2;
   const bodyWidth = Math.max(1.5, Math.min(width * 0.72, 10));
@@ -219,6 +224,11 @@ export function PortfolioAnalysisView({
   }, [analysis]);
 
   const chartData = useMemo(() => analysis ? buildAnalysisChartData(analysis) : [], [analysis]);
+  const chartDomain = useMemo(
+    () => analysisComparisonDomain(chartData, selectedBenchmarks),
+    [chartData, selectedBenchmarks],
+  );
+  const portfolioBase = chartData[0]?.close ?? 0;
   const change = analysis?.metrics.valuationChangePercent ?? analysisPeriodChange(chartData);
   const latest = chartData.at(-1);
   const high = chartData.length ? Math.max(...chartData.map((point) => point.high)) : 0;
@@ -256,6 +266,7 @@ export function PortfolioAnalysisView({
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
               국내·해외 종목을 일별 USD/KRW 환율로 원화 환산해 한 번에 재구성한 전체 평가금 추정 OHLC입니다.
             </p>
+            <p className="mt-1 text-xs font-bold text-muted-foreground">포트폴리오와 비교 지수는 기준일 종가를 0%로 맞춰 같은 지점에서 시작합니다.</p>
           </div>
 
           <div className="w-full xl:w-[560px]">
@@ -370,8 +381,8 @@ export function PortfolioAnalysisView({
               <ComposedChart data={chartData} margin={{ top: 12, right: 4, bottom: 4, left: 0 }}>
                 <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
                 <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} axisLine={false} tickLine={false} minTickGap={34} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11, fontWeight: 600 }} />
-                <YAxis yAxisId="portfolio" domain={["auto", "auto"]} tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} axisLine={false} tickLine={false} width={66} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
-                <YAxis yAxisId="benchmark" orientation="right" domain={["auto", "auto"]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} axisLine={false} tickLine={false} width={42} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
+                <YAxis yAxisId="portfolio" domain={chartDomain} allowDataOverflow tickFormatter={(value) => formatMoney(portfolioBase * (1 + Number(value) / 100), "KRW", true)} axisLine={false} tickLine={false} width={66} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
+                <YAxis yAxisId="benchmark" orientation="right" domain={chartDomain} allowDataOverflow tickFormatter={(value) => `${Number(value).toFixed(0)}%`} axisLine={false} tickLine={false} width={42} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
                 <Tooltip content={(props) => <AnalysisTooltip {...props} selectedBenchmarks={selectedBenchmarks} />} cursor={{ fill: "hsl(var(--foreground) / 0.04)" }} />
                 <Bar yAxisId="portfolio" dataKey="candleRange" shape={CandleShape} isAnimationActive={false} maxBarSize={12} />
                 {benchmarks.filter((item) => selectedBenchmarks.has(item.key)).map((item) => (
