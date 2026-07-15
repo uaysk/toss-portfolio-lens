@@ -315,10 +315,16 @@ app.all("/api/v1/{*path}", requireReadOnlyApiToken, (_request, response) => {
   });
 });
 
-app.get("/api/portfolio/history", requireSession, (request, response) => {
+app.get("/api/portfolio/history", requireSession, async (request, response) => {
   setNoStore(response);
   const accountId = typeof request.query.account === "string" ? request.query.account.trim() : "";
-  const currency = request.query.currency === "USD" ? "USD" : request.query.currency === "KRW" ? "KRW" : undefined;
+  const currency = request.query.currency === "USD"
+    ? "USD"
+    : request.query.currency === "KRW"
+      ? "KRW"
+      : request.query.currency === "ALL"
+        ? "ALL"
+        : undefined;
   const range = ["7d", "30d", "90d", "all"].includes(String(request.query.range))
     ? request.query.range as HistoryRange
     : undefined;
@@ -332,20 +338,26 @@ app.get("/api/portfolio/history", requireSession, (request, response) => {
     response.status(400).json({
       error: {
         code: "invalid-history-query",
-        message: "account, currency(KRW/USD), range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
+        message: "account, currency(ALL/KRW/USD), range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
       },
     });
     return;
   }
 
   try {
-    response.json(historyStore.getHistory(
-      accountId,
-      currency as HistoryCurrency,
-      range,
-      new Date(),
-      hasCustomRange ? { from: fromDate, to: toDate } : undefined,
-    ));
+    response.json(currency === "ALL"
+      ? await portfolioAnalysis.getCombinedHistory({
+          accountId,
+          range,
+          ...(hasCustomRange ? { fromDate, toDate } : {}),
+        })
+      : historyStore.getHistory(
+          accountId,
+          currency as HistoryCurrency,
+          range,
+          new Date(),
+          hasCustomRange ? { from: fromDate, to: toDate } : undefined,
+        ));
   } catch (error) {
     console.error("[history] 일별 기록 조회 실패:", error instanceof Error ? error.message : error);
     response.status(500).json({
@@ -406,7 +418,6 @@ app.post("/api/portfolio/history/backfill", requireSession, async (request, resp
 app.get("/api/portfolio/analysis", requireSession, async (request, response) => {
   setNoStore(response);
   const accountId = requestedAccount(request);
-  const currency = request.query.currency === "USD" ? "USD" : request.query.currency === "KRW" ? "KRW" : undefined;
   const range = ["30d", "90d", "1y", "all"].includes(String(request.query.range))
     ? request.query.range as AnalysisRange
     : undefined;
@@ -416,11 +427,11 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
   const validCustomRange = !hasCustomRange
     || (isHistoryDate(fromQuery) && isHistoryDate(toQuery) && fromQuery <= toQuery);
 
-  if (!accountId || accountId.length > 128 || !currency || !range || !validCustomRange) {
+  if (!accountId || accountId.length > 128 || !range || !validCustomRange) {
     response.status(400).json({
       error: {
         code: "invalid-analysis-query",
-        message: "account, currency(KRW/USD), range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
+        message: "account, range와 from/to(YYYY-MM-DD) 값을 확인해 주세요.",
       },
     });
     return;
@@ -434,7 +445,6 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
     const toDate = hasCustomRange ? toQuery : today;
     response.json(await portfolioAnalysis.getAnalysis({
       accountId,
-      currency,
       range,
       fromDate,
       toDate,

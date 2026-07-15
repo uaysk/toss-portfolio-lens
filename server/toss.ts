@@ -86,6 +86,12 @@ export type DailyCandle = {
   closePrice: number;
 };
 
+export type ExchangeRate = {
+  date: string;
+  rate: number;
+  timestamp: string;
+};
+
 export type CandlePage = {
   candles: DailyCandle[];
   nextBefore?: string;
@@ -358,6 +364,29 @@ export function normalizeCandlePage(payload: unknown, symbol: string): CandlePag
   return {
     candles,
     nextBefore: stringFrom(result, ["nextBefore", "before"]) || undefined,
+  };
+}
+
+export function normalizeExchangeRatePayload(payload: unknown, date: string): ExchangeRate {
+  const candidates = collectRecords(payload)
+    .map((record) => ({
+      record,
+      rate: numberFrom(record, ["rate", "midRate", "exchangeRate", "basePrice"]),
+    }))
+    .filter((candidate) => candidate.rate > 100 && candidate.rate < 10_000)
+    .sort((left, right) => {
+      const leftScore = Number(left.record.midRate !== undefined) + Number(left.record.rate !== undefined) * 2;
+      const rightScore = Number(right.record.midRate !== undefined) + Number(right.record.rate !== undefined) * 2;
+      return rightScore - leftScore;
+    });
+  const selected = candidates[0];
+  if (!selected) {
+    throw new TossApiError("USD/KRW 환율 응답 형식이 올바르지 않습니다.", 502, "invalid-exchange-rate-response");
+  }
+  return {
+    date,
+    rate: selected.rate,
+    timestamp: stringFrom(selected.record, ["dateTime", "timestamp", "updatedAt"], `${date}T15:30:00+09:00`),
   };
 }
 
@@ -664,6 +693,18 @@ export class TossClient {
     return normalizeCandlePage(
       await this.get(`/api/v1/market-indicators/${symbol}/candles?${params.toString()}`),
       symbol,
+    );
+  }
+
+  async getUsdKrwExchangeRate(date: string): Promise<ExchangeRate> {
+    const params = new URLSearchParams({
+      dateTime: `${date}T15:30:00+09:00`,
+      baseCurrency: "USD",
+      quoteCurrency: "KRW",
+    });
+    return normalizeExchangeRatePayload(
+      await this.get("/api/v1/exchange-rate?" + params.toString()),
+      date,
     );
   }
 

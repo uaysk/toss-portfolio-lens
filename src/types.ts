@@ -63,12 +63,14 @@ export type PortfolioHistorySeries = {
   symbol: string;
   name: string;
   market: string;
+  currency: HistoryCurrency;
   averageWeight: number;
 };
 
 export type PortfolioHistory = {
   accountId: string;
   currency: HistoryCurrency;
+  includesCurrencies?: HistoryCurrency[];
   range: HistoryRange;
   generatedAt: string;
   firstSnapshotDate?: string;
@@ -105,13 +107,16 @@ export type BackfillStatus = {
 
 export type PortfolioAnalysis = {
   accountId: string;
-  currency: HistoryCurrency;
+  currency: "KRW";
+  baseCurrency: "KRW";
+  includesCurrencies: ["KRW", "USD"];
   range: AnalysisRange;
   generatedAt: string;
   fromDate: string;
   toDate: string;
   estimatedOhlc: true;
   ohlcBackfillComplete: boolean;
+  fxBackfillComplete: boolean;
   candles: Array<{
     date: string;
     open: number;
@@ -126,4 +131,37 @@ export type PortfolioAnalysis = {
     points: Array<{ date: string; close: number }>;
   }>;
   benchmarkErrors: Array<{ key: BenchmarkKey; message: string }>;
+  metrics: {
+    valuationChangePercent: number;
+    estimatedReturnPercent: number | null;
+    annualizedReturnPercent: number | null;
+    annualizedVolatilityPercent: number | null;
+    maxDrawdownPercent: number | null;
+    currentDrawdownPercent: number | null;
+    maxDrawdownDays: number | null;
+    sharpeRatio: number | null;
+    sortinoRatio: number | null;
+    calmarRatio: number | null;
+    top3WeightPercent: number;
+    hhi: number;
+    effectivePositions: number;
+    benchmarkReturns: Partial<Record<BenchmarkKey, number>>;
+    excessReturns: Partial<Record<BenchmarkKey, number>>;
+    totalBuyAmount: number;
+    totalSellAmount: number;
+    commission: number;
+    tax: number;
+    turnoverPercent: number;
+    tradeCount: number;
+    riskFreeRatePercent: 0;
+  };
+  contributions: Array<{
+    key: string;
+    symbol: string;
+    name: string;
+    market: string;
+    currency: HistoryCurrency;
+    estimatedProfitLoss: number;
+    contributionPercent: number;
+  }>;
 };

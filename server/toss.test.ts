@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeCandlePage,
+  normalizeExchangeRatePayload,
   normalizeHoldingsPayload,
   normalizeInstrumentsPayload,
   normalizeOrderPage,
@@ -167,5 +168,13 @@ describe("과거 데이터 정규화", () => {
     expect(normalizeInstrumentsPayload({
       result: [{ symbol: "AAPL", name: "애플", market: "NASDAQ", currency: "USD" }],
     })).toEqual([{ symbol: "AAPL", name: "애플", market: "NASDAQ", currency: "USD" }]);
+
+    expect(normalizeExchangeRatePayload({
+      result: { baseCurrency: "USD", quoteCurrency: "KRW", rate: "1387.25", dateTime: "2026-07-01T15:30:00+09:00" },
+    }, "2026-07-01")).toEqual({
+      date: "2026-07-01",
+      rate: 1387.25,
+      timestamp: "2026-07-01T15:30:00+09:00",
+    });
   });
 });

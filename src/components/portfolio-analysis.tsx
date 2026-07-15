@@ -20,13 +20,12 @@ import {
   shiftCalendarDate,
   type CalendarDateRange,
 } from "@/lib/date-range";
-import { formatMoney, formatPercent } from "@/lib/format";
+import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
   AnalysisRange,
   ApiError,
   BenchmarkKey,
-  HistoryCurrency,
   Portfolio,
   PortfolioAnalysis,
 } from "@/types";
@@ -107,21 +106,20 @@ type TooltipContentProps = {
   active?: boolean;
   label?: string;
   payload?: Array<{ payload?: AnalysisChartPoint }>;
-  currency: HistoryCurrency;
   selectedBenchmarks: ReadonlySet<BenchmarkKey>;
 };
 
-function AnalysisTooltip({ active, label, payload, currency, selectedBenchmarks }: TooltipContentProps) {
+function AnalysisTooltip({ active, label, payload, selectedBenchmarks }: TooltipContentProps) {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
   return (
     <div className="min-w-48 rounded-2xl bg-card p-4 text-xs shadow-2xl">
       <p className="font-black">{displayDate(String(label), true)}</p>
       <div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-1.5 text-muted-foreground">
-        <span>시가</span><strong className="text-right text-foreground">{formatMoney(point.open, currency)}</strong>
-        <span>고가</span><strong className="text-right text-foreground">{formatMoney(point.high, currency)}</strong>
-        <span>저가</span><strong className="text-right text-foreground">{formatMoney(point.low, currency)}</strong>
-        <span>종가</span><strong className="text-right text-foreground">{formatMoney(point.close, currency)}</strong>
+        <span>시가</span><strong className="text-right text-foreground">{formatMoney(point.open, "KRW")}</strong>
+        <span>고가</span><strong className="text-right text-foreground">{formatMoney(point.high, "KRW")}</strong>
+        <span>저가</span><strong className="text-right text-foreground">{formatMoney(point.low, "KRW")}</strong>
+        <span>종가</span><strong className="text-right text-foreground">{formatMoney(point.close, "KRW")}</strong>
       </div>
       <div className="mt-3 space-y-1.5">
         {benchmarks.filter((item) => selectedBenchmarks.has(item.key)).map((item) => {
@@ -140,6 +138,24 @@ function AnalysisTooltip({ active, label, payload, currency, selectedBenchmarks 
   );
 }
 
+function metricPercent(value: number | null | undefined): string {
+  return value === null || value === undefined ? "데이터 부족" : formatPercent(value, true);
+}
+
+function metricRatio(value: number | null | undefined): string {
+  return value === null || value === undefined ? "데이터 부족" : value.toFixed(2);
+}
+
+function MetricCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="min-w-0 rounded-[20px] bg-card p-4 sm:p-5">
+      <p className="text-[11px] font-bold text-muted-foreground">{label}</p>
+      <p className="mt-2 truncate text-xl font-black tracking-[-0.035em]">{value}</p>
+      <p className="mt-2 text-[11px] leading-4 text-muted-foreground">{detail}</p>
+    </div>
+  );
+}
+
 export function PortfolioAnalysisView({
   portfolio,
   onUnauthorized,
@@ -148,7 +164,6 @@ export function PortfolioAnalysisView({
   onUnauthorized: () => void;
 }) {
   const today = useMemo(() => seoulDateString(), []);
-  const [currency, setCurrency] = useState<HistoryCurrency>("KRW");
   const [period, setPeriod] = useState<AnalysisRange | "custom">("30d");
   const [draftDateRange, setDraftDateRange] = useState<CalendarDateRange>(() => presetRange("30d", today));
   const [customDateRange, setCustomDateRange] = useState<CalendarDateRange>();
@@ -164,7 +179,6 @@ export function PortfolioAnalysisView({
     const controller = new AbortController();
     const params = new URLSearchParams({
       account: portfolio.selectedAccountId,
-      currency,
       range: period === "custom" ? "all" : period,
       benchmarks: benchmarks.map((item) => item.key).join(","),
     });
@@ -196,7 +210,7 @@ export function PortfolioAnalysisView({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [currency, customDateRange?.from, customDateRange?.to, onUnauthorized, period, portfolio.selectedAccountId, retryKey, today]);
+  }, [customDateRange?.from, customDateRange?.to, onUnauthorized, period, portfolio.selectedAccountId, retryKey, today]);
 
   useEffect(() => {
     if (!analysis || analysis.ohlcBackfillComplete) return;
@@ -205,7 +219,7 @@ export function PortfolioAnalysisView({
   }, [analysis]);
 
   const chartData = useMemo(() => analysis ? buildAnalysisChartData(analysis) : [], [analysis]);
-  const change = analysisPeriodChange(chartData);
+  const change = analysis?.metrics.valuationChangePercent ?? analysisPeriodChange(chartData);
   const latest = chartData.at(-1);
   const high = chartData.length ? Math.max(...chartData.map((point) => point.high)) : 0;
   const low = chartData.length ? Math.min(...chartData.map((point) => point.low)) : 0;
@@ -240,27 +254,14 @@ export function PortfolioAnalysisView({
             </div>
             <h2 id="analysis-title" className="text-2xl font-black tracking-[-0.04em]">포트폴리오 전체 평가금 일봉</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              종목별 일봉과 해당일 보유수량으로 재구성한 {currency} 전체 평가금 추정 OHLC입니다.
+              국내·해외 종목을 일별 USD/KRW 환율로 원화 환산해 한 번에 재구성한 전체 평가금 추정 OHLC입니다.
             </p>
           </div>
 
           <div className="w-full xl:w-[560px]">
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <div className="flex rounded-full bg-card p-1" aria-label="분석 통화 선택">
-                {(["KRW", "USD"] as const).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    aria-pressed={currency === item}
-                    onClick={() => setCurrency(item)}
-                    className={cn(
-                      "rounded-full px-3 py-2 text-[11px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      currency === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {item === "KRW" ? "KRW · 국내" : "USD · 해외/과거"}
-                  </button>
-                ))}
+              <div className="inline-flex min-h-10 items-center justify-center rounded-full bg-card px-4 text-[11px] font-black text-muted-foreground">
+                KRW 환산 · 국내 + 해외
               </div>
               <div className="grid flex-1 grid-cols-4 rounded-full bg-card p-1" aria-label="분석 기간">
                 {ranges.map((item) => (
@@ -338,10 +339,10 @@ export function PortfolioAnalysisView({
         {!loading && !error && chartData.length ? (
           <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-4" aria-label="평가금 일봉 요약">
             {[
-              ["최근 종가", formatMoney(latest?.close ?? 0, currency)],
+              ["최근 종가", formatMoney(latest?.close ?? 0, "KRW")],
               ["기간 평가금 변화", formatPercent(change, true)],
-              ["기간 추정 고가", formatMoney(high, currency)],
-              ["기간 추정 저가", formatMoney(low, currency)],
+              ["기간 추정 고가", formatMoney(high, "KRW")],
+              ["기간 추정 저가", formatMoney(low, "KRW")],
             ].map(([label, value]) => (
               <div key={label} className="rounded-[20px] bg-card p-4">
                 <p className="text-[11px] font-bold text-muted-foreground">{label}</p>
@@ -361,7 +362,7 @@ export function PortfolioAnalysisView({
           </div>
         ) : chartData.length === 0 ? (
           <div className="mt-6 grid h-[360px] place-items-center rounded-[24px] bg-card px-6 text-center">
-            <div><BarChart3 className="mx-auto size-7 text-muted-foreground" /><p className="mt-4 text-base font-black">선택 기간에 평가금 일봉이 없습니다.</p><p className="mt-2 text-sm text-muted-foreground">다른 통화 또는 더 긴 기간을 선택해 주세요.</p></div>
+            <div><BarChart3 className="mx-auto size-7 text-muted-foreground" /><p className="mt-4 text-base font-black">선택 기간에 평가금 일봉이 없습니다.</p><p className="mt-2 text-sm text-muted-foreground">더 긴 기간을 선택해 주세요.</p></div>
           </div>
         ) : (
           <div className="mt-7 h-[420px] w-full sm:h-[520px]" aria-label="포트폴리오 평가금 일봉과 비교 지수 차트">
@@ -369,9 +370,9 @@ export function PortfolioAnalysisView({
               <ComposedChart data={chartData} margin={{ top: 12, right: 4, bottom: 4, left: 0 }}>
                 <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
                 <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} axisLine={false} tickLine={false} minTickGap={34} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11, fontWeight: 600 }} />
-                <YAxis yAxisId="portfolio" domain={["auto", "auto"]} tickFormatter={(value) => formatMoney(Number(value), currency, true)} axisLine={false} tickLine={false} width={66} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
+                <YAxis yAxisId="portfolio" domain={["auto", "auto"]} tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} axisLine={false} tickLine={false} width={66} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
                 <YAxis yAxisId="benchmark" orientation="right" domain={["auto", "auto"]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} axisLine={false} tickLine={false} width={42} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
-                <Tooltip content={(props) => <AnalysisTooltip {...props} currency={currency} selectedBenchmarks={selectedBenchmarks} />} cursor={{ fill: "hsl(var(--foreground) / 0.04)" }} />
+                <Tooltip content={(props) => <AnalysisTooltip {...props} selectedBenchmarks={selectedBenchmarks} />} cursor={{ fill: "hsl(var(--foreground) / 0.04)" }} />
                 <Bar yAxisId="portfolio" dataKey="candleRange" shape={CandleShape} isAnimationActive={false} maxBarSize={12} />
                 {benchmarks.filter((item) => selectedBenchmarks.has(item.key)).map((item) => (
                   <Line
@@ -404,6 +405,84 @@ export function PortfolioAnalysisView({
           <p className="mt-3 text-xs text-muted-foreground">일부 비교 지수를 불러오지 못했습니다: {analysis.benchmarkErrors.map((item) => item.key).join(", ")}</p>
         ) : null}
       </Card>
+
+      {analysis && !loading && !error ? (
+        <>
+          <Card className="bg-secondary p-5 sm:p-7">
+            <div>
+              <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">PERFORMANCE</p>
+              <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">성과와 벤치마크</h3>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">전일 보유비중으로 가중한 종목·환율 수익률과 주요 시장지수를 비교합니다.</p>
+            </div>
+            <div className="mt-5 grid grid-cols-2 gap-2 xl:grid-cols-4">
+              <MetricCard label="추정 운용수익률" value={metricPercent(analysis.metrics.estimatedReturnPercent)} detail="전일 보유비중으로 일간수익률 연결" />
+              <MetricCard label="연환산 추정수익률" value={metricPercent(analysis.metrics.annualizedReturnPercent)} detail="252 거래일 기준 복리 환산" />
+              <MetricCard label="KOSPI 대비" value={metricPercent(analysis.metrics.excessReturns.KOSPI)} detail={`KOSPI ${metricPercent(analysis.metrics.benchmarkReturns.KOSPI)}`} />
+              <MetricCard label="나스닥 100 대비" value={metricPercent(analysis.metrics.excessReturns.NASDAQ100)} detail={`QQQ 프록시 ${metricPercent(analysis.metrics.benchmarkReturns.NASDAQ100)}`} />
+            </div>
+          </Card>
+
+          <div className="grid gap-3 xl:grid-cols-[1.35fr_1fr]">
+            <Card className="bg-secondary p-5 sm:p-7">
+              <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">RISK</p>
+              <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">위험 대비 성과</h3>
+              <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-3">
+                <MetricCard label="연환산 변동성" value={metricPercent(analysis.metrics.annualizedVolatilityPercent)} detail="일별 추정수익률 표준편차" />
+                <MetricCard label="최대 낙폭 MDD" value={metricPercent(analysis.metrics.maxDrawdownPercent)} detail={`최장 낙폭 ${analysis.metrics.maxDrawdownDays ?? 0}일`} />
+                <MetricCard label="현재 낙폭" value={metricPercent(analysis.metrics.currentDrawdownPercent)} detail="최근 고점 대비" />
+                <MetricCard label="샤프지수" value={metricRatio(analysis.metrics.sharpeRatio)} detail="무위험수익률 0% 가정" />
+                <MetricCard label="소르티노지수" value={metricRatio(analysis.metrics.sortinoRatio)} detail="하방 변동성만 위험으로 반영" />
+                <MetricCard label="Calmar 비율" value={metricRatio(analysis.metrics.calmarRatio)} detail="연환산 수익률 ÷ MDD" />
+              </div>
+            </Card>
+
+            <Card className="bg-secondary p-5 sm:p-7">
+              <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">DIVERSIFICATION & COST</p>
+              <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">집중도와 거래 비용</h3>
+              <div className="mt-5 grid grid-cols-2 gap-2">
+                <MetricCard label="상위 3종목 비중" value={formatPercent(analysis.metrics.top3WeightPercent)} detail="기간 마지막 평가일 기준" />
+                <MetricCard label="유효 종목 수" value={`${analysis.metrics.effectivePositions.toFixed(1)}개`} detail={`HHI ${analysis.metrics.hhi.toFixed(3)}`} />
+                <MetricCard label="회전율" value={formatPercent(analysis.metrics.turnoverPercent)} detail={`체결 ${analysis.metrics.tradeCount.toLocaleString("ko-KR")}건`} />
+                <MetricCard label="수수료 · 세금" value={formatMoney(analysis.metrics.commission + analysis.metrics.tax, "KRW")} detail={`수수료 ${formatMoney(analysis.metrics.commission, "KRW")} · 세금 ${formatMoney(analysis.metrics.tax, "KRW")}`} />
+              </div>
+            </Card>
+          </div>
+
+          <Card className="bg-secondary p-5 sm:p-7">
+            <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">CONTRIBUTION</p>
+            <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">종목별 추정 성과 기여도</h3>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">기간 시작·종료 평가금과 기간 중 체결 순액으로 계산한 상위 기여 종목입니다.</p>
+            {analysis.contributions.length ? (
+              <div className="mt-6 space-y-4">
+                {analysis.contributions.map((item) => {
+                  const maximum = Math.max(...analysis.contributions.map((candidate) => Math.abs(candidate.estimatedProfitLoss)), 1);
+                  const positive = item.estimatedProfitLoss >= 0;
+                  return (
+                    <div key={`${item.currency}:${item.key}`} className="grid gap-2 sm:grid-cols-[minmax(130px,0.8fr)_minmax(180px,2fr)_auto] sm:items-center">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-black">{item.name}</p>
+                        <p className="text-[10px] font-bold text-muted-foreground">{item.market} · {item.symbol}</p>
+                      </div>
+                      <div className="h-2.5 overflow-hidden rounded-full bg-card">
+                        <div className={cn("h-full rounded-full", positive ? "bg-emerald-300 dark:bg-emerald-300" : "bg-rose-300 dark:bg-rose-300")} style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%` }} />
+                      </div>
+                      <div className="text-left sm:text-right">
+                        <p className="text-sm font-black">{formatSignedMoney(item.estimatedProfitLoss, "KRW")}</p>
+                        <p className="text-[10px] font-bold text-muted-foreground">{formatPercent(item.contributionPercent, true)}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : <p className="mt-6 rounded-[20px] bg-card p-5 text-sm text-muted-foreground">선택 기간에 계산할 종목별 기여 내역이 없습니다.</p>}
+          </Card>
+
+          <div className="flex items-start gap-2 rounded-[18px] bg-secondary px-4 py-3 text-xs leading-5 text-muted-foreground">
+            <Info className="mt-0.5 size-4 shrink-0" />
+            <p>입출금·배당 원장이 제공되지 않아 TWR·XIRR은 표시하지 않습니다. 추정 운용수익률은 전일 종목 비중과 가격·환율 수익률을 연결한 참고 지표이며, 기여도는 체결 순액을 이용한 추정치입니다. 세금·수수료는 별도로 표시합니다.</p>
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }

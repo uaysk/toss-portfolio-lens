@@ -119,6 +119,8 @@ describe("PortfolioHistoryStore", () => {
     }]);
     expect(store.getDailyPrices(["KRW:AAA"], "2026-07-01", "2026-07-02").get("KRW:AAA")?.get("2026-07-01"))
       .toBe(110);
+    store.upsertExchangeRate("2026-07-01", 1387.25, "2026-07-01T15:30:00+09:00");
+    expect(store.getExchangeRates("2026-07-01", "2026-07-02").get("2026-07-01")).toBe(1387.25);
 
     expect(store.replaceHistoricalSnapshots("account-1", [{
       date: "2026-07-01",

@@ -1,9 +1,9 @@
 import type { Theme } from "@/types";
 
 const darkPalette = [
-  "#60a5fa", "#fb923c", "#34d399", "#a78bfa", "#fb7185", "#22d3ee",
-  "#fbbf24", "#818cf8", "#a3e635", "#f472b6", "#2dd4bf", "#f87171",
-  "#38bdf8", "#c084fc", "#facc15", "#4ade80", "#e879f9", "#d946ef",
+  "#67E8F9", "#A7F3D0", "#C4B5FD", "#FDBA74", "#F9A8D4", "#93C5FD",
+  "#FDE68A", "#99F6E4", "#D8B4FE", "#FDA4AF", "#A5B4FC", "#BEF264",
+  "#7DD3FC", "#6EE7B7", "#E9D5FF", "#FCA5A5", "#F0ABFC", "#5EEAD4",
 ];
 
 const lightPalette = [

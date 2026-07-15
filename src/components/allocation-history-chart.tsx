@@ -25,7 +25,6 @@ import { cn } from "@/lib/utils";
 import type {
   ApiError,
   BackfillStatus,
-  HistoryCurrency,
   HistoryRange,
   Portfolio,
   PortfolioHistory,
@@ -63,14 +62,6 @@ export function AllocationHistoryChart({
   onUnauthorized: () => void;
   onSeriesChange: (series: PortfolioHistorySeries[]) => void;
 }) {
-  const availableCurrencies: HistoryCurrency[] = ["KRW", "USD"];
-  const [currency, setCurrency] = useState<HistoryCurrency>(
-    portfolio.holdings.some((holding) => holding.currency === "KRW" && holding.evaluationAmount > 0)
-      ? "KRW"
-      : portfolio.holdings.some((holding) => holding.currency === "USD" && holding.evaluationAmount > 0)
-        ? "USD"
-        : "KRW",
-  );
   const today = useMemo(() => seoulDateString(), []);
   const [period, setPeriod] = useState<HistoryRange | "custom">("30d");
   const [draftDateRange, setDraftDateRange] = useState<CalendarDateRange>(
@@ -158,7 +149,7 @@ export function AllocationHistoryChart({
     const queryRange: HistoryRange = period === "custom" ? "all" : period;
     const params = new URLSearchParams({
       account: portfolio.selectedAccountId,
-      currency,
+      currency: "ALL",
       range: queryRange,
     });
     if (period === "custom" && customDateRange) {
@@ -192,7 +183,6 @@ export function AllocationHistoryChart({
 
     return () => controller.abort();
   }, [
-    currency,
     customDateRange?.from,
     customDateRange?.to,
     onSeriesChange,
@@ -238,7 +228,7 @@ export function AllocationHistoryChart({
             </div>
             <h2 id="history-title" className="text-2xl font-black tracking-[-0.04em]">종목별 포트폴리오 비중</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              KST 일 단위 · 영역 두께는 종목 비중, 전체 높이는 {currency} 평가금 · USD는 과거 해외주식 포함
+              KST 일 단위 · 국내·해외 주식을 일별 USD/KRW 환율로 합산한 원화 평가금
             </p>
             {backfill ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -284,21 +274,8 @@ export function AllocationHistoryChart({
 
           <div className="w-full xl:w-[540px]">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
-              <div className="flex rounded-full bg-card p-1" aria-label="통화 선택">
-                {availableCurrencies.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setCurrency(item)}
-                    aria-pressed={currency === item}
-                    className={cn(
-                      "rounded-full px-3 py-2 text-[11px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      currency === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                      {item === "KRW" ? "KRW · 국내" : "USD · 해외/과거"}
-                  </button>
-                ))}
+              <div className="inline-flex min-h-10 items-center justify-center rounded-full bg-card px-4 text-[11px] font-black text-muted-foreground">
+                KRW 환산 · 국내 + 해외
               </div>
               <div className="grid flex-1 grid-cols-4 rounded-full bg-card p-1" aria-label="빠른 조회 기간">
                 {ranges.map((item) => (
@@ -431,6 +408,14 @@ export function AllocationHistoryChart({
           <div className="mt-7 h-[300px] w-full sm:h-[370px]" aria-label="일별 종목 평가금 누적 영역 차트">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData} margin={{ top: 10, right: 4, bottom: 0, left: 0 }}>
+                <defs>
+                  {series.map((item, index) => (
+                    <linearGradient key={item.key} id={`portfolio-area-${index}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={stockColor(item.key, theme)} stopOpacity={0.9} />
+                      <stop offset="100%" stopColor={stockColor(item.key, theme)} stopOpacity={0.42} />
+                    </linearGradient>
+                  ))}
+                </defs>
                 <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
                 <XAxis
                   dataKey="date"
@@ -442,7 +427,7 @@ export function AllocationHistoryChart({
                 />
                 <YAxis
                   domain={[0, "auto"]}
-                  tickFormatter={(value) => formatMoney(Number(value), currency, true)}
+                  tickFormatter={(value) => formatMoney(Number(value), "KRW", true)}
                   axisLine={false}
                   tickLine={false}
                   width={64}
@@ -453,7 +438,7 @@ export function AllocationHistoryChart({
                     const amount = Number(value);
                     const totalValue = Number(entry.payload?.totalValue ?? 0);
                     const weight = totalValue > 0 ? (amount / totalValue) * 100 : 0;
-                    return [`${formatMoney(amount, currency)} · ${weight.toFixed(1)}%`, String(name)];
+                    return [`${formatMoney(amount, "KRW")} · ${weight.toFixed(1)}%`, String(name)];
                   }}
                   labelFormatter={(label) => displayDate(String(label), true)}
                   contentStyle={{
@@ -476,9 +461,9 @@ export function AllocationHistoryChart({
                     name={item.name}
                     stackId="portfolio"
                     stroke={stockColor(item.key, theme)}
-                    fill={stockColor(item.key, theme)}
-                    strokeWidth={1.5}
-                    fillOpacity={0.78}
+                    fill={`url(#portfolio-area-${index})`}
+                    strokeWidth={2}
+                    fillOpacity={1}
                     isAnimationActive={false}
                   />
                 ))}

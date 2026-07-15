@@ -10,6 +10,7 @@ export type HistoryDateRange = { from: string; to: string };
 export type PortfolioHistory = {
   accountId: string;
   currency: HistoryCurrency;
+  includesCurrencies?: HistoryCurrency[];
   range: HistoryRange;
   generatedAt: string;
   firstSnapshotDate?: string;
@@ -20,6 +21,7 @@ export type PortfolioHistory = {
     symbol: string;
     name: string;
     market: string;
+    currency: HistoryCurrency;
     averageWeight: number;
   }>;
   points: Array<{
@@ -218,6 +220,19 @@ export class PortfolioHistoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
         ON portfolio_benchmark_prices(benchmark_key, price_date);
+
+      CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
+        rate_date TEXT NOT NULL,
+        base_currency TEXT NOT NULL,
+        quote_currency TEXT NOT NULL,
+        rate REAL NOT NULL,
+        timestamp TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(rate_date, base_currency, quote_currency)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date
+        ON portfolio_exchange_rates(base_currency, quote_currency, rate_date);
 
       CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
         account_id TEXT PRIMARY KEY,
@@ -598,6 +613,59 @@ export class PortfolioHistoryStore {
     }
   }
 
+  upsertExchangeRate(
+    rateDate: string,
+    rate: number,
+    timestamp: string,
+    updatedAt = Date.now(),
+  ): void {
+    this.db.prepare(`
+      INSERT INTO portfolio_exchange_rates (
+        rate_date, base_currency, quote_currency, rate, timestamp, updated_at
+      ) VALUES (?, 'USD', 'KRW', ?, ?, ?)
+      ON CONFLICT(rate_date, base_currency, quote_currency) DO UPDATE SET
+        rate = excluded.rate,
+        timestamp = excluded.timestamp,
+        updated_at = excluded.updated_at
+    `).run(rateDate, rate, timestamp, updatedAt);
+  }
+
+  getExchangeRates(fromDate: string, toDate: string): Map<string, number> {
+    const rows = this.db.prepare(`
+      SELECT rate_date, rate
+      FROM portfolio_exchange_rates
+      WHERE base_currency = 'USD' AND quote_currency = 'KRW'
+        AND rate_date BETWEEN ? AND ?
+      ORDER BY rate_date ASC
+    `).all(fromDate, toDate) as Array<{ rate_date: string; rate: number }>;
+    return new Map(rows.map((row) => [row.rate_date, Number(row.rate)]));
+  }
+
+  getRequiredExchangeRateDates(accountId: string, fromDate: string, toDate: string): string[] {
+    const snapshotRows = this.db.prepare(`
+      SELECT DISTINCT snapshots.snapshot_date AS rate_date
+      FROM portfolio_snapshots AS snapshots
+      JOIN portfolio_snapshot_items AS items ON items.snapshot_id = snapshots.id
+      WHERE snapshots.account_id = ?
+        AND items.currency = 'USD'
+        AND items.evaluation_amount > 0
+        AND snapshots.snapshot_date BETWEEN ? AND ?
+      ORDER BY snapshots.snapshot_date ASC
+    `).all(accountId, fromDate, toDate) as Array<{ rate_date: string }>;
+    const dates = new Set(snapshotRows.map((row) => row.rate_date));
+    for (const order of this.getOrders(accountId)) {
+      if (order.currency !== "USD") continue;
+      const timestamp = order.filledAt || order.orderedAt;
+      if (!timestamp) continue;
+      const parsed = new Date(timestamp);
+      const date = !Number.isNaN(parsed.getTime()) && /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp)
+        ? kstDateString(parsed)
+        : timestamp.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? "";
+      if (date >= fromDate && date <= toDate) dates.add(date);
+    }
+    return Array.from(dates).sort();
+  }
+
   getBenchmarkPriceBounds(benchmarkKey: string): { earliest?: string; latest?: string } {
     const row = this.db.prepare(`
       SELECT MIN(price_date) AS earliest, MAX(price_date) AS latest
@@ -834,6 +902,7 @@ export class PortfolioHistoryStore {
       symbol: string;
       name: string;
       market: string;
+      currency: HistoryCurrency;
       weightSum: number;
     }>();
     for (const item of items) {
@@ -849,6 +918,7 @@ export class PortfolioHistoryStore {
           symbol: item.symbol,
           name: item.name,
           market: item.market,
+          currency,
           weightSum: item.weight_percent,
         });
       }

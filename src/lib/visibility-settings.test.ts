@@ -17,8 +17,8 @@ describe("visibility settings", () => {
       currency: "KRW",
     }] as Holding[];
     const history: PortfolioHistorySeries[] = [
-      { key: "KRX:AAA", symbol: "AAA", name: "이전 이름", market: "KRX", averageWeight: 60 },
-      { key: "KRX:SOLD", symbol: "SOLD", name: "매도 종목", market: "KRX", averageWeight: 40 },
+      { key: "KRX:AAA", symbol: "AAA", name: "이전 이름", market: "KRX", currency: "KRW", averageWeight: 60 },
+      { key: "KRX:SOLD", symbol: "SOLD", name: "매도 종목", market: "KRX", currency: "KRW", averageWeight: 40 },
     ];
 
     expect(buildVisibilityStocks(current, history)).toEqual([

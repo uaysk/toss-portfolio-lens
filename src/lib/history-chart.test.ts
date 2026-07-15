@@ -10,8 +10,8 @@ describe("buildValueChartData", () => {
       range: "30d",
       generatedAt: "2026-07-15T00:00:00.000Z",
       series: [
-        { key: "KRX:AAA", symbol: "AAA", name: "에이", market: "KRX", averageWeight: 60 },
-        { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", averageWeight: 40 },
+        { key: "KRX:AAA", symbol: "AAA", name: "에이", market: "KRX", currency: "KRW", averageWeight: 60 },
+        { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", currency: "KRW", averageWeight: 40 },
       ],
       points: [{
         date: "2026-07-15",
@@ -34,8 +34,8 @@ describe("buildValueChartData", () => {
       range: "30d",
       generatedAt: "2026-07-15T00:00:00.000Z",
       series: [
-        { key: "KRX:AAA", symbol: "AAA", name: "에이", market: "KRX", averageWeight: 60 },
-        { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", averageWeight: 40 },
+        { key: "KRX:AAA", symbol: "AAA", name: "에이", market: "KRX", currency: "KRW", averageWeight: 60 },
+        { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", currency: "KRW", averageWeight: 40 },
       ],
       points: [{
         date: "2026-07-15",
@@ -47,7 +47,7 @@ describe("buildValueChartData", () => {
 
     const filtered = filterPortfolioHistory(history, new Set(["KRX:AAA"]));
     expect(filtered.series).toEqual([
-      { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", averageWeight: 100 },
+      { key: "KRX:BBB", symbol: "BBB", name: "비", market: "KRX", currency: "KRW", averageWeight: 100 },
     ]);
     expect(filtered.points[0]).toMatchObject({
       totalValue: 800_000,
