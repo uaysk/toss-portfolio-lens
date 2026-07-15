@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { DailyCandle, HistoricalOrder, InstrumentInfo, Portfolio } from "./toss.js";
@@ -78,6 +79,32 @@ export type PortfolioAnalysisCandle = {
 export type BenchmarkPricePoint = {
   date: string;
   close: number;
+};
+
+export type CashLedgerKind =
+  | "BUY" | "SELL" | "DEPOSIT" | "WITHDRAWAL"
+  | "EXCHANGE_IN" | "EXCHANGE_OUT" | "DIVIDEND" | "FEE" | "OTHER";
+
+export type CashLedgerEntry = {
+  date: string;
+  time: string;
+  occurredAt: string;
+  title: string;
+  category: string;
+  kind: CashLedgerKind;
+  currency: HistoryCurrency;
+  amount: number;
+  balance: number;
+  instrumentName?: string;
+  quantity?: number;
+};
+
+export type CashLedgerSummary = {
+  accountId: string;
+  total: number;
+  earliestDate?: string;
+  latestDate?: string;
+  entries: CashLedgerEntry[];
 };
 
 type SnapshotRow = {
@@ -253,6 +280,28 @@ export class PortfolioHistoryStore {
         failed_symbols INTEGER NOT NULL DEFAULT 0,
         message TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS portfolio_cash_ledger (
+        account_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        transaction_date TEXT NOT NULL,
+        transaction_time TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        currency TEXT NOT NULL CHECK(currency IN ('KRW', 'USD')),
+        amount REAL NOT NULL,
+        balance REAL NOT NULL,
+        instrument_name TEXT,
+        quantity REAL,
+        source TEXT NOT NULL DEFAULT 'WTS_PASTE',
+        imported_at INTEGER NOT NULL,
+        PRIMARY KEY(account_id, entry_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cash_ledger_account_date
+        ON portfolio_cash_ledger(account_id, transaction_date, transaction_time);
     `);
     const snapshotColumns = this.db.prepare("PRAGMA table_info(portfolio_snapshots)").all() as Array<{ name: string }>;
     if (!snapshotColumns.some((column) => column.name === "origin")) {
@@ -268,6 +317,87 @@ export class PortfolioHistoryStore {
 
   close(): void {
     this.db.close();
+  }
+
+  importCashLedgerEntries(
+    accountId: string,
+    entries: CashLedgerEntry[],
+    importedAt = Date.now(),
+  ): { imported: number; skipped: number; total: number } {
+    const statement = this.db.prepare(`
+      INSERT OR IGNORE INTO portfolio_cash_ledger (
+        account_id, entry_id, transaction_date, transaction_time, occurred_at,
+        title, category, kind, currency, amount, balance, instrument_name,
+        quantity, source, imported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WTS_PASTE', ?)
+    `);
+    let imported = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const entry of entries) {
+        const entryId = createHash("sha256").update(JSON.stringify([
+          entry.occurredAt, entry.title, entry.category, entry.currency,
+          entry.amount, entry.balance, entry.quantity ?? null,
+        ])).digest("hex");
+        const result = statement.run(
+          accountId,
+          entryId,
+          entry.date,
+          entry.time,
+          entry.occurredAt,
+          entry.title,
+          entry.category,
+          entry.kind,
+          entry.currency,
+          entry.amount,
+          entry.balance,
+          entry.instrumentName ?? null,
+          entry.quantity ?? null,
+          importedAt,
+        );
+        imported += Number(result.changes);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { imported, skipped: entries.length - imported, total: this.getCashLedgerSummary(accountId).total };
+  }
+
+  getCashLedgerSummary(accountId: string, limit = 30): CashLedgerSummary {
+    const aggregate = this.db.prepare(`
+      SELECT COUNT(*) AS total, MIN(transaction_date) AS earliest_date, MAX(transaction_date) AS latest_date
+      FROM portfolio_cash_ledger
+      WHERE account_id = ?
+    `).get(accountId) as { total: number; earliest_date: string | null; latest_date: string | null };
+    const rows = this.db.prepare(`
+      SELECT transaction_date, transaction_time, occurred_at, title, category, kind,
+             currency, amount, balance, instrument_name, quantity
+      FROM portfolio_cash_ledger
+      WHERE account_id = ?
+      ORDER BY transaction_date DESC, transaction_time DESC, imported_at DESC
+      LIMIT ?
+    `).all(accountId, Math.max(1, Math.min(limit, 100))) as Array<Record<string, string | number | null>>;
+    return {
+      accountId,
+      total: Number(aggregate.total),
+      ...(aggregate.earliest_date ? { earliestDate: aggregate.earliest_date } : {}),
+      ...(aggregate.latest_date ? { latestDate: aggregate.latest_date } : {}),
+      entries: rows.map((row) => ({
+        date: String(row.transaction_date),
+        time: String(row.transaction_time),
+        occurredAt: String(row.occurred_at),
+        title: String(row.title),
+        category: String(row.category),
+        kind: String(row.kind) as CashLedgerKind,
+        currency: String(row.currency) as HistoryCurrency,
+        amount: Number(row.amount),
+        balance: Number(row.balance),
+        ...(row.instrument_name ? { instrumentName: String(row.instrument_name) } : {}),
+        ...(row.quantity !== null ? { quantity: Number(row.quantity) } : {}),
+      })),
+    };
   }
 
   recordPortfolio(portfolio: Portfolio, capturedAt = new Date()): void {

@@ -54,6 +54,33 @@ describe("PortfolioHistoryStore", () => {
     expect(isHistoryDate("2026-02-29")).toBe(false);
   });
 
+  it("WTS 추출 거래를 저장하고 같은 거래를 중복 저장하지 않는다", () => {
+    const store = new PortfolioHistoryStore(":memory:");
+    stores.push(store);
+    const entries = [{
+      date: "2026-07-14",
+      time: "09:14",
+      occurredAt: "2026-07-14T09:14:00+09:00",
+      title: "샘플전자 12주",
+      category: "구매",
+      kind: "BUY" as const,
+      currency: "KRW" as const,
+      amount: -120_600,
+      balance: 879_400,
+      instrumentName: "샘플전자",
+      quantity: 12,
+    }];
+
+    expect(store.importCashLedgerEntries("account-1", entries)).toMatchObject({ imported: 1, skipped: 0, total: 1 });
+    expect(store.importCashLedgerEntries("account-1", entries)).toMatchObject({ imported: 0, skipped: 1, total: 1 });
+    expect(store.getCashLedgerSummary("account-1")).toMatchObject({
+      total: 1,
+      earliestDate: "2026-07-14",
+      latestDate: "2026-07-14",
+      entries,
+    });
+  });
+
   it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", () => {
     const store = new PortfolioHistoryStore(":memory:");
     stores.push(store);
