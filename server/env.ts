@@ -202,9 +202,6 @@ export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
 
-  if (dashboardPassword.length < 12) {
-    throw new Error("DASHBOARD_PASSWORD는 12자 이상이어야 합니다.");
-  }
   if (sessionSecret.length < 32) {
     throw new Error("SESSION_SECRET은 32자 이상이어야 합니다.");
   }

@@ -24,6 +24,14 @@ describe("MySQL environment configuration", () => {
     expect(config.databasePath).toBe("./data/portfolio-history.sqlite");
   });
 
+  it("DASHBOARD_PASSWORD는 비어 있지 않으면 길이와 관계없이 허용한다", () => {
+    process.env.DASHBOARD_PASSWORD = "short";
+    expect(loadConfig().dashboardPassword).toBe("short");
+
+    process.env.DASHBOARD_PASSWORD = "   ";
+    expect(() => loadConfig()).toThrow("필수 환경 변수 DASHBOARD_PASSWORD");
+  });
+
   it("개별 MySQL 값을 모두 설정하면 연결 구성을 만든다", () => {
     Object.assign(process.env, {
       MYSQL_HOST: "mysql.internal",
