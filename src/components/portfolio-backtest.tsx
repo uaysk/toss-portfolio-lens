@@ -30,6 +30,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -50,6 +51,7 @@ const benchmarkOptions: Array<{ value: BacktestBenchmarkKey; label: string }> = 
   { value: "KOSDAQ", label: "KOSDAQ" },
   { value: "NASDAQ100", label: "나스닥 100 · QQQ" },
   { value: "SP500", label: "S&P 500 · SPY" },
+  { value: "CUSTOM", label: "개별 종목 직접 선택" },
 ];
 
 const rebalanceOptions: Array<{ value: BacktestRebalanceFrequency; label: string }> = [
@@ -81,11 +83,12 @@ function metricValue(value: number | null, kind: "percent" | "ratio" = "percent"
   return kind === "ratio" ? value.toFixed(2) : formatPercent(value, true);
 }
 
-function ResultMetric({ icon: Icon, label, value, detail }: {
+function ResultMetric({ icon: Icon, label, value, detail, benchmark }: {
   icon: typeof Activity;
   label: string;
   value: string;
   detail: string;
+  benchmark?: { name: string; value: string; detail?: string };
 }) {
   return (
     <div className="min-w-0 rounded-[20px] bg-card p-4 sm:p-5">
@@ -94,6 +97,13 @@ function ResultMetric({ icon: Icon, label, value, detail }: {
         <p className="text-[11px] font-bold">{label}</p>
       </div>
       <p className="mt-3 truncate text-xl font-black tracking-[-0.035em]">{value}</p>
+      {benchmark ? (
+        <div className="mt-3 rounded-[14px] bg-secondary px-3 py-2.5">
+          <p className="truncate text-[9px] font-black tracking-[0.08em] text-muted-foreground">벤치마크 · {benchmark.name}</p>
+          <p className="mt-1 text-sm font-black">{benchmark.value}</p>
+          {benchmark.detail ? <p className="mt-1 text-[9px] text-muted-foreground">{benchmark.detail}</p> : null}
+        </div>
+      ) : null}
       <p className="mt-2 text-[11px] leading-4 text-muted-foreground">{detail}</p>
     </div>
   );
@@ -115,6 +125,7 @@ export function PortfolioBacktestView({
   const [monthlyCashFlow, setMonthlyCashFlow] = useState(0);
   const [rebalanceFrequency, setRebalanceFrequency] = useState<BacktestRebalanceFrequency>("annually");
   const [benchmark, setBenchmark] = useState<BacktestBenchmarkKey>("KOSPI");
+  const [benchmarkSymbol, setBenchmarkSymbol] = useState("");
   const [loadingCurrent, setLoadingCurrent] = useState(false);
   const [adding, setAdding] = useState(false);
   const [running, setRunning] = useState(false);
@@ -193,7 +204,8 @@ export function PortfolioBacktestView({
     && Boolean(startDate)
     && startDate <= endDate
     && endDate <= today
-    && initialAmount >= 10_000;
+    && initialAmount >= 10_000
+    && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
 
   const runBacktest = async () => {
     if (!canRun) return;
@@ -211,6 +223,7 @@ export function PortfolioBacktestView({
           monthlyCashFlow,
           rebalanceFrequency,
           benchmark,
+          ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
         }),
       });
       const payload = await response.json().catch(() => ({})) as BacktestResult & ApiError;
@@ -365,12 +378,22 @@ export function PortfolioBacktestView({
             <span className="mt-2 block text-[10px] text-muted-foreground">기간 첫 거래일에 목표 비중으로 조정</span>
           </label>
           <label className="rounded-[20px] bg-card p-4">
-            <span className="mb-2 block text-[11px] font-bold text-muted-foreground">비교 지수</span>
+            <span className="mb-2 block text-[11px] font-bold text-muted-foreground">벤치마크</span>
             <Select value={benchmark} onValueChange={(value) => { setBenchmark(value as BacktestBenchmarkKey); setResult(undefined); }}>
               <SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger>
               <SelectContent>{benchmarkOptions.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
             </Select>
-            <span className="mt-2 block text-[10px] text-muted-foreground">미국 지수는 QQQ·SPY 수정주가 프록시</span>
+            {benchmark === "CUSTOM" ? (
+              <Input
+                value={benchmarkSymbol}
+                onChange={(event) => { setBenchmarkSymbol(event.target.value.toUpperCase()); setResult(undefined); }}
+                placeholder="종목코드 또는 티커 · 005930, AAPL"
+                aria-label="벤치마크 종목 코드"
+                maxLength={32}
+                className="mt-2 bg-secondary"
+              />
+            ) : null}
+            <span className="mt-2 block text-[10px] text-muted-foreground">지수 프록시 또는 국내·해외 개별 종목 수정주가</span>
           </label>
         </div>
 
@@ -401,6 +424,7 @@ export function PortfolioBacktestView({
                   monthlyCashFlow: result.config.monthlyCashFlow,
                   rebalanceFrequency: result.config.rebalanceFrequency,
                   benchmark: result.config.benchmark,
+                  ...(result.config.benchmarkSymbol ? { benchmarkSymbol: result.config.benchmarkSymbol } : {}),
                 }}
                 onUnauthorized={onUnauthorized}
               />
@@ -439,14 +463,14 @@ export function PortfolioBacktestView({
           </Card>
 
           <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-            <ResultMetric icon={TrendingUp} label="누적 TWR" value={metricValue(result.metrics.totalReturnPercent)} detail="정기 입출금 효과 제거" />
-            <ResultMetric icon={CalendarDays} label="CAGR" value={metricValue(result.metrics.cagrPercent)} detail="연평균 복리 수익률" />
-            <ResultMetric icon={Activity} label="연환산 변동성" value={metricValue(result.metrics.annualizedVolatilityPercent)} detail="일별 수익률 · 252거래일" />
-            <ResultMetric icon={TrendingDown} label="최대 낙폭" value={metricValue(result.metrics.maxDrawdownPercent)} detail={`최장 낙폭 ${result.metrics.maxDrawdownDays}일`} />
-            <ResultMetric icon={Scale} label="샤프지수" value={metricValue(result.metrics.sharpeRatio, "ratio")} detail="무위험수익률 0%" />
-            <ResultMetric icon={Scale} label="소르티노지수" value={metricValue(result.metrics.sortinoRatio, "ratio")} detail="하방 변동성 기준" />
-            <ResultMetric icon={TrendingUp} label="최고 연도" value={metricValue(result.metrics.bestYearPercent)} detail="부분 연도 포함" />
-            <ResultMetric icon={CircleDollarSign} label="상승 월 비율" value={metricValue(result.metrics.positiveMonthsPercent)} detail={`납입 ${formatMoney(result.metrics.totalContributions, "KRW")} · 인출 ${formatMoney(result.metrics.totalWithdrawals, "KRW")}`} />
+            <ResultMetric icon={TrendingUp} label="누적 TWR" value={metricValue(result.metrics.totalReturnPercent)} detail="정기 입출금 효과 제거" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.totalReturnPercent) } : undefined} />
+            <ResultMetric icon={CalendarDays} label="CAGR" value={metricValue(result.metrics.cagrPercent)} detail="연평균 복리 수익률" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.cagrPercent) } : undefined} />
+            <ResultMetric icon={Activity} label="연환산 변동성" value={metricValue(result.metrics.annualizedVolatilityPercent)} detail="일별 수익률 · 252거래일" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.annualizedVolatilityPercent) } : undefined} />
+            <ResultMetric icon={TrendingDown} label="최대 낙폭" value={metricValue(result.metrics.maxDrawdownPercent)} detail={`최장 낙폭 ${result.metrics.maxDrawdownDays}일`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.maxDrawdownPercent), detail: `최장 ${result.benchmarkMetrics.maxDrawdownDays}일` } : undefined} />
+            <ResultMetric icon={Scale} label="샤프지수" value={metricValue(result.metrics.sharpeRatio, "ratio")} detail="무위험수익률 0%" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.sharpeRatio, "ratio") } : undefined} />
+            <ResultMetric icon={Scale} label="소르티노지수" value={metricValue(result.metrics.sortinoRatio, "ratio")} detail="하방 변동성 기준" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.sortinoRatio, "ratio") } : undefined} />
+            <ResultMetric icon={TrendingUp} label="최고 연도" value={metricValue(result.metrics.bestYearPercent)} detail="부분 연도 포함" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.bestYearPercent) } : undefined} />
+            <ResultMetric icon={CircleDollarSign} label="상승 월 비율" value={metricValue(result.metrics.positiveMonthsPercent)} detail={`납입 ${formatMoney(result.metrics.totalContributions, "KRW")} · 인출 ${formatMoney(result.metrics.totalWithdrawals, "KRW")}`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.positiveMonthsPercent) } : undefined} />
           </div>
 
           <Card className="bg-secondary p-5 sm:p-7">
@@ -506,19 +530,32 @@ export function PortfolioBacktestView({
               <table className="w-full min-w-[520px] border-separate border-spacing-1 text-center text-xs">
                 <thead>
                   <tr>
-                    <th className="p-2 text-left text-muted-foreground">종목</th>
-                    {result.correlations.assets.map((asset) => <th key={asset.symbol} className="p-2 font-black">{asset.symbol}</th>)}
+                    <th scope="col" className="p-2 text-left text-muted-foreground">종목명</th>
+                    {result.correlations.assets.map((asset) => (
+                      <th
+                        key={asset.symbol}
+                        scope="col"
+                        title={asset.symbol}
+                        className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"
+                      >
+                        <span className="block whitespace-normal break-keep leading-4">
+                          {correlationAssetLabel(asset)}
+                        </span>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
                   {result.correlations.assets.map((asset, rowIndex) => (
                     <tr key={asset.symbol}>
-                      <th className="max-w-[170px] truncate p-2 text-left font-black">{asset.name}</th>
+                      <th scope="row" title={asset.symbol} className="max-w-[170px] truncate p-2 text-left font-black">
+                        {correlationAssetLabel(asset)}
+                      </th>
                       {result.correlations.values[rowIndex].map((value, columnIndex) => (
                         <td
                           key={`${asset.symbol}:${columnIndex}`}
                           className="rounded-xl p-3 font-black"
-                          style={{ backgroundColor: value === null ? "transparent" : value >= 0 ? `rgba(94, 234, 212, ${0.1 + Math.abs(value) * 0.45})` : `rgba(251, 113, 133, ${0.1 + Math.abs(value) * 0.45})` }}
+                          style={correlationCellStyle(value)}
                         >{value === null ? "-" : value.toFixed(2)}</td>
                       ))}
                     </tr>

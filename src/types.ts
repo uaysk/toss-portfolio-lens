@@ -174,7 +174,20 @@ export type PortfolioAnalysis = {
 };
 
 export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
-export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
+export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500" | "CUSTOM";
+
+export type BacktestComparableMetrics = {
+  totalReturnPercent: number;
+  cagrPercent: number | null;
+  annualizedVolatilityPercent: number | null;
+  maxDrawdownPercent: number;
+  maxDrawdownDays: number;
+  sharpeRatio: number | null;
+  sortinoRatio: number | null;
+  bestYearPercent: number | null;
+  worstYearPercent: number | null;
+  positiveMonthsPercent: number | null;
+};
 
 export type BacktestInstrument = {
   symbol: string;
@@ -214,13 +227,14 @@ export type BacktestResult = {
     monthlyCashFlow: number;
     rebalanceFrequency: BacktestRebalanceFrequency;
     benchmark: BacktestBenchmarkKey;
+    benchmarkSymbol?: string;
     requestedStartDate: string;
     latestListDate: string;
     effectiveStartDate: string;
     effectiveEndDate: string;
   };
   assets: BacktestAsset[];
-  benchmark?: { key: BacktestBenchmarkKey; name: string };
+  benchmark?: { key: BacktestBenchmarkKey; name: string; symbol: string };
   warnings: string[];
   points: Array<{
     date: string;
@@ -229,21 +243,12 @@ export type BacktestResult = {
     benchmarkGrowth?: number;
     drawdownPercent: number;
   }>;
-  metrics: {
+  metrics: BacktestComparableMetrics & {
     finalBalance: number;
     totalContributions: number;
     totalWithdrawals: number;
-    totalReturnPercent: number;
-    cagrPercent: number | null;
-    annualizedVolatilityPercent: number | null;
-    maxDrawdownPercent: number;
-    maxDrawdownDays: number;
-    sharpeRatio: number | null;
-    sortinoRatio: number | null;
-    bestYearPercent: number | null;
-    worstYearPercent: number | null;
-    positiveMonthsPercent: number | null;
   };
+  benchmarkMetrics?: BacktestComparableMetrics;
   annualReturns: Array<{ year: number; returnPercent: number }>;
   contributions: Array<{
     symbol: string;

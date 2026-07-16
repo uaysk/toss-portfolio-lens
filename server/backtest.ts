@@ -11,7 +11,7 @@ import type { InstrumentInfo, TossClient } from "./toss.js";
 const API_PACING_MS = 230;
 const MAX_PRICE_PAGES = 100;
 
-export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500";
+export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500" | "CUSTOM";
 
 export type BacktestInstrument = {
   symbol: string;
@@ -36,9 +36,10 @@ export type BacktestRunRequest = {
   monthlyCashFlow: number;
   rebalanceFrequency: BacktestRebalanceFrequency;
   benchmark: BacktestBenchmarkKey;
+  benchmarkSymbol?: string;
 };
 
-const BENCHMARKS: Record<Exclude<BacktestBenchmarkKey, "NONE">, {
+const BENCHMARKS: Record<Exclude<BacktestBenchmarkKey, "NONE" | "CUSTOM">, {
   name: string;
   symbol: string;
   source: "indicator" | "stock";
@@ -174,7 +175,7 @@ export class PortfolioBacktestService {
   }
 
   private async ensureBenchmarkPrices(
-    key: Exclude<BacktestBenchmarkKey, "NONE">,
+    key: Exclude<BacktestBenchmarkKey, "NONE" | "CUSTOM">,
     startDate: string,
     endDate: string,
   ): Promise<void> {
@@ -216,8 +217,8 @@ export class PortfolioBacktestService {
     if (!["none", "monthly", "quarterly", "annually"].includes(request.rebalanceFrequency)) {
       throw new BacktestValidationError("리밸런싱 주기를 확인해 주세요.");
     }
-    if (!["NONE", "KOSPI", "KOSDAQ", "NASDAQ100", "SP500"].includes(request.benchmark)) {
-      throw new BacktestValidationError("비교 지수를 확인해 주세요.");
+    if (!["NONE", "KOSPI", "KOSDAQ", "NASDAQ100", "SP500", "CUSTOM"].includes(request.benchmark)) {
+      throw new BacktestValidationError("벤치마크를 확인해 주세요.");
     }
     const instruments = await this.resolveInstruments(request.assets.map((asset) => asset.symbol));
     const weightBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), Number(asset.weight)]));
@@ -231,22 +232,39 @@ export class PortfolioBacktestService {
       listDate: instrument.listDate,
       weight: weightBySymbol.get(instrument.symbol) ?? 0,
     }));
+    const customBenchmark = request.benchmark === "CUSTOM"
+      ? (await this.resolveInstruments([request.benchmarkSymbol || ""]))[0]
+      : undefined;
+    const builtInBenchmark = request.benchmark !== "NONE" && request.benchmark !== "CUSTOM"
+      ? request.benchmark
+      : undefined;
 
     for (const instrument of instruments) {
       await this.ensureAssetPrices(instrument, effectiveRequestedStart, request.endDate);
     }
-    if (request.benchmark !== "NONE") {
-      await this.ensureBenchmarkPrices(request.benchmark, effectiveRequestedStart, request.endDate);
+    if (customBenchmark) {
+      await this.ensureAssetPrices(customBenchmark, effectiveRequestedStart, request.endDate);
+    } else if (builtInBenchmark) {
+      await this.ensureBenchmarkPrices(builtInBenchmark, effectiveRequestedStart, request.endDate);
     }
-    const keys = instruments.map(instrumentKey);
+    const keys = Array.from(new Set([
+      ...instruments.map(instrumentKey),
+      ...(customBenchmark ? [instrumentKey(customBenchmark)] : []),
+    ]));
     const prices = await this.store.getBacktestPrices(keys, effectiveRequestedStart, request.endDate);
     let benchmark: { key: string; name: string; prices: BacktestPricePoint[] } | undefined;
-    if (request.benchmark !== "NONE") {
-      const catalog = BENCHMARKS[request.benchmark];
+    if (customBenchmark) {
       benchmark = {
-        key: request.benchmark,
+        key: `CUSTOM:${instrumentKey(customBenchmark)}`,
+        name: customBenchmark.name,
+        prices: prices.get(instrumentKey(customBenchmark)) ?? [],
+      };
+    } else if (builtInBenchmark) {
+      const catalog = BENCHMARKS[builtInBenchmark];
+      benchmark = {
+        key: builtInBenchmark,
         name: catalog.name,
-        prices: await this.store.getBenchmarkPrices(request.benchmark, effectiveRequestedStart, request.endDate),
+        prices: await this.store.getBenchmarkPrices(builtInBenchmark, effectiveRequestedStart, request.endDate),
       };
     }
 
@@ -274,6 +292,7 @@ export class PortfolioBacktestService {
       currencyMethod: "LOCAL_RETURN" as const,
       config: {
         ...request,
+        ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
         requestedStartDate: request.startDate,
         latestListDate,
         effectiveStartDate: result.effectiveStartDate,
@@ -282,7 +301,8 @@ export class PortfolioBacktestService {
       assets: definitions,
       benchmark: request.benchmark === "NONE" ? undefined : {
         key: request.benchmark,
-        name: BENCHMARKS[request.benchmark].name,
+        name: customBenchmark?.name ?? BENCHMARKS[builtInBenchmark!].name,
+        symbol: customBenchmark?.symbol ?? BENCHMARKS[builtInBenchmark!].symbol,
       },
       warnings,
       ...result,

@@ -20,6 +20,19 @@ export type BacktestBenchmarkDefinition = {
   prices: BacktestPricePoint[];
 };
 
+export type BacktestComparableMetrics = {
+  totalReturnPercent: number;
+  cagrPercent: number | null;
+  annualizedVolatilityPercent: number | null;
+  maxDrawdownPercent: number;
+  maxDrawdownDays: number;
+  sharpeRatio: number | null;
+  sortinoRatio: number | null;
+  bestYearPercent: number | null;
+  worstYearPercent: number | null;
+  positiveMonthsPercent: number | null;
+};
+
 export type BacktestSimulationInput = {
   assets: BacktestAssetDefinition[];
   prices: ReadonlyMap<string, BacktestPricePoint[]>;
@@ -42,21 +55,12 @@ export type BacktestSimulationResult = {
     benchmarkGrowth?: number;
     drawdownPercent: number;
   }>;
-  metrics: {
+  metrics: BacktestComparableMetrics & {
     finalBalance: number;
     totalContributions: number;
     totalWithdrawals: number;
-    totalReturnPercent: number;
-    cagrPercent: number | null;
-    annualizedVolatilityPercent: number | null;
-    maxDrawdownPercent: number;
-    maxDrawdownDays: number;
-    sharpeRatio: number | null;
-    sortinoRatio: number | null;
-    bestYearPercent: number | null;
-    worstYearPercent: number | null;
-    positiveMonthsPercent: number | null;
   };
+  benchmarkMetrics?: BacktestComparableMetrics;
   annualReturns: Array<{ year: number; returnPercent: number }>;
   contributions: Array<{
     symbol: string;
@@ -148,6 +152,77 @@ function downsample<T>(values: T[], maximum = 1_200): T[] {
   return result;
 }
 
+function summarizeGrowthSeries(
+  points: Array<{ date: string; value: number }>,
+  dailyReturns: number[],
+): { metrics: BacktestComparableMetrics; annualReturns: Array<{ year: number; returnPercent: number }> } {
+  const initialValue = points[0].value;
+  const finalValue = points.at(-1)!.value;
+  let peak = initialValue;
+  let peakDate = points[0].date;
+  let maxDrawdown = 0;
+  let maxDrawdownDays = 0;
+  for (const point of points) {
+    if (point.value >= peak) {
+      peak = point.value;
+      peakDate = point.date;
+    }
+    const drawdown = peak > 0 ? point.value / peak - 1 : 0;
+    if (drawdown < maxDrawdown) maxDrawdown = drawdown;
+    if (drawdown < 0) maxDrawdownDays = Math.max(maxDrawdownDays, dateDays(peakDate, point.date));
+  }
+
+  const annualReturns: Array<{ year: number; returnPercent: number }> = [];
+  const yearEndPoints = new Map<string, (typeof points)[number]>();
+  for (const point of points) yearEndPoints.set(point.date.slice(0, 4), point);
+  let previousYearValue = initialValue;
+  for (const [year, point] of Array.from(yearEndPoints.entries()).sort()) {
+    annualReturns.push({ year: Number(year), returnPercent: round((point.value / previousYearValue - 1) * 100) });
+    previousYearValue = point.value;
+  }
+
+  const monthEndPoints = new Map<string, (typeof points)[number]>();
+  for (const point of points) monthEndPoints.set(yearMonth(point.date), point);
+  let previousMonthValue = initialValue;
+  const monthlyReturns: number[] = [];
+  for (const point of Array.from(monthEndPoints.values())) {
+    monthlyReturns.push(point.value / previousMonthValue - 1);
+    previousMonthValue = point.value;
+  }
+
+  const elapsedYears = dateDays(points[0].date, points.at(-1)!.date) / 365.25;
+  const totalReturn = finalValue / initialValue - 1;
+  const dailyVolatility = standardDeviation(dailyReturns);
+  const meanDailyReturn = dailyReturns.length
+    ? dailyReturns.reduce((sum, value) => sum + value, 0) / dailyReturns.length
+    : 0;
+  const downsideDeviation = dailyReturns.length
+    ? Math.sqrt(dailyReturns.reduce((sum, value) => sum + Math.min(value, 0) ** 2, 0) / dailyReturns.length)
+    : 0;
+
+  return {
+    metrics: {
+      totalReturnPercent: round(totalReturn * 100),
+      cagrPercent: elapsedYears > 0 && finalValue > 0
+        ? round(((finalValue / initialValue) ** (1 / elapsedYears) - 1) * 100)
+        : null,
+      annualizedVolatilityPercent: dailyReturns.length > 1
+        ? round(dailyVolatility * Math.sqrt(252) * 100)
+        : null,
+      maxDrawdownPercent: round(maxDrawdown * 100),
+      maxDrawdownDays,
+      sharpeRatio: dailyVolatility > 0 ? round((meanDailyReturn / dailyVolatility) * Math.sqrt(252)) : null,
+      sortinoRatio: downsideDeviation > 0 ? round((meanDailyReturn / downsideDeviation) * Math.sqrt(252)) : null,
+      bestYearPercent: annualReturns.length ? Math.max(...annualReturns.map((item) => item.returnPercent)) : null,
+      worstYearPercent: annualReturns.length ? Math.min(...annualReturns.map((item) => item.returnPercent)) : null,
+      positiveMonthsPercent: monthlyReturns.length
+        ? round((monthlyReturns.filter((value) => value > 0).length / monthlyReturns.length) * 100)
+        : null,
+    },
+    annualReturns,
+  };
+}
+
 export function simulateBacktest(input: BacktestSimulationInput): BacktestSimulationResult {
   if (input.assets.length < 1 || input.assets.length > 20) {
     throw new BacktestValidationError("백테스트 종목은 1~20개까지 구성할 수 있습니다.");
@@ -218,7 +293,12 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   let maxDrawdown = 0;
   let maxDrawdownDays = 0;
   const portfolioReturns: number[] = [];
+  const benchmarkReturns: number[] = [];
   const assetReturns = input.assets.map(() => [] as number[]);
+  const portfolioGrowthSeries = [{ date: aligned[0].date, value: growth }];
+  const benchmarkGrowthSeries = input.benchmark
+    ? [{ date: aligned[0].date, value: input.initialAmount }]
+    : [];
   const fullPoints: BacktestSimulationResult["points"] = [{
     date: aligned[0].date,
     balance: round(input.initialAmount, 2),
@@ -242,6 +322,9 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     const portfolioReturn = beforeMarket > 0 ? afterMarket / beforeMarket - 1 : 0;
     portfolioReturns.push(portfolioReturn);
     growth *= 1 + portfolioReturn;
+    if (input.benchmark) {
+      benchmarkReturns.push((current.benchmarkClose ?? benchmarkBase) / (previous.benchmarkClose ?? benchmarkBase) - 1);
+    }
 
     if (yearMonth(previous.date) !== yearMonth(current.date) && input.monthlyCashFlow !== 0) {
       const flow = input.monthlyCashFlow;
@@ -275,45 +358,24 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     if (drawdown < maxDrawdown) maxDrawdown = drawdown;
     if (drawdown < 0) maxDrawdownDays = Math.max(maxDrawdownDays, dateDays(peakDate, current.date));
     const balance = positionValues.reduce((sum, value) => sum + value, 0);
+    const benchmarkGrowth = input.benchmark && benchmarkBase > 0
+      ? input.initialAmount * ((current.benchmarkClose ?? benchmarkBase) / benchmarkBase)
+      : undefined;
+    portfolioGrowthSeries.push({ date: current.date, value: growth });
+    if (benchmarkGrowth !== undefined) benchmarkGrowthSeries.push({ date: current.date, value: benchmarkGrowth });
     fullPoints.push({
       date: current.date,
       balance: round(balance, 2),
       growth: round(growth, 2),
-      ...(input.benchmark && benchmarkBase > 0
-        ? { benchmarkGrowth: round(input.initialAmount * ((current.benchmarkClose ?? benchmarkBase) / benchmarkBase), 2) }
-        : {}),
+      ...(benchmarkGrowth !== undefined ? { benchmarkGrowth: round(benchmarkGrowth, 2) } : {}),
       drawdownPercent: round(drawdown * 100),
     });
   }
 
-  const annualReturns: Array<{ year: number; returnPercent: number }> = [];
-  const yearEndPoints = new Map<string, (typeof fullPoints)[number]>();
-  for (const point of fullPoints) yearEndPoints.set(point.date.slice(0, 4), point);
-  let previousYearValue = input.initialAmount;
-  for (const [year, point] of Array.from(yearEndPoints.entries()).sort()) {
-    annualReturns.push({ year: Number(year), returnPercent: round((point.growth / previousYearValue - 1) * 100) });
-    previousYearValue = point.growth;
-  }
-
-  const monthEndPoints = new Map<string, (typeof fullPoints)[number]>();
-  for (const point of fullPoints) monthEndPoints.set(yearMonth(point.date), point);
-  let previousMonthValue = input.initialAmount;
-  const monthlyReturns: number[] = [];
-  for (const point of Array.from(monthEndPoints.values())) {
-    monthlyReturns.push(point.growth / previousMonthValue - 1);
-    previousMonthValue = point.growth;
-  }
-
-  const elapsedYears = dateDays(aligned[0].date, aligned.at(-1)!.date) / 365.25;
-  const totalReturn = growth / input.initialAmount - 1;
-  const dailyVolatility = standardDeviation(portfolioReturns);
-  const meanDailyReturn = portfolioReturns.length
-    ? portfolioReturns.reduce((sum, value) => sum + value, 0) / portfolioReturns.length
-    : 0;
-  const downsideDeviation = portfolioReturns.length
-    ? Math.sqrt(portfolioReturns.reduce((sum, value) => sum + Math.min(value, 0) ** 2, 0) / portfolioReturns.length)
-    : 0;
-  const annualizedVolatility = portfolioReturns.length > 1 ? dailyVolatility * Math.sqrt(252) : 0;
+  const portfolioSummary = summarizeGrowthSeries(portfolioGrowthSeries, portfolioReturns);
+  const benchmarkSummary = input.benchmark
+    ? summarizeGrowthSeries(benchmarkGrowthSeries, benchmarkReturns)
+    : undefined;
 
   const contributions = input.assets.map((asset, index) => {
     const profitLoss = marketProfitByAsset[index];
@@ -345,20 +407,10 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       finalBalance: round(positionValues.reduce((sum, value) => sum + value, 0), 2),
       totalContributions: round(totalContributions, 2),
       totalWithdrawals: round(totalWithdrawals, 2),
-      totalReturnPercent: round(totalReturn * 100),
-      cagrPercent: elapsedYears > 0 && growth > 0 ? round(((growth / input.initialAmount) ** (1 / elapsedYears) - 1) * 100) : null,
-      annualizedVolatilityPercent: portfolioReturns.length > 1 ? round(annualizedVolatility * 100) : null,
-      maxDrawdownPercent: round(maxDrawdown * 100),
-      maxDrawdownDays,
-      sharpeRatio: dailyVolatility > 0 ? round((meanDailyReturn / dailyVolatility) * Math.sqrt(252)) : null,
-      sortinoRatio: downsideDeviation > 0 ? round((meanDailyReturn / downsideDeviation) * Math.sqrt(252)) : null,
-      bestYearPercent: annualReturns.length ? Math.max(...annualReturns.map((item) => item.returnPercent)) : null,
-      worstYearPercent: annualReturns.length ? Math.min(...annualReturns.map((item) => item.returnPercent)) : null,
-      positiveMonthsPercent: monthlyReturns.length
-        ? round((monthlyReturns.filter((value) => value > 0).length / monthlyReturns.length) * 100)
-        : null,
+      ...portfolioSummary.metrics,
     },
-    annualReturns,
+    ...(benchmarkSummary ? { benchmarkMetrics: benchmarkSummary.metrics } : {}),
+    annualReturns: portfolioSummary.annualReturns,
     contributions,
     correlations: {
       assets: input.assets.map((asset) => ({ symbol: asset.symbol, name: asset.name })),

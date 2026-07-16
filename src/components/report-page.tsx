@@ -29,6 +29,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { analysisComparisonDomain, buildAnalysisChartData } from "@/lib/analysis-chart";
+import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
@@ -79,11 +80,23 @@ function percent(value: number | null | undefined): string {
   return value === null || value === undefined ? "데이터 부족" : formatPercent(value, true);
 }
 
-function ReportMetric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+function ReportMetric({ label, value, detail, benchmark }: {
+  label: string;
+  value: string;
+  detail?: string;
+  benchmark?: { name: string; value: string; detail?: string };
+}) {
   return (
     <div className="min-w-0 rounded-[20px] bg-card p-4 sm:p-5">
       <p className="text-[10px] font-black tracking-[0.08em] text-muted-foreground">{label}</p>
       <p className="mt-3 truncate text-xl font-black tracking-[-0.04em]">{value}</p>
+      {benchmark ? (
+        <div className="mt-3 rounded-[14px] bg-secondary px-3 py-2.5">
+          <p className="truncate text-[9px] font-black tracking-[0.08em] text-muted-foreground">벤치마크 · {benchmark.name}</p>
+          <p className="mt-1 text-sm font-black">{benchmark.value}</p>
+          {benchmark.detail ? <p className="mt-1 text-[9px] text-muted-foreground">{benchmark.detail}</p> : null}
+        </div>
+      ) : null}
       {detail ? <p className="mt-2 text-[11px] leading-5 text-muted-foreground">{detail}</p> : null}
     </div>
   );
@@ -323,14 +336,14 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
       <Card className="bg-secondary p-5 sm:p-7">
         <SectionHeading eyebrow="KEY METRICS" title="성과와 위험 지표" />
         <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-4">
-          <ReportMetric label="누적 TWR" value={percent(metrics.totalReturnPercent)} />
-          <ReportMetric label="CAGR" value={percent(metrics.cagrPercent)} />
+          <ReportMetric label="누적 TWR" value={percent(metrics.totalReturnPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.totalReturnPercent) } : undefined} />
+          <ReportMetric label="CAGR" value={percent(metrics.cagrPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.cagrPercent) } : undefined} />
           <ReportMetric label="최종 잔액" value={formatMoney(metrics.finalBalance, "KRW")} />
-          <ReportMetric label="연환산 변동성" value={percent(metrics.annualizedVolatilityPercent)} />
-          <ReportMetric label="최대 낙폭 MDD" value={percent(metrics.maxDrawdownPercent)} detail={`최장 ${metrics.maxDrawdownDays}일`} />
-          <ReportMetric label="샤프지수" value={ratio(metrics.sharpeRatio)} />
-          <ReportMetric label="소르티노지수" value={ratio(metrics.sortinoRatio)} />
-          <ReportMetric label="상승 월 비율" value={percent(metrics.positiveMonthsPercent)} />
+          <ReportMetric label="연환산 변동성" value={percent(metrics.annualizedVolatilityPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.annualizedVolatilityPercent) } : undefined} />
+          <ReportMetric label="최대 낙폭 MDD" value={percent(metrics.maxDrawdownPercent)} detail={`최장 ${metrics.maxDrawdownDays}일`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.maxDrawdownPercent), detail: `최장 ${result.benchmarkMetrics.maxDrawdownDays}일` } : undefined} />
+          <ReportMetric label="샤프지수" value={ratio(metrics.sharpeRatio)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: ratio(result.benchmarkMetrics.sharpeRatio) } : undefined} />
+          <ReportMetric label="소르티노지수" value={ratio(metrics.sortinoRatio)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: ratio(result.benchmarkMetrics.sortinoRatio) } : undefined} />
+          <ReportMetric label="상승 월 비율" value={percent(metrics.positiveMonthsPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.positiveMonthsPercent) } : undefined} />
         </div>
       </Card>
 
@@ -373,13 +386,31 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
         <SectionHeading eyebrow="CORRELATION" title="일간 수익률 상관관계" detail="1에 가까울수록 같은 방향, -1에 가까울수록 반대 방향으로 움직인 구간이 많습니다." />
         <div className="mt-5 overflow-x-auto rounded-[20px] bg-card p-3">
           <table className="w-full min-w-[520px] border-separate border-spacing-1 text-center text-xs">
-            <thead><tr><th className="p-2 text-left text-muted-foreground">종목</th>{result.correlations.assets.map((asset) => <th key={asset.symbol} className="p-2 font-black">{asset.symbol}</th>)}</tr></thead>
+            <thead>
+              <tr>
+                <th scope="col" className="p-2 text-left text-muted-foreground">종목명</th>
+                {result.correlations.assets.map((asset) => (
+                  <th
+                    key={asset.symbol}
+                    scope="col"
+                    title={asset.symbol}
+                    className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"
+                  >
+                    <span className="block whitespace-normal break-keep leading-4">
+                      {correlationAssetLabel(asset)}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
             <tbody>
               {result.correlations.assets.map((asset, row) => (
                 <tr key={asset.symbol}>
-                  <th className="max-w-[170px] truncate p-2 text-left font-black">{asset.name}</th>
+                  <th scope="row" title={asset.symbol} className="max-w-[170px] truncate p-2 text-left font-black">
+                    {correlationAssetLabel(asset)}
+                  </th>
                   {result.correlations.values[row].map((value, column) => (
-                    <td key={`${asset.symbol}:${column}`} className="rounded-xl bg-secondary p-3 font-black">{value === null ? "-" : value.toFixed(2)}</td>
+                    <td key={`${asset.symbol}:${column}`} className="rounded-xl p-3 font-black" style={correlationCellStyle(value)}>{value === null ? "-" : value.toFixed(2)}</td>
                   ))}
                 </tr>
               ))}

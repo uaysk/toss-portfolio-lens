@@ -70,6 +70,41 @@ describe("portfolio backtest engine", () => {
     expect(result.contributions.reduce((sum, item) => sum + item.contributionPercent, 0)).toBe(21);
   });
 
+  it("동일한 공통 거래일로 벤치마크의 수익과 위험 지표를 계산한다", () => {
+    const result = simulateBacktest({
+      assets: [{ ...assets[0], weight: 100 }],
+      prices: new Map([["KRW:005930", prices([
+        ["2026-01-02", 100],
+        ["2026-01-03", 110],
+        ["2026-01-04", 121],
+      ])]]),
+      requestedStartDate: "2026-01-02",
+      endDate: "2026-01-04",
+      initialAmount: 1_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: {
+        key: "CUSTOM:USD:AAPL",
+        name: "Apple",
+        prices: prices([
+          ["2026-01-02", 100],
+          ["2026-01-03", 90],
+          ["2026-01-04", 99],
+        ]),
+      },
+    });
+
+    expect(result.metrics.totalReturnPercent).toBe(21);
+    expect(result.benchmarkMetrics).toMatchObject({
+      totalReturnPercent: -1,
+      maxDrawdownPercent: -10,
+      maxDrawdownDays: 2,
+      bestYearPercent: -1,
+      positiveMonthsPercent: 0,
+    });
+    expect(result.benchmarkMetrics?.annualizedVolatilityPercent).not.toBeNull();
+  });
+
   it("비중 합계가 100%가 아니면 실행하지 않는다", () => {
     expect(() => simulateBacktest({
       assets: [{ ...assets[0], weight: 99 }],

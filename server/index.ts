@@ -561,6 +561,7 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
       ? body.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"]
       : "none",
     benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
+    ...(typeof body.benchmarkSymbol === "string" ? { benchmarkSymbol: body.benchmarkSymbol } : {}),
   };
 }
 

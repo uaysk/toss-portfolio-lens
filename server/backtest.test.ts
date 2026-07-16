@@ -117,4 +117,37 @@ describe("PortfolioBacktestService", () => {
     expect(result.warnings[0]).toContain("2020-01-02");
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("005930", undefined, true);
   });
+
+  it("국내·해외 개별 종목을 벤치마크로 선택하고 비교 지표를 반환한다", async () => {
+    const toss = {
+      getInstruments: vi.fn().mockImplementation(async (symbols: string[]) => (
+        instruments.filter((instrument) => symbols.includes(instrument.symbol))
+      )),
+      getDailyCandles: vi.fn().mockImplementation(async (symbol: string, _before?: string, adjusted?: boolean) => ({
+        candles: symbol === "005930"
+          ? [candle(symbol, "KRW", "2026-01-02", 100), candle(symbol, "KRW", "2026-01-03", 110)]
+          : [candle(symbol, "USD", "2026-01-02", 100), candle(symbol, "USD", "2026-01-03", 90)],
+        nextBefore: undefined,
+        adjusted,
+      })),
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+
+    const result = await new PortfolioBacktestService(toss, store).run({
+      assets: [{ symbol: "005930", weight: 100 }],
+      startDate: "2026-01-02",
+      endDate: "2026-01-03",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: "CUSTOM",
+      benchmarkSymbol: "aapl",
+    });
+
+    expect(result.benchmark).toEqual({ key: "CUSTOM", name: "미국 종목", symbol: "AAPL" });
+    expect(result.benchmarkMetrics?.totalReturnPercent).toBe(-10);
+    expect(result.config.benchmarkSymbol).toBe("AAPL");
+    expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("AAPL", undefined, true);
+  });
 });

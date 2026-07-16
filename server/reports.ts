@@ -107,6 +107,7 @@ export function backtestEvaluationInput(backtest: BacktestResult): unknown {
       weight: asset.weight,
     })),
     metrics: backtest.metrics,
+    benchmarkMetrics: backtest.benchmarkMetrics,
     annualReturns: backtest.annualReturns,
     performanceContributions: backtest.contributions,
     trajectory: sample(backtest.points).map((point) => ({
