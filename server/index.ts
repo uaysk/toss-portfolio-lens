@@ -450,10 +450,13 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
   const fromQuery = typeof request.query.from === "string" ? request.query.from.trim() : "";
   const toQuery = typeof request.query.to === "string" ? request.query.to.trim() : "";
   const hasCustomRange = Boolean(fromQuery || toQuery);
+  const riskFreeRateText = typeof request.query.riskFreeRate === "string" ? request.query.riskFreeRate.trim() : "0";
+  const riskFreeRatePercent = Number(riskFreeRateText);
   const validCustomRange = !hasCustomRange
     || (isHistoryDate(fromQuery) && isHistoryDate(toQuery) && fromQuery <= toQuery);
 
-  if (!accountId || accountId.length > 128 || !range || !validCustomRange) {
+  if (!accountId || accountId.length > 128 || !range || !validCustomRange
+    || !Number.isFinite(riskFreeRatePercent) || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
     response.status(400).json({
       error: {
         code: "invalid-analysis-query",
@@ -475,6 +478,7 @@ app.get("/api/portfolio/analysis", requireSession, async (request, response) => 
       fromDate,
       toDate,
       benchmarkKeys,
+      riskFreeRatePercent,
     }));
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("지원하는 비교 지수")) {
@@ -557,6 +561,8 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
     endDate: typeof body.endDate === "string" ? body.endDate : "",
     initialAmount: typeof body.initialAmount === "number" ? body.initialAmount : Number.NaN,
     monthlyCashFlow: typeof body.monthlyCashFlow === "number" ? body.monthlyCashFlow : Number.NaN,
+    riskFreeRatePercent: typeof body.riskFreeRatePercent === "number" ? body.riskFreeRatePercent : 0,
+    transactionCostBps: typeof body.transactionCostBps === "number" ? body.transactionCostBps : 0,
     rebalanceFrequency: typeof body.rebalanceFrequency === "string"
       ? body.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"]
       : "none",
@@ -587,8 +593,10 @@ app.post("/api/reports/portfolio-analysis", requireSession, async (request, resp
     : undefined;
   const fromDate = typeof body.from === "string" ? body.from.trim() : "";
   const toDate = typeof body.to === "string" ? body.to.trim() : "";
+  const riskFreeRatePercent = typeof body.riskFreeRate === "number" ? body.riskFreeRate : 0;
   if (!accountId || accountId.length > 128 || !range || !isHistoryDate(fromDate) || !isHistoryDate(toDate)
-    || fromDate > toDate || toDate > analysisToday()) {
+    || fromDate > toDate || toDate > analysisToday() || !Number.isFinite(riskFreeRatePercent)
+    || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
     response.status(400).json({
       error: { code: "invalid-report-range", message: "계좌와 보고서 분석 기간을 확인해 주세요." },
     });
@@ -596,7 +604,14 @@ app.post("/api/reports/portfolio-analysis", requireSession, async (request, resp
   }
   try {
     const benchmarkKeys = body.benchmarks === "" ? [] : parseBenchmarkKeys(body.benchmarks);
-    const analysis = await portfolioAnalysis.getAnalysis({ accountId, range, fromDate, toDate, benchmarkKeys });
+    const analysis = await portfolioAnalysis.getAnalysis({
+      accountId,
+      range,
+      fromDate,
+      toDate,
+      benchmarkKeys,
+      riskFreeRatePercent,
+    });
     const report = await portfolioReports.createAnalysis(analysis);
     response.status(201).json({
       id: report.id,

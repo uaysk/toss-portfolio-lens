@@ -4,6 +4,7 @@ import {
   buildPositionWeightedReturns,
   combinePortfolioCandles,
   combinePortfolioHistories,
+  convertUsdBenchmarkToKrw,
   parseBenchmarkKeys,
 } from "./analysis.js";
 import { PortfolioHistoryStore, type PortfolioHistory } from "./history.js";
@@ -96,5 +97,20 @@ describe("portfolio analysis query", () => {
     } finally {
       await store.close();
     }
+  });
+
+  it("미국 벤치마크를 포트폴리오 분석일의 USD/KRW로 원화 환산한다", () => {
+    expect(convertUsdBenchmarkToKrw(
+      [
+        { date: "2026-07-01", close: 100 },
+        { date: "2026-07-03", close: 105 },
+      ],
+      ["2026-07-01", "2026-07-02", "2026-07-03"],
+      new Map([["2026-07-01", 1_400], ["2026-07-02", 1_410], ["2026-07-03", 1_420]]),
+    )).toEqual([
+      { date: "2026-07-01", close: 140_000 },
+      { date: "2026-07-02", close: 141_000 },
+      { date: "2026-07-03", close: 149_100 },
+    ]);
   });
 });

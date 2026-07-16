@@ -59,6 +59,17 @@ export function analysisEvaluationInput(analysis: PublicPortfolioAnalysis): unkn
     period: { from: analysis.fromDate, to: analysis.toDate },
     currency: analysis.baseCurrency,
     metrics: analysis.metrics,
+    benchmarkComparisons: analysis.benchmarkComparisons ?? [],
+    drawdownAnalysis: analysis.drawdowns ? {
+      ...analysis.drawdowns,
+      points: sample(analysis.drawdowns.points),
+    } : undefined,
+    tailRisk: analysis.tailRisk,
+    monthlyReturns: analysis.monthlyReturns ?? [],
+    exposure: analysis.exposure,
+    riskContributions: analysis.riskContributions?.slice(0, 10) ?? [],
+    costEfficiency: analysis.costEfficiency,
+    tradeBehavior: analysis.tradeBehavior,
     benchmarkErrors: analysis.benchmarkErrors,
     performanceContributions: analysis.contributions.slice(0, 15).map((item) => ({
       symbol: item.symbol,
@@ -77,6 +88,7 @@ export function analysisEvaluationInput(analysis: PublicPortfolioAnalysis): unkn
       ohlcBackfillComplete: analysis.ohlcBackfillComplete,
       fxBackfillComplete: analysis.fxBackfillComplete,
       includesCurrencies: analysis.includesCurrencies,
+      coverage: analysis.dataQuality,
       limitations: [
         "계좌 입출금·예수금·배당 원장이 제공되지 않아 계좌 전체 성과가 아닌 보유주식 추정 성과입니다.",
         "TWR은 전일 보유비중과 종목·환율 수익률을 연결한 추정값입니다.",
@@ -95,6 +107,8 @@ export function backtestEvaluationInput(backtest: BacktestResult): unknown {
       initialAmount: backtest.config.initialAmount,
       monthlyCashFlow: backtest.config.monthlyCashFlow,
       rebalanceFrequency: backtest.config.rebalanceFrequency,
+      riskFreeRatePercent: backtest.config.riskFreeRatePercent,
+      transactionCostBps: backtest.config.transactionCostBps,
       benchmark: backtest.benchmark,
       currencyMethod: backtest.currencyMethod,
     },
@@ -110,6 +124,7 @@ export function backtestEvaluationInput(backtest: BacktestResult): unknown {
     benchmarkMetrics: backtest.benchmarkMetrics,
     annualReturns: backtest.annualReturns,
     performanceContributions: backtest.contributions,
+    advancedAnalytics: backtest.advanced,
     trajectory: sample(backtest.points).map((point) => ({
       date: point.date,
       portfolioGrowth: point.growth,

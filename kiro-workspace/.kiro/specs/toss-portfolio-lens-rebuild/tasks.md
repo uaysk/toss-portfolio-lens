@@ -118,6 +118,10 @@
   - [ ] 13.5 집중도, 비용, turnover, benchmark/excess, best/worst day, positive day 지표를 구현한다.
   - [ ] 13.6 signed contribution 계산과 원래 값 내림차순 정렬을 구현한다.
   - [ ] 13.7 null/zero/sample 부족과 매도·현금 부재 limitations를 포함한 API 테스트를 작성한다.
+  - [ ] 13.8 미국 proxy KRW 환산과 tracking error·information ratio·beta·alpha·capture·relative MDD를 구현한다.
+  - [ ] 13.9 rolling return/risk, drawdown recovery, VaR/CVaR, monthly heatmap 계산을 구현한다.
+  - [ ] 13.10 time-linked local/FX attribution, risk contribution, correlation, exposure와 diversification benefit을 구현한다.
+  - [ ] 13.11 비용효율·월별 turnover·FIFO 거래 추정치와 data confidence를 구현한다.
   - _Requirements: 10.1–10.10, 11.1–11.10, 16.4, 17.1–17.3_
 
 - [ ] 14. 분석 탭 UI 구현
@@ -127,6 +131,8 @@
   - [ ] 14.4 국내·해외 통합 기여도 목록을 signed 값 순으로 표시한다.
   - [ ] 14.5 OHLC 추정, ETF proxy, 입출금/예수금 부재, TWR/XIRR 한계를 인접한 위치에 표시한다.
   - [ ] 14.6 mobile overflow, chart tooltip, benchmark failure UI를 검증한다.
+  - [ ] 14.7 active risk, rolling, drawdown, tail risk, monthly return, risk contribution, correlation, cost와 confidence section을 구현한다.
+  - [ ] 14.8 사용자 risk-free rate 입력을 분석 API와 AI report 재계산에 연결한다.
   - _Requirements: 10.1–10.10, 11.1–11.10, 8.8, 8.9_
 
 - [ ] 15. 백테스트 가격 서비스와 simulation engine 구현
@@ -136,17 +142,22 @@
   - [ ] 15.4 공통 실제 시작일, local-return virtual units, 월 cash flow, 4개 rebalance mode를 구현한다.
   - [ ] 15.5 고정 지수/ETF와 국내·해외 개별 종목 benchmark의 growth, drawdown, annual return, contribution, correlation과 전체 비교 metric을 구현한다.
   - [ ] 15.6 deterministic fixture로 no-rebalance/rebalance/deposit/withdrawal/missing-price test를 작성한다.
-  - _Requirements: 12.1–12.14, 16.5_
+  - [ ] 15.7 configurable risk-free rate, active risk/capture, rolling, drawdown episode, tail-risk와 monthly return analytics를 구현한다.
+  - [ ] 15.8 평균/종료 비중 기반 risk contribution·집중도와 virtual trade ledger 기반 turnover/cost·FIFO statistics를 구현한다.
+  - [ ] 15.9 candle 관측·carry-forward·공통 기간 기반 data confidence와 deterministic 회귀 테스트를 구현한다.
+  - _Requirements: 12.1–12.23, 16.5_
 
 - [ ] 16. 백테스트 탭 UI 구현
   - [ ] 16.1 현재 포트폴리오 불러오기와 종목 검색·추가·삭제·비중 편집을 구현한다.
   - [ ] 16.2 기본/실제 시작일, 종료일, 초기금, 월 현금흐름, rebalance, 고정/개별 종목 benchmark controls를 구현한다.
   - [ ] 16.3 growth/contribution, drawdown, annual returns, signed contributions, 각 지표 아래 benchmark 비교값, 종목명을 양축 머리글로 쓰는 무채색 correlation matrix를 구현한다.
   - [ ] 16.4 loading/progress/validation/error/limitations와 mobile layout을 구현한다.
-  - _Requirements: 12.1–12.14, 8.8, 8.9_
+  - [ ] 16.5 종목 삭제 시 남은 종목 비중을 보존하고 unit test로 회귀를 막는다.
+  - [ ] 16.6 risk-free/cost controls와 active risk, rolling, tail-risk, monthly heatmap, risk contribution, concentration, turnover/FIFO, data confidence sections를 구현한다.
+  - _Requirements: 12.1–12.23, 8.8, 8.9_
 
 - [ ] 17. OpenAI narrative writer와 report service 구현
-  - [ ] 17.1 OpenAI config pair validation, optional model discovery와 Responses endpoint normalization을 구현한다.
+  - [ ] 17.1 OpenAI config pair validation, optional model discovery, Responses endpoint normalization과 명시적 미지원 시 Chat Completions fallback을 구현한다.
   - [ ] 17.2 strict narrative JSON schema, Korean safety instructions, `store=false`, timeout/error mapping을 구현한다.
   - [ ] 17.3 analysis와 backtest를 서버에서 재계산하고 account ID를 제거한 bounded prompt builder를 구현한다.
   - [ ] 17.4 report ID, versioned schema, local atomic JSON storage를 구현한다.

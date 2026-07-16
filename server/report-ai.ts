@@ -71,6 +71,11 @@ function modelsEndpoint(endpoint: string): string {
   return `${normalized}/models`;
 }
 
+function chatCompletionsEndpoint(endpoint: string): string {
+  const normalized = endpoint.replace(/\/+$/, "").replace(/\/responses$/, "");
+  return `${normalized}/chat/completions`;
+}
+
 function cleanText(value: string): string {
   return value.replace(placeholderPattern, "").replace(/\s{2,}/g, " ").trim();
 }
@@ -131,6 +136,40 @@ function outputText(payload: unknown): string {
   throw new ReportGenerationError("AI 응답에서 평가 내용을 찾지 못했습니다.", true);
 }
 
+function chatOutputText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") throw new ReportGenerationError("AI 응답이 비어 있습니다.", true);
+  const choices = Array.isArray((payload as { choices?: unknown }).choices)
+    ? (payload as { choices: unknown[] }).choices
+    : [];
+  const message = choices[0] && typeof choices[0] === "object"
+    ? (choices[0] as { message?: unknown }).message
+    : undefined;
+  if (!message || typeof message !== "object") {
+    throw new ReportGenerationError("AI 응답에서 평가 내용을 찾지 못했습니다.", true);
+  }
+  if (typeof (message as { refusal?: unknown }).refusal === "string") {
+    throw new ReportGenerationError("AI가 이 평가 보고서 생성을 거절했습니다.");
+  }
+  const content = (message as { content?: unknown }).content;
+  if (typeof content !== "string") throw new ReportGenerationError("AI 응답에서 평가 내용을 찾지 못했습니다.", true);
+  return content;
+}
+
+function apiErrorMessage(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const error = (payload as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return "";
+  return typeof (error as { message?: unknown }).message === "string"
+    ? (error as { message: string }).message
+    : "";
+}
+
+function responsesApiUnsupported(status: number, payload: unknown): boolean {
+  if (status === 404 || status === 405) return true;
+  const message = apiErrorMessage(payload).toLowerCase();
+  return status === 400 && message.includes("does not support") && message.includes("responses");
+}
+
 export class OpenAiReportWriter {
   private resolvedModel?: Promise<string>;
 
@@ -166,6 +205,9 @@ export class OpenAiReportWriter {
 
   async evaluate(input: unknown): Promise<ReportNarrative> {
     let response: Response;
+    let payload: unknown;
+    let usedChatCompletions = false;
+    const model = await this.model();
     try {
       response = await this.fetcher(responsesEndpoint(this.config.endpoint), {
         method: "POST",
@@ -174,7 +216,7 @@ export class OpenAiReportWriter {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: await this.model(),
+          model,
           store: false,
           instructions,
           input: [{
@@ -194,8 +236,38 @@ export class OpenAiReportWriter {
         }),
         signal: AbortSignal.timeout(this.config.timeoutMs),
       });
+      payload = await response.json() as unknown;
+      if (!response.ok && responsesApiUnsupported(response.status, payload)) {
+        usedChatCompletions = true;
+        response = await this.fetcher(chatCompletionsEndpoint(this.config.endpoint), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.config.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: instructions },
+              { role: "user", content: JSON.stringify(input) },
+            ],
+            max_tokens: 1_800,
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: "portfolio_evaluation",
+                strict: true,
+                schema: narrativeSchema,
+              },
+            },
+          }),
+          signal: AbortSignal.timeout(this.config.timeoutMs),
+        });
+        payload = await response.json() as unknown;
+      }
     } catch (error) {
       const timeout = error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);
+      if (error instanceof SyntaxError) throw new ReportGenerationError("AI 응답을 해석하지 못했습니다.", true);
       throw new ReportGenerationError(timeout ? "AI 평가 생성 시간이 초과되었습니다." : "AI 평가 서비스에 연결하지 못했습니다.", true);
     }
     if (!response.ok) {
@@ -206,15 +278,9 @@ export class OpenAiReportWriter {
         response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500,
       );
     }
-    let payload: unknown;
-    try {
-      payload = await response.json() as unknown;
-    } catch {
-      throw new ReportGenerationError("AI 응답을 해석하지 못했습니다.", true);
-    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(outputText(payload)) as unknown;
+      parsed = JSON.parse(usedChatCompletions ? chatOutputText(payload) : outputText(payload)) as unknown;
     } catch (error) {
       if (error instanceof ReportGenerationError) throw error;
       throw new ReportGenerationError("AI 평가 JSON을 해석하지 못했습니다.", true);

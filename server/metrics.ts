@@ -5,6 +5,22 @@ import type {
 } from "./history.js";
 import { kstDateString } from "./history.js";
 import type { HistoricalOrder } from "./toss.js";
+import {
+  calculateAdvancedAnalytics,
+  type AdvancedAnalytics,
+  type PortfolioReturnDetail,
+} from "./advanced-metrics.js";
+
+export type {
+  AdvancedAnalytics,
+  BenchmarkComparisonMetric,
+  CorrelationMatrix,
+  DrawdownEpisode,
+  DrawdownPoint,
+  PortfolioReturnDetail,
+  RiskContribution,
+  RollingMetricPoint,
+} from "./advanced-metrics.js";
 
 const TRADING_DAYS_PER_YEAR = 252;
 
@@ -39,7 +55,7 @@ export type PortfolioAnalyticsMetrics = {
   bestDailyReturnPercent: number | null;
   worstDailyReturnPercent: number | null;
   positiveDaysPercent: number | null;
-  riskFreeRatePercent: 0;
+  riskFreeRatePercent: number;
 };
 
 export type PortfolioContribution = {
@@ -50,6 +66,9 @@ export type PortfolioContribution = {
   currency: "KRW" | "USD";
   estimatedProfitLoss: number;
   contributionPercent: number;
+  timeLinkedContributionPercent: number;
+  localPriceContributionPercent: number;
+  fxContributionPercent: number;
 };
 
 export type PortfolioDailyReturn = { date: string; value: number };
@@ -183,6 +202,8 @@ export function calculatePortfolioAnalytics({
   exchangeRates,
   benchmarks,
   returnSeries,
+  returnDetail,
+  riskFreeRatePercent = 0,
 }: {
   candles: PortfolioAnalysisCandle[];
   history: PortfolioHistory;
@@ -190,14 +211,25 @@ export function calculatePortfolioAnalytics({
   exchangeRates: ReadonlyMap<string, number>;
   benchmarks: BenchmarkInput[];
   returnSeries?: PortfolioDailyReturn[];
-}): { metrics: PortfolioAnalyticsMetrics; contributions: PortfolioContribution[] } {
+  returnDetail?: PortfolioReturnDetail;
+  riskFreeRatePercent?: number;
+}): { metrics: PortfolioAnalyticsMetrics; contributions: PortfolioContribution[] } & AdvancedAnalytics {
   const sortedCandles = [...candles].sort((left, right) => left.date.localeCompare(right.date));
   const firstCandle = sortedCandles[0];
   const lastCandle = sortedCandles.at(-1);
   const valuationChangePercent = firstCandle && lastCandle && firstCandle.open > 0
     ? round(((lastCandle.close / firstCandle.open) - 1) * 100)
     : 0;
-  const returns = returnSeries ?? dailyReturns(sortedCandles, orders, exchangeRates);
+  const returns = returnDetail?.returns ?? returnSeries ?? dailyReturns(sortedCandles, orders, exchangeRates);
+  const effectiveReturnDetail: PortfolioReturnDetail = returnDetail ?? {
+    returns,
+    daily: returns.map((item) => ({ ...item, assets: [] })),
+    expectedReturnObservations: returns.length,
+    requiredPriceObservations: 0,
+    missingPriceObservations: 0,
+    requiredFxObservations: 0,
+    missingFxObservations: 0,
+  };
   const cumulativeMultiplier = returns.reduce((value, item) => value * (1 + item.value), 1);
   const estimatedReturnPercent = returns.length ? round((cumulativeMultiplier - 1) * 100) : null;
   const annualizedReturnPercent = returns.length && cumulativeMultiplier > 0
@@ -263,7 +295,7 @@ export function calculatePortfolioAnalytics({
   const firstPoint = history.points[0];
   const lastPoint = history.points.at(-1);
   const baseValue = firstPoint?.totalValue ?? 0;
-  const contributions = history.series.map((series) => {
+  const baseContributions = history.series.map((series) => {
     const startValue = firstPoint ? firstPoint.totalValue * ((firstPoint.values[series.key] ?? 0) / 100) : 0;
     const endValue = lastPoint ? lastPoint.totalValue * ((lastPoint.values[series.key] ?? 0) / 100) : 0;
     let netPurchaseFlow = 0;
@@ -281,10 +313,8 @@ export function calculatePortfolioAnalytics({
       currency: series.currency,
       estimatedProfitLoss: round(estimatedProfitLoss, 2),
       contributionPercent: baseValue > 0 ? round((estimatedProfitLoss / baseValue) * 100) : 0,
-    } satisfies PortfolioContribution;
-  }).filter((item) => Math.abs(item.estimatedProfitLoss) >= 0.01)
-    .sort((left, right) => right.estimatedProfitLoss - left.estimatedProfitLoss)
-    .slice(0, 8);
+    } satisfies Omit<PortfolioContribution, "timeLinkedContributionPercent" | "localPriceContributionPercent" | "fxContributionPercent">;
+  }).filter((item) => Math.abs(item.estimatedProfitLoss) >= 0.01);
 
   const concentration = concentrationMetrics(history);
   const xirrCashFlows: DatedCashFlow[] = [];
@@ -302,15 +332,42 @@ export function calculatePortfolioAnalytics({
   const netInvestedAmount = initialValue + totalBuyAmount - totalSellAmount + commission + tax;
   const dailyReturnValues = returns.map((item) => item.value);
   const annualizedVolatilityPercent = returns.length > 1 ? round(standardDeviation * Math.sqrt(TRADING_DAYS_PER_YEAR) * 100) : null;
+  const dailyRiskFreeRate = (1 + riskFreeRatePercent / 100) ** (1 / TRADING_DAYS_PER_YEAR) - 1;
   const sharpeRatio = returns.length > 1 && standardDeviation > 0
-    ? safeRatio((mean / standardDeviation) * Math.sqrt(TRADING_DAYS_PER_YEAR))
+    ? safeRatio(((mean - dailyRiskFreeRate) / standardDeviation) * Math.sqrt(TRADING_DAYS_PER_YEAR))
     : null;
   const sortinoRatio = returns.length && downsideDeviation > 0
-    ? safeRatio((mean / downsideDeviation) * Math.sqrt(TRADING_DAYS_PER_YEAR))
+    ? safeRatio(((mean - dailyRiskFreeRate) / downsideDeviation) * Math.sqrt(TRADING_DAYS_PER_YEAR))
     : null;
   const calmarRatio = annualizedReturnPercent !== null && maxDrawdown < 0
     ? safeRatio((annualizedReturnPercent / 100) / Math.abs(maxDrawdown))
     : null;
+
+  const advanced = calculateAdvancedAnalytics({
+    detail: effectiveReturnDetail,
+    history,
+    candles: sortedCandles,
+    benchmarks,
+    orders,
+    datedOrders: orders.map((order) => ({ order, date: analysisOrderDate(order) })).filter((item) => item.date),
+    fromDate: metricFromDate,
+    toDate: metricToDate,
+    riskFreeRatePercent,
+    totalBuyAmount,
+    totalSellAmount,
+    commission,
+    tax,
+    averageValue,
+    estimatedReturnPercent,
+    convertAmount: (value, currency, date) => convertedAmount(value, currency, date, exchangeRates),
+  });
+  const contributions = baseContributions.map((item) => ({
+    ...item,
+    timeLinkedContributionPercent: advanced.attributionByKey[item.key]?.timeLinkedContributionPercent ?? 0,
+    localPriceContributionPercent: advanced.attributionByKey[item.key]?.localPriceContributionPercent ?? 0,
+    fxContributionPercent: advanced.attributionByKey[item.key]?.fxContributionPercent ?? 0,
+  })).sort((left, right) => right.estimatedProfitLoss - left.estimatedProfitLoss)
+    .slice(0, 10);
 
   return {
     metrics: {
@@ -342,8 +399,9 @@ export function calculatePortfolioAnalytics({
       positiveDaysPercent: dailyReturnValues.length
         ? round((dailyReturnValues.filter((value) => value > 0).length / dailyReturnValues.length) * 100)
         : null,
-      riskFreeRatePercent: 0,
+      riskFreeRatePercent: round(riskFreeRatePercent, 2),
     },
     contributions,
+    ...advanced,
   };
 }

@@ -58,4 +58,35 @@ describe("OpenAI report evaluation", () => {
     const request = JSON.parse(String((fetcher.mock.calls[1] as unknown as [string, RequestInit])[1].body));
     expect(request.model).toBe("gpt-5.6-sol");
   });
+
+  it("Responses API 미지원 모델은 Chat Completions strict JSON schema로 전환한다", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => String(input).endsWith("/responses")
+      ? new Response(JSON.stringify({
+          error: {
+            type: "invalid_request_error",
+            code: "validation_error",
+            message: "The model does not support the '/v1/responses' API",
+          },
+        }), { status: 400, headers: { "Content-Type": "application/json" } })
+      : new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: JSON.stringify(narrative) } }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
+    const writer = new OpenAiReportWriter({
+      endpoint: "https://gateway.example/v1",
+      apiKey: "secret-key",
+      model: "moonshotai.kimi-k2.5",
+      timeoutMs: 5_000,
+    }, fetcher);
+
+    await expect(writer.evaluate({ synthetic: true })).resolves.toEqual(narrative);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(String(fetcher.mock.calls[1][0])).toBe("https://gateway.example/v1/chat/completions");
+    const request = JSON.parse(String((fetcher.mock.calls[1] as unknown as [string, RequestInit])[1].body));
+    expect(request.model).toBe("moonshotai.kimi-k2.5");
+    expect(request.response_format.json_schema).toMatchObject({
+      name: "portfolio_evaluation",
+      strict: true,
+    });
+    expect(request.response_format.json_schema.schema.additionalProperties).toBe(false);
+  });
 });

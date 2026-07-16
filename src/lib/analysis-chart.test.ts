@@ -24,6 +24,8 @@ describe("analysis chart data", () => {
         {
           key: "KOSPI",
           name: "KOSPI",
+          baseCurrency: "KRW",
+          currencyAdjusted: false,
           points: [
             { date: "2026-07-01", close: 1000 },
             { date: "2026-07-02", close: 1050 },
@@ -32,6 +34,8 @@ describe("analysis chart data", () => {
         {
           key: "NASDAQ100",
           name: "나스닥 100",
+          baseCurrency: "KRW",
+          currencyAdjusted: true,
           points: [{ date: "2026-07-02", close: 500 }],
         },
       ],
@@ -68,6 +72,39 @@ describe("analysis chart data", () => {
         positiveDaysPercent: 50,
       },
       contributions: [],
+      benchmarkComparisons: [],
+      rolling: [],
+      drawdowns: {
+        points: [], episodes: [], currentUnderwaterDays: 0, averageDrawdownPercent: null,
+        ulcerIndex: null, worst20DayReturnPercent: null, worst60DayReturnPercent: null,
+      },
+      tailRisk: {
+        historicalVar95Percent: null, expectedShortfall95Percent: null, lossDaysPercent: null,
+        averageGainPercent: null, averageLossPercent: null, gainLossRatio: null, skewness: null,
+        excessKurtosis: null, maxConsecutiveGainDays: 0, maxConsecutiveLossDays: 0,
+      },
+      monthlyReturns: [],
+      attributionByKey: {},
+      riskContributions: [],
+      correlations: { assets: [], values: [] },
+      exposure: {
+        krwWeightPercent: 100, usdWeightPercent: 0, domesticWeightPercent: 100, overseasWeightPercent: 0,
+        top1WeightPercent: 100, top5WeightPercent: 100, top10WeightPercent: 100, diversificationBenefitPercent: null,
+      },
+      costEfficiency: {
+        costDragPercent: null, grossEstimatedReturnPercent: null, costPerTradedAmountBps: null,
+        averageTradeAmount: null, buySellAmountRatio: null, monthly: [],
+      },
+      tradeBehavior: {
+        estimatedRealizedProfitLoss: 0, estimatedWinRatePercent: null, estimatedProfitFactor: null,
+        estimatedAverageHoldingDays: null, matchedSellCount: 0, unmatchedSellCount: 0,
+      },
+      dataQuality: {
+        confidence: "high", historyDays: 2, returnObservationDays: 1, expectedReturnObservationDays: 1, returnCoveragePercent: 100,
+        requiredPriceObservations: 1, missingPriceObservations: 0, priceCoveragePercent: 100,
+        requiredFxObservations: 0, missingFxObservations: 0, fxCoveragePercent: 100,
+        liveSnapshotDays: 2, reconstructedSnapshotDays: 0, backfillStatus: "complete", failedSymbols: 0, notes: [],
+      },
     };
 
     const points = buildAnalysisChartData(analysis);

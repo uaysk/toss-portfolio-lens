@@ -108,12 +108,17 @@ describe("PortfolioBacktestService", () => {
       initialAmount: 1_000_000,
       monthlyCashFlow: 0,
       rebalanceFrequency: "none",
+      riskFreeRatePercent: 2.5,
+      transactionCostBps: 15,
       benchmark: "NONE",
     });
 
     expect(result.config.latestListDate).toBe("2020-01-02");
     expect(result.effectiveStartDate).toBe("2020-01-02");
     expect(result.metrics.totalReturnPercent).toBe(5);
+    expect(result.config).toMatchObject({ riskFreeRatePercent: 2.5, transactionCostBps: 15 });
+    expect(result.advanced.costEfficiency).toMatchObject({ transactionCostBps: 15, tradeCount: 2 });
+    expect(result.advanced.costEfficiency.estimatedTotalCost).toBeGreaterThan(0);
     expect(result.warnings[0]).toContain("2020-01-02");
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("005930", undefined, true);
   });

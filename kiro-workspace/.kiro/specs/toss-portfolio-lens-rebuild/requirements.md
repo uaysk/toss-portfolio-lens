@@ -185,6 +185,16 @@
 8. WHEN 기여도를 정렬하면 THE SYSTEM SHALL 절댓값이 아니라 부호가 있는 원래 기여값을 내림차순으로 정렬해 양수 기여가 음수 기여보다 먼저 나오게 한다.
 9. WHEN 표본 수가 부족하거나 분모가 0이거나 연율화가 의미 없으면 THE SYSTEM SHALL 숫자를 조작하지 않고 `N/A`와 사유를 표시한다.
 10. THE SYSTEM SHALL 무위험수익률 기본 가정과 연율화 거래일 수를 계산 코드와 UI 설명에 명시한다.
+11. THE SYSTEM SHALL 미국 benchmark proxy를 분석일 USD/KRW로 환산해 portfolio와 동일한 KRW 기준으로 비교한다.
+12. THE SYSTEM SHALL tracking error, information ratio, beta, Jensen alpha, correlation, upside/downside capture, 일간·월간 benchmark 승률과 relative MDD를 제공한다.
+13. THE SYSTEM SHALL 20/60/120/252거래일 rolling return, 60일 volatility·Sharpe·beta·correlation과 최악 20/60일 수익률을 제공한다.
+14. THE SYSTEM SHALL drawdown path, 현재 수중 기간, 평균 drawdown, Ulcer Index와 최악 drawdown·회복 구간을 제공한다.
+15. THE SYSTEM SHALL historical VaR 95%, CVaR 95%, 손실일 비율, 평균 상승·하락, 손익비, 왜도·초과첨도와 연속 상승·하락일을 제공한다.
+16. THE SYSTEM SHALL 최신 종목 비중과 일간 공분산으로 risk contribution, portfolio correlation, diversification benefit와 Top 1/5/10·KRW/USD exposure를 제공한다.
+17. THE SYSTEM SHALL 전일 비중 기반 기여도를 시간 연결하고 현지 가격 기여와 FX 기여를 분리하며 월간 수익률 heatmap을 제공한다.
+18. THE SYSTEM SHALL 비용 drag, 거래금액당 비용 bp, 월별 turnover·비용과 FIFO 기반 추정 실현손익·승률·Profit Factor·평균 보유기간을 제공하고 기업행사 원장 부재 한계를 표시한다.
+19. THE SYSTEM SHALL 수익률 관측, 가격·FX coverage, 실제·재구성 snapshot, backfill 상태를 이용한 data confidence를 표시한다.
+20. WHEN 사용자가 연 무위험수익률을 -10%~50% 범위에서 지정하면 THE SYSTEM SHALL Sharpe·Sortino·alpha와 rolling Sharpe에 같은 값을 사용하고 보고서 재계산에도 전달한다.
 
 ### Requirement 12 — 포트폴리오 백테스트
 
@@ -202,10 +212,19 @@
 8. THE SYSTEM SHALL KOSPI, KOSDAQ, Nasdaq-100, S&P 500, 사용자가 입력한 국내·해외 개별 종목 또는 비교 없음 중 하나를 지원한다.
 9. THE SYSTEM SHALL 포트폴리오 성장, 납입 누계, 벤치마크 성장, drawdown, 연도별 수익률, 종목별 기여도, 일간 수익률 상관행렬을 제공한다.
 10. THE SYSTEM SHALL ending value, total return, CAGR, 연환산 변동성, MDD와 기간, Sharpe, Sortino, best/worst year, positive month 비율을 제공한다.
-11. THE SYSTEM SHALL 국내·해외 혼합 백테스트가 현지 통화 수정주가 수익률을 합성하며 과거 FX, 명시적 배당 현금흐름, 세금, 수수료, spread, slippage를 반영하지 않는다는 한계를 표시한다.
+11. THE SYSTEM SHALL 국내·해외 혼합 백테스트가 현지 통화 수정주가 수익률을 합성하며 과거 FX, 명시적 배당 현금흐름, 세금과 실제 spread/slippage를 반영하지 않는다는 한계를 표시한다.
 12. WHEN 일간 수익률 상관행렬을 표시하면 THE SYSTEM SHALL 상단 열 머리글과 왼쪽 행 머리글에 종목 코드가 아닌 종목명을 우선 표시하고, 종목명이 없을 때만 코드를 대신 사용한다.
 13. WHEN 벤치마크가 선택되면 THE SYSTEM SHALL 포트폴리오와 동일한 공통 거래일 구간에서 누적수익률, CAGR, 연환산 변동성, MDD와 기간, Sharpe, Sortino, 최고 연도, 상승 월 비율을 계산하고 각 포트폴리오 수치 바로 아래에 벤치마크 수치를 표시한다.
 14. THE SYSTEM SHALL 일간 수익률 상관행렬의 셀을 유채색 없이 상관계수 절댓값에 따른 무채색 명도 차이로 표현하고 수치의 부호는 텍스트로 유지한다.
+15. WHEN 사용자가 구성 종목을 삭제하면 THE SYSTEM SHALL 나머지 종목의 입력 비중을 자동 재배분하지 않고 원래 값을 보존한다.
+16. WHEN 사용자가 연 무위험수익률을 -10%~50% 범위에서 지정하면 THE SYSTEM SHALL Sharpe·Sortino·Jensen alpha와 rolling Sharpe에 동일한 값을 적용한다.
+17. WHEN 사용자가 거래비용을 0~500bp 범위에서 지정하면 THE SYSTEM SHALL 초기매수·정기 현금흐름·리밸런싱 거래금액에 적용한 추정 비용·비용 드래그·비용 차감 후 추정수익률을 별도로 표시하되 성과 경로 자체에서는 차감하지 않는다.
+18. WHEN 벤치마크가 선택되면 THE SYSTEM SHALL tracking error, information ratio, beta, Jensen alpha, correlation, upside/downside capture, 일·월 승률과 relative MDD를 제공한다.
+19. THE SYSTEM SHALL 20/60/120/252일 rolling return, 60일 volatility·Sharpe와 선택 benchmark의 rolling excess return·beta·correlation을 제공한다.
+20. THE SYSTEM SHALL drawdown episode·회복기간·현재 underwater 기간·평균 drawdown·Ulcer Index·최악 20/60일 수익률과 historical VaR/CVaR·왜도·첨도·연속 손익을 제공한다.
+21. THE SYSTEM SHALL 월간 수익률 heatmap, 평균/종료 비중 기반 종목별 risk contribution, Top 1/5/10·HHI·effective positions·통화 노출·diversification benefit을 제공한다.
+22. THE SYSTEM SHALL simulation이 생성한 virtual trade를 이용해 월별 turnover와 FIFO 추정 실현손익·승률·Profit Factor·평균 보유기간을 제공한다.
+23. THE SYSTEM SHALL 종목별 수정주가 관측·carry-forward·공통 기간·benchmark 관측 수를 기반으로 백테스트 data confidence를 높음·보통·제한적으로 표시한다.
 
 ### Requirement 13 — AI 평가 보고서 생성
 
@@ -217,7 +236,7 @@
 2. WHEN 백테스트 보고서를 요청하면 THE SYSTEM SHALL 서버에서 동일 종목·비중·기간·현금흐름·리밸런싱 조건을 다시 실행한다.
 3. THE SYSTEM SHALL LLM 입력에서 account ID와 모든 비밀값을 제거하고 수치, 표본 경로, 데이터 품질, 계산 한계만 전송한다.
 4. WHEN `OPENAI_MODEL`이 설정되면 THE SYSTEM SHALL 그 모델을 사용하고, 없으면 `/models` 응답에서 Responses API와 호환되는 우선순위 모델을 결정적으로 선택한다.
-5. THE SYSTEM SHALL Responses API에 `store=false`, timeout, 낮은 reasoning budget과 strict JSON schema를 사용한다.
+5. THE SYSTEM SHALL Responses API에 `store=false`, timeout, 낮은 reasoning budget과 strict JSON schema를 사용하고, 선택 모델이 Responses API 미지원을 명시하면 같은 strict JSON schema의 Chat Completions API로 전환한다.
 6. THE SYSTEM SHALL LLM이 `score(0..100)`, `stance`, 한국어 `summary`, 정확히 3개의 `strengths`, `risks`, `actions`, `methodology`만 반환하게 검증한다.
 7. THE SYSTEM SHALL LLM이 HTML, CSS, 차트 값 또는 템플릿을 생성하게 하지 않는다.
 8. WHEN LLM 응답이 거절·timeout·rate limit·schema 불일치이면 THE SYSTEM SHALL retry 가능 여부를 구분한 안전한 오류를 표시하고 불완전 보고서를 저장하지 않는다.

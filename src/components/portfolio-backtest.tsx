@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   AreaChart,
+  Bar,
+  ComposedChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -31,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
+import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -96,7 +99,7 @@ function ResultMetric({ icon: Icon, label, value, detail, benchmark }: {
         <Icon className="size-4" aria-hidden="true" />
         <p className="text-[11px] font-bold">{label}</p>
       </div>
-      <p className="mt-3 truncate text-xl font-black tracking-[-0.035em]">{value}</p>
+      <p className="mt-3 break-words text-xl font-black tracking-[-0.035em]">{value}</p>
       {benchmark ? (
         <div className="mt-3 rounded-[14px] bg-secondary px-3 py-2.5">
           <p className="truncate text-[9px] font-black tracking-[0.08em] text-muted-foreground">벤치마크 · {benchmark.name}</p>
@@ -124,6 +127,8 @@ export function PortfolioBacktestView({
   const [initialAmount, setInitialAmount] = useState(10_000_000);
   const [monthlyCashFlow, setMonthlyCashFlow] = useState(0);
   const [rebalanceFrequency, setRebalanceFrequency] = useState<BacktestRebalanceFrequency>("annually");
+  const [riskFreeRatePercent, setRiskFreeRatePercent] = useState(0);
+  const [transactionCostBps, setTransactionCostBps] = useState(0);
   const [benchmark, setBenchmark] = useState<BacktestBenchmarkKey>("KOSPI");
   const [benchmarkSymbol, setBenchmarkSymbol] = useState("");
   const [loadingCurrent, setLoadingCurrent] = useState(false);
@@ -192,7 +197,7 @@ export function PortfolioBacktestView({
   };
 
   const removeAsset = (assetSymbol: string) => {
-    const next = rebalanceEvenly(assets.filter((asset) => asset.symbol !== assetSymbol));
+    const next = removeBacktestAssetPreservingWeights(assets, assetSymbol);
     setAssets(next);
     if (!manuallyEditedStart.current) setStartDate(latestListDate(next));
     setResult(undefined);
@@ -205,6 +210,12 @@ export function PortfolioBacktestView({
     && startDate <= endDate
     && endDate <= today
     && initialAmount >= 10_000
+    && Number.isFinite(riskFreeRatePercent)
+    && riskFreeRatePercent >= -10
+    && riskFreeRatePercent <= 50
+    && Number.isFinite(transactionCostBps)
+    && transactionCostBps >= 0
+    && transactionCostBps <= 500
     && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
 
   const runBacktest = async () => {
@@ -222,6 +233,8 @@ export function PortfolioBacktestView({
           initialAmount,
           monthlyCashFlow,
           rebalanceFrequency,
+          riskFreeRatePercent,
+          transactionCostBps,
           benchmark,
           ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
         }),
@@ -239,6 +252,22 @@ export function PortfolioBacktestView({
       setRunning(false);
     }
   };
+
+  const advanced = result?.advanced;
+  const rollingData = advanced?.rolling.filter((point) => (
+    point.return20d !== null || point.return60d !== null || point.volatility60d !== null
+  )) ?? [];
+  const hasRolling60 = rollingData.some((point) => point.volatility60d !== null);
+  const monthlyYears = useMemo(() => {
+    const years = new Map<string, Record<number, number>>();
+    for (const item of advanced?.monthlyReturns ?? []) {
+      const [year, month] = item.month.split("-");
+      const values = years.get(year) ?? {};
+      values[Number(month)] = item.returnPercent;
+      years.set(year, values);
+    }
+    return Array.from(years, ([year, months]) => ({ year, months })).sort((left, right) => left.year.localeCompare(right.year));
+  }, [advanced?.monthlyReturns]);
 
   return (
     <section aria-labelledby="backtest-title" className="space-y-3">
@@ -337,7 +366,7 @@ export function PortfolioBacktestView({
       <Card className="bg-secondary p-5 sm:p-7">
         <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">ASSUMPTIONS</p>
         <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">기간과 운용 조건</h3>
-        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">시작일</span>
             <Input
@@ -395,6 +424,16 @@ export function PortfolioBacktestView({
             ) : null}
             <span className="mt-2 block text-[10px] text-muted-foreground">지수 프록시 또는 국내·해외 개별 종목 수정주가</span>
           </label>
+          <label className="rounded-[20px] bg-card p-4">
+            <span className="mb-2 block text-[11px] font-bold text-muted-foreground">연 무위험수익률 · %</span>
+            <Input type="number" min={-10} max={50} step={0.1} value={riskFreeRatePercent} onChange={(event) => { setRiskFreeRatePercent(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+            <span className="mt-2 block text-[10px] text-muted-foreground">Sharpe·Sortino·알파 및 롤링 위험에 반영</span>
+          </label>
+          <label className="rounded-[20px] bg-card p-4">
+            <span className="mb-2 block text-[11px] font-bold text-muted-foreground">거래비용 가정 · bp</span>
+            <Input type="number" min={0} max={500} step={1} value={transactionCostBps} onChange={(event) => { setTransactionCostBps(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+            <span className="mt-2 block text-[10px] text-muted-foreground">1bp=0.01% · 초기매수·현금흐름·리밸런싱 거래</span>
+          </label>
         </div>
 
         {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
@@ -423,6 +462,8 @@ export function PortfolioBacktestView({
                   initialAmount: result.config.initialAmount,
                   monthlyCashFlow: result.config.monthlyCashFlow,
                   rebalanceFrequency: result.config.rebalanceFrequency,
+                  riskFreeRatePercent: result.config.riskFreeRatePercent ?? 0,
+                  transactionCostBps: result.config.transactionCostBps ?? 0,
                   benchmark: result.config.benchmark,
                   ...(result.config.benchmarkSymbol ? { benchmarkSymbol: result.config.benchmarkSymbol } : {}),
                 }}
@@ -467,11 +508,95 @@ export function PortfolioBacktestView({
             <ResultMetric icon={CalendarDays} label="CAGR" value={metricValue(result.metrics.cagrPercent)} detail="연평균 복리 수익률" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.cagrPercent) } : undefined} />
             <ResultMetric icon={Activity} label="연환산 변동성" value={metricValue(result.metrics.annualizedVolatilityPercent)} detail="일별 수익률 · 252거래일" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.annualizedVolatilityPercent) } : undefined} />
             <ResultMetric icon={TrendingDown} label="최대 낙폭" value={metricValue(result.metrics.maxDrawdownPercent)} detail={`최장 낙폭 ${result.metrics.maxDrawdownDays}일`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.maxDrawdownPercent), detail: `최장 ${result.benchmarkMetrics.maxDrawdownDays}일` } : undefined} />
-            <ResultMetric icon={Scale} label="샤프지수" value={metricValue(result.metrics.sharpeRatio, "ratio")} detail="무위험수익률 0%" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.sharpeRatio, "ratio") } : undefined} />
+            <ResultMetric icon={Scale} label="샤프지수" value={metricValue(result.metrics.sharpeRatio, "ratio")} detail={`연 무위험수익률 ${(result.config.riskFreeRatePercent ?? 0).toFixed(2)}%`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.sharpeRatio, "ratio") } : undefined} />
             <ResultMetric icon={Scale} label="소르티노지수" value={metricValue(result.metrics.sortinoRatio, "ratio")} detail="하방 변동성 기준" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.sortinoRatio, "ratio") } : undefined} />
             <ResultMetric icon={TrendingUp} label="최고 연도" value={metricValue(result.metrics.bestYearPercent)} detail="부분 연도 포함" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.bestYearPercent) } : undefined} />
             <ResultMetric icon={CircleDollarSign} label="상승 월 비율" value={metricValue(result.metrics.positiveMonthsPercent)} detail={`납입 ${formatMoney(result.metrics.totalContributions, "KRW")} · 인출 ${formatMoney(result.metrics.totalWithdrawals, "KRW")}`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.positiveMonthsPercent) } : undefined} />
+            <ResultMetric icon={Scale} label="Calmar 비율" value={metricValue(result.metrics.calmarRatio, "ratio")} detail="CAGR ÷ 최대 낙폭" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.calmarRatio, "ratio") } : undefined} />
+            <ResultMetric icon={TrendingUp} label="최고 일간수익률" value={metricValue(result.metrics.bestDailyReturnPercent)} detail="현금흐름 제거 일간 경로" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.bestDailyReturnPercent) } : undefined} />
+            <ResultMetric icon={TrendingDown} label="최저 일간수익률" value={metricValue(result.metrics.worstDailyReturnPercent)} detail="현금흐름 제거 일간 경로" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.worstDailyReturnPercent) } : undefined} />
+            <ResultMetric icon={CalendarDays} label="상승일 비율" value={metricValue(result.metrics.positiveDaysPercent)} detail="일간수익률이 0%보다 높은 날" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.positiveDaysPercent) } : undefined} />
           </div>
+
+          {advanced?.benchmarkComparison ? (
+            <Card className="bg-secondary p-5 sm:p-7">
+              <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">ACTIVE RISK & CAPTURE</p>
+              <div className="mt-2 flex flex-wrap items-end justify-between gap-2">
+                <h3 className="text-xl font-black tracking-[-0.035em]">벤치마크 대비 위험과 참여율</h3>
+                <span className="text-[10px] font-bold text-muted-foreground">{advanced.benchmarkComparison.name} · {advanced.benchmarkComparison.observations.toLocaleString("ko-KR")}일</span>
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-6">
+                <ResultMetric icon={TrendingUp} label="초과수익" value={metricValue(advanced.benchmarkComparison.excessReturnPercent)} detail={`벤치마크 ${metricValue(advanced.benchmarkComparison.returnPercent)}`} />
+                <ResultMetric icon={Activity} label="추적오차" value={metricValue(advanced.benchmarkComparison.trackingErrorPercent)} detail={`정보비율 ${metricValue(advanced.benchmarkComparison.informationRatio, "ratio")}`} />
+                <ResultMetric icon={Scale} label="베타 · 알파" value={metricValue(advanced.benchmarkComparison.beta, "ratio")} detail={`알파 ${metricValue(advanced.benchmarkComparison.alphaPercent)}`} />
+                <ResultMetric icon={Activity} label="상관계수" value={metricValue(advanced.benchmarkComparison.correlation, "ratio")} detail={`상대 MDD ${metricValue(advanced.benchmarkComparison.relativeMaxDrawdownPercent)}`} />
+                <ResultMetric icon={TrendingUp} label="상승 · 하락 참여" value={`${metricValue(advanced.benchmarkComparison.upsideCapturePercent)} · ${metricValue(advanced.benchmarkComparison.downsideCapturePercent)}`} detail="벤치마크 상승일 · 하락일" />
+                <ResultMetric icon={CalendarDays} label="일간 · 월간 승률" value={`${metricValue(advanced.benchmarkComparison.dailyWinRatePercent)} · ${metricValue(advanced.benchmarkComparison.monthlyWinRatePercent)}`} detail="벤치마크 초과 비율" />
+              </div>
+            </Card>
+          ) : null}
+
+          {advanced ? (
+            <div className="grid min-w-0 gap-3 xl:grid-cols-[1.2fr_0.9fr]">
+              <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">ROLLING PERFORMANCE</p>
+                <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">롤링 수익률과 위험 변화</h3>
+                {rollingData.length ? (
+                  <div className="mt-5 grid gap-3 2xl:grid-cols-2">
+                    <div className="h-[280px] min-w-0 rounded-[20px] bg-card p-3">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+                          <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                          <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                          <Line type="monotone" dataKey="return20d" name="20일" stroke="#5eead4" strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return60d" name="60일" stroke="#60a5fa" strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return120d" name="120일" stroke="#c084fc" strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return252d" name="252일" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="h-[280px] min-w-0 rounded-[20px] bg-card p-3">
+                      {hasRolling60 ? <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+                          <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                          <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <YAxis yAxisId="ratio" orientation="right" width={34} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                          <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke="#fb7185" strokeWidth={2} dot={false} connectNulls />
+                          <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke="#e5e7eb" strokeWidth={2} dot={false} connectNulls />
+                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls /> : null}
+                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkCorrelation60d" name="상관" stroke="#a3e635" strokeWidth={2} dot={false} connectNulls /> : null}
+                        </ComposedChart>
+                      </ResponsiveContainer> : <div className="grid h-full place-items-center px-4 text-center text-xs leading-5 text-muted-foreground">60개 이상의 수익률 관측이 쌓이면 롤링 위험을 표시합니다.</div>}
+                    </div>
+                  </div>
+                ) : <p className="mt-5 rounded-[20px] bg-card p-5 text-sm text-muted-foreground">20개 이상의 수익률 관측이 필요합니다.</p>}
+              </Card>
+
+              <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">DRAWDOWN DETAIL</p>
+                <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">낙폭 깊이와 회복</h3>
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  <ResultMetric icon={TrendingDown} label="현재 낙폭" value={metricValue(advanced.drawdowns.points.at(-1)?.drawdownPercent ?? null)} detail="최근 고점 대비" />
+                  <ResultMetric icon={CalendarDays} label="현재 수중 기간" value={`${advanced.drawdowns.currentUnderwaterDays.toLocaleString("ko-KR")}일`} detail="최근 고점 미회복" />
+                  <ResultMetric icon={TrendingDown} label="평균 낙폭 · Ulcer" value={`${metricValue(advanced.drawdowns.averageDrawdownPercent)} · ${metricValue(advanced.drawdowns.ulcerIndex, "ratio")}`} detail="깊이와 지속 위험" />
+                  <ResultMetric icon={TrendingDown} label="최악 20일" value={metricValue(advanced.drawdowns.worst20DayReturnPercent)} detail="20 관측일 롤링 최저" />
+                  <ResultMetric icon={TrendingDown} label="최악 60일" value={metricValue(advanced.drawdowns.worst60DayReturnPercent)} detail="60 관측일 롤링 최저" />
+                </div>
+                <div className="mt-3 space-y-2">
+                  {advanced.drawdowns.episodes.map((episode, index) => (
+                    <div key={`${episode.startDate}:${episode.troughDate}`} className="rounded-[18px] bg-card p-4">
+                      <div className="flex items-center justify-between gap-3"><span className="text-xs font-black">#{index + 1} · {formatPercent(episode.depthPercent, true)}</span><span className="text-[10px] text-muted-foreground">{episode.durationDays}일</span></div>
+                      <p className="mt-2 text-[10px] leading-4 text-muted-foreground">{episode.startDate} → {episode.troughDate}{episode.recoveryDate ? ` → ${episode.recoveryDate} 회복` : " · 미회복"}</p>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            </div>
+          ) : null}
 
           <Card className="bg-secondary p-5 sm:p-7">
             <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">DRAWDOWN</p>
@@ -512,6 +637,7 @@ export function PortfolioBacktestView({
                     <div className="min-w-0">
                       <p className="truncate text-sm font-black">{item.name}</p>
                       <p className="mt-1 text-[10px] font-bold text-muted-foreground">{item.market} · {item.symbol} · 목표 {item.weight.toFixed(2)}% · 종목 {formatPercent(item.assetReturnPercent, true)}</p>
+                      <p className="mt-1 text-[10px] font-bold text-muted-foreground">시간연결 {formatPercent(item.timeLinkedContributionPercent ?? item.contributionPercent, true)} · 현지가격 {formatPercent(item.localPriceContributionPercent ?? item.timeLinkedContributionPercent ?? item.contributionPercent, true)} · 환율 {formatPercent(item.fxContributionPercent ?? 0, true)}</p>
                     </div>
                     <div className="sm:text-right">
                       <p className="text-sm font-black">{formatSignedMoney(item.profitLoss, "KRW")}</p>
@@ -522,6 +648,138 @@ export function PortfolioBacktestView({
               </div>
             </Card>
           </div>
+
+          {advanced ? (
+            <>
+              <div className="grid min-w-0 gap-3 xl:grid-cols-[0.95fr_1.35fr]">
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">TAIL RISK</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">손실 분포와 극단 위험</h3>
+                  <div className="mt-5 grid grid-cols-2 gap-2">
+                    <ResultMetric icon={TrendingDown} label="역사적 VaR 95%" value={metricValue(advanced.tailRisk.historicalVar95Percent)} detail="하위 5% 일간수익률 경계" />
+                    <ResultMetric icon={TrendingDown} label="CVaR 95%" value={metricValue(advanced.tailRisk.expectedShortfall95Percent)} detail="VaR 이하 손실일 평균" />
+                    <ResultMetric icon={CalendarDays} label="손실일 비율" value={metricValue(advanced.tailRisk.lossDaysPercent)} detail={`최장 연속 하락 ${advanced.tailRisk.maxConsecutiveLossDays}일`} />
+                    <ResultMetric icon={Scale} label="평균 상승 · 하락" value={`${metricValue(advanced.tailRisk.averageGainPercent)} · ${metricValue(advanced.tailRisk.averageLossPercent)}`} detail={`손익비 ${metricValue(advanced.tailRisk.gainLossRatio, "ratio")}`} />
+                    <ResultMetric icon={Activity} label="왜도" value={metricValue(advanced.tailRisk.skewness, "ratio")} detail="음수일수록 왼쪽 꼬리 위험" />
+                    <ResultMetric icon={Activity} label="초과 첨도" value={metricValue(advanced.tailRisk.excessKurtosis, "ratio")} detail={`최장 연속 상승 ${advanced.tailRisk.maxConsecutiveGainDays}일`} />
+                  </div>
+                </Card>
+
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">MONTHLY RETURN MAP</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">월간 수익률 히트맵</h3>
+                  <div className="mt-5 w-full min-w-0 overflow-x-auto rounded-[20px] bg-card p-3">
+                    <table className="w-full min-w-[720px] border-separate border-spacing-1 text-center text-[10px]">
+                      <thead><tr><th className="p-2 text-left text-muted-foreground">연도</th>{Array.from({ length: 12 }, (_, index) => <th key={index} className="p-2 text-muted-foreground">{index + 1}월</th>)}</tr></thead>
+                      <tbody>{monthlyYears.map((row) => (
+                        <tr key={row.year}>
+                          <th className="p-2 text-left text-xs font-black">{row.year}</th>
+                          {Array.from({ length: 12 }, (_, index) => {
+                            const value = row.months[index + 1];
+                            const opacity = value === undefined ? 0 : Math.min(0.5, 0.1 + Math.abs(value) / 40);
+                            return <td key={index} className="rounded-xl p-2.5 font-black" style={value === undefined ? undefined : { backgroundColor: value >= 0 ? `rgba(94, 234, 212, ${opacity})` : `rgba(251, 113, 133, ${opacity})` }}>{value === undefined ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(1)}`}</td>;
+                          })}
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </Card>
+              </div>
+
+              <div className="grid min-w-0 gap-3 xl:grid-cols-[1fr_0.95fr]">
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">RISK CONTRIBUTION</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">종목별 위험 기여도</h3>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">시뮬레이션 평균 비중과 종목 공분산으로 전체 변동성 기여를 계산합니다.</p>
+                  <div className="mt-5 space-y-3">
+                    {advanced.riskContributions.map((item) => {
+                      const maximum = Math.max(...advanced.riskContributions.map((candidate) => Math.abs(candidate.riskContributionPercent ?? 0)), 1);
+                      return (
+                        <div key={item.key} className="rounded-[18px] bg-card p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0"><p className="truncate text-xs font-black">{item.name}</p><p className="mt-1 text-[10px] text-muted-foreground">평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricValue(item.annualizedVolatilityPercent)}</p></div>
+                            <p className="text-sm font-black">{metricValue(item.riskContributionPercent)}</p>
+                          </div>
+                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%` }} /></div>
+                          <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricValue(item.correlationToPortfolio, "ratio")}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">DIVERSIFICATION</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">집중도와 통화 노출</h3>
+                  <div className="mt-5 grid grid-cols-2 gap-2">
+                    <ResultMetric icon={Scale} label="상위 1 · 5종목" value={`${formatPercent(advanced.exposure.top1WeightPercent)} · ${formatPercent(advanced.exposure.top5WeightPercent)}`} detail="종료 평가액 기준" />
+                    <ResultMetric icon={Scale} label="상위 10종목" value={formatPercent(advanced.exposure.top10WeightPercent)} detail="종료 평가액 기준" />
+                    <ResultMetric icon={WalletCards} label="유효 종목 수" value={advanced.exposure.effectivePositions === null ? "데이터 부족" : `${advanced.exposure.effectivePositions.toFixed(2)}개`} detail={`HHI ${advanced.exposure.hhi.toFixed(4)}`} />
+                    <ResultMetric icon={Activity} label="분산 효과" value={metricValue(advanced.exposure.diversificationBenefitPercent)} detail="개별 변동성 가중합 대비 감소" />
+                    <ResultMetric icon={WalletCards} label="KRW · USD 노출" value={`${formatPercent(advanced.exposure.krwWeightPercent)} · ${formatPercent(advanced.exposure.usdWeightPercent)}`} detail="종료 비중 · 현지수익률 방식" />
+                    <ResultMetric icon={Scale} label="국내 · 해외" value={`${formatPercent(advanced.exposure.domesticWeightPercent)} · ${formatPercent(advanced.exposure.overseasWeightPercent)}`} detail="동시 포트폴리오 구성" />
+                  </div>
+                </Card>
+              </div>
+
+              <div className="grid min-w-0 gap-3 xl:grid-cols-[1.2fr_0.9fr]">
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">TURNOVER & COST</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">월별 회전율과 추정 거래비용</h3>
+                  <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                    <ResultMetric icon={RefreshCw} label="운용 회전율" value={metricValue(advanced.costEfficiency.turnoverPercent)} detail="초기 매수를 제외한 거래금액" />
+                    <ResultMetric icon={CircleDollarSign} label="추정 총비용" value={formatMoney(advanced.costEfficiency.estimatedTotalCost, "KRW")} detail={`${advanced.costEfficiency.transactionCostBps.toFixed(2)}bp 가정`} />
+                    <ResultMetric icon={TrendingDown} label="비용 드래그" value={metricValue(advanced.costEfficiency.costDragPercent)} detail={`총 거래 ${formatMoney(advanced.costEfficiency.totalTradedAmount, "KRW", true)}`} />
+                    <ResultMetric icon={TrendingUp} label="비용 차감 후 추정" value={metricValue(advanced.costEfficiency.netEstimatedReturnPercent)} detail={`차감 전 ${metricValue(advanced.costEfficiency.grossReturnPercent)}`} />
+                  </div>
+                  <div className="mt-4 h-[280px] min-w-0 rounded-[20px] bg-card p-3">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={advanced.costEfficiency.monthly} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+                        <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                        <XAxis dataKey="month" tickFormatter={(value) => String(value).slice(2).replace("-", ".")} minTickGap={26} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                        <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                        <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                        <Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                        <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill="#60a5fa" radius={[6, 6, 0, 0]} />
+                        <Line yAxisId="cost" type="monotone" dataKey="estimatedCost" name="추정비용" stroke="#fbbf24" strokeWidth={2} dot={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Card>
+
+                <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                  <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">SIMULATED TRADE OUTCOME</p>
+                  <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">FIFO 거래 추정치</h3>
+                  <div className="mt-5 grid grid-cols-2 gap-2">
+                    <ResultMetric icon={CircleDollarSign} label="추정 실현손익" value={formatSignedMoney(advanced.tradeBehavior.estimatedRealizedProfitLoss, "KRW")} detail={`매칭 매도 ${advanced.tradeBehavior.matchedSellCount}건`} />
+                    <ResultMetric icon={TrendingUp} label="추정 승률" value={metricValue(advanced.tradeBehavior.estimatedWinRatePercent)} detail={`미매칭 ${advanced.tradeBehavior.unmatchedSellCount}건`} />
+                    <ResultMetric icon={Scale} label="Profit Factor" value={metricValue(advanced.tradeBehavior.estimatedProfitFactor, "ratio")} detail="총이익 ÷ 총손실" />
+                    <ResultMetric icon={CalendarDays} label="평균 보유기간" value={advanced.tradeBehavior.estimatedAverageHoldingDays === null ? "데이터 부족" : `${advanced.tradeBehavior.estimatedAverageHoldingDays.toFixed(1)}일`} detail="FIFO 수량 가중" />
+                    <ResultMetric icon={RefreshCw} label="매수 · 매도" value={`${advanced.tradeBehavior.buyCount} · ${advanced.tradeBehavior.sellCount}건`} detail={`총 ${advanced.costEfficiency.tradeCount}건`} />
+                    <ResultMetric icon={CircleDollarSign} label="거래당 평균" value={advanced.costEfficiency.averageTradeAmount === null ? "데이터 부족" : formatMoney(advanced.costEfficiency.averageTradeAmount, "KRW")} detail={`매수/매도 금액비 ${metricValue(advanced.costEfficiency.buySellAmountRatio, "ratio")}`} />
+                  </div>
+                  <p className="mt-4 text-[10px] leading-4 text-muted-foreground">시뮬레이션이 만든 초기매수·정기 현금흐름·리밸런싱 거래를 FIFO로 매칭한 추정치입니다.</p>
+                </Card>
+              </div>
+
+              <Card className="bg-secondary p-5 sm:p-7">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div><p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">DATA CONFIDENCE</p><h3 className="mt-2 text-xl font-black tracking-[-0.035em]">백테스트 데이터 신뢰도</h3></div>
+                  <span className="w-fit rounded-full bg-card px-4 py-2 text-xs font-black">{advanced.dataQuality.confidence === "high" ? "높음" : advanced.dataQuality.confidence === "medium" ? "보통" : "제한적"}</span>
+                </div>
+                <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                  <ResultMetric icon={CalendarDays} label="수익률 관측" value={`${advanced.dataQuality.returnObservationDays.toLocaleString("ko-KR")}일`} detail={`정렬 일자 ${advanced.dataQuality.observationDays.toLocaleString("ko-KR")}일`} />
+                  <ResultMetric icon={Activity} label="공통 커버리지" value={formatPercent(advanced.dataQuality.commonCoveragePercent)} detail={`이월 관측 ${advanced.dataQuality.carriedForwardObservations.toLocaleString("ko-KR")}건`} />
+                  <ResultMetric icon={CalendarDays} label="유효 기간" value={`${advanced.dataQuality.effectiveStartDate.slice(2)}~${advanced.dataQuality.effectiveEndDate.slice(2)}`} detail={`요청 달력 ${advanced.dataQuality.requestedCalendarDays.toLocaleString("ko-KR")}일`} />
+                  <ResultMetric icon={BarChart3} label="벤치마크 관측" value={`${advanced.dataQuality.benchmarkObservations.toLocaleString("ko-KR")}일`} detail={result.benchmark?.name ?? "비교 지수 없음"} />
+                </div>
+                <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {advanced.dataQuality.assets.map((asset) => <div key={asset.key} className="rounded-[18px] bg-card p-4"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.observations}/{asset.alignedDays}일 · {formatPercent(asset.coveragePercent)} · {asset.firstDate}~{asset.lastDate}</p></div>)}
+                </div>
+                <div className="mt-4 rounded-[18px] bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">{advanced.dataQuality.notes.map((note) => <p key={note}>{note}</p>)}</div>
+              </Card>
+            </>
+          ) : null}
 
           <Card className="bg-secondary p-5 sm:p-7">
             <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">CORRELATION</p>

@@ -80,6 +80,7 @@ export type PortfolioHistory = {
   points: Array<{
     date: string;
     capturedAt: string;
+    origin?: "LIVE" | "HISTORICAL";
     totalValue: number;
     values: Record<string, number>;
   }>;
@@ -128,6 +129,8 @@ export type PortfolioAnalysis = {
     key: BenchmarkKey;
     name: string;
     proxySymbol?: string;
+    baseCurrency: "KRW";
+    currencyAdjusted: boolean;
     points: Array<{ date: string; close: number }>;
   }>;
   benchmarkErrors: Array<{ key: BenchmarkKey; message: string }>;
@@ -160,7 +163,7 @@ export type PortfolioAnalysis = {
     bestDailyReturnPercent: number | null;
     worstDailyReturnPercent: number | null;
     positiveDaysPercent: number | null;
-    riskFreeRatePercent: 0;
+    riskFreeRatePercent: number;
   };
   contributions: Array<{
     key: string;
@@ -170,7 +173,129 @@ export type PortfolioAnalysis = {
     currency: HistoryCurrency;
     estimatedProfitLoss: number;
     contributionPercent: number;
+    timeLinkedContributionPercent: number;
+    localPriceContributionPercent: number;
+    fxContributionPercent: number;
   }>;
+  benchmarkComparisons: Array<{
+    key: BenchmarkKey;
+    observations: number;
+    returnPercent: number | null;
+    excessReturnPercent: number | null;
+    trackingErrorPercent: number | null;
+    informationRatio: number | null;
+    beta: number | null;
+    alphaPercent: number | null;
+    correlation: number | null;
+    upsideCapturePercent: number | null;
+    downsideCapturePercent: number | null;
+    dailyWinRatePercent: number | null;
+    monthlyWinRatePercent: number | null;
+    relativeMaxDrawdownPercent: number | null;
+  }>;
+  rolling: Array<{
+    date: string;
+    return20d: number | null;
+    return60d: number | null;
+    return120d: number | null;
+    return252d: number | null;
+    volatility60d: number | null;
+    sharpe60d: number | null;
+    benchmarkExcess60d: Partial<Record<BenchmarkKey, number>>;
+    benchmarkBeta60d: Partial<Record<BenchmarkKey, number>>;
+    benchmarkCorrelation60d: Partial<Record<BenchmarkKey, number>>;
+  }>;
+  drawdowns: {
+    points: Array<{ date: string; drawdownPercent: number }>;
+    episodes: Array<{
+      startDate: string;
+      troughDate: string;
+      recoveryDate?: string;
+      depthPercent: number;
+      durationDays: number;
+      recoveryDays?: number;
+    }>;
+    currentUnderwaterDays: number;
+    averageDrawdownPercent: number | null;
+    ulcerIndex: number | null;
+    worst20DayReturnPercent: number | null;
+    worst60DayReturnPercent: number | null;
+  };
+  tailRisk: {
+    historicalVar95Percent: number | null;
+    expectedShortfall95Percent: number | null;
+    lossDaysPercent: number | null;
+    averageGainPercent: number | null;
+    averageLossPercent: number | null;
+    gainLossRatio: number | null;
+    skewness: number | null;
+    excessKurtosis: number | null;
+    maxConsecutiveGainDays: number;
+    maxConsecutiveLossDays: number;
+  };
+  monthlyReturns: Array<{ month: string; returnPercent: number }>;
+  attributionByKey: Record<string, {
+    timeLinkedContributionPercent: number;
+    localPriceContributionPercent: number;
+    fxContributionPercent: number;
+  }>;
+  riskContributions: Array<{
+    key: string;
+    symbol: string;
+    name: string;
+    weightPercent: number;
+    annualizedVolatilityPercent: number | null;
+    riskContributionPercent: number | null;
+    correlationToPortfolio: number | null;
+  }>;
+  correlations: {
+    assets: Array<{ key: string; symbol: string; name: string }>;
+    values: Array<Array<number | null>>;
+  };
+  exposure: {
+    krwWeightPercent: number;
+    usdWeightPercent: number;
+    domesticWeightPercent: number;
+    overseasWeightPercent: number;
+    top1WeightPercent: number;
+    top5WeightPercent: number;
+    top10WeightPercent: number;
+    diversificationBenefitPercent: number | null;
+  };
+  costEfficiency: {
+    costDragPercent: number | null;
+    grossEstimatedReturnPercent: number | null;
+    costPerTradedAmountBps: number | null;
+    averageTradeAmount: number | null;
+    buySellAmountRatio: number | null;
+    monthly: Array<{ month: string; turnoverPercent: number; tradeCount: number; cost: number }>;
+  };
+  tradeBehavior: {
+    estimatedRealizedProfitLoss: number;
+    estimatedWinRatePercent: number | null;
+    estimatedProfitFactor: number | null;
+    estimatedAverageHoldingDays: number | null;
+    matchedSellCount: number;
+    unmatchedSellCount: number;
+  };
+  dataQuality: {
+    confidence: "high" | "medium" | "limited";
+    historyDays: number;
+    returnObservationDays: number;
+    expectedReturnObservationDays: number;
+    returnCoveragePercent: number;
+    requiredPriceObservations: number;
+    missingPriceObservations: number;
+    priceCoveragePercent: number;
+    requiredFxObservations: number;
+    missingFxObservations: number;
+    fxCoveragePercent: number;
+    liveSnapshotDays: number;
+    reconstructedSnapshotDays: number;
+    backfillStatus: BackfillStatus["status"];
+    failedSymbols: number;
+    notes: string[];
+  };
 };
 
 export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
@@ -184,6 +309,10 @@ export type BacktestComparableMetrics = {
   maxDrawdownDays: number;
   sharpeRatio: number | null;
   sortinoRatio: number | null;
+  calmarRatio: number | null;
+  bestDailyReturnPercent: number | null;
+  worstDailyReturnPercent: number | null;
+  positiveDaysPercent: number | null;
   bestYearPercent: number | null;
   worstYearPercent: number | null;
   positiveMonthsPercent: number | null;
@@ -212,6 +341,141 @@ export type CurrentBacktestPortfolio = {
   initialAmount: number;
 };
 
+export type BacktestAdvancedAnalytics = {
+  benchmarkComparison?: {
+    key: string;
+    name: string;
+    observations: number;
+    returnPercent: number | null;
+    excessReturnPercent: number | null;
+    trackingErrorPercent: number | null;
+    informationRatio: number | null;
+    beta: number | null;
+    alphaPercent: number | null;
+    correlation: number | null;
+    upsideCapturePercent: number | null;
+    downsideCapturePercent: number | null;
+    dailyWinRatePercent: number | null;
+    monthlyWinRatePercent: number | null;
+    relativeMaxDrawdownPercent: number | null;
+  };
+  rolling: Array<{
+    date: string;
+    return20d: number | null;
+    return60d: number | null;
+    return120d: number | null;
+    return252d: number | null;
+    volatility60d: number | null;
+    sharpe60d: number | null;
+    benchmarkExcess60d: number | null;
+    benchmarkBeta60d: number | null;
+    benchmarkCorrelation60d: number | null;
+  }>;
+  drawdowns: {
+    points: Array<{ date: string; drawdownPercent: number }>;
+    episodes: Array<{
+      startDate: string;
+      troughDate: string;
+      recoveryDate?: string;
+      depthPercent: number;
+      durationDays: number;
+      recoveryDays?: number;
+    }>;
+    currentUnderwaterDays: number;
+    averageDrawdownPercent: number | null;
+    ulcerIndex: number | null;
+    worst20DayReturnPercent: number | null;
+    worst60DayReturnPercent: number | null;
+  };
+  tailRisk: {
+    historicalVar95Percent: number | null;
+    expectedShortfall95Percent: number | null;
+    lossDaysPercent: number | null;
+    averageGainPercent: number | null;
+    averageLossPercent: number | null;
+    gainLossRatio: number | null;
+    skewness: number | null;
+    excessKurtosis: number | null;
+    maxConsecutiveGainDays: number;
+    maxConsecutiveLossDays: number;
+  };
+  monthlyReturns: Array<{ month: string; returnPercent: number }>;
+  riskContributions: Array<{
+    key: string;
+    symbol: string;
+    name: string;
+    averageWeightPercent: number;
+    endingWeightPercent: number;
+    annualizedVolatilityPercent: number | null;
+    riskContributionPercent: number | null;
+    correlationToPortfolio: number | null;
+  }>;
+  exposure: {
+    krwWeightPercent: number;
+    usdWeightPercent: number;
+    domesticWeightPercent: number;
+    overseasWeightPercent: number;
+    top1WeightPercent: number;
+    top5WeightPercent: number;
+    top10WeightPercent: number;
+    hhi: number;
+    effectivePositions: number | null;
+    diversificationBenefitPercent: number | null;
+  };
+  costEfficiency: {
+    transactionCostBps: number;
+    turnoverPercent: number | null;
+    totalTradedAmount: number;
+    ongoingTradedAmount: number;
+    estimatedTotalCost: number;
+    costDragPercent: number | null;
+    grossReturnPercent: number;
+    netEstimatedReturnPercent: number | null;
+    averageTradeAmount: number | null;
+    buySellAmountRatio: number | null;
+    tradeCount: number;
+    monthly: Array<{
+      month: string;
+      turnoverPercent: number;
+      tradeCount: number;
+      tradedAmount: number;
+      estimatedCost: number;
+    }>;
+  };
+  tradeBehavior: {
+    estimatedRealizedProfitLoss: number;
+    estimatedWinRatePercent: number | null;
+    estimatedProfitFactor: number | null;
+    estimatedAverageHoldingDays: number | null;
+    matchedSellCount: number;
+    unmatchedSellCount: number;
+    buyCount: number;
+    sellCount: number;
+  };
+  dataQuality: {
+    confidence: "high" | "medium" | "limited";
+    observationDays: number;
+    returnObservationDays: number;
+    requestedCalendarDays: number;
+    effectiveStartDate: string;
+    effectiveEndDate: string;
+    commonCoveragePercent: number;
+    carriedForwardObservations: number;
+    benchmarkObservations: number;
+    assets: Array<{
+      key: string;
+      symbol: string;
+      name: string;
+      observations: number;
+      alignedDays: number;
+      coveragePercent: number;
+      firstDate: string;
+      lastDate: string;
+    }>;
+    notes: string[];
+  };
+};
+
 export type BacktestResult = {
   generatedAt: string;
   baseCurrency: "KRW";
@@ -226,6 +490,8 @@ export type BacktestResult = {
     initialAmount: number;
     monthlyCashFlow: number;
     rebalanceFrequency: BacktestRebalanceFrequency;
+    riskFreeRatePercent?: number;
+    transactionCostBps?: number;
     benchmark: BacktestBenchmarkKey;
     benchmarkSymbol?: string;
     requestedStartDate: string;
@@ -259,12 +525,16 @@ export type BacktestResult = {
     endingValue: number;
     profitLoss: number;
     contributionPercent: number;
+    timeLinkedContributionPercent?: number;
+    localPriceContributionPercent?: number;
+    fxContributionPercent?: number;
     assetReturnPercent: number;
   }>;
   correlations: {
     assets: Array<{ symbol: string; name: string }>;
     values: Array<Array<number | null>>;
   };
+  advanced?: BacktestAdvancedAnalytics;
 };
 
 export type ReportStance = "strong" | "balanced" | "cautious" | "high-risk";

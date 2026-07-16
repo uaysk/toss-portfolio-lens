@@ -26,6 +26,7 @@ export type PortfolioHistory = {
   points: Array<{
     date: string;
     capturedAt: string;
+    origin?: "LIVE" | "HISTORICAL";
     totalValue: number;
     values: Record<string, number>;
   }>;
@@ -83,7 +84,7 @@ type SnapshotRow = {
   id: number;
   snapshot_date: string;
   captured_at: number;
-  origin?: string;
+  origin?: "LIVE" | "HISTORICAL";
 };
 
 type ItemRow = {
@@ -1455,7 +1456,7 @@ export class PortfolioHistoryStore {
       parameters.push(endDate);
     }
     const snapshots = await this.db.query<SnapshotRow & DatabaseRow>(`
-      SELECT id, snapshot_date, captured_at
+      SELECT id, snapshot_date, captured_at, origin
       FROM portfolio_snapshots
       WHERE ${clauses.join(" AND ")}
       ORDER BY snapshot_date ASC
@@ -1527,6 +1528,7 @@ export class PortfolioHistoryStore {
       return {
         date: snapshot.snapshot_date,
         capturedAt: new Date(snapshot.captured_at).toISOString(),
+        ...(snapshot.origin ? { origin: snapshot.origin } : {}),
         totalValue: round(totalValue, 4),
         values,
       };

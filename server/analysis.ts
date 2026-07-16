@@ -6,9 +6,11 @@ import {
 } from "./history.js";
 import {
   calculatePortfolioAnalytics,
+  type AdvancedAnalytics,
   type PortfolioDailyReturn,
   type PortfolioAnalyticsMetrics,
   type PortfolioContribution,
+  type PortfolioReturnDetail,
 } from "./metrics.js";
 import type { TossClient } from "./toss.js";
 
@@ -42,12 +44,32 @@ export type PortfolioAnalysis = {
     key: BenchmarkKey;
     name: string;
     proxySymbol?: string;
+    baseCurrency: "KRW";
+    currencyAdjusted: boolean;
     points: Awaited<ReturnType<PortfolioHistoryStore["getBenchmarkPrices"]>>;
   }>;
   benchmarkErrors: Array<{ key: BenchmarkKey; message: string }>;
   metrics: PortfolioAnalyticsMetrics;
   contributions: PortfolioContribution[];
-};
+  dataQuality: {
+    confidence: "high" | "medium" | "limited";
+    historyDays: number;
+    returnObservationDays: number;
+    expectedReturnObservationDays: number;
+    returnCoveragePercent: number;
+    requiredPriceObservations: number;
+    missingPriceObservations: number;
+    priceCoveragePercent: number;
+    requiredFxObservations: number;
+    missingFxObservations: number;
+    fxCoveragePercent: number;
+    liveSnapshotDays: number;
+    reconstructedSnapshotDays: number;
+    backfillStatus: "idle" | "running" | "complete" | "partial" | "error";
+    failedSymbols: number;
+    notes: string[];
+  };
+} & AdvancedAnalytics;
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -119,6 +141,7 @@ export function combinePortfolioHistories(
     return {
       date,
       capturedAt: krwPoint?.capturedAt ?? usdPoint?.capturedAt ?? new Date(`${date}T15:00:00+09:00`).toISOString(),
+      origin: krwPoint?.origin === "LIVE" || usdPoint?.origin === "LIVE" ? "LIVE" as const : "HISTORICAL" as const,
       totalValue: round(totalValue, 4),
       values,
     };
@@ -178,19 +201,46 @@ export function combinePortfolioCandles(
   }).filter((candle) => candle.close > 0);
 }
 
-export async function buildPositionWeightedReturns(
+export function convertUsdBenchmarkToKrw(
+  rawPoints: Array<{ date: string; close: number }>,
+  comparisonDates: string[],
+  exchangeRates: ReadonlyMap<string, number>,
+): Array<{ date: string; close: number }> {
+  let cursor = 0;
+  let latestPrice = 0;
+  const sortedPrices = [...rawPoints].filter((point) => point.close > 0).sort((left, right) => left.date.localeCompare(right.date));
+  return [...comparisonDates].sort().flatMap((date) => {
+    while (cursor < sortedPrices.length && sortedPrices[cursor].date <= date) {
+      latestPrice = sortedPrices[cursor].close;
+      cursor += 1;
+    }
+    const rate = exchangeRates.get(date) ?? 0;
+    return latestPrice > 0 && rate > 0 ? [{ date, close: round(latestPrice * rate, 4) }] : [];
+  });
+}
+
+export async function buildPositionReturnDetail(
   history: PortfolioHistory,
   store: PortfolioHistoryStore,
   exchangeRates: ReadonlyMap<string, number>,
-): Promise<PortfolioDailyReturn[]> {
-  if (history.points.length < 2 || !history.series.length) return [];
+): Promise<PortfolioReturnDetail> {
+  const empty: PortfolioReturnDetail = {
+    returns: [],
+    daily: [],
+    expectedReturnObservations: 0,
+    requiredPriceObservations: 0,
+    missingPriceObservations: 0,
+    requiredFxObservations: 0,
+    missingFxObservations: 0,
+  };
+  if (history.points.length < 2 || !history.series.length) return empty;
   const fromDate = history.points[0].date;
   const toDate = history.points.at(-1)!.date;
   const instrumentKeys = history.series.map((series) => `${series.currency}:${series.symbol}`);
   const dailyPrices = await store.getDailyPrices(instrumentKeys, fromDate, toDate);
   const latestPrices = new Map<string, number>();
   let previousPrices = new Map<string, number>();
-  const returns: PortfolioDailyReturn[] = [];
+  const detail: PortfolioReturnDetail = { ...empty, returns: [], daily: [] };
 
   for (let pointIndex = 0; pointIndex < history.points.length; pointIndex += 1) {
     const point = history.points[pointIndex];
@@ -203,27 +253,61 @@ export async function buildPositionWeightedReturns(
       const previousPoint = history.points[pointIndex - 1];
       let weightedReturn = 0;
       let hasMarketMove = false;
+      const assets: PortfolioReturnDetail["daily"][number]["assets"] = [];
       for (const series of history.series) {
         const weight = Math.max(0, previousPoint.values[series.key] ?? 0) / 100;
         if (weight <= 0) continue;
+        detail.requiredPriceObservations += 1;
         const key = `${series.currency}:${series.symbol}`;
+        if (dailyPrices.get(key)?.has(point.date)) hasMarketMove = true;
         const previousPrice = previousPrices.get(key);
         const currentPrice = latestPrices.get(key);
-        if (!previousPrice || !currentPrice) continue;
+        if (!previousPrice || !currentPrice) {
+          detail.missingPriceObservations += 1;
+          continue;
+        }
         const previousRate = series.currency === "USD" ? exchangeRates.get(previousPoint.date) ?? 0 : 1;
         const currentRate = series.currency === "USD" ? exchangeRates.get(point.date) ?? previousRate : 1;
-        if (previousRate <= 0 || currentRate <= 0) continue;
-        const assetReturn = ((currentPrice * currentRate) / (previousPrice * previousRate)) - 1;
+        if (series.currency === "USD" && currentRate > 0 && previousRate > 0 && currentRate !== previousRate) hasMarketMove = true;
+        if (series.currency === "USD") detail.requiredFxObservations += 1;
+        if (previousRate <= 0 || currentRate <= 0) {
+          if (series.currency === "USD") detail.missingFxObservations += 1;
+          continue;
+        }
+        const localReturn = currentPrice / previousPrice - 1;
+        const fxReturn = currentRate / previousRate - 1;
+        const assetReturn = (1 + localReturn) * (1 + fxReturn) - 1;
+        const localContribution = weight * localReturn;
+        const fxContribution = weight * (1 + localReturn) * fxReturn;
         weightedReturn += weight * assetReturn;
-        if (dailyPrices.get(key)?.has(point.date) || currentRate !== previousRate) hasMarketMove = true;
+        assets.push({
+          key: series.key,
+          totalReturn: assetReturn,
+          localReturn,
+          fxReturn,
+          contribution: weight * assetReturn,
+          localContribution,
+          fxContribution,
+        });
       }
+      if (hasMarketMove) detail.expectedReturnObservations += 1;
       if (hasMarketMove && Number.isFinite(weightedReturn) && weightedReturn > -1) {
-        returns.push({ date: point.date, value: weightedReturn });
+        const returnPoint = { date: point.date, value: weightedReturn };
+        detail.returns.push(returnPoint);
+        detail.daily.push({ ...returnPoint, assets });
       }
     }
     previousPrices = new Map(latestPrices);
   }
-  return returns;
+  return detail;
+}
+
+export async function buildPositionWeightedReturns(
+  history: PortfolioHistory,
+  store: PortfolioHistoryStore,
+  exchangeRates: ReadonlyMap<string, number>,
+): Promise<PortfolioDailyReturn[]> {
+  return (await buildPositionReturnDetail(history, store, exchangeRates)).returns;
 }
 
 export class PortfolioAnalysisService {
@@ -246,8 +330,16 @@ export class PortfolioAnalysisService {
     return task;
   }
 
-  private async ensureExchangeRates(accountId: string, fromDate: string, toDate: string): Promise<Map<string, number>> {
-    const requiredDates = await this.store.getRequiredExchangeRateDates(accountId, fromDate, toDate);
+  private async ensureExchangeRates(
+    accountId: string,
+    fromDate: string,
+    toDate: string,
+    additionalDates: string[] = [],
+  ): Promise<Map<string, number>> {
+    const requiredDates = Array.from(new Set([
+      ...await this.store.getRequiredExchangeRateDates(accountId, fromDate, toDate),
+      ...additionalDates.filter((date) => date >= fromDate && date <= toDate),
+    ])).sort();
     const cached = await this.store.getExchangeRates(fromDate, toDate);
     const missing = requiredDates.filter((date) => !cached.has(date));
     const workerCount = Math.min(2, missing.length);
@@ -340,12 +432,14 @@ export class PortfolioAnalysisService {
     fromDate,
     toDate,
     benchmarkKeys,
+    riskFreeRatePercent = 0,
   }: {
     accountId: string;
     range: AnalysisRange;
     fromDate: string;
     toDate: string;
     benchmarkKeys: BenchmarkKey[];
+    riskFreeRatePercent?: number;
   }): Promise<PortfolioAnalysis> {
     const benchmarkErrors: PortfolioAnalysis["benchmarkErrors"] = [];
     for (const key of benchmarkKeys) {
@@ -359,11 +453,18 @@ export class PortfolioAnalysisService {
       }
     }
 
-    const exchangeRates = await this.ensureExchangeRates(accountId, fromDate, toDate);
     const [krwHistory, usdHistory] = await Promise.all([
       this.store.getHistory(accountId, "KRW", "all", new Date(), { from: fromDate, to: toDate }),
       this.store.getHistory(accountId, "USD", "all", new Date(), { from: fromDate, to: toDate }),
     ]);
+    const historyDates = Array.from(new Set([...krwHistory.points, ...usdHistory.points].map((point) => point.date))).sort();
+    const needsKrwBenchmarks = benchmarkKeys.some((key) => key === "NASDAQ100" || key === "SP500");
+    const exchangeRates = await this.ensureExchangeRates(
+      accountId,
+      fromDate,
+      toDate,
+      needsKrwBenchmarks ? historyDates : [],
+    );
     const history = combinePortfolioHistories(krwHistory, usdHistory, exchangeRates);
     const [krwCandles, usdCandles] = await Promise.all([
       this.store.getPortfolioAnalysisCandles(accountId, "KRW", fromDate, toDate),
@@ -379,17 +480,25 @@ export class PortfolioAnalysisService {
     );
     const benchmarkData = await Promise.all(benchmarkKeys.map(async (key) => {
       const catalog = BENCHMARK_CATALOG[key];
+      const rawPoints = await this.store.getBenchmarkPrices(key, fromDate, toDate);
+      let points = rawPoints;
+      if (catalog.proxy) {
+        points = convertUsdBenchmarkToKrw(rawPoints, history.points.map((point) => point.date), exchangeRates);
+      }
       return {
         key,
         name: catalog.name,
         ...(catalog.proxy ? { proxySymbol: catalog.symbol } : {}),
-        points: await this.store.getBenchmarkPrices(key, fromDate, toDate),
+        baseCurrency: "KRW" as const,
+        currencyAdjusted: catalog.proxy,
+        points,
       };
     }));
-    const [orders, returnSeries, ohlcIncomplete] = await Promise.all([
+    const [orders, returnDetail, ohlcIncomplete, backfillStatus] = await Promise.all([
       this.store.getOrders(accountId),
-      buildPositionWeightedReturns(history, this.store, exchangeRates),
+      buildPositionReturnDetail(history, this.store, exchangeRates),
       this.store.hasIncompleteDailyOhlc(),
+      this.store.getBackfillStatus(accountId),
     ]);
     const analytics = calculatePortfolioAnalytics({
       candles,
@@ -397,8 +506,32 @@ export class PortfolioAnalysisService {
       orders,
       exchangeRates,
       benchmarks: benchmarkData,
-      returnSeries,
+      returnDetail,
+      riskFreeRatePercent,
     });
+    const returnCoveragePercent = returnDetail.expectedReturnObservations > 0
+      ? round((returnDetail.returns.length / returnDetail.expectedReturnObservations) * 100, 2)
+      : 0;
+    const priceCoveragePercent = returnDetail.requiredPriceObservations > 0
+      ? round(((returnDetail.requiredPriceObservations - returnDetail.missingPriceObservations) / returnDetail.requiredPriceObservations) * 100, 2)
+      : 100;
+    const fxCoveragePercent = returnDetail.requiredFxObservations > 0
+      ? round(((returnDetail.requiredFxObservations - returnDetail.missingFxObservations) / returnDetail.requiredFxObservations) * 100, 2)
+      : 100;
+    const liveSnapshotDays = history.points.filter((point) => point.origin === "LIVE").length;
+    const reconstructedSnapshotDays = history.points.filter((point) => point.origin === "HISTORICAL").length;
+    const confidence = returnCoveragePercent >= 95 && priceCoveragePercent >= 98 && fxCoveragePercent >= 98
+      && backfillStatus.failedSymbols === 0 && backfillStatus.status === "complete"
+      ? "high"
+      : returnCoveragePercent >= 75 && priceCoveragePercent >= 85 && fxCoveragePercent >= 85
+        ? "medium"
+        : "limited";
+    const notes = [
+      ...(returnDetail.missingPriceObservations ? [`가격 누락 ${returnDetail.missingPriceObservations}건`] : []),
+      ...(returnDetail.missingFxObservations ? [`환율 누락 ${returnDetail.missingFxObservations}건`] : []),
+      ...(backfillStatus.failedSymbols ? [`과거 일봉 수집 실패 종목 ${backfillStatus.failedSymbols}개`] : []),
+      ...(returnDetail.returns.length < 60 ? ["60거래일 미만이라 일부 롤링·분포 지표가 제한됩니다."] : []),
+    ];
 
     return {
       accountId,
@@ -411,10 +544,28 @@ export class PortfolioAnalysisService {
       toDate,
       estimatedOhlc: true,
       ohlcBackfillComplete: !ohlcIncomplete,
-      fxBackfillComplete: true,
+      fxBackfillComplete: returnDetail.missingFxObservations === 0,
       candles,
       benchmarks: benchmarkData,
       benchmarkErrors,
+      dataQuality: {
+        confidence,
+        historyDays: history.points.length,
+        returnObservationDays: returnDetail.returns.length,
+        expectedReturnObservationDays: returnDetail.expectedReturnObservations,
+        returnCoveragePercent,
+        requiredPriceObservations: returnDetail.requiredPriceObservations,
+        missingPriceObservations: returnDetail.missingPriceObservations,
+        priceCoveragePercent,
+        requiredFxObservations: returnDetail.requiredFxObservations,
+        missingFxObservations: returnDetail.missingFxObservations,
+        fxCoveragePercent,
+        liveSnapshotDays,
+        reconstructedSnapshotDays,
+        backfillStatus: backfillStatus.status,
+        failedSymbols: backfillStatus.failedSymbols,
+        notes,
+      },
       ...analytics,
     };
   }

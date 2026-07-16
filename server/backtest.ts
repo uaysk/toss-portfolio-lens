@@ -35,6 +35,8 @@ export type BacktestRunRequest = {
   initialAmount: number;
   monthlyCashFlow: number;
   rebalanceFrequency: BacktestRebalanceFrequency;
+  riskFreeRatePercent?: number;
+  transactionCostBps?: number;
   benchmark: BacktestBenchmarkKey;
   benchmarkSymbol?: string;
 };
@@ -205,6 +207,8 @@ export class PortfolioBacktestService {
 
   async run(request: BacktestRunRequest) {
     const today = kstDateString(new Date());
+    const riskFreeRatePercent = request.riskFreeRatePercent ?? 0;
+    const transactionCostBps = request.transactionCostBps ?? 0;
     if (!isHistoryDate(request.startDate) || !isHistoryDate(request.endDate) || request.startDate > request.endDate || request.endDate > today) {
       throw new BacktestValidationError("백테스트 시작일과 종료일을 확인해 주세요.");
     }
@@ -213,6 +217,12 @@ export class PortfolioBacktestService {
     }
     if (!Number.isFinite(request.monthlyCashFlow) || Math.abs(request.monthlyCashFlow) > 1_000_000_000_000) {
       throw new BacktestValidationError("월 정기 현금흐름은 절댓값 1조원 이하로 입력해 주세요.");
+    }
+    if (!Number.isFinite(riskFreeRatePercent) || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
+      throw new BacktestValidationError("무위험수익률은 -10% 이상 50% 이하로 입력해 주세요.");
+    }
+    if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
+      throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
     }
     if (!["none", "monthly", "quarterly", "annually"].includes(request.rebalanceFrequency)) {
       throw new BacktestValidationError("리밸런싱 주기를 확인해 주세요.");
@@ -276,11 +286,16 @@ export class PortfolioBacktestService {
       initialAmount: request.initialAmount,
       monthlyCashFlow: request.monthlyCashFlow,
       rebalanceFrequency: request.rebalanceFrequency,
+      riskFreeRatePercent,
+      transactionCostBps,
       benchmark,
     });
     const warnings = [
       "국내·해외 종목을 함께 비교할 때 각 종목의 현지 통화 수정주가 수익률을 사용하며 과거 환율 변동은 반영하지 않습니다.",
-      "배당금·세금·거래비용과 실제 체결 슬리피지는 백테스트에 포함되지 않습니다.",
+      transactionCostBps > 0
+        ? `거래비용은 체결금액의 ${transactionCostBps}bp로 추정하며 성과 경로에는 차감하지 않고 비용 차감 후 추정 수익률로 별도 표시합니다.`
+        : "거래비용 가정이 0bp이므로 비용 차감 전 성과와 비용 차감 후 추정 성과가 같습니다.",
+      "수정주가에 반영되지 않은 세금·실제 체결 슬리피지와 과거 환율은 별도로 반영하지 않습니다.",
     ];
     if (request.startDate < latestListDate) warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
     if (result.effectiveStartDate > effectiveRequestedStart) {
@@ -292,6 +307,8 @@ export class PortfolioBacktestService {
       currencyMethod: "LOCAL_RETURN" as const,
       config: {
         ...request,
+        riskFreeRatePercent,
+        transactionCostBps,
         ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
         requestedStartDate: request.startDate,
         latestListDate,

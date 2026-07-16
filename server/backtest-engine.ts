@@ -1,3 +1,9 @@
+import {
+  calculateBacktestAdvancedAnalytics,
+  type BacktestAdvancedAnalytics,
+  type BacktestTradeEvent,
+} from "./backtest-analytics.js";
+
 export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
 
 export type BacktestAssetDefinition = {
@@ -28,6 +34,10 @@ export type BacktestComparableMetrics = {
   maxDrawdownDays: number;
   sharpeRatio: number | null;
   sortinoRatio: number | null;
+  calmarRatio: number | null;
+  bestDailyReturnPercent: number | null;
+  worstDailyReturnPercent: number | null;
+  positiveDaysPercent: number | null;
   bestYearPercent: number | null;
   worstYearPercent: number | null;
   positiveMonthsPercent: number | null;
@@ -41,6 +51,8 @@ export type BacktestSimulationInput = {
   initialAmount: number;
   monthlyCashFlow: number;
   rebalanceFrequency: BacktestRebalanceFrequency;
+  riskFreeRatePercent?: number;
+  transactionCostBps?: number;
   benchmark?: BacktestBenchmarkDefinition;
 };
 
@@ -71,12 +83,16 @@ export type BacktestSimulationResult = {
     endingValue: number;
     profitLoss: number;
     contributionPercent: number;
+    timeLinkedContributionPercent: number;
+    localPriceContributionPercent: number;
+    fxContributionPercent: number;
     assetReturnPercent: number;
   }>;
   correlations: {
     assets: Array<{ symbol: string; name: string }>;
     values: Array<Array<number | null>>;
   };
+  advanced: BacktestAdvancedAnalytics;
 };
 
 export class BacktestValidationError extends Error {
@@ -155,6 +171,7 @@ function downsample<T>(values: T[], maximum = 1_200): T[] {
 function summarizeGrowthSeries(
   points: Array<{ date: string; value: number }>,
   dailyReturns: number[],
+  riskFreeRatePercent: number,
 ): { metrics: BacktestComparableMetrics; annualReturns: Array<{ year: number; returnPercent: number }> } {
   const initialValue = points[0].value;
   const finalValue = points.at(-1)!.value;
@@ -196,23 +213,36 @@ function summarizeGrowthSeries(
   const meanDailyReturn = dailyReturns.length
     ? dailyReturns.reduce((sum, value) => sum + value, 0) / dailyReturns.length
     : 0;
-  const downsideDeviation = dailyReturns.length
-    ? Math.sqrt(dailyReturns.reduce((sum, value) => sum + Math.min(value, 0) ** 2, 0) / dailyReturns.length)
+  const dailyRiskFree = (1 + riskFreeRatePercent / 100) ** (1 / 252) - 1;
+  const excessReturns = dailyReturns.map((value) => value - dailyRiskFree);
+  const meanDailyExcessReturn = excessReturns.length
+    ? excessReturns.reduce((sum, value) => sum + value, 0) / excessReturns.length
     : 0;
+  const downsideDeviation = excessReturns.length
+    ? Math.sqrt(excessReturns.reduce((sum, value) => sum + Math.min(value, 0) ** 2, 0) / excessReturns.length)
+    : 0;
+  const cagrPercent = elapsedYears > 0 && finalValue > 0
+    ? round(((finalValue / initialValue) ** (1 / elapsedYears) - 1) * 100)
+    : null;
+  const maxDrawdownPercent = round(maxDrawdown * 100);
 
   return {
     metrics: {
       totalReturnPercent: round(totalReturn * 100),
-      cagrPercent: elapsedYears > 0 && finalValue > 0
-        ? round(((finalValue / initialValue) ** (1 / elapsedYears) - 1) * 100)
-        : null,
+      cagrPercent,
       annualizedVolatilityPercent: dailyReturns.length > 1
         ? round(dailyVolatility * Math.sqrt(252) * 100)
         : null,
-      maxDrawdownPercent: round(maxDrawdown * 100),
+      maxDrawdownPercent,
       maxDrawdownDays,
-      sharpeRatio: dailyVolatility > 0 ? round((meanDailyReturn / dailyVolatility) * Math.sqrt(252)) : null,
-      sortinoRatio: downsideDeviation > 0 ? round((meanDailyReturn / downsideDeviation) * Math.sqrt(252)) : null,
+      sharpeRatio: dailyVolatility > 0 ? round((meanDailyExcessReturn / dailyVolatility) * Math.sqrt(252)) : null,
+      sortinoRatio: downsideDeviation > 0 ? round((meanDailyExcessReturn / downsideDeviation) * Math.sqrt(252)) : null,
+      calmarRatio: cagrPercent !== null && maxDrawdownPercent < 0 ? round(cagrPercent / Math.abs(maxDrawdownPercent)) : null,
+      bestDailyReturnPercent: dailyReturns.length ? round(Math.max(...dailyReturns) * 100) : null,
+      worstDailyReturnPercent: dailyReturns.length ? round(Math.min(...dailyReturns) * 100) : null,
+      positiveDaysPercent: dailyReturns.length
+        ? round((dailyReturns.filter((value) => value > 0).length / dailyReturns.length) * 100)
+        : null,
       bestYearPercent: annualReturns.length ? Math.max(...annualReturns.map((item) => item.returnPercent)) : null,
       worstYearPercent: annualReturns.length ? Math.min(...annualReturns.map((item) => item.returnPercent)) : null,
       positiveMonthsPercent: monthlyReturns.length
@@ -229,6 +259,14 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   }
   if (!Number.isFinite(input.initialAmount) || input.initialAmount <= 0) {
     throw new BacktestValidationError("초기 투자금은 0보다 커야 합니다.");
+  }
+  const riskFreeRatePercent = input.riskFreeRatePercent ?? 0;
+  const transactionCostBps = input.transactionCostBps ?? 0;
+  if (!Number.isFinite(riskFreeRatePercent) || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
+    throw new BacktestValidationError("무위험수익률은 -10% 이상 50% 이하로 입력해 주세요.");
+  }
+  if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
+    throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
   }
   const weightTotal = input.assets.reduce((sum, asset) => sum + asset.weight, 0);
   if (input.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0) || Math.abs(weightTotal - 100) > 0.01) {
@@ -285,6 +323,9 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   const weights = input.assets.map((asset) => asset.weight / 100);
   let positionValues = weights.map((weight) => input.initialAmount * weight);
   const marketProfitByAsset = input.assets.map(() => 0);
+  const linkedContributionByAsset = input.assets.map(() => 0);
+  const weightSums = input.assets.map(() => 0);
+  let weightObservationCount = 0;
   let totalContributions = input.initialAmount;
   let totalWithdrawals = 0;
   let growth = input.initialAmount;
@@ -295,6 +336,15 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   const portfolioReturns: number[] = [];
   const benchmarkReturns: number[] = [];
   const assetReturns = input.assets.map(() => [] as number[]);
+  const trades: BacktestTradeEvent[] = input.assets.map((_, assetIndex) => ({
+    date: aligned[0].date,
+    assetIndex,
+    side: "BUY" as const,
+    amount: positionValues[assetIndex],
+    quantity: positionValues[assetIndex] / aligned[0].closes[assetIndex],
+    price: aligned[0].closes[assetIndex],
+    reason: "initial" as const,
+  }));
   const portfolioGrowthSeries = [{ date: aligned[0].date, value: growth }];
   const benchmarkGrowthSeries = input.benchmark
     ? [{ date: aligned[0].date, value: input.initialAmount }]
@@ -313,8 +363,16 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     const current = aligned[dateIndex];
     const beforeMarket = positionValues.reduce((sum, value) => sum + value, 0);
     for (let assetIndex = 0; assetIndex < input.assets.length; assetIndex += 1) {
+      weightSums[assetIndex] += beforeMarket > 0 ? positionValues[assetIndex] / beforeMarket : 0;
+    }
+    weightObservationCount += 1;
+    const dailyContributions = input.assets.map(() => 0);
+    for (let assetIndex = 0; assetIndex < input.assets.length; assetIndex += 1) {
       const assetReturn = current.closes[assetIndex] / previous.closes[assetIndex] - 1;
       assetReturns[assetIndex].push(assetReturn);
+      dailyContributions[assetIndex] = beforeMarket > 0
+        ? (positionValues[assetIndex] / beforeMarket) * assetReturn
+        : 0;
       marketProfitByAsset[assetIndex] += positionValues[assetIndex] * assetReturn;
       positionValues[assetIndex] *= 1 + assetReturn;
     }
@@ -322,6 +380,10 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     const portfolioReturn = beforeMarket > 0 ? afterMarket / beforeMarket - 1 : 0;
     portfolioReturns.push(portfolioReturn);
     growth *= 1 + portfolioReturn;
+    for (let assetIndex = 0; assetIndex < input.assets.length; assetIndex += 1) {
+      linkedContributionByAsset[assetIndex] = linkedContributionByAsset[assetIndex] * (1 + portfolioReturn)
+        + dailyContributions[assetIndex] * 100;
+    }
     if (input.benchmark) {
       benchmarkReturns.push((current.benchmarkClose ?? benchmarkBase) / (previous.benchmarkClose ?? benchmarkBase) - 1);
     }
@@ -332,6 +394,15 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       if (flow > 0) {
         for (let assetIndex = 0; assetIndex < positionValues.length; assetIndex += 1) {
           const allocation = flow * weights[assetIndex];
+          trades.push({
+            date: current.date,
+            assetIndex,
+            side: "BUY",
+            amount: allocation,
+            quantity: allocation / current.closes[assetIndex],
+            price: current.closes[assetIndex],
+            reason: "cash-flow",
+          });
           positionValues[assetIndex] += allocation;
         }
         totalContributions += flow;
@@ -339,6 +410,15 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
         const withdrawal = Math.abs(flow);
         for (let assetIndex = 0; assetIndex < positionValues.length; assetIndex += 1) {
           const allocation = withdrawal * (positionValues[assetIndex] / afterMarket);
+          trades.push({
+            date: current.date,
+            assetIndex,
+            side: "SELL",
+            amount: allocation,
+            quantity: allocation / current.closes[assetIndex],
+            price: current.closes[assetIndex],
+            reason: "cash-flow",
+          });
           positionValues[assetIndex] -= allocation;
         }
         totalWithdrawals += withdrawal;
@@ -347,7 +427,21 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
 
     if (shouldRebalance(previous.date, current.date, input.rebalanceFrequency)) {
       const total = positionValues.reduce((sum, value) => sum + value, 0);
-      positionValues = weights.map((weight) => total * weight);
+      const targets = weights.map((weight) => total * weight);
+      for (let assetIndex = 0; assetIndex < positionValues.length; assetIndex += 1) {
+        const difference = targets[assetIndex] - positionValues[assetIndex];
+        if (Math.abs(difference) <= 0.000001) continue;
+        trades.push({
+          date: current.date,
+          assetIndex,
+          side: difference > 0 ? "BUY" : "SELL",
+          amount: Math.abs(difference),
+          quantity: Math.abs(difference) / current.closes[assetIndex],
+          price: current.closes[assetIndex],
+          reason: "rebalance",
+        });
+      }
+      positionValues = targets;
     }
 
     if (growth >= peak) {
@@ -372,9 +466,9 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     });
   }
 
-  const portfolioSummary = summarizeGrowthSeries(portfolioGrowthSeries, portfolioReturns);
+  const portfolioSummary = summarizeGrowthSeries(portfolioGrowthSeries, portfolioReturns, riskFreeRatePercent);
   const benchmarkSummary = input.benchmark
-    ? summarizeGrowthSeries(benchmarkGrowthSeries, benchmarkReturns)
+    ? summarizeGrowthSeries(benchmarkGrowthSeries, benchmarkReturns, riskFreeRatePercent)
     : undefined;
 
   const contributions = input.assets.map((asset, index) => {
@@ -390,21 +484,61 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       endingValue: round(positionValues[index], 2),
       profitLoss: round(profitLoss, 2),
       contributionPercent: round((profitLoss / input.initialAmount) * 100),
+      timeLinkedContributionPercent: round(linkedContributionByAsset[index]),
+      localPriceContributionPercent: round(linkedContributionByAsset[index]),
+      fxContributionPercent: 0,
       assetReturnPercent: round((lastPrice / firstPrice - 1) * 100),
     };
-  }).sort((left, right) => Math.abs(right.contributionPercent) - Math.abs(left.contributionPercent));
+  }).sort((left, right) => right.contributionPercent - left.contributionPercent);
 
   const correlations = input.assets.map((_, leftIndex) => (
     input.assets.map((__, rightIndex) => leftIndex === rightIndex ? 1 : pearson(assetReturns[leftIndex], assetReturns[rightIndex]))
   ));
+  const finalBalance = positionValues.reduce((sum, value) => sum + value, 0);
+  const endingWeights = positionValues.map((value) => finalBalance > 0 ? value / finalBalance : 0);
+  const averageWeights = weightSums.map((value) => weightObservationCount > 0 ? value / weightObservationCount : 0);
+  const effectiveStartDate = aligned[0].date;
+  const effectiveEndDate = aligned.at(-1)!.date;
+  const advanced = calculateBacktestAdvancedAnalytics({
+    assets: input.assets,
+    baseDate: effectiveStartDate,
+    effectiveEndDate,
+    requestedStartDate: input.requestedStartDate,
+    returns: portfolioReturns.map((value, index) => ({ date: aligned[index + 1].date, value })),
+    assetReturns,
+    ...(input.benchmark ? {
+      benchmark: {
+        key: input.benchmark.key,
+        name: input.benchmark.name,
+        returns: benchmarkReturns,
+        observations: benchmarkSeries.filter((point) => point.date >= effectiveStartDate && point.date <= effectiveEndDate).length,
+      },
+    } : {}),
+    averageWeights,
+    endingWeights,
+    trades,
+    balances: fullPoints.map((point) => ({ date: point.date, value: point.balance })),
+    transactionCostBps,
+    riskFreeRatePercent,
+    grossReturnPercent: portfolioSummary.metrics.totalReturnPercent,
+    priceCoverage: seriesByAsset.map((series) => {
+      const observations = series.filter((point) => point.date >= effectiveStartDate && point.date <= effectiveEndDate);
+      return {
+        observations: observations.length,
+        alignedDays: aligned.length,
+        firstDate: observations[0]?.date ?? effectiveStartDate,
+        lastDate: observations.at(-1)?.date ?? effectiveEndDate,
+      };
+    }),
+  });
 
   return {
     requestedStartDate: input.requestedStartDate,
-    effectiveStartDate: aligned[0].date,
-    endDate: aligned.at(-1)!.date,
+    effectiveStartDate,
+    endDate: effectiveEndDate,
     points: downsample(fullPoints),
     metrics: {
-      finalBalance: round(positionValues.reduce((sum, value) => sum + value, 0), 2),
+      finalBalance: round(finalBalance, 2),
       totalContributions: round(totalContributions, 2),
       totalWithdrawals: round(totalWithdrawals, 2),
       ...portfolioSummary.metrics,
@@ -416,5 +550,6 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       assets: input.assets.map((asset) => ({ symbol: asset.symbol, name: asset.name })),
       values: correlations,
     },
+    advanced,
   };
 }
