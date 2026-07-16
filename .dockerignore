@@ -2,6 +2,14 @@ node_modules
 dist
 .git
 .env
+.env.*
 *.log
+*.db
+*.sqlite
+*.sqlite3
 screenshots
 data
+.playwright-mcp
+playwright-report
+test-results
+토스증권 _ 거래 내역.html

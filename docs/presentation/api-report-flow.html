@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Toss Portfolio Lens · API and Report Flow</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, "Pretendard", "Noto Sans KR", system-ui, sans-serif; background: #050505; color: #f4f4f4; }
+      * { box-sizing: border-box; }
+      html, body { width: 1440px; height: 900px; margin: 0; overflow: hidden; }
+      body { background: #050505; }
+      main { height: 100%; padding: 54px 64px 42px; display: flex; flex-direction: column; }
+      .eyebrow { color: #858585; font-size: 13px; font-weight: 900; letter-spacing: .18em; }
+      h1 { margin: 12px 0 8px; font-size: 42px; letter-spacing: -.052em; line-height: 1.06; }
+      .subtitle { color: #999; margin: 0; font-size: 15px; line-height: 1.6; }
+      .flows { margin-top: 36px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; flex: 1; min-height: 0; }
+      .lane { border-radius: 30px; background: #0e0e0e; padding: 24px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); display: flex; flex-direction: column; }
+      .lane-head { display: flex; align-items: center; justify-content: space-between; }
+      .lane-head b { font-size: 13px; letter-spacing: .15em; }
+      .lane-head span { border-radius: 999px; background: #1e1e1e; padding: 8px 11px; color: #aaa; font-size: 10px; font-weight: 900; }
+      .steps { margin-top: 20px; display: grid; gap: 9px; }
+      .step { display: grid; grid-template-columns: 38px 1fr auto; align-items: center; gap: 13px; min-height: 75px; border-radius: 19px; background: #171717; padding: 12px 15px; }
+      .step.primary { background: #f2f2f2; color: #090909; }
+      .number { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; background: #292929; color: #aaa; font-size: 11px; font-weight: 900; }
+      .primary .number { background: #dcdcdc; color: #222; }
+      .step h2 { font-size: 14px; margin: 0 0 4px; letter-spacing: -.02em; }
+      .step p { margin: 0; font-size: 11px; color: #8e8e8e; line-height: 1.45; }
+      .primary p { color: #555; }
+      .step img { width: 42px; height: 42px; }
+      .endpoint { color: #cfcfcf; font: 700 10px ui-monospace, SFMono-Regular, monospace; }
+      .primary .endpoint { color: #333; }
+      .guard { margin-top: auto; border-radius: 18px; background: #171717; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+      .guard strong { font-size: 11px; letter-spacing: .12em; }
+      .guard p { margin: 4px 0 0; font-size: 10px; color: #7f7f7f; }
+      .pill { white-space: nowrap; border-radius: 999px; background: #f0f0f0; color: #090909; padding: 8px 11px; font-size: 9px; font-weight: 950; }
+      footer { display: flex; justify-content: space-between; margin-top: 18px; color: #666; font-size: 11px; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="eyebrow">TOSS PORTFOLIO LENS · DATA CONTRACT</div>
+        <h1>원본 계좌 데이터는 읽기 전용으로,<br />AI에는 계산된 지표만 전달합니다.</h1>
+        <p class="subtitle">내부 API의 책임을 분리하고 동일한 보고서 스키마를 사용해<br />포트폴리오 분석과 백테스트 결과를 일관된 화면으로 제공합니다.</p>
+      </header>
+
+      <section class="flows">
+        <article class="lane">
+          <div class="lane-head"><b>READ-ONLY PORTFOLIO FLOW</b><span>ACCOUNT → CHARTS</span></div>
+          <div class="steps">
+            <div class="step primary"><div class="number">01</div><div><h2>브라우저 요청과 세션 확인</h2><p>패스워드 로그인 쿠키 · 계좌 식별자는 서버 내부에서만 사용</p></div><code class="endpoint">/api/portfolio</code></div>
+            <div class="step"><div class="number">02</div><div><h2>호환 조회 API 호출</h2><p>고정 업스트림 · Bearer 자격 증명은 Kubernetes Secret에서 주입</p></div><code class="endpoint">tpl.uaysk.com</code></div>
+            <div class="step"><div class="number">03</div><div><h2>표준 포트폴리오로 정규화</h2><p>국내·해외 종목, 체결, 일봉과 환율을 KRW 기준으로 결합</p></div><code class="endpoint">READ ONLY</code></div>
+            <div class="step"><div class="number">04</div><div><h2>시계열 저장과 분석</h2><p>TWR · XIRR · MDD · 위험기여도 · 상관관계 · 백테스트</p></div><img src="../assets/aws-icons/Arch_Amazon-RDS_64.svg" alt="Amazon RDS" /></div>
+          </div>
+          <div class="guard"><div><strong>ORDER SURFACE EXCLUDED</strong><p>매수·매도·정정·취소 엔드포인트를 애플리케이션에서 노출하지 않습니다.</p></div><span class="pill">조회 전용</span></div>
+        </article>
+
+        <article class="lane">
+          <div class="lane-head"><b>LLM REPORT FLOW</b><span>METRICS → REPORT</span></div>
+          <div class="steps">
+            <div class="step primary"><div class="number">01</div><div><h2>기간과 전략을 고정</h2><p>분석 기간 또는 백테스트의 종목·비중·가정을 명시적으로 저장</p></div><code class="endpoint">SCHEMA v1</code></div>
+            <div class="step"><div class="number">02</div><div><h2>계산 지표를 구조화</h2><p>성과·위험·집중도·기여도·비용·데이터 품질 전체를 JSON으로 구성</p></div><code class="endpoint">NO ACCOUNT ID</code></div>
+            <div class="step"><div class="number">03</div><div><h2>Kimi K2.5 평가 생성</h2><p>Amazon Bedrock Converse · 점수, 강점, 위험, 실행 항목을 고정 출력</p></div><img src="../assets/aws-icons/Arch_Amazon-Bedrock_64.svg" alt="Amazon Bedrock" /></div>
+            <div class="step"><div class="number">04</div><div><h2>검증 후 보고서 JSON 저장</h2><p>서술 스키마 검증 · S3 비공개 저장 · 고정 React 템플릿 렌더링</p></div><img src="../assets/aws-icons/Arch_Amazon-Simple-Storage-Service_64.svg" alt="Amazon S3" /></div>
+          </div>
+          <div class="guard"><div><strong>DETERMINISTIC VISUAL TEMPLATE</strong><p>보고서별 디자인은 바뀌지 않으며 데이터와 AI 평가 내용만 교체됩니다.</p></div><span class="pill">S3 /reports</span></div>
+        </article>
+      </section>
+      <footer><span>ACCOUNT IDENTIFIERS STAY SERVER-SIDE</span><span>KRW · DOMESTIC + OVERSEAS · DAILY SERIES</span></footer>
+    </main>
+  </body>
+</html>

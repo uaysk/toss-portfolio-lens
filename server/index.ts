@@ -25,6 +25,7 @@ import {
   type BacktestRunRequest,
 } from "./backtest.js";
 import { loadConfig } from "./env.js";
+import { BedrockReportWriter } from "./bedrock-report-ai.js";
 import {
   isHistoryDate,
   type HistoryCurrency,
@@ -49,14 +50,20 @@ const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const portfolioBacktest = new PortfolioBacktestService(toss, historyStore);
 const reportStorage = createReportStorage(config.reportStorage);
+const reportWriter = config.bedrock
+  ? new BedrockReportWriter(config.bedrock)
+  : config.openAi
+    ? new OpenAiReportWriter(config.openAi)
+    : undefined;
 const portfolioReports = new PortfolioReportService(
   reportStorage,
   config.publicAppUrl,
-  config.openAi ? new OpenAiReportWriter(config.openAi) : undefined,
+  reportWriter,
 );
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
+const secureSessionCookie = new URL(config.publicAppUrl).protocol === "https:";
 
 type AttemptState = {
   count: number;
@@ -67,7 +74,6 @@ const loginAttempts = new Map<string, AttemptState>();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 5;
 
-app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
 app.use((request, response, next) => {
@@ -86,7 +92,7 @@ app.use((request, response, next) => {
 });
 
 function clientIp(request: Request): string {
-  return request.ip || request.socket.remoteAddress || "unknown";
+  return request.socket.remoteAddress || "unknown";
 }
 
 function requireSession(request: Request, response: Response, next: NextFunction): void {
@@ -152,13 +158,13 @@ app.post("/api/auth/login", (request, response) => {
   }
 
   loginAttempts.delete(ip);
-  response.setHeader("Set-Cookie", createSessionCookie(request, config.sessionSecret));
+  response.setHeader("Set-Cookie", createSessionCookie(request, config.sessionSecret, secureSessionCookie));
   response.json({ authenticated: true });
 });
 
 app.post("/api/auth/logout", (request, response) => {
   setNoStore(response);
-  response.setHeader("Set-Cookie", clearSessionCookie(request));
+  response.setHeader("Set-Cookie", clearSessionCookie(request, secureSessionCookie));
   response.json({ authenticated: false });
 });
 

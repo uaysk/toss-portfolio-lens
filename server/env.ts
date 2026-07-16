@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
 import type { MySqlConnectionConfig } from "./database.js";
 
 export type OpenAiConfig = {
   endpoint: string;
   apiKey: string;
   model?: string;
+  timeoutMs: number;
+};
+
+export type BedrockConfig = {
+  region: string;
+  modelId: string;
   timeoutMs: number;
 };
 
@@ -26,9 +33,21 @@ export type ReportStorageConfig = S3ReportStorageConfig | {
   directory: string;
 };
 
-export type AppConfig = {
-  clientId: string;
-  clientSecret: string;
+export type TossApiAuthConfig =
+  | {
+    tossApiAuthMode: "oauth_client_credentials";
+    clientId: string;
+    clientSecret: string;
+    tossApiBearerToken?: undefined;
+  }
+  | {
+    tossApiAuthMode: "static_bearer";
+    clientId?: string;
+    clientSecret?: string;
+    tossApiBearerToken: string;
+  };
+
+export type AppConfig = TossApiAuthConfig & {
   dashboardPassword: string;
   sessionSecret: string;
   host: string;
@@ -36,10 +55,12 @@ export type AppConfig = {
   tossApiBaseUrl: string;
   databasePath: string;
   mysql?: MySqlConnectionConfig;
+  mysqlRequired: boolean;
   snapshotRefreshHours: number;
   nodeEnv: string;
   publicAppUrl: string;
   openAi?: OpenAiConfig;
+  bedrock?: BedrockConfig;
   reportStorage: ReportStorageConfig;
 };
 
@@ -98,6 +119,10 @@ function readMySqlConfig(): MySqlConnectionConfig | undefined {
       throw new Error("MYSQL_CONNECT_TIMEOUT_MS는 500~30000 범위여야 합니다.");
     }
     const useSsl = readBoolean("MYSQL_SSL", false);
+    const caPath = optional("MYSQL_SSL_CA_PATH");
+    if (caPath && !useSsl) throw new Error("MYSQL_SSL_CA_PATH를 사용하려면 MYSQL_SSL=true가 필요합니다.");
+    const ca = caPath ? readFileSync(caPath, "utf8") : undefined;
+    if (caPath && !ca?.trim()) throw new Error("MYSQL_SSL_CA_PATH의 인증서가 비어 있습니다.");
     return {
       host,
       port,
@@ -106,7 +131,10 @@ function readMySqlConfig(): MySqlConnectionConfig | undefined {
       database,
       connectTimeoutMs,
       ...(useSsl ? {
-        ssl: { rejectUnauthorized: readBoolean("MYSQL_SSL_REJECT_UNAUTHORIZED", true) },
+        ssl: {
+          rejectUnauthorized: readBoolean("MYSQL_SSL_REJECT_UNAUTHORIZED", true),
+          ...(ca ? { ca } : {}),
+        },
       } : {}),
     };
   } catch (error) {
@@ -121,6 +149,28 @@ function required(name: string): string {
     throw new Error("필수 환경 변수 " + name + "가 설정되지 않았습니다.");
   }
   return value;
+}
+
+function readTossApiAuth(): TossApiAuthConfig {
+  const mode = optional("TOSS_API_AUTH_MODE")?.toLowerCase() || "oauth_client_credentials";
+  if (mode === "static_bearer") {
+    const clientId = optional("CLIENT_ID");
+    const clientSecret = optional("CLIENT_SECRET");
+    return {
+      tossApiAuthMode: "static_bearer",
+      tossApiBearerToken: required("TOSS_API_BEARER_TOKEN"),
+      ...(clientId ? { clientId } : {}),
+      ...(clientSecret ? { clientSecret } : {}),
+    };
+  }
+  if (mode !== "oauth_client_credentials") {
+    throw new Error("TOSS_API_AUTH_MODE는 oauth_client_credentials 또는 static_bearer여야 합니다.");
+  }
+  return {
+    tossApiAuthMode: "oauth_client_credentials",
+    clientId: required("CLIENT_ID"),
+    clientSecret: required("CLIENT_SECRET"),
+  };
 }
 
 function readPort(): number {
@@ -173,6 +223,23 @@ function readOpenAiConfig(): OpenAiConfig | undefined {
   };
 }
 
+function readReportAiConfig(): Pick<AppConfig, "openAi" | "bedrock"> {
+  const provider = optional("REPORT_AI_PROVIDER")?.toLowerCase();
+  if (provider && provider !== "openai" && provider !== "bedrock") {
+    throw new Error("REPORT_AI_PROVIDER는 openai 또는 bedrock이어야 합니다.");
+  }
+  if (provider === "bedrock") {
+    return {
+      bedrock: {
+        region: optional("BEDROCK_REGION") || "eu-north-1",
+        modelId: optional("BEDROCK_MODEL_ID") || "moonshotai.kimi-k2.5",
+        timeoutMs: readBoundedInteger("BEDROCK_TIMEOUT_MS", 120_000, 5_000, 180_000),
+      },
+    };
+  }
+  return { openAi: readOpenAiConfig() };
+}
+
 function readReportStorage(): ReportStorageConfig {
   const bucket = optional("S3_BUCKET");
   if (!bucket) {
@@ -201,6 +268,7 @@ function readReportStorage(): ReportStorageConfig {
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
+  const tossApiAuth = readTossApiAuth();
 
   if (sessionSecret.length < 32) {
     throw new Error("SESSION_SECRET은 32자 이상이어야 합니다.");
@@ -209,22 +277,31 @@ export function loadConfig(): AppConfig {
   const host = process.env.HOST?.trim() || "0.0.0.0";
   const port = readPort();
   const configuredPublicUrl = optional("PUBLIC_APP_URL") || optional("APP_URL");
+  const reportAi = readReportAiConfig();
+  const mysql = readMySqlConfig();
+  const mysqlRequired = readBoolean("MYSQL_REQUIRED", false);
+  if (mysqlRequired && !mysql) {
+    throw new Error("MYSQL_REQUIRED=true이면 유효한 MySQL 연결 설정이 필요합니다.");
+  }
   return {
-    clientId: required("CLIENT_ID"),
-    clientSecret: required("CLIENT_SECRET"),
+    ...tossApiAuth,
     dashboardPassword,
     sessionSecret,
     host,
     port,
-    tossApiBaseUrl: process.env.TOSS_API_BASE_URL?.trim() || "https://openapi.tossinvest.com",
+    tossApiBaseUrl: normalizedHttpUrl(
+      optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
+      "TOSS_API_BASE_URL",
+    ),
     databasePath: process.env.DATABASE_PATH?.trim() || "./data/portfolio-history.sqlite",
-    mysql: readMySqlConfig(),
+    mysql,
+    mysqlRequired,
     snapshotRefreshHours: readSnapshotRefreshHours(),
     nodeEnv: process.env.NODE_ENV?.trim() || "development",
     publicAppUrl: configuredPublicUrl
       ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
       : `http://localhost:${port}`,
-    openAi: readOpenAiConfig(),
+    ...reportAi,
     reportStorage: readReportStorage(),
   };
 }

@@ -169,6 +169,7 @@ export type MySqlConnectionConfig = {
   connectTimeoutMs: number;
   ssl?: {
     rejectUnauthorized: boolean;
+    ca?: string;
   };
 };
 

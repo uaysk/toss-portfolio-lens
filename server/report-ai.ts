@@ -12,7 +12,7 @@ export type ReportNarrative = {
   methodology: string;
 };
 
-const narrativeSchema = {
+export const REPORT_NARRATIVE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["score", "stance", "summary", "strengths", "risks", "actions", "methodology"],
@@ -42,7 +42,7 @@ const narrativeSchema = {
   },
 } as const;
 
-const instructions = `당신은 한국어 포트폴리오 분석 보고서를 작성하는 신중한 애널리스트입니다.
+export const REPORT_EVALUATION_INSTRUCTIONS = `당신은 한국어 포트폴리오 분석 보고서를 작성하는 신중한 애널리스트입니다.
 제공된 수치와 데이터 품질 정보만 근거로 평가하고, 제공되지 않은 시장 뉴스·기업 정보·전망은 추측하지 마세요.
 입력 JSON에 제공된 핵심 성과, 벤치마크 비교, 롤링 성과, 낙폭, 꼬리위험, 월간 수익률, 성과·위험 기여도, 상관관계, 집중도·노출, 비용, 거래 행동, 가정과 데이터 품질 범주를 모두 검토한 뒤 종합 평가하세요.
 특정 지표 하나로 결론을 내리지 말고 서로 보완하거나 충돌하는 지표를 함께 해석하며, 값이 없거나 데이터 부족으로 표시된 범주는 임의로 보완하지 마세요.
@@ -221,7 +221,7 @@ export class OpenAiReportWriter {
         body: JSON.stringify({
           model,
           store: false,
-          instructions,
+          instructions: REPORT_EVALUATION_INSTRUCTIONS,
           input: [{
             role: "user",
             content: [{ type: "input_text", text: JSON.stringify(input) }],
@@ -233,7 +233,7 @@ export class OpenAiReportWriter {
               type: "json_schema",
               name: "portfolio_evaluation",
               strict: true,
-              schema: narrativeSchema,
+              schema: REPORT_NARRATIVE_SCHEMA,
             },
           },
         }),
@@ -251,7 +251,7 @@ export class OpenAiReportWriter {
           body: JSON.stringify({
             model,
             messages: [
-              { role: "system", content: instructions },
+              { role: "system", content: REPORT_EVALUATION_INSTRUCTIONS },
               { role: "user", content: JSON.stringify(input) },
             ],
             max_tokens: 1_800,
@@ -260,7 +260,7 @@ export class OpenAiReportWriter {
               json_schema: {
                 name: "portfolio_evaluation",
                 strict: true,
-                schema: narrativeSchema,
+                schema: REPORT_NARRATIVE_SCHEMA,
               },
             },
           }),

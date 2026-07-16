@@ -1,133 +1,186 @@
 # Portfolio Lens
 
-토스증권 Open API의 계좌·보유 주식·체결 완료 주문·일봉을 읽어 개인 포트폴리오의 현재 상태, 과거 비중, 성과 분석과 전략 백테스트를 보여주는 대시보드입니다. 주문 생성·정정·취소 엔드포인트는 구현하지 않았습니다.
+토스증권 호환 조회 API의 계좌·체결·시세 데이터를 일별 포트폴리오로 복원하고, 성과 분석·백테스트·AI 평가 보고서까지 하나의 화면에서 제공하는 읽기 전용 투자 대시보드입니다.
 
-## 실행
+> 현재 AWS 데모: [EKS에서 실행 중인 Portfolio Lens](http://k8s-portfoli-portfoli-c955ab91b2-b83d97e1505d6fca.elb.ap-northeast-2.amazonaws.com)
+>
+> 이 NLB 엔드포인트는 **HTTP 데모**입니다. 브라우저와 서버 사이의 로그인 정보가 암호화되지 않으므로, ACM 인증서와 사용자 도메인으로 HTTPS를 구성하기 전에는 실제 비밀번호를 입력하지 마세요.
 
-1. **.env.example**을 참고해 **.env**에 다음 값을 설정합니다.
+![Portfolio Lens 대시보드](docs/presentation/generated/app-overview.png)
 
-   - **CLIENT_ID**, **CLIENT_SECRET**: 실제 토스증권 WTS에서 발급한 상위 Open API 자격증명
-   - **DASHBOARD_PASSWORD**: 웹 로그인 비밀번호이자 이 앱이 노출하는 읽기 전용 API의 Bearer 토큰. 최소 글자 수 제한은 없지만 외부에 노출되는 서비스에서는 충분히 강한 값을 권장합니다.
-   - **SESSION_SECRET**: 32자 이상의 임의 문자열
-   - **SNAPSHOT_REFRESH_HOURS**: 일별 스냅샷 갱신 주기(기본 6시간)
-   - **PUBLIC_APP_URL**: 보고서 공개 링크에 사용할 최종 외부 주소(예: `https://tpl.uaysk.com`)
-   - **OPENAI_API_ENDPOINT**, **OPENAI_API_KEY**: AI 평가 보고서를 생성할 OpenAI Responses API 주소와 키
-   - 기본 저장소는 **SQLite**입니다. MySQL을 사용하려면 **MYSQL_URL** 또는 **MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE**를 설정합니다.
+## 무엇을 해결하나요?
 
-2. Docker Compose로 실행합니다.
+- 국내·해외 주식을 한 포트폴리오로 합쳐 일별 평가금과 종목별 비중을 복원합니다.
+- 포트폴리오 OHLC, TWR·XIRR, MDD, Sharpe·Sortino, VaR·CVaR, 집중도·기여도·상관관계 등 성과와 위험을 함께 분석합니다.
+- KOSPI·KOSDAQ·Nasdaq 100·S&P 500 또는 개별 종목을 벤치마크로 비교합니다.
+- 현재 보유 종목을 그대로 불러오거나 국내 6자리 코드와 미국 티커를 조합해 백테스트합니다.
+- 계산된 지표를 Amazon Bedrock의 Kimi K2.5가 평가하고, 모든 보고서를 동일한 React 템플릿으로 렌더링합니다.
+- 주문 생성·정정·취소 기능은 구현하지 않았고, 허용된 조회 요청만 업스트림으로 전달합니다.
 
-       docker compose up --build -d web
+## 제품 화면
 
-3. http://localhost:3200 또는 연결된 리버스 프록시 주소로 접속합니다.
+### 자산 구성과 일별 비중
 
-서비스는 컨테이너와 호스트 모두 **0.0.0.0:3200**을 사용합니다. 상태 확인 주소는 **/api/health**이며 응답의 `storage` 값으로 현재 선택된 저장소(`sqlite` 또는 `mysql`)를 확인할 수 있습니다.
+스택 영역의 전체 높이는 포트폴리오 평가금에 따라 변하고, 각 영역은 종목별 평가 비중을 나타냅니다. 날짜 범위를 일 단위로 지정할 수 있으며 현재 보유하지 않는 과거 종목도 함께 복원합니다.
 
-## 데이터베이스 선택과 마이그레이션
+![자산 구성과 보유 종목](docs/presentation/generated/app-account-composition.png)
 
-- MySQL 설정이 없거나 일부만 설정된 경우 기존 SQLite를 사용합니다.
-- MySQL 설정이 완전하면 시작 시 실제 연결과 스키마 생성을 확인합니다. 연결·스키마 생성·마이그레이션 중 하나라도 실패하면 서비스 시작을 중단하지 않고 SQLite로 안전하게 되돌아갑니다.
-- MySQL 연결에 성공하면 MySQL이 주 저장소가 됩니다. 기존 `DATABASE_PATH`의 SQLite 파일은 삭제하지 않고 자동 마이그레이션 원본과 장애 시 fallback으로 보존합니다.
-- 첫 전환에서는 스냅샷·종목 비중·체결 주문·종목 정보·종목/지수 일봉·백테스트 수정주가 캐시·환율·백필 상태를 트랜잭션으로 upsert합니다. SQLite보다 최신인 MySQL 행은 덮어쓰지 않습니다.
-- SQLite 파일이 바뀌지 않았다면 저장된 fingerprint를 확인해 다음 시작의 마이그레이션을 건너뜁니다. MySQL 장애 중 SQLite fallback으로 새 데이터가 저장된 뒤 다시 연결되면 변경된 SQLite를 자동으로 재마이그레이션합니다.
-- `MYSQL_SSL=true`로 TLS를 활성화할 수 있습니다. 신뢰할 수 없는 사설 인증서를 명시적으로 허용해야 하는 환경에서만 `MYSQL_SSL_REJECT_UNAUTHORIZED=false`를 사용합니다.
-- `MYSQL_DATABASE`가 이미 존재하면 그대로 사용합니다. 존재하지 않고 계정에 권한이 있으면 UTF-8 데이터베이스를 자동 생성합니다.
+### 포트폴리오 분석
 
-## 읽기 전용 토스 호환 API
+전체 평가금을 일봉 형태로 표시하고 비교 지수의 시작점을 같은 날짜에 맞춥니다. 벤치마크 수치, 위험 조정 성과, 낙폭, 기여도, 집중도와 데이터 신뢰도를 한 화면에서 확인할 수 있습니다.
 
-이 앱은 실제 토스증권 자격증명을 외부에 전달하지 않고 토스증권과 같은 경로의 조회 전용 API를 제공합니다. 별도 토큰 발급 요청 없이 `.env`의 **DASHBOARD_PASSWORD** 자체를 Bearer 토큰으로 사용합니다.
+![포트폴리오 분석과 벤치마크](docs/presentation/generated/app-analysis.png)
 
-    curl 'https://tpl.uaysk.com/api/v1/accounts' \
-      -H 'Authorization: Bearer YOUR_DASHBOARD_PASSWORD'
+### 포트폴리오 백테스트
 
-이 토큰은 `.env`의 **DASHBOARD_PASSWORD**가 변경될 때까지 유효합니다. 계좌·보유자산 조회는 토스증권과 마찬가지로 보유 계좌의 식별자를 `X-Tossinvest-Account` 헤더에 전달합니다.
+현재 포트폴리오를 불러오거나 국내·해외 종목을 직접 추가할 수 있습니다. 종목을 삭제해도 다른 종목의 입력 비중은 자동 변경되지 않으며, 가장 늦게 상장한 종목의 상장일이 기본 시작일이 됩니다.
 
-노출하는 GET 경로:
+![백테스트 종목과 비중 설정](docs/presentation/generated/app-backtest.png)
 
-- 계좌·자산: `/api/v1/accounts`, `/api/v1/holdings`
-- 거래 내역: `/api/v1/orders`, `/api/v1/orders/{orderId}` (`GET`만 지원)
-- 시세: `/api/v1/orderbook`, `/api/v1/prices`, `/api/v1/trades`, `/api/v1/price-limits`, `/api/v1/candles`
-- 종목: `/api/v1/stocks`, `/api/v1/stocks/{symbol}/warnings`
-- 시장: `/api/v1/exchange-rate`, `/api/v1/market-calendar/KR`, `/api/v1/market-calendar/US`, `/api/v1/rankings`
-- 지표: `/api/v1/market-indicators/prices`, `/api/v1/market-indicators/{symbol}/candles`, `/api/v1/market-indicators/{symbol}/investor-trading`
+초기 투자금·정기 현금흐름·리밸런싱·벤치마크·무위험수익률·거래비용 가정을 고정하고, 성장 경로와 위험·기여도·상관관계를 같은 조건으로 재현합니다.
 
-거래 내역 목록은 `status=OPEN|CLOSED`가 필수이며 `symbol`, `from`, `to`, `cursor`, `limit`만 추가로 허용합니다. 계좌 헤더와 Bearer 토큰 사용 예시는 다음과 같습니다.
+![백테스트 결과와 AI 보고서](docs/presentation/generated/app-backtest-result.png)
 
-    curl 'https://tpl.uaysk.com/api/v1/orders?status=CLOSED&limit=100' \
-      -H 'Authorization: Bearer YOUR_DASHBOARD_PASSWORD' \
-      -H 'X-Tossinvest-Account: ACCOUNT_SEQ'
+## 발표용 시연 포트폴리오
 
-매수 가능 금액, 매도 가능 수량, 수수료, 주문 생성·정정·취소와 조건주문 경로는 호환 API에 노출하지 않습니다. 임의 경로나 허용되지 않은 쿼리도 서버 화이트리스트에서 거부합니다.
+README의 애플리케이션 화면은 실제 계좌가 아닌 아래의 결정론적 시연 데이터를 사용했습니다. 시작 평가금은 **₩10,000,000**, 비중 합계는 **100%**입니다.
 
-## 일별 비중 차트
+| 종목 | 통화·시장 | 코드 | 상장일 | 목표 비중 |
+| --- | --- | --- | --- | ---: |
+| KODEX 200 | KRW · KOSPI | `069500` | 2002-10-14 | 20% |
+| KODEX 반도체 | KRW · KOSPI | `091160` | 2006-06-27 | 20% |
+| KODEX 미국반도체 | KRW · KOSPI | `390390` | 2021-06-30 | 15% |
+| TIGER 글로벌멀티에셋TIF액티브 | KRW · KOSPI | `440340` | 2022-08-30 | 15% |
+| KODEX 미국나스닥100 | KRW · KOSPI | `379810` | 2021-04-09 | 10% |
+| TIME 미국나스닥100액티브 | KRW · KOSPI | `426030` | 2022-05-11 | 20% |
 
-- 최초 실행 시 체결 완료 주문 전체를 커서 기반으로 조회해 사용자의 첫 체결일부터 현재까지 데이터를 복원합니다.
-- 각 종목의 비수정 일봉 종가를 페이지 단위로 모두 불러오고, 매수·매도 체결 수량을 KST 날짜별로 반영합니다.
-- 주말·휴일은 직전 거래일 종가를 이어 쓰고 오늘 데이터는 현재 보유 API의 실시간 평가액으로 기록합니다.
-- 같은 날짜에 여러 번 조회하면 별도 점을 만들지 않고 그날의 최신 상태로 갱신합니다.
-- 컨테이너가 실행 중이면 6시간마다 모든 조회 가능 계좌를 갱신하며, 대시보드 조회·새로고침 때도 오늘 스냅샷을 저장합니다.
-- KRW와 USD를 분리합니다. 영역 두께는 각 통화 안의 종목 비중을 나타내고, 스택 전체 높이는 그날의 통화별 총평가금을 따라 변합니다.
-- 현재 보유자산의 평가액·손익·수익률은 화면이 보이는 동안 5초마다 갱신합니다.
-- 현재 해외주식 잔고가 없어도 과거 USD 주문과 일봉으로 복원한 해외주식 기록은 차트의 **USD · 해외/과거** 탭에서 확인할 수 있습니다.
-- 7일, 30일, 90일, 전체 기간을 빠르게 선택하거나 시작일·종료일 달력 입력으로 KST 일 단위 범위를 직접 지정할 수 있습니다.
-- 체결 합계와 현재 보유량이 다른 종목(입고·출고, 액면분할 등)은 현재 보유량에 맞춰 기준 수량을 보정하고 UI에 **일부 추정**으로 표시합니다.
-- 기본 SQLite 데이터는 Docker named volume **portfolio_data**의 **/app/data/portfolio-history.sqlite**에 유지됩니다. MySQL 설정이 정상일 때는 같은 파일을 보존하면서 MySQL을 주 저장소로 사용합니다.
+가장 늦게 상장한 종목을 기준으로 백테스트 기본 기간은 `2022-08-30`부터 README 생성 시점인 `2026-07-16`까지로 구성했습니다. 화면 재현 방법은 [발표 자료 가이드](docs/presentation/README.md)에 정리되어 있습니다.
 
-첫 동기화는 보유·과거 보유 종목 수에 따라 시간이 걸릴 수 있습니다. 진행 상태는 비중 차트 상단에서 확인할 수 있고, 완료되면 차트가 자동 갱신됩니다.
+## AWS 배포 구조
 
-## 포트폴리오 분석 탭
+![AWS 런타임 아키텍처](docs/presentation/generated/aws-runtime-architecture.png)
 
-- KRW 국내 포지션과 USD 해외·과거 포지션의 통화별 전체 평가금을 일 단위 캔들로 표시합니다.
-- 시가·고가·저가·종가는 종목별 일봉 OHLC와 해당일 보유수량을 합산한 추정치입니다. 종목별 극값 발생 시각이 다르므로 실제 계좌 장중 극값과 차이가 날 수 있습니다.
-- KOSPI·KOSDAQ 공식 지수 일봉과 나스닥 100(QQQ)·S&P 500(SPY) 조정주가 프록시를 시작점 대비 등락률로 같은 화면에서 비교합니다. QQQ·SPY는 분석일의 USD/KRW를 적용해 포트폴리오와 같은 원화 기준으로 정규화합니다.
-- 기본 30일과 90일·1년·전체 기간, 시작일·종료일 직접 입력을 지원합니다. 지수 데이터는 현재 선택된 데이터베이스에 캐시합니다.
-- 보유비중 기반 TWR, 체결 현금흐름 기반 XIRR, 기간 추정 손익·순투자액, 연환산 변동성, MDD, 샤프·소르티노·Calmar, 최고·최저 일간수익률, 상승일 비율, 집중도, 회전율, 비용과 종목별 기여도를 표시합니다.
-- 추적오차·정보비율·베타·알파·상하방 참여율·벤치마크 승률·상대 MDD, 20/60/120/252일 롤링 수익률과 60일 위험 변화, 낙폭 회복 구간, VaR·CVaR, 월간 수익률 히트맵을 추가로 제공합니다.
-- 최신 보유비중과 종목 공분산 기반 위험 기여도·무채색 상관행렬, 가격/환율 분리 시간연결 기여도, 통화 노출, 비용 드래그·월별 회전율, FIFO 체결 기반 추정 실현손익·승률·Profit Factor·보유기간을 표시합니다.
-- 수익률 관측일, 종목 가격·환율 커버리지, 실제·재구성 스냅샷과 과거 수집 상태를 합쳐 데이터 신뢰도를 높음·보통·제한적으로 표시합니다. 연 무위험수익률은 -10%~50% 범위에서 사용자가 설정할 수 있습니다.
-- 토스 OpenAPI가 계좌 입출금·예수금·배당 원장을 제공하지 않으므로 XIRR은 기간 시작 보유주식 평가액, 기간 중 매수·매도 체결, 종료 평가액을 이용한 **보유주식 투자 추정치**입니다. 실제 계좌 전체 수익률로 표시하지 않습니다.
+| 영역 | 실제 구성 |
+| --- | --- |
+| 애플리케이션 | 서울 `ap-northeast-2`의 Amazon EKS 1.36, 관리형 노드 그룹 `t3.small` 1대, Kubernetes Deployment 1 replica |
+| 컨테이너 | 로컬에서 `linux/amd64` 이미지를 빌드하고 Amazon ECR에 푸시한 뒤 EKS가 해당 이미지를 사용 |
+| 외부 진입점 | AWS Load Balancer Controller가 생성한 인터넷 공개 NLB, 현재 HTTP 80 → Pod 3200 |
+| 데이터베이스 | 격리 서브넷의 Amazon RDS for MariaDB 11.8.8, `db.t4g.small`, 20 GiB gp3, Single-AZ |
+| 보고서 저장 | 버전 관리와 SSE-S3를 적용한 비공개 Amazon S3 객체(JSON) |
+| AI 평가 | 스톡홀름 `eu-north-1`의 Amazon Bedrock, `moonshotai.kimi-k2.5` |
+| AWS 권한 | EKS Pod Identity로 애플리케이션 Pod에 지정 S3 prefix와 Kimi 모델의 최소 권한만 부여 |
+| 비밀 관리 | RDS 관리형 비밀번호는 AWS Secrets Manager에 보관하고, 배포 시 대시보드·세션·업스트림 토큰과 함께 Kubernetes Secret으로 주입 |
 
-## 포트폴리오 백테스트 탭
+비용을 줄이기 위해 단일 EKS 노드와 Single-AZ RDS를 사용합니다. 이는 고가용성 구성이 아니며 운영 환경에서는 다중 노드, RDS Multi-AZ, HTTPS listener와 사용자 도메인을 추가해야 합니다.
 
-- 현재 보유 종목과 원화 환산 비중을 한 번에 불러오거나 국내 6자리 종목 코드와 미국 티커를 최대 20개까지 직접 추가할 수 있습니다.
-- 종목을 삭제해도 나머지 종목의 입력 비중은 자동 재배분하지 않습니다. 합계가 100%가 되도록 사용자가 원하는 비중만 직접 조정합니다.
-- 시작일 기본값은 구성 종목 중 가장 늦은 상장일, 종료일 기본값은 현재 KST 날짜입니다. 실제 계산은 모든 종목과 비교 지수에 공통 일봉이 존재하는 첫날부터 시작합니다.
-- 초기 투자금, 월 정기 납입·인출, 리밸런싱 없음·월·분기·연 단위 조건과 연 무위험수익률(-10%~50%), 거래비용(0~500bp) 가정을 지원합니다.
-- KOSPI·KOSDAQ과 나스닥 100(QQQ)·S&P 500(SPY) 프록시뿐 아니라 국내 6자리 코드와 해외 티커의 개별 종목도 벤치마크로 선택할 수 있습니다.
-- 현금흐름 제거 성장, CAGR, 변동성, MDD, 샤프·소르티노, 최고 연도와 상승 월 비율 아래에 동일 기간 벤치마크 수치를 함께 표시하며, 연도별 수익률·종목별 성과 기여도와 무채색 일간 수익률 상관관계를 제공합니다.
-- 추적오차·정보비율·베타·알파·상하방 참여율·승률·상대 MDD, 20/60/120/252일 롤링 수익률, 롤링 변동성·Sharpe·베타·상관, 낙폭 회복 구간과 Ulcer Index를 제공합니다.
-- 역사적 VaR·CVaR·손실일·왜도·첨도·연속 손익, 월간 수익률 히트맵, 평균·종료 비중 기반 위험 기여도, Top 1/5/10·HHI·유효 종목 수·통화 노출·분산 효과를 제공합니다.
-- 시뮬레이션이 생성한 초기매수·정기 현금흐름·리밸런싱 거래를 이용해 월별 회전율, 거래비용, 비용 차감 후 추정수익률과 FIFO 실현손익·승률·Profit Factor·평균 보유기간을 계산합니다. 비용은 성과 경로 자체에서는 차감하지 않고 별도 추정치로 표시합니다.
-- 종목별 수정주가 관측·이월 일수, 공통 기간과 벤치마크 관측 수를 기반으로 백테스트 데이터 신뢰도를 표시합니다.
-- 국내·해외 혼합 포트폴리오는 각 종목의 현지 통화 수정주가 수익률을 합성합니다. 과거 환율, 수정주가에 포함되지 않은 배당 현금흐름, 세금과 실제 체결 슬리피지는 반영하지 않으며 결과 화면에 이 한계를 함께 표시합니다.
+다이어그램에는 AWS가 배포한 [공식 AWS Architecture Icons](https://aws.amazon.com/architecture/icons/)를 사용했습니다.
 
-## AI 평가 보고서
+## 조회 API와 AI 보고서 흐름
 
-- 분석 탭에서 현재 선택한 기간·비교 지수의 포트폴리오 평가 보고서를, 백테스트 결과에서 같은 종목·비중·기간·운용 조건의 백테스트 평가 보고서를 생성할 수 있습니다.
-- `OPENAI_MODEL`을 지정하면 해당 모델을 사용하고, 생략하면 설정된 엔드포인트의 `/models`에서 사용 가능한 GPT-5.6 계열을 우선 선택합니다.
-- 선택 모델이 Responses API를 지원하지 않는다는 명시적 오류를 반환하면 동일한 strict JSON Schema를 사용하는 Chat Completions API로 자동 전환합니다.
-- 서버가 생성 시점에 원본 수치를 다시 계산하고 OpenAI에는 계좌 식별자를 제외한 지표·기여도·표본 경로·데이터 한계만 전달합니다. AI는 엄격한 JSON 스키마의 종합 점수·요약·강점·위험·점검 항목만 작성하며 HTML이나 화면 디자인을 만들지 않습니다.
-- 모든 보고서는 `portfolio-report-v1` React 템플릿으로 렌더링되어 같은 다크 모드 중심 디자인, 지표 카드와 인터랙티브 차트를 사용합니다. 발급 주소는 `${PUBLIC_APP_URL}/reports/{REPORT_ID}`입니다.
-- `S3_BUCKET`이 없으면 Docker volume의 `/app/data/reports`에 JSON으로 저장합니다. `S3_BUCKET`을 설정하면 `S3_REGION`, `S3_PREFIX`, 선택적 `S3_ENDPOINT`, `S3_FORCE_PATH_STYLE`과 AWS 표준 자격증명을 사용해 비공개 S3 객체로 저장하고 애플리케이션이 읽어 제공합니다.
-- 보고서 목록은 외부에 노출하지 않으며 UUID 주소를 아는 사용자가 개별 보고서를 열 수 있습니다. 보고서에는 실제 평가액과 성과 지표가 포함되므로 링크를 비밀번호처럼 취급해야 합니다.
+![조회 API와 보고서 생성 흐름](docs/presentation/generated/api-report-flow.png)
 
-대시보드는 다크 테마가 기본이며, 로그인 화면과 대시보드 상단 버튼으로 라이트 테마를 선택할 수 있습니다. 상단 표시 설정에서는 현재 보유 종목뿐 아니라 선택한 차트 기간에 등장하는 매도 완료 종목도 숨기거나 다시 표시할 수 있습니다. 숨긴 종목은 보유 목록, 자산 구성, 과거 차트에서 제외되지만 계좌 합계는 바뀌지 않습니다. 자산 구성에는 평가액 상위 10종목과 나머지 합계가 표시됩니다. 각 종목은 차트와 목록에서 일관된 컬러로 표시됩니다. 선택한 테마와 숨긴 종목 키만 현재 브라우저의 로컬 저장소에 보관합니다.
+### 조회 전용 포트폴리오
 
-## 보안과 데이터 흐름
+1. 브라우저는 HMAC 서명된 HttpOnly 세션 쿠키로 Express API를 호출합니다.
+2. 서버는 Kubernetes Secret의 정적 Bearer 토큰으로 `https://tpl.uaysk.com/`의 토스증권 호환 읽기 전용 API를 호출합니다.
+3. 국내·해외 종목, 체결, 일봉과 환율을 KRW 기준 포트폴리오 시계열로 정규화합니다.
+4. 스냅샷·주문·가격·환율·분석 캐시는 RDS MariaDB에 저장합니다.
 
-- 브라우저는 토스증권 자격증명을 직접 받지 않습니다.
-- 서버는 실제 토스증권의 OAuth 토큰을 메모리에만 보관하고, 계좌·자산·시장 데이터의 GET 조회와 과거 차트 복원용 CLOSED 주문 GET만 호출합니다.
-- 외부 호환 API는 앱의 **DASHBOARD_PASSWORD** 자체를 `Authorization: Bearer ...` 토큰으로 일정 시간 비교해 확인합니다. 별도의 호환 토큰을 발급하거나 저장하지 않습니다.
-- 액세스 토큰은 프로세스 메모리에만 캐시하며 디스크나 브라우저에 저장하지 않습니다.
-- 로그인 세션은 HMAC 서명된 HttpOnly, SameSite=Strict 쿠키이며 12시간 후 만료됩니다.
-- 로그인은 IP별 15분 동안 5회 실패 제한을 적용합니다.
-- KRW와 USD 금액은 환율로 임의 합산하지 않고 통화별로 표시합니다.
-- 선택된 SQLite 또는 MySQL에는 읽어 온 체결 주문, 종목 메타데이터, 종목별 일봉 OHLC, 백테스트용 수정주가, 비교 지수 종가, 환율, 백필 진행 상태, 날짜별 평가액과 계산된 비중을 저장합니다. 토스 자격증명과 액세스 토큰은 저장하지 않습니다.
-- OpenAI API 키는 서버 환경 변수에서만 읽고 브라우저나 보고서 파일에 기록하지 않습니다. 보고서 JSON에는 계좌 식별자를 넣지 않으며, S3 객체는 public-read 권한을 설정하지 않습니다.
+AWS 배포에서 `https://tpl.uaysk.com/`은 **토스증권 데이터 업스트림 API 엔드포인트**입니다. 사용자의 브라우저가 이 주소를 직접 호출하지 않으며, 계좌 식별자와 Bearer 토큰은 서버 내부에만 유지됩니다.
 
-## 문제 해결
+노출하는 호환 경로는 계좌·보유자산·체결 완료 주문·시세·종목·시장 지표의 `GET` 요청뿐입니다. 주문 가능 금액, 주문 생성·정정·취소와 조건주문 경로는 애플리케이션에서 제외합니다.
 
-- **invalid_client**: CLIENT_ID 또는 CLIENT_SECRET이 다르거나 토스증권 Open API 클라이언트가 비활성 상태인지 확인합니다.
-- **access_denied**: 토스증권 WTS의 Open API 허용 IP 관리에서 서버의 외부 IP를 등록합니다.
-- 리버스 프록시에서 HTTPS를 사용하면 세션 쿠키에 Secure 속성이 자동 적용됩니다.
+```bash
+curl 'https://tpl.uaysk.com/api/v1/orders?status=CLOSED&limit=100' \
+  -H 'Authorization: Bearer YOUR_DASHBOARD_PASSWORD' \
+  -H 'X-Tossinvest-Account: ACCOUNT_SEQ'
+```
 
-정확한 요청·응답 형식은 [토스증권 Open API 문서](https://developers.tossinvest.com/docs)를 기준으로 합니다.
+### AI 평가 보고서
+
+1. 분석 또는 백테스트의 기간·종목·비중·운용 조건을 서버에서 다시 계산합니다.
+2. 수익률·위험·벤치마크·집중도·기여도·비용·데이터 품질 지표를 JSON으로 구성하고 계좌 식별자를 제거합니다.
+3. EKS Pod가 Bedrock Converse API로 Kimi K2.5를 호출해 종합 점수, 강점, 위험과 점검 항목을 생성합니다.
+4. 응답을 애플리케이션 스키마로 검증한 뒤 **비공개 S3에 JSON만 저장**합니다.
+5. `/reports/{id}` 요청 시 서버가 JSON을 읽고 고정된 `portfolio-report-v1` React 템플릿으로 렌더링합니다. LLM이 HTML이나 디자인을 생성하지 않으므로 보고서마다 시각 구조가 달라지지 않습니다.
+
+S3 객체는 public-read가 아니며, 보고서 ID 목록도 외부에 노출하지 않습니다. 다만 개별 보고서에는 실제 평가액과 성과가 포함될 수 있으므로 보고서 URL은 비밀번호처럼 취급해야 합니다.
+
+## 보안 경계
+
+- 브라우저에는 토스증권 자격증명, 업스트림 Bearer 토큰, RDS 비밀번호와 AWS 자격 증명이 전달되지 않습니다.
+- 앱의 S3·Bedrock 권한은 장기 Access Key 대신 EKS Pod Identity로 제공합니다.
+- RDS는 `require_secure_transport=1`이며, AWS global RDS CA bundle을 Pod에 마운트해 서버 인증서 체인을 검증합니다.
+- RDS는 인터넷 경로가 없는 격리 서브넷에 있고 MariaDB 3306은 EKS 노드 보안 그룹에서만 접근할 수 있습니다.
+- S3는 퍼블릭 액세스를 차단하고 암호화·버전 관리를 적용합니다.
+- ECR은 immutable tag, push scan과 수명 주기 정책을 사용합니다.
+- 로그인은 연결 원본 주소별 실패 횟수를 제한하고, 세션 쿠키는 HttpOnly·SameSite=Strict로 설정합니다. 외부 URL이 HTTPS이면 `Secure` 속성도 강제합니다.
+
+## 로컬 실행
+
+요구 사항은 Docker와 Docker Compose입니다. 애플리케이션과 호스트 모두 `0.0.0.0:3200`을 사용합니다.
+
+```bash
+cp .env.example .env
+# .env에 DASHBOARD_PASSWORD, SESSION_SECRET과 데이터 소스 설정 입력
+docker compose up --build -d web
+curl http://localhost:3200/api/health
+```
+
+기본 데이터베이스는 SQLite입니다. 완전하고 유효한 MySQL 설정이 있으면 MySQL을 사용하고, 기존 SQLite 데이터를 안전하게 마이그레이션합니다. 로컬 AI 보고서는 OpenAI 호환 엔드포인트를, AWS 배포는 Bedrock을 선택할 수 있습니다.
+
+주요 환경 변수:
+
+| 변수 | 역할 |
+| --- | --- |
+| `DASHBOARD_PASSWORD` | 웹 로그인 비밀번호이자 이 앱이 노출하는 읽기 전용 호환 API의 Bearer 토큰 |
+| `SESSION_SECRET` | 로그인 세션 HMAC 서명 값 |
+| `TOSS_API_AUTH_MODE` | 실제 토스 OAuth는 `oauth_client_credentials`, 호환 API는 `static_bearer` |
+| `TOSS_API_BASE_URL` | AWS 배포에서는 `https://tpl.uaysk.com/` |
+| `PUBLIC_APP_URL` | 보고서 링크에 사용할 최종 외부 주소 |
+| `REPORT_AI_PROVIDER` | `openai` 또는 `bedrock` |
+| `MYSQL_*` | 선택적 MySQL 연결, TLS와 CA 검증 설정 포함 |
+| `S3_*` | 선택적 비공개 보고서 저장소 설정 |
+
+전체 예시는 [.env.example](.env.example)을 참고하세요.
+
+## AWS에 재배포
+
+AWS CLI, Docker, kubectl, Helm, jq, curl과 필요한 IAM 권한을 준비한 뒤 프로젝트 루트에서 실행합니다.
+
+```bash
+./infra/aws/deploy.sh
+```
+
+배포 스크립트는 다음 과정을 멱등적으로 수행합니다.
+
+1. CloudFormation으로 VPC·EKS·ECR·RDS·S3·IAM을 생성 또는 갱신합니다.
+2. AWS Load Balancer Controller와 EKS Pod Identity를 구성합니다.
+3. RDS 관리형 비밀번호와 공식 CA bundle을 Pod 설정에 주입합니다.
+4. 로컬 이미지를 빌드·검사해 ECR로 푸시하고 Deployment를 롤아웃합니다.
+5. NLB의 `/api/health`가 `mysql`, `s3`, AI `configured`를 모두 보고할 때 완료합니다.
+
+```bash
+kubectl --context toss-portfolio-lens -n portfolio-lens get deploy,pod,svc
+kubectl --context toss-portfolio-lens -n portfolio-lens rollout status deploy/portfolio-lens
+```
+
+리소스 사양, 변수, 운영상 주의점과 안전한 정리 순서는 [AWS 배포 가이드](infra/aws/README.md)에 있습니다.
+
+## 기술 구성
+
+- React, TypeScript, Vite, shadcn/ui, Recharts
+- Express, Vitest, Playwright
+- SQLite / MySQL·MariaDB
+- Docker, Kubernetes, CloudFormation
+- Amazon EKS, ECR, RDS, S3, Secrets Manager, Bedrock, NLB
+
+## 검증
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+발표용 화면은 Playwright로 같은 데이터와 뷰포트에서 재현하며, 생성 원본은 `docs/presentation/generated/`에 보관합니다. 토스증권 호환 API의 정확한 요청·응답 형식은 [토스증권 Open API 문서](https://developers.tossinvest.com/docs)를 기준으로 합니다.

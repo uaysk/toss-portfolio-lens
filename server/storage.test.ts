@@ -13,6 +13,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     port: 3200,
     tossApiBaseUrl: "https://example.invalid",
     databasePath: ":memory:",
+    mysqlRequired: false,
     snapshotRefreshHours: 6,
     nodeEnv: "test",
     ...overrides,
@@ -53,5 +54,20 @@ describe("configured history storage", () => {
       expect.stringContaining("MySQL 연결 또는 마이그레이션에 실패해 SQLite를 사용합니다"),
       expect.anything(),
     );
+  });
+
+  it("MYSQL_REQUIRED이면 MySQL 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(openConfiguredHistoryStore(config({
+      mysqlRequired: true,
+      mysql: {
+        host: "127.0.0.1",
+        port: 1,
+        user: "unavailable",
+        password: "unavailable",
+        database: "portfolio_lens",
+        connectTimeoutMs: 500,
+      },
+    }))).rejects.toThrow();
   });
 });

@@ -537,6 +537,10 @@ export class TossClient {
   constructor(private readonly config: AppConfig) {}
 
   private async getAccessToken(): Promise<string> {
+    if (this.config.tossApiAuthMode === "static_bearer") {
+      return this.config.tossApiBearerToken;
+    }
+
     if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 60_000) {
       return this.tokenCache.accessToken;
     }
@@ -617,7 +621,11 @@ export class TossClient {
         if (response.ok) return payload;
         const apiError = this.toApiError(response, payload, "토스증권 데이터를 불러오지 못했습니다.");
         lastError = apiError;
-        if (response.status === 401 && attempt === 0) {
+        if (
+          response.status === 401
+          && attempt === 0
+          && this.config.tossApiAuthMode === "oauth_client_credentials"
+        ) {
           this.tokenCache = undefined;
           continue;
         }

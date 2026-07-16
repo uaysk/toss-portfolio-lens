@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portfolio-lens
+  labels:
+    app.kubernetes.io/name: toss-portfolio-lens
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portfolio-lens
+  namespace: portfolio-lens
+  labels:
+    app.kubernetes.io/name: toss-portfolio-lens
+automountServiceAccountToken: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portfolio-lens
+  namespace: portfolio-lens
+  labels:
+    app.kubernetes.io/name: toss-portfolio-lens
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: toss-portfolio-lens
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: toss-portfolio-lens
+    spec:
+      serviceAccountName: portfolio-lens
+      automountServiceAccountToken: true
+      nodeSelector:
+        workload: portfolio-lens
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: __IMAGE_URI__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3200
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: portfolio-lens
+            - secretRef:
+                name: portfolio-lens
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: rds-ca
+              mountPath: /app/certs
+              readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: rds-ca
+          configMap:
+            name: portfolio-lens-rds-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portfolio-lens
+  namespace: portfolio-lens
+  labels:
+    app.kubernetes.io/name: toss-portfolio-lens
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /api/health
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "15"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-unhealthy-threshold: "2"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  selector:
+    app.kubernetes.io/name: toss-portfolio-lens
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http

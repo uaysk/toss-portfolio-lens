@@ -26,9 +26,8 @@ function parseCookies(header: string | undefined): Record<string, string> {
   }, {});
 }
 
-function secureRequest(request: Request): boolean {
-  const forwardedProto = request.get("x-forwarded-proto");
-  return request.secure || forwardedProto?.split(",")[0]?.trim() === "https";
+function secureRequest(request: Request, forceSecure: boolean): boolean {
+  return forceSecure || request.secure;
 }
 
 export function passwordsMatch(input: string, expected: string): boolean {
@@ -37,7 +36,7 @@ export function passwordsMatch(input: string, expected: string): boolean {
   return timingSafeEqual(inputHash, expectedHash);
 }
 
-export function createSessionCookie(request: Request, secret: string): string {
+export function createSessionCookie(request: Request, secret: string, forceSecure = false): string {
   const now = Math.floor(Date.now() / 1000);
   const payload: SessionPayload = {
     iat: now,
@@ -46,12 +45,12 @@ export function createSessionCookie(request: Request, secret: string): string {
   };
   const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const value = encoded + "." + sign(encoded, secret);
-  const secure = secureRequest(request) ? "; Secure" : "";
+  const secure = secureRequest(request, forceSecure) ? "; Secure" : "";
   return COOKIE_NAME + "=" + value + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + SESSION_TTL_SECONDS + secure;
 }
 
-export function clearSessionCookie(request: Request): string {
-  const secure = secureRequest(request) ? "; Secure" : "";
+export function clearSessionCookie(request: Request, forceSecure = false): string {
+  const secure = secureRequest(request, forceSecure) ? "; Secure" : "";
   return COOKIE_NAME + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + secure;
 }
 

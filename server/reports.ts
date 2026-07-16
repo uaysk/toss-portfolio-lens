@@ -159,7 +159,7 @@ export class PortfolioReportService {
 
   private requireWriter(): ReportWriter {
     if (!this.writer) {
-      throw new ReportGenerationError("OPENAI_API_ENDPOINT와 OPENAI_API_KEY 설정이 필요합니다.");
+      throw new ReportGenerationError("AI 보고서 생성 공급자 설정이 필요합니다.");
     }
     return this.writer;
   }

@@ -34,6 +34,14 @@ export async function openConfiguredHistoryStore(config: AppConfig): Promise<Por
   } catch (error) {
     if (mysqlStore) await mysqlStore.close().catch(() => undefined);
     else if (mysqlDatabase) await mysqlDatabase.close().catch(() => undefined);
+    if (config.mysqlRequired) {
+      await sqliteStore.close().catch(() => undefined);
+      console.error(
+        "[storage] MYSQL_REQUIRED가 설정되어 MySQL 연결 또는 마이그레이션 실패 후 시작을 중단합니다:",
+        error instanceof Error ? error.message : error,
+      );
+      throw error;
+    }
     console.warn(
       "[storage] MySQL 연결 또는 마이그레이션에 실패해 SQLite를 사용합니다:",
       error instanceof Error ? error.message : error,

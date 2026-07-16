@@ -17,3 +17,6 @@ screenshots
 data
 .playwright-mcp
 tpl-*.png
+
+# 사용자가 로컬 분석을 위해 둔 WTS 원본 내역은 저장소에 포함하지 않습니다.
+토스증권 _ 거래 내역.html

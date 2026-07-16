@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Toss Portfolio Lens · AWS Runtime Architecture</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "Pretendard", "Noto Sans KR", system-ui, sans-serif;
+        background: #050505;
+        color: #f5f5f5;
+      }
+      * { box-sizing: border-box; }
+      html, body { width: 1440px; height: 900px; margin: 0; overflow: hidden; }
+      body { background: #050505; }
+      main { height: 100%; padding: 56px 64px 46px; display: flex; flex-direction: column; }
+      .eyebrow { color: #8c8c8c; font-size: 13px; font-weight: 800; letter-spacing: .18em; }
+      h1 { margin: 12px 0 8px; font-size: 44px; line-height: 1.04; letter-spacing: -.055em; }
+      .subtitle { margin: 0; color: #9b9b9b; font-size: 16px; line-height: 1.6; }
+      .stage {
+        margin-top: 38px;
+        flex: 1;
+        display: grid;
+        grid-template-columns: 190px 56px 260px 56px 1fr;
+        align-items: stretch;
+        min-height: 0;
+      }
+      .stack { display: flex; flex-direction: column; justify-content: center; gap: 14px; }
+      .arrow { display: grid; place-items: center; color: #555; font-size: 30px; font-weight: 300; }
+      .card {
+        border-radius: 24px;
+        background: #121212;
+        padding: 20px;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,.035);
+      }
+      .card.primary { background: #f4f4f4; color: #080808; }
+      .card .tag { font-size: 10px; letter-spacing: .14em; font-weight: 900; color: #777; }
+      .card.primary .tag { color: #676767; }
+      .card h2 { margin: 10px 0 5px; font-size: 18px; letter-spacing: -.025em; }
+      .card p { margin: 0; color: #8e8e8e; font-size: 12px; line-height: 1.5; }
+      .card.primary p { color: #555; }
+      .browser { min-height: 150px; display: flex; flex-direction: column; justify-content: space-between; }
+      .browser-ui { margin-top: 18px; display: flex; align-items: center; gap: 8px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #999; }
+      .address { flex: 1; padding: 8px 10px; border-radius: 10px; background: #e0e0e0; font: 700 10px ui-monospace, monospace; }
+      .service { display: flex; gap: 15px; align-items: center; }
+      .service img { width: 48px; height: 48px; flex: 0 0 auto; }
+      .service.small img { width: 40px; height: 40px; }
+      .aws-zone {
+        border-radius: 30px;
+        background: #0d0d0d;
+        padding: 22px;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,.055);
+        display: grid;
+        grid-template-rows: auto 1fr;
+        min-width: 0;
+      }
+      .zone-title { display: flex; justify-content: space-between; align-items: center; padding: 0 4px 16px; }
+      .zone-title strong { font-size: 13px; letter-spacing: .12em; }
+      .zone-title span { color: #777; font-size: 11px; font-weight: 700; }
+      .zone-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 14px; min-height: 0; }
+      .runtime { background: #171717; display: grid; grid-template-rows: auto 1fr auto; }
+      .runtime .pods { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 16px 0; }
+      .pod { border-radius: 16px; background: #242424; padding: 13px; font-size: 11px; font-weight: 800; color: #d8d8d8; }
+      .dependencies { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .dependencies .card { min-height: 125px; }
+      .wide { grid-column: 1 / -1; }
+      .flow-note { margin-top: 18px; display: flex; gap: 8px; align-items: center; color: #777; font-size: 11px; font-weight: 700; }
+      .flow-note span { color: #d6d6d6; }
+      footer { display: flex; justify-content: space-between; margin-top: 22px; color: #686868; font-size: 11px; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="eyebrow">TOSS PORTFOLIO LENS · AWS RUNTIME</div>
+        <h1>조회 전용 포트폴리오를<br />AWS에서 안전하게 시각화합니다.</h1>
+        <p class="subtitle">서울 리전의 애플리케이션 계층과 스톡홀름 리전의 Bedrock을 분리하고,<br />보고서·데이터·이미지는 목적에 맞는 관리형 서비스에 저장합니다.</p>
+      </header>
+
+      <section class="stage" aria-label="AWS 런타임 아키텍처">
+        <div class="stack">
+          <article class="card primary browser">
+            <div>
+              <div class="tag">USER</div>
+              <h2>웹 브라우저</h2>
+              <p>대시보드 · 분석<br />백테스트 · AI 보고서</p>
+            </div>
+            <div class="browser-ui"><i class="dot"></i><i class="dot"></i><i class="dot"></i><div class="address">HTTP DEMO · TLS 권장</div></div>
+          </article>
+        </div>
+
+        <div class="arrow">→</div>
+
+        <div class="stack">
+          <article class="card service">
+            <img src="../assets/aws-icons/Arch_Elastic-Load-Balancing_64.svg" alt="Elastic Load Balancing" />
+            <div><div class="tag">PUBLIC ENTRY</div><h2>Load Balancer</h2><p>공인 엔드포인트와<br />상태 확인</p></div>
+          </article>
+          <article class="card service small">
+            <img src="../assets/aws-icons/Arch_AWS-Secrets-Manager_64.svg" alt="AWS Secrets Manager" />
+            <div><div class="tag">DEPLOY-TIME SECRET</div><h2>Secrets Manager</h2><p>RDS 비밀번호 → K8s Secret</p></div>
+          </article>
+        </div>
+
+        <div class="arrow">→</div>
+
+        <section class="aws-zone">
+          <div class="zone-title"><strong>AWS RUNTIME · SEOUL + STOCKHOLM</strong><span>VPC DATA PLANE · CROSS-REGION AI</span></div>
+          <div class="zone-grid">
+            <article class="card runtime">
+              <div class="service">
+                <img src="../assets/aws-icons/Arch_Amazon-Elastic-Kubernetes-Service_64.svg" alt="Amazon EKS" />
+                <div><div class="tag">APPLICATION</div><h2>Amazon EKS</h2><p>Deployment · Service · Pod</p></div>
+              </div>
+              <div class="pods">
+                <div class="pod">React UI<br /><small>정적 자산</small></div>
+                <div class="pod">Express API<br /><small>조회·분석</small></div>
+                <div class="pod">Backtest<br /><small>수정주가 계산</small></div>
+                <div class="pod">Reports<br /><small>정형 템플릿</small></div>
+              </div>
+              <div class="flow-note">컨테이너 이미지 <span>← Amazon ECR</span></div>
+            </article>
+
+            <div class="dependencies">
+              <article class="card service small">
+                <img src="../assets/aws-icons/Arch_Amazon-Elastic-Container-Registry_64.svg" alt="Amazon ECR" />
+                <div><div class="tag">IMAGE</div><h2>Amazon ECR</h2><p>검증된 Docker 이미지</p></div>
+              </article>
+              <article class="card service small">
+                <img src="../assets/aws-icons/Arch_Amazon-RDS_64.svg" alt="Amazon RDS" />
+                <div><div class="tag">DATABASE</div><h2>RDS MariaDB</h2><p>일봉 · 스냅샷 · 메타데이터</p></div>
+              </article>
+              <article class="card service small">
+                <img src="../assets/aws-icons/Arch_Amazon-Simple-Storage-Service_64.svg" alt="Amazon S3" />
+                <div><div class="tag">OBJECT STORE</div><h2>Amazon S3</h2><p>AI 보고서 JSON</p></div>
+              </article>
+              <article class="card service small">
+                <img src="../assets/aws-icons/Arch_Amazon-Bedrock_64.svg" alt="Amazon Bedrock" />
+                <div><div class="tag">EU-NORTH-1</div><h2>Bedrock</h2><p>Kimi K2.5 평가 서술</p></div>
+              </article>
+              <article class="card wide">
+                <div class="tag">READ-ONLY UPSTREAM</div>
+                <h2>https://tpl.uaysk.com</h2>
+                <p>로컬 서비스가 노출하는 토스증권 호환 조회 전용 API · 주문 엔드포인트 미사용</p>
+              </article>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <footer><span>GRADIENT-FREE · DARK PRESENTATION SYSTEM</span><span>Official AWS Architecture Icons</span></footer>
+    </main>
+  </body>
+</html>

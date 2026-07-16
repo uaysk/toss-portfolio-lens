@@ -1,7 +1,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY tsconfig.json tsconfig.server.json vite.config.ts tailwind.config.ts postcss.config.js index.html ./
 COPY src ./src
 COPY server ./server
@@ -13,7 +13,7 @@ RUN npm prune --omit=dev
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN addgroup -S portfolio && adduser -S portfolio -G portfolio
+RUN addgroup -g 10001 -S portfolio && adduser -u 10001 -S portfolio -G portfolio
 RUN mkdir -p /app/data && chown portfolio:portfolio /app/data
 COPY --from=build --chown=portfolio:portfolio /app/package.json ./package.json
 COPY --from=build --chown=portfolio:portfolio /app/node_modules ./node_modules

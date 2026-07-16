@@ -1,11 +1,100 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AppConfig } from "./env.js";
 import {
   normalizeCandlePage,
   normalizeExchangeRatePayload,
   normalizeHoldingsPayload,
   normalizeInstrumentsPayload,
   normalizeOrderPage,
+  TossClient,
 } from "./toss.js";
+
+function staticBearerConfig(): AppConfig {
+  return {
+    tossApiAuthMode: "static_bearer",
+    tossApiBearerToken: "local-read-only-token",
+    dashboardPassword: "dashboard-password",
+    sessionSecret: "session-secret-with-at-least-32-characters",
+    host: "127.0.0.1",
+    port: 3200,
+    tossApiBaseUrl: "https://tpl.uaysk.com",
+    databasePath: ":memory:",
+    snapshotRefreshHours: 6,
+    nodeEnv: "test",
+    publicAppUrl: "http://localhost:3200",
+    reportStorage: { kind: "local", directory: "/tmp/reports" },
+  };
+}
+
+function oauthConfig(): AppConfig {
+  return {
+    ...staticBearerConfig(),
+    tossApiAuthMode: "oauth_client_credentials",
+    clientId: "client-id",
+    clientSecret: "client-secret",
+    tossApiBearerToken: undefined,
+    tossApiBaseUrl: "https://openapi.tossinvest.com",
+  };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("TossClient 인증", () => {
+  it("기본 OAuth 모드는 Client Credentials 토큰을 발급받아 사용한다", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "oauth-access-token", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: [{ id: "account-1", name: "대표 계좌", type: "STOCK" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new TossClient(oauthConfig()).getAccounts(true);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "https://openapi.tossinvest.com/oauth2/token", expect.objectContaining({
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    }));
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("client_id=client-id");
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "https://openapi.tossinvest.com/api/v1/accounts", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer oauth-access-token" }),
+    }));
+  });
+
+  it("정적 Bearer 모드는 토큰 교환 없이 호환 API를 직접 호출한다", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      result: [{ id: "account-1", name: "대표 계좌", type: "STOCK" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await new TossClient(staticBearerConfig()).getAccounts(true);
+
+    expect(accounts).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("https://tpl.uaysk.com/api/v1/accounts", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer local-read-only-token" }),
+    }));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/oauth2/token"))).toBe(false);
+  });
+
+  it("정적 Bearer 인증 실패는 같은 토큰으로 재시도하지 않는다", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: "unauthorized", message: "invalid token" },
+    }), { status: 401, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new TossClient(staticBearerConfig()).getAccounts(true)).rejects.toMatchObject({
+      status: 401,
+      code: "unauthorized",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("normalizeHoldingsPayload", () => {
   it("토스증권 v1.2.2의 통화별 요약과 중첩 종목 값을 정규화한다", () => {
