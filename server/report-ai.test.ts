@@ -41,6 +41,9 @@ describe("OpenAI report evaluation", () => {
     expect(body.model).toBe("gpt-test");
     expect(body.text.format).toMatchObject({ type: "json_schema", name: "portfolio_evaluation", strict: true });
     expect(body.text.format.schema.additionalProperties).toBe(false);
+    expect(body.instructions).toContain("롤링 성과");
+    expect(body.instructions).toContain("성과·위험 기여도");
+    expect(body.instructions).toContain("데이터 품질 범주를 모두 검토");
   });
 
   it("모델 설정이 없으면 엔드포인트에서 호환 가능한 GPT-5.6 모델을 찾는다", async () => {

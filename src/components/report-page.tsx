@@ -25,6 +25,7 @@ import {
   YAxis,
 } from "recharts";
 import { Logo } from "@/components/logo";
+import { AnalysisReportAnalytics, BacktestReportAnalytics } from "@/components/report-analytics";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -224,15 +225,19 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
       <Card className="bg-secondary p-5 sm:p-7">
         <SectionHeading eyebrow="KEY METRICS" title="성과와 위험 지표" />
         <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-4">
+          <ReportMetric label="평가금 변화율" value={percent(metrics.valuationChangePercent)} detail="기간 시작·종료 평가금 기준" />
+          <ReportMetric label="단순 추정 수익률" value={percent(metrics.estimatedReturnPercent)} />
           <ReportMetric label="보유주식 TWR" value={percent(metrics.timeWeightedReturnPercent)} detail="입출금 영향 제거 추정" />
           <ReportMetric label="보유주식 XIRR" value={percent(metrics.moneyWeightedReturnPercent)} detail="체결 현금흐름 기반 추정" />
           <ReportMetric label="연환산 수익률" value={percent(metrics.annualizedReturnPercent)} />
           <ReportMetric label="연환산 변동성" value={percent(metrics.annualizedVolatilityPercent)} />
           <ReportMetric label="최대 낙폭 MDD" value={percent(metrics.maxDrawdownPercent)} detail={`최장 ${metrics.maxDrawdownDays ?? 0}일`} />
           <ReportMetric label="현재 낙폭" value={percent(metrics.currentDrawdownPercent)} />
-          <ReportMetric label="샤프지수" value={ratio(metrics.sharpeRatio)} detail="무위험수익률 0%" />
+          <ReportMetric label="샤프지수" value={ratio(metrics.sharpeRatio)} detail={`연 무위험수익률 ${metrics.riskFreeRatePercent.toFixed(2)}%`} />
           <ReportMetric label="소르티노지수" value={ratio(metrics.sortinoRatio)} />
           <ReportMetric label="CALMAR" value={ratio(metrics.calmarRatio)} />
+          <ReportMetric label="최고 · 최저 일간수익률" value={`${percent(metrics.bestDailyReturnPercent)} · ${percent(metrics.worstDailyReturnPercent)}`} />
+          <ReportMetric label="상승일 비율" value={percent(metrics.positiveDaysPercent)} />
           <ReportMetric label="상위 3종목 비중" value={formatPercent(metrics.top3WeightPercent)} />
           <ReportMetric label="유효 종목 수" value={`${metrics.effectivePositions.toFixed(1)}개`} detail={`HHI ${metrics.hhi.toFixed(3)}`} />
           <ReportMetric label="회전율" value={formatPercent(metrics.turnoverPercent)} detail={`체결 ${metrics.tradeCount.toLocaleString("ko-KR")}건`} />
@@ -264,6 +269,7 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
                 <div className="min-w-0">
                   <p className="truncate text-xs font-black">{item.name}</p>
                   <p className="mt-1 text-[10px] text-muted-foreground">{item.market} · {item.symbol}</p>
+                  <p className="mt-1 text-[10px] text-muted-foreground">시간연결 {percent(item.timeLinkedContributionPercent)} · 현지가격 {percent(item.localPriceContributionPercent)} · 환율 {percent(item.fxContributionPercent)}</p>
                 </div>
                 <div className="h-2 overflow-hidden rounded-full bg-secondary">
                   <div
@@ -288,9 +294,11 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
           <ReportMetric label="기간 추정 손익" value={formatSignedMoney(metrics.estimatedProfitLoss, "KRW")} />
           <ReportMetric label="순투자 추정" value={formatMoney(metrics.netInvestedAmount, "KRW")} />
           <ReportMetric label="매수 · 매도" value={`${formatMoney(metrics.totalBuyAmount, "KRW", true)} · ${formatMoney(metrics.totalSellAmount, "KRW", true)}`} />
-          <ReportMetric label="수수료 · 세금" value={formatMoney(metrics.commission + metrics.tax, "KRW")} />
+          <ReportMetric label="수수료 · 세금" value={formatMoney(metrics.commission + metrics.tax, "KRW")} detail={`${formatMoney(metrics.commission, "KRW")} · ${formatMoney(metrics.tax, "KRW")}`} />
         </div>
       </Card>
+
+      <AnalysisReportAnalytics analysis={analysis} />
     </>
   );
 }
@@ -343,7 +351,37 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
           <ReportMetric label="최대 낙폭 MDD" value={percent(metrics.maxDrawdownPercent)} detail={`최장 ${metrics.maxDrawdownDays}일`} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.maxDrawdownPercent), detail: `최장 ${result.benchmarkMetrics.maxDrawdownDays}일` } : undefined} />
           <ReportMetric label="샤프지수" value={ratio(metrics.sharpeRatio)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: ratio(result.benchmarkMetrics.sharpeRatio) } : undefined} />
           <ReportMetric label="소르티노지수" value={ratio(metrics.sortinoRatio)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: ratio(result.benchmarkMetrics.sortinoRatio) } : undefined} />
+          <ReportMetric label="CALMAR" value={ratio(metrics.calmarRatio)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: ratio(result.benchmarkMetrics.calmarRatio) } : undefined} />
+          <ReportMetric label="최고 일간수익률" value={percent(metrics.bestDailyReturnPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.bestDailyReturnPercent) } : undefined} />
+          <ReportMetric label="최저 일간수익률" value={percent(metrics.worstDailyReturnPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.worstDailyReturnPercent) } : undefined} />
+          <ReportMetric label="상승일 비율" value={percent(metrics.positiveDaysPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.positiveDaysPercent) } : undefined} />
+          <ReportMetric label="최고 연간수익률" value={percent(metrics.bestYearPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.bestYearPercent) } : undefined} />
+          <ReportMetric label="최저 연간수익률" value={percent(metrics.worstYearPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.worstYearPercent) } : undefined} />
           <ReportMetric label="상승 월 비율" value={percent(metrics.positiveMonthsPercent)} benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: percent(result.benchmarkMetrics.positiveMonthsPercent) } : undefined} />
+          <ReportMetric label="총 납입금" value={formatMoney(metrics.totalContributions, "KRW")} />
+          <ReportMetric label="총 인출금" value={formatMoney(metrics.totalWithdrawals, "KRW")} />
+        </div>
+      </Card>
+
+      <Card className="bg-secondary p-5 sm:p-7">
+        <SectionHeading eyebrow="SIMULATION ASSUMPTIONS" title="백테스트 조건과 편입 종목" detail="보고서 결과를 재현하는 데 사용한 기간·현금흐름·리밸런싱·비용 가정입니다." />
+        <div className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <ReportMetric label="요청 · 유효 시작일" value={`${result.requestedStartDate} · ${result.effectiveStartDate}`} />
+          <ReportMetric label="초기 투자금" value={formatMoney(result.config.initialAmount, "KRW")} />
+          <ReportMetric label="월 현금흐름" value={formatSignedMoney(result.config.monthlyCashFlow, "KRW")} />
+          <ReportMetric label="리밸런싱" value={result.config.rebalanceFrequency} />
+          <ReportMetric label="무위험수익률" value={formatPercent(result.config.riskFreeRatePercent ?? 0)} />
+          <ReportMetric label="거래비용" value={`${(result.config.transactionCostBps ?? 0).toFixed(2)}bp`} />
+          <ReportMetric label="통화 방식" value={result.currencyMethod} />
+          <ReportMetric label="벤치마크" value={result.benchmark?.name ?? "선택 안 함"} />
+        </div>
+        <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {result.assets.map((asset) => (
+            <div key={`${asset.currency}:${asset.symbol}`} className="rounded-[18px] bg-card p-4">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.market} · {asset.symbol} · {asset.currency}</p></div><span className="rounded-full bg-secondary px-2.5 py-1 text-[10px] font-black">{formatPercent(asset.weight)}</span></div>
+              <p className="mt-2 text-[10px] text-muted-foreground">상장 {asset.listDate} · {asset.securityType} · {asset.status}</p>
+            </div>
+          ))}
         </div>
       </Card>
 
@@ -371,6 +409,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2"><p className="truncate text-xs font-black">{item.name}</p><span className="rounded-full bg-secondary px-2 py-1 text-[9px] font-black text-muted-foreground">{item.weight.toFixed(1)}%</span></div>
                   <p className="mt-1 text-[10px] text-muted-foreground">{item.market} · {item.symbol} · 종목 수익 {formatPercent(item.assetReturnPercent, true)}</p>
+                  <p className="mt-1 text-[10px] text-muted-foreground">시간연결 {percent(item.timeLinkedContributionPercent ?? item.contributionPercent)} · 현지가격 {percent(item.localPriceContributionPercent ?? item.timeLinkedContributionPercent ?? item.contributionPercent)} · 환율 {percent(item.fxContributionPercent ?? 0)} · 종료 {formatMoney(item.endingValue, "KRW")}</p>
                 </div>
                 <div className="sm:text-right">
                   <p className="text-xs font-black">{formatSignedMoney(item.profitLoss, "KRW")}</p>
@@ -418,6 +457,8 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
           </table>
         </div>
       </Card>
+
+      <BacktestReportAnalytics result={result} />
     </>
   );
 }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PortfolioAnalysis } from "./analysis.js";
 import type { ReportNarrative } from "./report-ai.js";
 import type { ReportStorage } from "./report-storage.js";
-import { analysisEvaluationInput, PortfolioReportService } from "./reports.js";
+import { analysisEvaluationInput, backtestEvaluationInput, PortfolioReportService } from "./reports.js";
 
 const narrative: ReportNarrative = {
   score: 70,
@@ -74,6 +74,56 @@ describe("portfolio reports", () => {
     const input = JSON.stringify(analysisEvaluationInput(analysis));
     expect(input).not.toContain("private-account-id");
     expect(input).toContain("입출금");
+  });
+
+  it("포트폴리오 분석의 모든 고급 지표 범주와 상세 성과귀속을 LLM 입력에 포함한다", () => {
+    const { accountId: _accountId, ...base } = analysisFixture();
+    const analysis = {
+      ...base,
+      rolling: [{
+        date: "2026-07-16", return20d: 20.123, return60d: 60.123, return120d: 120.123,
+        return252d: 252.123, volatility60d: 15.123, sharpe60d: 1.123,
+        benchmarkExcess60d: { KOSPI: 2.123 }, benchmarkBeta60d: { KOSPI: 0.923 },
+        benchmarkCorrelation60d: { KOSPI: 0.823 },
+      }],
+      correlations: { assets: [{ key: "KRX:TEST", symbol: "TEST", name: "상관표식" }], values: [[1]] },
+      contributions: [{
+        key: "KRX:TEST", symbol: "TEST", name: "기여표식", market: "KRX", currency: "KRW" as const,
+        estimatedProfitLoss: 100, contributionPercent: 1.1, timeLinkedContributionPercent: 2.222,
+        localPriceContributionPercent: 3.333, fxContributionPercent: 4.444,
+      }],
+      attributionByKey: { "KRX:TEST": { timeLinkedContributionPercent: 2.222, localPriceContributionPercent: 3.333, fxContributionPercent: 4.444 } },
+      riskContributions: [{ key: "KRX:TEST", symbol: "TEST", name: "위험표식", weightPercent: 100, annualizedVolatilityPercent: 15, riskContributionPercent: 100, correlationToPortfolio: 1 }],
+    };
+    const input = analysisEvaluationInput(analysis);
+    expect(input).toMatchObject({
+      rollingAnalytics: { latest: { return252d: 252.123 }, history: [{ benchmarkCorrelation60d: { KOSPI: 0.823 } }] },
+      correlations: { assets: [{ name: "상관표식" }] },
+      performanceContributions: [{ timeLinkedContributionPercent: 2.222, localPriceContributionPercent: 3.333, fxContributionPercent: 4.444 }],
+      attributionByKey: { "KRX:TEST": { fxContributionPercent: 4.444 } },
+      riskContributions: [{ name: "위험표식" }],
+    });
+  });
+
+  it("백테스트의 설정·상관관계·고급 지표 전체를 LLM 입력에 포함한다", () => {
+    const backtest = {
+      generatedAt: "2026-07-16T00:00:00.000Z", effectiveStartDate: "2026-01-01", endDate: "2026-07-16", baseCurrency: "KRW",
+      currencyMethod: "LOCAL_RETURN", config: { initialAmount: 1_000_000, transactionCostBps: 12.34, requestedStartDate: "2025-01-01" },
+      assets: [{ symbol: "TEST", name: "자산표식", currentValueKrw: 123_456 }], benchmark: { key: "KOSPI", name: "KOSPI", symbol: "KOSPI" },
+      metrics: { totalReturnPercent: 12.345 }, benchmarkMetrics: { totalReturnPercent: 6.789 }, annualReturns: [{ year: 2026, returnPercent: 12.345 }],
+      contributions: [{ symbol: "TEST", timeLinkedContributionPercent: 9.876, fxContributionPercent: 1.234 }],
+      correlations: { assets: [{ symbol: "TEST", name: "상관표식" }], values: [[1]] },
+      advanced: { rolling: [{ date: "2026-07-16", return252d: 25.252 }], dataQuality: { confidence: "high" } },
+      points: [{ date: "2026-01-01", growth: 100, benchmarkGrowth: 100, drawdownPercent: 0 }], warnings: ["경고표식"],
+    } as unknown as Parameters<typeof backtestEvaluationInput>[0];
+    const input = backtestEvaluationInput(backtest);
+    expect(input).toMatchObject({
+      assumptions: { transactionCostBps: 12.34, requestedStartDate: "2025-01-01", currencyMethod: "LOCAL_RETURN" },
+      assets: [{ name: "자산표식", currentValueKrw: 123_456 }],
+      correlations: { assets: [{ name: "상관표식" }] },
+      performanceContributions: [{ timeLinkedContributionPercent: 9.876, fxContributionPercent: 1.234 }],
+      advancedAnalytics: { rolling: [{ return252d: 25.252 }], dataQuality: { confidence: "high" } },
+    });
   });
 
   it("생성된 공개 보고서에서 계좌 식별자를 제거한다", async () => {
