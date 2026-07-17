@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "toss-portfolio-lens-compute-worker"
+version = "0.1.0"
+description = "Durable PostgreSQL compute worker for Toss Portfolio Lens"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=2.2,<3",
+  "psycopg[binary,pool]>=3.2,<4",
+  "pydantic>=2.11,<3"
+]
+
+[project.optional-dependencies]
+dev = [
+  "hypothesis>=6.135,<7",
+  "pytest>=8.4,<9"
+]
+
+[project.scripts]
+portfolio-compute-worker = "portfolio_worker.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portfolio_worker"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120

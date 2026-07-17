@@ -5,7 +5,8 @@ import type { MarketDataService } from "./market-data-service.js";
 import type { RunService } from "./run-service.js";
 import type { ReportService, GeneratedReportMetadata } from "./report-service.js";
 import type { ArtifactService } from "./artifact-service.js";
-import { envelope, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "./service-envelope.js";
+import { envelope, ServiceError } from "./service-envelope.js";
+import type { RustComputeClient } from "../worker/rust-client.js";
 
 export type BacktestReportOption = {
   enabled?: boolean;
@@ -39,6 +40,18 @@ function artifacts(result: BacktestRunResult): Array<{ type: ArtifactType; conte
       rowCount: result.contributions.length,
     },
     { type: "trades", content: result.trades, rowCount: result.trades.length },
+    {
+      type: "cash-ledger",
+      content: result.points.map((point) => ({
+        date: point.date,
+        balance: point.balance,
+        investedBalance: point.investedBalance,
+        cashBalance: point.cashBalance,
+        unitPrice: point.unitPrice,
+      })),
+      rowCount: result.points.length,
+    },
+    { type: "cash-flows", content: result.cashFlows ?? [], rowCount: result.cashFlows?.length ?? 0 },
     { type: "rolling", content: result.advanced.rolling, rowCount: result.advanced.rolling.length },
     { type: "correlation", content: result.correlations, rowCount: result.correlations.assets.length },
     { type: "risk-contribution", content: result.advanced.riskContributions, rowCount: result.advanced.riskContributions.length },
@@ -53,15 +66,17 @@ export class BacktestService {
     private readonly runs: RunService,
     private readonly artifacts: ArtifactService,
     private readonly reports: ReportService,
+    private readonly rustCompute?: RustComputeClient,
   ) {}
 
   async validate(request: BacktestRunRequest): Promise<ReturnType<typeof envelope>> {
     const instruments = await this.engine.resolveInstruments(request.assets.map((asset) => asset.symbol));
     const availability = await this.marketData.getDataAvailability(instruments.map((instrument) => instrument.symbol), true);
     const weightTotal = request.assets.reduce((sum, asset) => sum + asset.weight, 0);
+    const cashTarget = request.execution?.cashTargetPercent ?? 0;
     const errors: Array<{ field: string; message: string }> = [];
     const warnings: string[] = [];
-    if (Math.abs(weightTotal - 100) > 0.01) errors.push({ field: "assets", message: "종목 비중 합계는 100%여야 합니다." });
+    if (Math.abs(weightTotal + cashTarget - 100) > 0.01) errors.push({ field: "assets", message: "종목과 현금 목표 비중 합계는 100%여야 합니다." });
     if (request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0)) errors.push({ field: "assets", message: "각 종목 비중은 0보다 커야 합니다." });
     if (new Set(request.assets.map((asset) => asset.symbol.toUpperCase())).size !== request.assets.length) errors.push({ field: "assets", message: "중복 종목을 제거해 주세요." });
     if (request.startDate > request.endDate) errors.push({ field: "startDate", message: "시작일은 종료일보다 빠르거나 같아야 합니다." });
@@ -115,32 +130,7 @@ export class BacktestService {
       enabled: report?.enabled ?? false,
       failure_mode: report?.failure_mode ?? "warn" as const,
     };
-    const initialRevision = await this.marketData.repository.dataRevision();
-    const reusable = await this.runs.findReusable({
-      ownerSubject: input.ownerSubject,
-      kind: "backtest",
-      config: backtestRequest,
-      dataRevision: initialRevision,
-    });
-    let executed: { run: PortfolioRunRecord; reused: boolean };
-    if (reusable) {
-      executed = { run: reusable, reused: true };
-    } else {
-      const calculated = await this.engine.run(backtestRequest);
-      const calculatedRevision = await this.marketData.repository.dataRevision();
-      executed = await this.runs.execute({
-        ownerSubject: input.ownerSubject,
-        kind: "backtest",
-        config: backtestRequest,
-        dataRevision: calculatedRevision,
-        task: async () => ({
-          summary: calculated.metrics,
-          result: calculated,
-          warnings: calculated.warnings,
-          artifacts: artifacts(calculated),
-        }),
-      });
-    }
+    const executed = await this.executeBacktest(input.ownerSubject, backtestRequest);
     const dataRevision = executed.run.dataRevision;
     const result = executed.run.result as BacktestRunResult | undefined;
     if (!result) throw new ServiceError({ code: "RUN_RESULT_NOT_FOUND", message: "완료된 백테스트 결과를 찾을 수 없습니다.", retryable: true });
@@ -159,9 +149,9 @@ export class BacktestService {
         const generated = await this.reports.generateBacktest({
           runId: executed.run.id,
           ownerSubject: input.ownerSubject,
-          backtestRequestHash: requestHash(backtestRequest),
+          backtestRequestHash: executed.run.requestHash,
           dataRevision,
-          engineVersion: PORTFOLIO_ENGINE_VERSION,
+          engineVersion: executed.run.engineVersion,
           reportConfig: reportOption,
           result,
         });
@@ -214,6 +204,13 @@ export class BacktestService {
     });
   }
 
+  async runRaw(input: { ownerSubject: string; request: BacktestRunRequest }): Promise<BacktestRunResult> {
+    const executed = await this.executeBacktest(input.ownerSubject, input.request);
+    const result = executed.run.result as BacktestRunResult | undefined;
+    if (!result) throw new ServiceError({ code: "RUN_RESULT_NOT_FOUND", message: "완료된 백테스트 결과를 찾을 수 없습니다.", retryable: true });
+    return result;
+  }
+
   async generateReport(input: {
     ownerSubject: string;
     run: PortfolioRunRecord;
@@ -230,6 +227,78 @@ export class BacktestService {
       engineVersion: input.run.engineVersion,
       reportConfig: input.reportConfig,
       result: input.run.result as BacktestRunResult,
+    });
+  }
+
+  private async executeBacktest(
+    ownerSubject: string,
+    backtestRequest: BacktestRunRequest,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    const initialRevision = await this.marketData.repository.dataRevision();
+    const reusable = await this.runs.findReusable({
+      ownerSubject,
+      kind: "backtest",
+      config: backtestRequest,
+      dataRevision: initialRevision,
+    });
+    if (reusable) return { run: reusable, reused: true };
+    if (this.runs.executionMode === "external") {
+      const prepared = await this.engine.prepare(backtestRequest);
+      const calculatedRevision = await this.marketData.repository.dataRevision();
+      return this.runs.executeExternal({
+        ownerSubject,
+        kind: "backtest",
+        config: backtestRequest,
+        dataRevision: calculatedRevision,
+        payload: {
+          simulation: prepared.simulation,
+          response_context: prepared.responseContext,
+        },
+      });
+    }
+    if (this.runs.executionMode === "rust_socket") {
+      if (!this.rustCompute) throw new Error("rust_socket 실행 모드에 Rust compute client가 없습니다.");
+      const prepared = await this.engine.prepare(backtestRequest);
+      const calculatedRevision = await this.marketData.repository.dataRevision();
+      return this.runs.execute({
+        ownerSubject,
+        kind: "backtest",
+        config: backtestRequest,
+        dataRevision: calculatedRevision,
+        task: async () => {
+          const output = await this.rustCompute!.compute<BacktestRunResult>("backtest", {
+            simulation: prepared.simulation,
+            response_context: prepared.responseContext,
+          }, { includeArtifacts: false });
+          return {
+            summary: output.summary,
+            result: output.result,
+            warnings: output.warnings,
+            artifacts: [
+              ...artifacts(output.result),
+              ...output.artifacts.map((artifact) => ({
+                type: artifact.type as ArtifactType,
+                content: artifact.content,
+                rowCount: artifact.row_count,
+              })),
+            ],
+          };
+        },
+      });
+    }
+    const calculated = await this.engine.run(backtestRequest);
+    const calculatedRevision = await this.marketData.repository.dataRevision();
+    return this.runs.execute({
+      ownerSubject,
+      kind: "backtest",
+      config: backtestRequest,
+      dataRevision: calculatedRevision,
+      task: async () => ({
+        summary: calculated.metrics,
+        result: calculated,
+        warnings: calculated.warnings,
+        artifacts: artifacts(calculated),
+      }),
     });
   }
 

@@ -40,6 +40,40 @@ describe("database environment configuration", () => {
     expect(config.mysql).toBeUndefined();
     expect(config.databasePath).toBe("./data/portfolio-history.sqlite");
     expect(config.mcp).toMatchObject({ enabled: false, authMode: "oauth" });
+    expect(config.compute).toMatchObject({
+      executionMode: "rust_socket",
+      resultPollMs: 250,
+      resultDeadlineMs: 300_000,
+    });
+  });
+
+  it("external compute는 PostgreSQL에서만 허용하고 실행 제한값을 검증한다", () => {
+    process.env.EXECUTION_MODE = "external";
+    expect(() => loadConfig()).toThrow("EXECUTION_MODE=external은 DB_PROVIDER=postgresql");
+
+    Object.assign(process.env, {
+      DB_PROVIDER: "postgresql",
+      POSTGRES_URL: "postgresql://portfolio:password@postgres.internal:5432/portfolio_lens",
+      PYTHON_WORKER_RESULT_POLL_MS: "50",
+      PYTHON_WORKER_RESULT_DEADLINE_MS: "120000",
+      MCP_MAX_QUEUED_RUNS: "8",
+      MCP_RUN_DEADLINE_MS: "90000",
+    });
+    expect(loadConfig()).toMatchObject({
+      compute: {
+        executionMode: "external",
+        resultPollMs: 50,
+        resultDeadlineMs: 120_000,
+      },
+      mcp: { maxQueuedRuns: 8, runDeadlineMs: 90_000 },
+    });
+
+    process.env.RUST_WORKER_RESULT_POLL_MS = "75";
+    process.env.RUST_WORKER_RESULT_DEADLINE_MS = "180000";
+    expect(loadConfig().compute).toMatchObject({ resultPollMs: 75, resultDeadlineMs: 180_000 });
+
+    process.env.EXECUTION_MODE = "process";
+    expect(() => loadConfig()).toThrow("EXECUTION_MODE는 inline, rust_socket 또는 external");
   });
 
   it("정적 Bearer 모드에서는 OAuth 자격증명 없이 호환 API를 설정한다", () => {

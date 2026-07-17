@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "compute-benchmark-v1",
+  "generatedAt": "2026-07-17T13:07:56.127Z",
+  "engine": "node-inline",
+  "environment": {
+    "platform": "linux-x64",
+    "node": "v22.14.0",
+    "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "logicalCores": 12,
+    "totalMemoryBytes": 12519014400
+  },
+  "fixture": {
+    "dayCount": 1260,
+    "assetCount": 8,
+    "candidateBudget": 1000,
+    "backtestIterations": 12,
+    "optimizationIterations": 4
+  },
+  "phases": {
+    "inputPreparationMs": 15.753,
+    "backtest": {
+      "p50Ms": 43.05,
+      "p95Ms": 70.462,
+      "maxMs": 70.462
+    },
+    "optimization": {
+      "p50Ms": 6139.8,
+      "p95Ms": 6305.514,
+      "maxMs": 6305.514,
+      "candidatesPerSecond": 161.368,
+      "producedCandidates": 1000
+    },
+    "serializationMs": 12.543,
+    "serializedBytes": 1229388,
+    "artifactStorageMs": 17.367,
+    "artifactBytes": 606930
+  },
+  "responsiveness": {
+    "computeMs": 6161.354,
+    "health": {
+      "requests": 253,
+      "completed": 247,
+      "timeouts": 6,
+      "p50Ms": 2969.169,
+      "p95Ms": 5704.145,
+      "p99Ms": 5949.669,
+      "maxMs": 5998.337
+    },
+    "eventLoop": {
+      "p95Ms": 6174.015,
+      "p99Ms": 6174.015,
+      "maxMs": 6174.015
+    }
+  },
+  "process": {
+    "cpuUserMs": 32521.941,
+    "cpuSystemMs": 356.914,
+    "rssBytes": 179728384,
+    "maxRssBytes": 182046720
+  }
+}

@@ -62,12 +62,12 @@ Authorization code는 일회성 hash로, refresh token은 회전형 opaque token
 | --- | --- |
 | `market:read` | `search_instruments`, `get_data_availability`, `get_price_series`, `analyze_instrument`, `analyze_asset_relationship`, `get_correlation_matrix`, `find_diversifying_assets`, `analyze_market_regimes`, `find_redundant_assets`, `explain_data_quality` |
 | `portfolio:read` | `get_current_portfolio` |
-| `backtest:run` | 설정 검증, 백테스트·비교·artifact, 기여도, 최적화·Walk-forward·stress·Pareto·리밸런싱·민감도, run 상태·취소·결과 |
+| `backtest:run` | 설정 검증, 백테스트·비교·artifact, 기여도, 최적화·Walk-forward·stress·Pareto·리밸런싱·민감도·Monte Carlo, run 상태·취소·결과 |
 | `report:generate` | `generate_backtest_report`, `get_report` |
 
 `run_portfolio_backtest`는 기본적으로 `backtest:run`만 요구합니다. 입력에서 `report.enabled=true`이면 계산 전에 `report:generate`도 확인하고, 부족하면 `WWW-Authenticate`와 MCP `_meta["mcp/www_authenticate"]` challenge를 반환합니다.
 
-## 도구 30개
+## 도구 31개
 
 ### 종목·시장 데이터
 
@@ -110,15 +110,16 @@ Authorization code는 일회성 hash로, refresh token은 회전형 opaque token
 22. `analyze_start_date_sensitivity`
 23. `analyze_rebalance_sensitivity`
 24. `analyze_cash_flow_sensitivity`
-25. `explain_data_quality`
+25. `simulate_portfolio_monte_carlo`
+26. `explain_data_quality`
 
 ### 장기 작업·보고서
 
-26. `get_run_status`
-27. `cancel_run`
-28. `get_run_result`
-29. `generate_backtest_report`
-30. `get_report`
+27. `get_run_status`
+28. `cancel_run`
+29. `get_run_result`
+30. `generate_backtest_report`
+31. `get_report`
 
 각 도구는 한국어 title/description, Zod input/output schema, 도구별 OAuth security scheme, `readOnlyHint`·`openWorldHint`·`destructiveHint`를 노출합니다.
 
@@ -153,7 +154,7 @@ Authorization code는 일회성 hash로, refresh token은 회전형 opaque token
 
 ## 장기 실행과 resource
 
-최적화, Walk-forward, stress와 민감도는 DB에 run 상태를 저장하는 in-process queue를 사용합니다. 동일 request hash와 data revision은 멱등적으로 재사용합니다. 서버 재시작 시 남아 있던 running 작업은 failed로 복구하며, 취소는 상태만 변경하고 이미 저장한 결과는 삭제하지 않습니다.
+백테스트·최적화·Walk-forward·stress·민감도·Monte Carlo의 CPU 집약 계산은 Rust worker가 담당합니다. 기본 `rust_socket` 모드는 persistent Unix domain socket pool로 저지연 실행하고 run 상태를 DB에 저장합니다. PostgreSQL 전용 `external` 모드는 immutable gzip artifact, `SKIP LOCKED` claim, lease·heartbeat·deadline·취소 fencing으로 서버 재시작과 다중 worker를 견딥니다. 동일 request hash와 data revision은 멱등적으로 재사용하며 이미 저장한 결과는 취소 시에도 삭제하지 않습니다.
 
 약 1,000행 또는 200KB를 넘는 시계열은 `structuredContent`에 직접 넣지 않고 다음 resource URI로 분리합니다.
 
@@ -169,11 +170,18 @@ Descriptor에는 format, row/byte count, checksum, 생성 시각, schema version
 - 투자 성과·상관·최적화는 공급자가 제공하는 수정주가를 사용합니다.
 - 기업행위 반영 범위는 공급자 정의를 따르며 별도 현금배당, 세금, 슬리피지는 포함하지 않습니다.
 - KRW 모드는 전체 기간 USD/KRW 경로를 반영하고 현지가격·환율 기여를 분리합니다.
+- 거래비용은 추정치만 표시하지 않고 매 체결 시 현금과 성과 경로에서 차감합니다.
+- 현금 목표, 정수/소수 수량, 잔여 현금, 현금 수익률, 임계치·정기·현금흐름 리밸런싱을 지원합니다.
+- 사용자 지정 입출금은 다음 공통 실제 관측일에 적용하고 unitized TWR와 XIRR을 함께 반환합니다.
 - 상관과 관계 분석은 휴장일을 0%로 만들지 않고 실제 공통 관측일의 수익률을 inner join합니다.
 - 평가금 경로에서 가격 또는 환율 carry-forward가 발생하면 횟수와 경고를 반환합니다.
 - 실제 계좌 도구는 opaque selector와 원화 환산 비중만 반환하며 계좌 번호와 금액을 노출하지 않습니다.
 - 현재 cache universe를 사용하는 후보 탐색은 전체 시장 검색으로 표현하지 않습니다.
 - 최적화 결과는 표본 내 역사적 결과이며 미래 성과 보장이 아닙니다.
+
+## MCP 호출 감사 로그
+
+MCP `tools/call`은 별도 DB 테이블 `mcp_tool_audit_log`에 기록합니다. 정상 호출뿐 아니라 unknown tool, 잘못된 입력, scope 부족과 handler/output 오류도 포함하며 SDK의 실제 JSON-RPC request ID를 내부 UUID와 함께 보존합니다. OAuth subject와 session ID는 HMAC hash로만 저장합니다. 도구 인자, 응답 본문, access/refresh token, 계좌 식별자와 평가금은 저장하지 않습니다. 저장은 일시 오류에 재시도하고 도구 실행 결과와 분리되며, `MCP_AUDIT_RETENTION_DAYS`(기본 90일) 이전 행은 시작 시와 주기적으로 정리합니다.
 
 ## 검증
 
@@ -226,6 +234,7 @@ Inspector에서 `initialize`, `tools/list`, `get_data_availability`, 작은 `get
 | `MCP_MAX_DATE_RANGE_YEARS` | 날짜 범위 상한 |
 | `MCP_INLINE_RESULT_MAX_ROWS` | inline 행 상한 |
 | `MCP_INLINE_RESULT_MAX_BYTES` | inline byte 상한 |
+| `MCP_AUDIT_RETENTION_DAYS` | MCP 도구 감사 로그 보존 기간; 기본 `90`일 |
 | `MCP_ALLOWED_ORIGINS` | 브라우저 MCP client가 있을 때만 정확한 origin 지정 |
 
 ## 롤백

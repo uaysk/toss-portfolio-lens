@@ -49,6 +49,8 @@ import { ArtifactRepository } from "./repositories/artifact-repository.js";
 import { OptimizationRepository } from "./repositories/optimization-repository.js";
 import { ReportRepository } from "./repositories/report-repository.js";
 import { RunRepository } from "./repositories/run-repository.js";
+import { RunJobRepository } from "./repositories/run-job-repository.js";
+import { McpAuditRepository } from "./repositories/mcp-audit-repository.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { ArtifactService } from "./services/artifact-service.js";
 import { BacktestService } from "./services/backtest-service.js";
@@ -61,8 +63,12 @@ import { RunService } from "./services/run-service.js";
 import { McpResourceRegistry } from "./mcp/resources.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
+import { EventLoopLagMonitor } from "./observability/event-loop-monitor.js";
+import { RustComputeClient } from "./worker/rust-client.js";
 
 const config = loadConfig();
+const eventLoopLag = new EventLoopLagMonitor();
+eventLoopLag.start();
 const toss = new TossClient(config);
 const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
@@ -70,6 +76,13 @@ const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const marketData = new MarketDataService(toss, historyStore);
 const portfolioBacktest = new PortfolioBacktestService(toss, historyStore, marketData);
 const reportStorage = createReportStorage(config.reportStorage);
+const rustCompute = config.compute.executionMode === "rust_socket"
+  ? new RustComputeClient({
+    socketPath: config.compute.rustSocketPath,
+    poolSize: config.compute.rustSocketPoolSize,
+    timeoutMs: config.compute.rustSocketTimeoutMs,
+  })
+  : undefined;
 const reportWriter = config.bedrock
   ? new BedrockReportWriter(config.bedrock)
   : config.openAi
@@ -83,40 +96,64 @@ const portfolioReports = new PortfolioReportService(
 let mcpHttpRuntime: McpHttpRuntime | undefined;
 let mcpOAuthRuntime: McpOAuthRuntime | undefined;
 let mcpCleanupTimer: NodeJS.Timeout | undefined;
+let mcpAuditCleanupTimer: NodeJS.Timeout | undefined;
+
+const database = historyStore.relationalDatabase;
+const runRepository = new RunRepository(database);
+const artifactRepository = new ArtifactRepository(database);
+const optimizationRepository = new OptimizationRepository(database);
+const reportRepository = new ReportRepository(database);
+const runJobRepository = database.dialect === "postgres" ? new RunJobRepository(database) : undefined;
+const mcpAuditRepository = new McpAuditRepository(database);
+await runRepository.initialize();
+await artifactRepository.initialize();
+await optimizationRepository.initialize();
+await reportRepository.initialize();
+await runJobRepository?.initialize();
+await mcpAuditRepository.initialize();
+const mcpAuditRetentionMs = config.mcp.auditRetentionDays * 86_400_000;
+await mcpAuditRepository.deleteBefore(Date.now() - mcpAuditRetentionMs);
+mcpAuditCleanupTimer = setInterval(
+  () => void mcpAuditRepository.deleteBefore(Date.now() - mcpAuditRetentionMs).catch((error) => {
+    console.warn("[mcp-audit] 보존기간 정리 실패:", error instanceof Error ? error.message : "unknown error");
+  }),
+  24 * 60 * 60_000,
+);
+mcpAuditCleanupTimer.unref();
+
+const artifactService = new ArtifactService(
+  artifactRepository,
+  config.mcp.inlineResultMaxRows,
+  config.mcp.inlineResultMaxBytes,
+);
+const runService = new RunService(
+  runRepository,
+  artifactService,
+  config.mcp.maxConcurrentRuns,
+  config.mcp.maxRunsPerSubject,
+  {
+    maxQueuedRuns: config.mcp.maxQueuedRuns,
+    runDeadlineMs: config.mcp.runDeadlineMs,
+    executionMode: config.compute.executionMode,
+    jobRepository: runJobRepository,
+    resultPollMs: config.compute.resultPollMs,
+    resultDeadlineMs: config.compute.resultDeadlineMs,
+    optimizationRepository,
+  },
+);
+const recoveredRuns = await runService.initialize();
+if (recoveredRuns > 0) console.warn(`[compute] ${recoveredRuns}개의 stale 실행을 복구했습니다.`);
+const reportService = new ReportService(
+  portfolioReports,
+  reportRepository,
+  config.openAi?.model ?? config.bedrock?.modelId,
+);
+const backtests = new BacktestService(portfolioBacktest, marketData, runService, artifactService, reportService, rustCompute);
 
 if (config.mcp.enabled) {
-  const database = historyStore.relationalDatabase;
-  const runRepository = new RunRepository(database);
-  const artifactRepository = new ArtifactRepository(database);
-  const optimizationRepository = new OptimizationRepository(database);
-  const reportRepository = new ReportRepository(database);
-  await runRepository.initialize();
-  await artifactRepository.initialize();
-  await optimizationRepository.initialize();
-  await reportRepository.initialize();
-
-  const artifactService = new ArtifactService(
-    artifactRepository,
-    config.mcp.inlineResultMaxRows,
-    config.mcp.inlineResultMaxBytes,
-  );
-  const runService = new RunService(
-    runRepository,
-    artifactService,
-    config.mcp.maxConcurrentRuns,
-    config.mcp.maxRunsPerSubject,
-  );
-  const staleRuns = await runService.initialize();
-  if (staleRuns > 0) console.warn(`[mcp] ${staleRuns}개의 stale 실행을 failed 상태로 복구했습니다.`);
   const instrumentService = new InstrumentService(marketData);
   const returnSeries = new ReturnSeriesService(marketData);
   const analytics = new AnalyticsService(returnSeries, marketData);
-  const reportService = new ReportService(
-    portfolioReports,
-    reportRepository,
-    config.openAi?.model ?? config.bedrock?.modelId,
-  );
-  const backtests = new BacktestService(portfolioBacktest, marketData, runService, artifactService, reportService);
   const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
   const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
   const resourceMetadataUrl = new URL("/.well-known/oauth-protected-resource", config.mcp.resourceUrl).toString();
@@ -153,6 +190,7 @@ if (config.mcp.enabled) {
     reports: reportService,
     optimizationRepository,
     resources,
+    rustCompute,
     maxCandidateBudget: config.mcp.maxCandidateBudget,
     maxAssets: config.mcp.maxAssets,
     maxDateRangeYears: config.mcp.maxDateRangeYears,
@@ -162,12 +200,16 @@ if (config.mcp.enabled) {
       dependencies,
       authMode: config.mcp.authMode,
       resourceMetadataUrl,
+      audit: mcpAuditRepository,
+      auditSubjectSalt: config.sessionSecret,
     }),
     authMode: config.mcp.authMode,
     verifier: mcpOAuthRuntime?.verifier,
     resourceMetadataUrl,
     allowedOrigins: config.mcp.allowedOrigins,
     maxRequestsPerMinute: config.mcp.maxRequestsPerMinute,
+    audit: mcpAuditRepository,
+    auditSubjectSalt: config.sessionSecret,
   });
 }
 const app = express();
@@ -251,6 +293,11 @@ app.get("/api/health", (_request, response) => {
     mcpAuth: !config.mcp.enabled
       ? "disabled"
       : config.mcp.authMode === "oauth" ? "oauth" : "local-none",
+    compute: {
+      executionMode: config.compute.executionMode,
+      rustSocket: config.compute.executionMode === "rust_socket" ? config.compute.rustSocketPath : undefined,
+      eventLoopLagMs: eventLoopLag.snapshot(),
+    },
   });
 });
 
@@ -713,7 +760,7 @@ app.post("/api/portfolio/backtest", requireSession, async (request, response) =>
   setNoStore(response);
   const payload = parseBacktestPayload(request.body);
   try {
-    response.json(await portfolioBacktest.run(payload));
+    response.json(await backtests.runRaw({ ownerSubject: "dashboard-http", request: payload }));
   } catch (error) {
     backtestError(response, error);
   }
@@ -727,6 +774,7 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
         return {
           symbol: typeof item.symbol === "string" ? item.symbol : "",
           weight: typeof item.weight === "number" ? item.weight : Number.NaN,
+          ...(typeof item.lotSize === "number" ? { lotSize: item.lotSize } : {}),
         };
       })
     : [];
@@ -750,6 +798,24 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
       ? body.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"]
       : "none",
     ...(typeof body.rebalanceThresholdPercent === "number" ? { rebalanceThresholdPercent: body.rebalanceThresholdPercent } : {}),
+    cashFlows: Array.isArray(body.cashFlows) ? body.cashFlows.map((value) => {
+      const flow = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      return {
+        date: typeof flow.date === "string" ? flow.date : "",
+        amount: typeof flow.amount === "number" ? flow.amount : Number.NaN,
+        ...(typeof flow.memo === "string" ? { memo: flow.memo } : {}),
+      };
+    }) : [],
+    execution: body.execution && typeof body.execution === "object" ? {
+      cashTargetPercent: typeof (body.execution as Record<string, unknown>).cashTargetPercent === "number"
+        ? Number((body.execution as Record<string, unknown>).cashTargetPercent) : 0,
+      quantityMode: (body.execution as Record<string, unknown>).quantityMode === "whole" ? "whole" : "fractional",
+      cashFlowRebalanceMode: ["target_weights", "drift_reduction", "full"].includes(String((body.execution as Record<string, unknown>).cashFlowRebalanceMode))
+        ? (body.execution as Record<string, unknown>).cashFlowRebalanceMode as "target_weights" | "drift_reduction" | "full" : "target_weights",
+      tradeDatePolicy: "next_common_observation",
+      cashAnnualYieldPercent: typeof (body.execution as Record<string, unknown>).cashAnnualYieldPercent === "number"
+        ? Number((body.execution as Record<string, unknown>).cashAnnualYieldPercent) : 0,
+    } : undefined,
     benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
     ...(typeof body.benchmarkSymbol === "string" ? { benchmarkSymbol: body.benchmarkSymbol } : {}),
   };
@@ -815,7 +881,7 @@ app.post("/api/reports/portfolio-analysis", requireSession, async (request, resp
 app.post("/api/reports/backtest", requireSession, async (request, response) => {
   setNoStore(response);
   try {
-    const result = await portfolioBacktest.run(parseBacktestPayload(request.body));
+    const result = await backtests.runRaw({ ownerSubject: "dashboard-report", request: parseBacktestPayload(request.body) });
     const report = await portfolioReports.createBacktest(result);
     response.status(201).json({
       id: report.id,
@@ -915,11 +981,14 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(initialCollectionTimer);
+  eventLoopLag.stop();
   clearInterval(collectionInterval);
   if (mcpCleanupTimer) clearInterval(mcpCleanupTimer);
+  if (mcpAuditCleanupTimer) clearInterval(mcpAuditCleanupTimer);
   server.close(async () => {
     await mcpHttpRuntime?.close();
     await mcpOAuthRuntime?.cleanup().catch(() => undefined);
+    rustCompute?.close();
     await historicalBackfill.waitForIdle();
     await historyStore.close();
     console.info("Portfolio Lens stopped by " + signal);

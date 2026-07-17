@@ -13,19 +13,78 @@ services:
       DATABASE_PATH: /app/data/portfolio-history.sqlite
       REPORTS_PATH: /app/data/reports
       SNAPSHOT_REFRESH_HOURS: "6"
+      EXECUTION_MODE: ${EXECUTION_MODE:-rust_socket}
+      RUST_COMPUTE_SOCKET: /app/run/compute.sock
       TZ: Asia/Seoul
+    extra_hosts:
+      - "${POSTGRES_HOST:-postgres.internal}:${POSTGRES_DOCKER_HOST_IP:-host-gateway}"
     ports:
       - "0.0.0.0:3200:3200"
     restart: unless-stopped
     init: true
     volumes:
       - portfolio_data:/app/data
+      - compute_socket:/app/run
+      - ${POSTGRES_CA_HOST_PATH:-/dev/null}:/app/certs/cnpg-ca.crt:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 15s
+    depends_on:
+      compute-ipc:
+        condition: service_healthy
+
+  compute-worker:
+    profiles: ["external-compute"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.rust
+    environment:
+      POSTGRES_URL: ${POSTGRES_URL:-}
+      POSTGRES_HOST: ${POSTGRES_HOST:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE:-}
+      POSTGRES_CONNECT_TIMEOUT_SECONDS: ${POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
+      POSTGRES_SSL: ${POSTGRES_SSL:-false}
+      POSTGRES_SSL_CA_PATH: ${POSTGRES_SSL_CA_PATH:-}
+      WORKER_ID: ${RUST_WORKER_ID:-compose-rust-worker}
+      WORKER_POLL_MS: ${RUST_WORKER_POLL_MS:-250}
+      WORKER_LEASE_MS: ${RUST_WORKER_LEASE_MS:-30000}
+      WORKER_HEARTBEAT_MS: ${RUST_WORKER_HEARTBEAT_MS:-5000}
+      WORKER_RECOVERY_MS: ${RUST_WORKER_RECOVERY_MS:-10000}
+      TZ: Asia/Seoul
+    extra_hosts:
+      - "${POSTGRES_HOST:-postgres.internal}:${POSTGRES_DOCKER_HOST_IP:-host-gateway}"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - ${POSTGRES_CA_HOST_PATH:-/dev/null}:/app/certs/cnpg-ca.crt:ro
+
+  compute-ipc:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.rust
+    command: ["serve", "--socket", "/app/run/compute.sock"]
+    environment:
+      TZ: Asia/Seoul
+    restart: unless-stopped
+    init: true
+    volumes:
+      - compute_socket:/app/run
+    healthcheck:
+      test: ["CMD", "test", "-S", "/app/run/compute.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
 
 volumes:
   portfolio_data:
+  compute_socket:

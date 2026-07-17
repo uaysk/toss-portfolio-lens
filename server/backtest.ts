@@ -6,6 +6,8 @@ import {
   type BacktestRebalanceFrequency,
   type BacktestCashFlowFrequency,
   type BacktestCashFlowTiming,
+  type BacktestSimulationInput,
+  type BacktestSimulationResult,
 } from "./backtest-engine.js";
 import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "./history.js";
 import type { InstrumentInfo, TossClient } from "./toss.js";
@@ -29,6 +31,7 @@ export type BacktestInstrument = {
 export type BacktestAssetInput = {
   symbol: string;
   weight: number;
+  lotSize?: number;
 };
 
 export type BacktestRunRequest = {
@@ -45,8 +48,37 @@ export type BacktestRunRequest = {
   currencyMode?: CurrencyMode;
   baseCurrency?: "KRW";
   rebalanceThresholdPercent?: number;
+  cashFlows?: Array<{ date: string; amount: number; memo?: string }>;
+  execution?: {
+    cashTargetPercent?: number;
+    quantityMode?: "fractional" | "whole";
+    cashFlowRebalanceMode?: "target_weights" | "drift_reduction" | "full";
+    tradeDatePolicy?: "next_common_observation";
+    cashAnnualYieldPercent?: number;
+  };
   benchmark: BacktestBenchmarkKey;
   benchmarkSymbol?: string;
+};
+
+export type BacktestWorkerResponseContext = {
+  effective_requested_start: string;
+  currency_method: "KRW_FX_CONVERTED" | "LOCAL_RETURN";
+  config: BacktestRunRequest & {
+    riskFreeRatePercent: number;
+    transactionCostBps: number;
+    currencyMode: CurrencyMode;
+    baseCurrency: "KRW";
+    requestedStartDate: string;
+    latestListDate: string;
+  };
+  assets: BacktestAssetDefinition[];
+  benchmark?: { key: BacktestBenchmarkKey; name: string; symbol: string };
+  warnings: string[];
+};
+
+export type PreparedBacktestRun = {
+  simulation: BacktestSimulationInput;
+  responseContext: BacktestWorkerResponseContext;
 };
 
 const BENCHMARKS: Record<Exclude<BacktestBenchmarkKey, "NONE" | "CUSTOM">, {
@@ -234,12 +266,19 @@ export class PortfolioBacktestService {
     throw new BacktestValidationError(`${catalog.name} 일봉 조회 범위가 안전 한도를 초과했습니다.`);
   }
 
-  async run(request: BacktestRunRequest) {
+  async prepare(request: BacktestRunRequest): Promise<PreparedBacktestRun> {
     const today = kstDateString(new Date());
     const riskFreeRatePercent = request.riskFreeRatePercent ?? 0;
     const transactionCostBps = request.transactionCostBps ?? 0;
     const currencyMode = request.currencyMode ?? "KRW";
     const rebalanceThresholdPercent = request.rebalanceThresholdPercent ?? 5;
+    const execution = {
+      cashTargetPercent: request.execution?.cashTargetPercent ?? 0,
+      quantityMode: request.execution?.quantityMode ?? "fractional" as const,
+      cashFlowRebalanceMode: request.execution?.cashFlowRebalanceMode ?? "target_weights" as const,
+      tradeDatePolicy: request.execution?.tradeDatePolicy ?? "next_common_observation" as const,
+      cashAnnualYieldPercent: request.execution?.cashAnnualYieldPercent ?? 0,
+    };
     if (!isHistoryDate(request.startDate) || !isHistoryDate(request.endDate) || request.startDate > request.endDate || request.endDate > today) {
       throw new BacktestValidationError("백테스트 시작일과 종료일을 확인해 주세요.");
     }
@@ -261,6 +300,24 @@ export class PortfolioBacktestService {
     if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
       throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
     }
+    if (!Number.isFinite(execution.cashTargetPercent) || execution.cashTargetPercent < 0 || execution.cashTargetPercent > 100) {
+      throw new BacktestValidationError("현금 목표 비중은 0% 이상 100% 이하여야 합니다.");
+    }
+    if (!Number.isFinite(execution.cashAnnualYieldPercent) || execution.cashAnnualYieldPercent < -100 || execution.cashAnnualYieldPercent > 100) {
+      throw new BacktestValidationError("현금 연수익률은 -100% 이상 100% 이하여야 합니다.");
+    }
+    const weightTotal = request.assets.reduce((sum, asset) => sum + Number(asset.weight), 0);
+    if (!request.assets.length || request.assets.length > 20
+      || request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0
+        || (asset.lotSize !== undefined && (!Number.isFinite(asset.lotSize) || asset.lotSize <= 0)))
+      || Math.abs(weightTotal + execution.cashTargetPercent - 100) > 0.01) {
+      throw new BacktestValidationError("종목 비중·lot size와 현금 목표 비중의 합계를 확인해 주세요.");
+    }
+    if ((request.cashFlows?.length ?? 0) > 1_000 || request.cashFlows?.some((flow) => (
+      !isHistoryDate(flow.date) || !Number.isFinite(flow.amount) || Math.abs(flow.amount) > 1_000_000_000_000
+    ))) {
+      throw new BacktestValidationError("사용자 지정 현금흐름의 날짜·금액·개수를 확인해 주세요.");
+    }
     if (!["none", "monthly", "quarterly", "annually", "threshold"].includes(request.rebalanceFrequency)) {
       throw new BacktestValidationError("리밸런싱 주기를 확인해 주세요.");
     }
@@ -281,6 +338,9 @@ export class PortfolioBacktestService {
     const weightBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), Number(asset.weight)]));
     const latestListDate = instruments.map((instrument) => instrument.listDate).sort().at(-1)!;
     const effectiveRequestedStart = request.startDate < latestListDate ? latestListDate : request.startDate;
+    if (request.cashFlows?.some((flow) => flow.date < effectiveRequestedStart || flow.date > request.endDate)) {
+      throw new BacktestValidationError(`사용자 지정 현금흐름은 ${effectiveRequestedStart}부터 ${request.endDate} 사이여야 합니다.`);
+    }
     const definitions: BacktestAssetDefinition[] = instruments.map((instrument) => ({
       symbol: instrument.symbol,
       name: instrument.name,
@@ -288,6 +348,7 @@ export class PortfolioBacktestService {
       currency: instrument.currency,
       listDate: instrument.listDate,
       weight: weightBySymbol.get(instrument.symbol) ?? 0,
+      lotSize: request.assets.find((asset) => normalizeSymbol(asset.symbol) === instrument.symbol)?.lotSize ?? 1,
     }));
     const customBenchmark = request.benchmark === "CUSTOM"
       ? (await this.resolveInstruments([request.benchmarkSymbol || ""]))[0]
@@ -325,42 +386,61 @@ export class PortfolioBacktestService {
       };
     }
 
-    const usdSeries = [
-      ...instruments.filter((instrument) => instrument.currency === "USD")
-        .map((instrument) => localPrices.get(instrumentKey(instrument)) ?? []),
-      ...(customBenchmark?.currency === "USD" ? [benchmark?.prices ?? []] : []),
-      ...(builtInBenchmark && BENCHMARKS[builtInBenchmark].source === "stock" ? [benchmark?.prices ?? []] : []),
-    ];
-    const exchangeRates = currencyMode === "KRW" && usdSeries.length
-      ? await this.marketData.ensureExchangeRates(usdSeries.flatMap((series) => series.map((point) => point.date)))
+    const hasUsdSeries = instruments.some((instrument) => instrument.currency === "USD")
+      || customBenchmark?.currency === "USD"
+      || Boolean(builtInBenchmark && BENCHMARKS[builtInBenchmark].source === "stock");
+    const valuationDates = Array.from(new Set([
+      ...Array.from(localPrices.values()).flatMap((series) => series.map((point) => point.date)),
+      ...(benchmark?.prices ?? []).map((point) => point.date),
+    ])).filter((date) => date >= effectiveRequestedStart && date <= request.endDate).sort();
+    const exchangeRates = currencyMode === "KRW" && hasUsdSeries
+      ? await this.marketData.ensureExchangeRates(valuationDates)
       : new Map<string, number>();
     const rateEntries = Array.from(exchangeRates.entries())
       .filter((entry) => Number.isFinite(entry[1]) && entry[1] > 0)
       .sort((left, right) => left[0].localeCompare(right[0]));
+    const valuationTimeline = Array.from(new Set([
+      ...valuationDates,
+      ...rateEntries.map(([date]) => date),
+    ])).filter((date) => date >= effectiveRequestedStart && date <= request.endDate).sort();
+    const observedDates = new Map<string, string[]>();
+    for (const instrument of instruments) {
+      const key = instrumentKey(instrument);
+      observedDates.set(key, (localPrices.get(key) ?? []).map((point) => point.date));
+    }
+    if (benchmark) observedDates.set(benchmark.key, benchmark.prices.map((point) => point.date));
     let carriedFxObservations = 0;
     let missingFxObservations = 0;
     const convertSeries = (series: BacktestPricePoint[], currency: "KRW" | "USD"): BacktestPricePoint[] => {
       if (currencyMode !== "KRW" || currency === "KRW") {
         return series.map((point) => ({ ...point, localClose: point.close, fxRate: 1 }));
       }
+      const localSeries = [...series].sort((left, right) => left.date.localeCompare(right.date));
+      let localIndex = 0;
+      let latestLocal: BacktestPricePoint | undefined;
       let rateIndex = 0;
       let lastRate = 0;
       let lastRateDate = "";
-      return series.flatMap((point): BacktestPricePoint[] => {
-        while (rateIndex < rateEntries.length && rateEntries[rateIndex][0] <= point.date) {
+      return valuationTimeline.flatMap((date): BacktestPricePoint[] => {
+        while (localIndex < localSeries.length && localSeries[localIndex].date <= date) {
+          latestLocal = localSeries[localIndex];
+          localIndex += 1;
+        }
+        while (rateIndex < rateEntries.length && rateEntries[rateIndex][0] <= date) {
           lastRateDate = rateEntries[rateIndex][0];
           lastRate = rateEntries[rateIndex][1];
           rateIndex += 1;
         }
+        if (!latestLocal) return [];
         if (!(lastRate > 0)) {
           missingFxObservations += 1;
           return [];
         }
-        if (lastRateDate !== point.date) carriedFxObservations += 1;
+        if (lastRateDate !== date) carriedFxObservations += 1;
         return [{
-          date: point.date,
-          close: point.close * lastRate,
-          localClose: point.close,
+          date,
+          close: latestLocal.close * lastRate,
+          localClose: latestLocal.close,
           fxRate: lastRate,
         }];
       });
@@ -376,9 +456,10 @@ export class PortfolioBacktestService {
       benchmark = { ...benchmark, prices: convertSeries(benchmark.prices, benchmarkCurrency) };
     }
 
-    const result = simulateBacktest({
+    const simulation: BacktestSimulationInput = {
       assets: definitions,
       prices,
+      observedDates,
       requestedStartDate: effectiveRequestedStart,
       endDate: request.endDate,
       initialAmount: request.initialAmount,
@@ -389,48 +470,86 @@ export class PortfolioBacktestService {
       riskFreeRatePercent,
       transactionCostBps,
       rebalanceThresholdPercent,
+      cashFlows: request.cashFlows ?? [],
+      execution,
       benchmark,
-    });
+    };
     const warnings = [
       currencyMode === "KRW"
         ? "국내·해외 종목의 수정주가를 전체 기간 USD/KRW 환율로 원화 환산해 동일 기준통화로 계산했습니다."
         : "local 모드는 각 종목의 현지통화 수익률을 합성하므로 국내·해외 혼합 결과는 단일 통화 성과로 해석할 수 없습니다.",
       transactionCostBps > 0
-        ? `거래비용은 체결금액의 ${transactionCostBps}bp로 추정하며 성과 경로에는 차감하지 않고 비용 차감 후 추정 수익률로 별도 표시합니다.`
+        ? `거래비용은 매 체결금액의 ${transactionCostBps}bp를 현금에서 즉시 차감해 실제 성과 경로에 반영했습니다.`
         : "거래비용 가정이 0bp이므로 비용 차감 전 성과와 비용 차감 후 추정 성과가 같습니다.",
+      execution.quantityMode === "whole"
+        ? "정수 수량은 수정주가 기준 단위이며 기업행동 원시 split 이력이 없으면 실제 과거 주문 수량과 다를 수 있습니다."
+        : "소수 수량 체결을 허용합니다.",
       "수정주가에 반영되지 않은 현금배당·세금·실제 체결 슬리피지는 별도로 반영하지 않습니다.",
       ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 이용 가능 값을 사용했습니다.`] : []),
       ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 계산에서 제외했습니다.`] : []),
     ];
     if (request.startDate < latestListDate) warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
-    if (result.effectiveStartDate > effectiveRequestedStart) {
+    return {
+      simulation,
+      responseContext: {
+        effective_requested_start: effectiveRequestedStart,
+        currency_method: currencyMode === "KRW" ? "KRW_FX_CONVERTED" : "LOCAL_RETURN",
+        config: {
+          ...request,
+          riskFreeRatePercent,
+          transactionCostBps,
+          currencyMode,
+          baseCurrency: "KRW",
+          ...(request.rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
+          ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
+          requestedStartDate: request.startDate,
+          latestListDate,
+        },
+        assets: definitions,
+        ...(request.benchmark === "NONE" ? {} : {
+          benchmark: {
+            key: request.benchmark,
+            name: customBenchmark?.name ?? BENCHMARKS[builtInBenchmark!].name,
+            symbol: customBenchmark?.symbol ?? BENCHMARKS[builtInBenchmark!].symbol,
+          },
+        }),
+        warnings,
+      },
+    };
+  }
+
+  simulatePrepared(prepared: PreparedBacktestRun): BacktestSimulationResult {
+    return simulateBacktest(prepared.simulation);
+  }
+
+  finalizePrepared(
+    prepared: PreparedBacktestRun,
+    result: BacktestSimulationResult,
+    generatedAt = new Date().toISOString(),
+  ) {
+    const context = prepared.responseContext;
+    const warnings = [...context.warnings];
+    if (result.effectiveStartDate > context.effective_requested_start) {
       warnings.unshift(`모든 종목과 비교 지수의 공통 일봉이 시작되는 ${result.effectiveStartDate}부터 계산했습니다.`);
     }
     return {
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       baseCurrency: "KRW" as const,
-      currencyMethod: currencyMode === "KRW" ? "KRW_FX_CONVERTED" as const : "LOCAL_RETURN" as const,
+      currencyMethod: context.currency_method,
       config: {
-        ...request,
-        riskFreeRatePercent,
-        transactionCostBps,
-        currencyMode,
-        baseCurrency: "KRW" as const,
-        ...(request.rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
-        ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
-        requestedStartDate: request.startDate,
-        latestListDate,
+        ...context.config,
         effectiveStartDate: result.effectiveStartDate,
         effectiveEndDate: result.endDate,
       },
-      assets: definitions,
-      benchmark: request.benchmark === "NONE" ? undefined : {
-        key: request.benchmark,
-        name: customBenchmark?.name ?? BENCHMARKS[builtInBenchmark!].name,
-        symbol: customBenchmark?.symbol ?? BENCHMARKS[builtInBenchmark!].symbol,
-      },
+      assets: context.assets,
+      ...(context.benchmark ? { benchmark: context.benchmark } : {}),
       warnings,
       ...result,
     };
+  }
+
+  async run(request: BacktestRunRequest) {
+    const prepared = await this.prepare(request);
+    return this.finalizePrepared(prepared, this.simulatePrepared(prepared));
   }
 }

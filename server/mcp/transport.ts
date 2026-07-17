@@ -5,6 +5,9 @@ import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/p
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { McpAuditRepository } from "../repositories/mcp-audit-repository.js";
+import { anonymizedAuditValue, persistMcpAudit, protocolRequestId } from "./audit.js";
+import { toolSchemas, type ToolName } from "./schemas.js";
 
 type Session = {
   server: McpServer;
@@ -98,6 +101,8 @@ export function createMcpHttpRuntime(input: {
   resourceMetadataUrl: string;
   allowedOrigins: string[];
   maxRequestsPerMinute: number;
+  audit?: McpAuditRepository;
+  auditSubjectSalt?: string;
 }): McpHttpRuntime {
   if (input.authMode === "oauth" && !input.verifier) {
     throw new Error("OAuth MCP transport requires a token verifier.");
@@ -115,6 +120,45 @@ export function createMcpHttpRuntime(input: {
 
   const cors = corsMiddleware(new Set(input.allowedOrigins));
   const rateLimit = rateLimitMiddleware(input.maxRequestsPerMinute);
+  const auditRejectedToolCall: RequestHandler = (request, _response, next) => {
+    void (async () => {
+      const messages = Array.isArray(request.body) ? request.body : [request.body];
+      for (const message of messages) {
+        if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+        const rpc = message as Record<string, unknown>;
+        if (rpc.method !== "tools/call") continue;
+        const startedAt = Date.now();
+        const params = rpc.params && typeof rpc.params === "object" && !Array.isArray(rpc.params)
+          ? rpc.params as Record<string, unknown>
+          : {};
+        const requestedName = typeof params.name === "string" ? params.name : "<missing>";
+        const schema = requestedName in toolSchemas ? toolSchemas[requestedName as ToolName] : undefined;
+        const errorCode = !schema
+          ? "UNKNOWN_TOOL"
+          : schema.safeParse(params.arguments ?? {}).success ? undefined : "INVALID_TOOL_INPUT";
+        if (!errorCode) continue;
+        const subject = input.authMode === "none"
+          ? "local-owner"
+          : typeof request.auth?.extra?.sub === "string" ? request.auth.extra.sub : "owner";
+        const actualRequestId = protocolRequestId(rpc.id);
+        const id = sessionId(request);
+        await persistMcpAudit(input.audit, {
+          requestId: randomUUID(),
+          ...(actualRequestId ? { protocolRequestId: actualRequestId } : {}),
+          ...(id ? { sessionHash: anonymizedAuditValue(id, input.auditSubjectSalt) } : {}),
+          toolName: requestedName,
+          subjectHash: anonymizedAuditValue(subject, input.auditSubjectSalt),
+          authMode: input.authMode,
+          status: "error",
+          errorCode,
+          startedAt,
+          finishedAt: Date.now(),
+        });
+      }
+    })().catch((error) => {
+      console.warn("[mcp-audit] 사전 검증 오류 기록 실패:", error instanceof Error ? error.message : "unknown error");
+    }).finally(next);
+  };
 
   async function handleStateless(request: Request, response: Response): Promise<void> {
     const server = input.serverFactory();
@@ -228,7 +272,7 @@ export function createMcpHttpRuntime(input: {
   };
 
   router.options("/mcp", cors, rateLimit, (_request, response) => response.status(204).end());
-  router.post("/mcp", cors, rateLimit, bearer, route(post));
+  router.post("/mcp", cors, rateLimit, bearer, auditRejectedToolCall, route(post));
   router.get("/mcp", cors, rateLimit, bearer, route(established));
   router.delete("/mcp", cors, rateLimit, bearer, route(established));
 

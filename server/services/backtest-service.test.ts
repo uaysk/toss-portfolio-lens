@@ -28,10 +28,18 @@ const calculated = {
   dataQuality: { commonObservations: 1 },
 };
 
-function setup(reportGenerate = vi.fn()) {
-  const engine = { run: vi.fn().mockResolvedValue(calculated) };
+function setup(reportGenerate = vi.fn(), executionMode: "inline" | "external" = "inline") {
+  const prepared = {
+    simulation: { assets: [], prices: new Map(), requestedStartDate: "2024-01-01", endDate: "2024-01-03" },
+    responseContext: { effective_requested_start: "2024-01-01", warnings: [] },
+  };
+  const engine = {
+    run: vi.fn().mockResolvedValue(calculated),
+    prepare: vi.fn().mockResolvedValue(prepared),
+  };
   const marketData = { repository: { dataRevision: vi.fn().mockResolvedValue("revision-1") } };
   const runs = {
+    executionMode,
     findReusable: vi.fn().mockResolvedValue(undefined),
     execute: vi.fn().mockImplementation(async ({ task }) => {
       await task();
@@ -39,11 +47,24 @@ function setup(reportGenerate = vi.fn()) {
         reused: false,
         run: {
           id: "00000000-0000-4000-8000-000000000001",
+          requestHash: "engine-aware-request-hash",
+          engineVersion: "engine-v1",
           dataRevision: "revision-1",
           result: calculated,
           warnings: [],
         },
       };
+    }),
+    executeExternal: vi.fn().mockResolvedValue({
+      reused: false,
+      run: {
+        id: "00000000-0000-4000-8000-000000000001",
+        requestHash: "engine-aware-request-hash",
+        engineVersion: "engine-v1",
+        dataRevision: "revision-1",
+        result: calculated,
+        warnings: [],
+      },
     }),
   };
   const artifacts = { list: vi.fn().mockResolvedValue([]) };
@@ -98,6 +119,9 @@ describe("BacktestService report option", () => {
       request: { ...request, report: { enabled: true, failure_mode: "warn" } },
     });
     expect(generate).toHaveBeenCalledOnce();
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining({
+      backtestRequestHash: "engine-aware-request-hash",
+    }));
     expect(result.result.report).toMatchObject({ generated: true, reused: true, url: expect.stringContaining("/reports/") });
   });
 
@@ -123,5 +147,23 @@ describe("BacktestService report option", () => {
       request: { ...request, report: { enabled: true, failure_mode: "fail" } },
     })).rejects.toBeInstanceOf(ServiceError);
     expect(context.runs.execute).toHaveBeenCalledOnce();
+  });
+
+  it("external 모드는 Node 준비 snapshot만 durable worker payload로 전달한다", async () => {
+    const context = setup(vi.fn(), "external");
+    const result = await context.service.runRaw({ ownerSubject: "owner", request });
+
+    expect(context.engine.run).not.toHaveBeenCalled();
+    expect(context.engine.prepare).toHaveBeenCalledWith(request);
+    expect(context.runs.execute).not.toHaveBeenCalled();
+    expect(context.runs.executeExternal).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "backtest",
+      dataRevision: "revision-1",
+      payload: expect.objectContaining({
+        simulation: expect.objectContaining({ prices: expect.any(Map) }),
+        response_context: expect.objectContaining({ effective_requested_start: "2024-01-01" }),
+      }),
+    }));
+    expect(result).toBe(calculated);
   });
 });

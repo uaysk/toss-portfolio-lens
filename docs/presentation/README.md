@@ -2,6 +2,11 @@
 
 이 디렉터리는 프로젝트 README에 넣을 실제 애플리케이션 화면과 아키텍처 슬라이드의 재현 가능한 원본을 관리합니다.
 
+## 엔지니어링 보고서
+
+- [`rust-migration-report.html`](rust-migration-report.html): Rust compute 전환, UDS/PostgreSQL 실행 경로, 기능 범위와 Node/Python/Rust 실측 성능을 담은 독립 실행형 대화형 보고서입니다.
+- [`rust-ipc-comparison.html`](rust-ipc-comparison.html): 구현 전 IPC 구조와 예상 성능을 비교한 제안서입니다. 최종 판단에는 위 실측 보고서를 사용합니다.
+
 ## 화면 데이터
 
 현재 README에 커밋된 애플리케이션 화면은 실제 빌드된 React 화면을 브라우저로 열고, 아래 예시 포트폴리오의 실제 수정주가 및 백테스트 결과를 주입해 캡처했습니다. 실제 계좌 보유내역은 사용하지 않습니다. `capture-readme.mjs`의 기본 fixture는 오프라인 레이아웃 재현을 위한 대체 데이터입니다.

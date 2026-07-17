@@ -205,4 +205,49 @@ describe("PortfolioBacktestService", () => {
     expect(krw.contributions[0].fxContributionPercent).toBeCloseTo(10, 8);
     expect(krw.dataQuality.commonReturnPolicy).toBe("inner_join");
   });
+
+  it("미국 휴장일의 환율 변동은 KRW 평가 경로에만 반영하고 실제 공통 관측일로 세지 않는다", async () => {
+    const toss = {
+      getInstruments: vi.fn().mockResolvedValue(instruments),
+      getDailyCandles: vi.fn().mockImplementation(async (symbol: string, _before?: string, adjusted?: boolean) => ({
+        candles: symbol === "005930"
+          ? [
+            candle(symbol, "KRW", "2024-01-02", 100),
+            candle(symbol, "KRW", "2024-01-03", 100),
+            candle(symbol, "KRW", "2024-01-04", 100),
+          ]
+          : [
+            candle(symbol, "USD", "2024-01-02", 100),
+            candle(symbol, "USD", "2024-01-04", 100),
+          ],
+        nextBefore: undefined,
+        adjusted,
+      })),
+      getUsdKrwExchangeRate: vi.fn().mockImplementation(async (date: string) => ({
+        date,
+        rate: date === "2024-01-02" ? 1_000 : 1_100,
+        timestamp: `${date}T15:30:00+09:00`,
+      })),
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+
+    const result = await new PortfolioBacktestService(toss, store).run({
+      assets: [{ symbol: "005930", weight: 50 }, { symbol: "AAPL", weight: 50 }],
+      startDate: "2024-01-02",
+      endDate: "2024-01-04",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: "NONE",
+      currencyMode: "KRW",
+    });
+
+    expect(result.metrics.totalReturnPercent).toBeCloseTo(5, 8);
+    expect(result.dataQuality.commonReturnObservations).toBe(1);
+    expect(result.dataQuality.carryForwardByAsset).toEqual(expect.arrayContaining([
+      { symbol: "AAPL", count: 1 },
+    ]));
+    expect(result.points.map((point) => point.date)).toContain("2024-01-03");
+  });
 });

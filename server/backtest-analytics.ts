@@ -9,6 +9,7 @@ export type BacktestTradeEvent = {
   amount: number;
   quantity: number;
   price: number;
+  transactionCost?: number;
   reason: "initial" | "cash-flow" | "rebalance";
 };
 
@@ -99,9 +100,13 @@ export type BacktestAdvancedAnalytics = {
     totalTradedAmount: number;
     ongoingTradedAmount: number;
     estimatedTotalCost: number;
+    actualTotalCost: number;
     costDragPercent: number | null;
-    grossReturnPercent: number;
-    netEstimatedReturnPercent: number | null;
+    grossReturnPercent: number | null;
+    netEstimatedReturnPercent: number;
+    netReturnPercent: number;
+    costsDeductedFromPath: boolean;
+    method: "actual_path_deduction" | "legacy_estimate_only";
     averageTradeAmount: number | null;
     buySellAmountRatio: number | null;
     tradeCount: number;
@@ -517,7 +522,10 @@ function costAnalytics({
   const totalSellAmount = trades.filter((trade) => trade.side === "SELL").reduce((sum, trade) => sum + trade.amount, 0);
   const averageValue = average(balances.map((point) => point.value));
   const estimatedTotalCost = totalTradedAmount * transactionCostBps / 10_000;
-  const costDragPercent = averageValue > 0 ? (estimatedTotalCost / averageValue) * 100 : null;
+  const actualTotalCost = trades.reduce((sum, trade) => sum + (trade.transactionCost ?? 0), 0);
+  const costsDeductedFromPath = trades.some((trade) => trade.transactionCost !== undefined);
+  const appliedCost = costsDeductedFromPath ? actualTotalCost : estimatedTotalCost;
+  const costDragPercent = averageValue > 0 ? (appliedCost / averageValue) * 100 : null;
   const valuesByMonth = new Map<string, number[]>();
   for (const point of balances) {
     const month = point.date.slice(0, 7);
@@ -550,9 +558,17 @@ function costAnalytics({
     totalTradedAmount: round(totalTradedAmount, 2),
     ongoingTradedAmount: round(ongoingTradedAmount, 2),
     estimatedTotalCost: round(estimatedTotalCost, 2),
+    actualTotalCost: round(actualTotalCost, 2),
     costDragPercent: costDragPercent === null ? null : round(costDragPercent),
-    grossReturnPercent: round(grossReturnPercent),
-    netEstimatedReturnPercent: costDragPercent === null ? null : round(grossReturnPercent - costDragPercent),
+    grossReturnPercent: costDragPercent === null
+      ? null
+      : round(costsDeductedFromPath ? grossReturnPercent + costDragPercent : grossReturnPercent),
+    netEstimatedReturnPercent: round(
+      costsDeductedFromPath || costDragPercent === null ? grossReturnPercent : grossReturnPercent - costDragPercent,
+    ),
+    netReturnPercent: round(grossReturnPercent),
+    costsDeductedFromPath,
+    method: costsDeductedFromPath ? "actual_path_deduction" : "legacy_estimate_only",
     averageTradeAmount: trades.length ? round(totalTradedAmount / trades.length, 2) : null,
     buySellAmountRatio: totalSellAmount > 0 ? round(totalBuyAmount / totalSellAmount) : null,
     tradeCount: trades.length,

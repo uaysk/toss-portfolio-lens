@@ -41,6 +41,7 @@ export const toolMetadata: Record<ToolName, ToolMetadata> = {
   analyze_start_date_sensitivity: { title: "시작일 민감도 분석", description: "시작일 이동에 따른 백테스트 성과와 위험 분포를 실행합니다.", scopes: ["backtest:run"], annotations: run },
   analyze_rebalance_sensitivity: { title: "리밸런싱 민감도 분석", description: "없음·월·분기·연·threshold 리밸런싱 가정을 비교합니다.", scopes: ["backtest:run"], annotations: run },
   analyze_cash_flow_sensitivity: { title: "현금흐름 민감도 분석", description: "정기 납입·인출 금액·주기·기간 내 시점 변화가 백테스트에 미치는 영향을 실행합니다.", scopes: ["backtest:run"], annotations: run },
+  simulate_portfolio_monte_carlo: { title: "포트폴리오 Monte Carlo", description: "자산 간 상관을 보존하는 moving-block bootstrap으로 미래 경로 분포·낙폭·손실·목표 달성 확률을 계산합니다.", scopes: ["backtest:run"], annotations: run },
   explain_data_quality: { title: "데이터 품질 설명", description: "가격·환율·벤치마크 관측률과 공통 거래일·carry-forward·cache revision을 설명합니다.", scopes: ["market:read"], annotations: readOnly },
   get_run_status: { title: "실행 상태 조회", description: "비동기 run의 상태·진행률·완료 후보·검증 구간과 경고를 조회합니다.", scopes: ["backtest:run"], annotations: readOnly },
   cancel_run: { title: "실행 취소", description: "실행 중인 최적화·Walk-forward·stress·민감도 run을 취소하고 기존 결과는 보존합니다.", scopes: ["backtest:run"], annotations: run },

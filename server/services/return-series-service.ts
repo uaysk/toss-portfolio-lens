@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CurrencyMode, MarketDataService } from "./market-data-service.js";
 import { convertPricesToReturns, type PriceSeriesInput, type ReturnSeriesInput } from "./quant-math.js";
 
@@ -10,6 +11,11 @@ export type LoadedReturnSeries = {
   warnings: string[];
   dataQuality: Record<string, unknown>;
 };
+
+export function combineDataRevisions(revisions: readonly string[]): string {
+  const canonical = [...revisions].sort().join("\n");
+  return createHash("sha256").update(canonical).digest("hex");
+}
 
 export class ReturnSeriesService {
   constructor(private readonly marketData: MarketDataService) {}
@@ -41,7 +47,7 @@ export class ReturnSeriesService {
     return {
       prices,
       returns: prices.map(convertPricesToReturns),
-      dataRevision: results.map((series) => series.dataRevision).sort().join(":"),
+      dataRevision: combineDataRevisions(results.map((series) => series.dataRevision)),
       requestedPeriod: { from: input.fromDate, to: input.toDate },
       ...(from && to && from <= to ? { effectivePeriod: { from, to } } : {}),
       warnings: Array.from(new Set(results.flatMap((series) => series.warnings))),

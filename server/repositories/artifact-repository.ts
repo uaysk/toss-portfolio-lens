@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
+import { canonicalJson } from "../worker/contracts.js";
 
 export type ArtifactType =
   | "equity"
@@ -10,8 +11,16 @@ export type ArtifactType =
   | "correlation"
   | "risk-contribution"
   | "monthly-returns"
+  | "cash-ledger"
+  | "cash-flows"
   | "candidates"
   | "walk-forward"
+  | "worker-pareto-frontier"
+  | "scenario-comparison"
+  | "monte-carlo-distribution"
+  | "monte-carlo-percentile-paths"
+  | "monte-carlo-sample-paths"
+  | "worker-metrics"
   | "result";
 
 export type ArtifactDescriptor = {
@@ -42,7 +51,7 @@ type ArtifactRow = {
 };
 
 function uriFor(runId: string, type: ArtifactType): string {
-  if (type === "candidates" || type === "walk-forward") {
+  if (["candidates", "walk-forward", "worker-pareto-frontier", "scenario-comparison", "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths"].includes(type)) {
     return `optimization://runs/${runId}/${type}`;
   }
   return `backtest://runs/${runId}/${type}`;
@@ -114,7 +123,7 @@ export class ArtifactRepository {
     dataRevision: string;
     generatedAt?: string;
   }): Promise<ArtifactDescriptor> {
-    const contentJson = JSON.stringify(input.content);
+    const contentJson = canonicalJson(input.content);
     const checksum = createHash("sha256").update(contentJson).digest("hex");
     const byteCount = Buffer.byteLength(contentJson);
     const rowCount = input.rowCount ?? (Array.isArray(input.content) ? input.content.length : 1);

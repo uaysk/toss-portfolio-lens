@@ -10,7 +10,29 @@ const currencyMode = z.enum(["local", "KRW"]).default("KRW");
 const period = { fromDate: date, toDate: date };
 const weight = z.number().finite().gt(0).max(100);
 const weights = z.record(symbol, z.number().finite().min(0).max(1));
-const asset = z.object({ symbol, weight }).strict();
+const asset = z.object({
+  symbol,
+  weight,
+  lotSize: z.number().finite().positive().max(1_000_000).default(1),
+}).strict();
+const customCashFlow = z.object({
+  date,
+  amount: z.number().finite().min(-1_000_000_000_000).max(1_000_000_000_000),
+  memo: z.string().trim().max(200).optional(),
+}).strict();
+const executionPolicy = z.object({
+  cashTargetPercent: z.number().finite().min(0).max(100).default(0),
+  quantityMode: z.enum(["fractional", "whole"]).default("fractional"),
+  cashFlowRebalanceMode: z.enum(["target_weights", "drift_reduction", "full"]).default("target_weights"),
+  tradeDatePolicy: z.literal("next_common_observation").default("next_common_observation"),
+  cashAnnualYieldPercent: z.number().finite().min(-100).max(100).default(0),
+}).strict().default({
+  cashTargetPercent: 0,
+  quantityMode: "fractional",
+  cashFlowRebalanceMode: "target_weights",
+  tradeDatePolicy: "next_common_observation",
+  cashAnnualYieldPercent: 0,
+});
 const report = z.object({
   enabled: z.boolean().default(false),
   failure_mode: z.enum(["warn", "fail"]).default("warn"),
@@ -27,6 +49,8 @@ const backtestBase = z.object({
   rebalanceThresholdPercent: z.number().finite().min(0.1).max(50).optional(),
   riskFreeRatePercent: z.number().finite().min(-10).max(50).default(0),
   transactionCostBps: z.number().finite().min(0).max(500).default(0),
+  cashFlows: z.array(customCashFlow).max(1_000).default([]),
+  execution: executionPolicy,
   currencyMode,
   baseCurrency: z.literal("KRW").default("KRW"),
   benchmark: z.enum(["NONE", "KOSPI", "KOSDAQ", "NASDAQ100", "SP500", "CUSTOM"]).default("NONE"),
@@ -34,14 +58,18 @@ const backtestBase = z.object({
   report,
 }).strict();
 function refineBacktest(value: Pick<z.infer<typeof backtestBase>,
-  "assets" | "startDate" | "endDate" | "benchmark" | "benchmarkSymbol" | "rebalanceFrequency" | "rebalanceThresholdPercent"
+  "assets" | "startDate" | "endDate" | "benchmark" | "benchmarkSymbol" | "rebalanceFrequency" | "rebalanceThresholdPercent" | "execution" | "cashFlows"
 >, context: z.RefinementCtx): void {
   const total = value.assets.reduce((sum, item) => sum + item.weight, 0);
-  if (Math.abs(total - 100) > 0.01) context.addIssue({ code: "custom", path: ["assets"], message: "비중 합계는 100%여야 합니다." });
+  if (Math.abs(total + value.execution.cashTargetPercent - 100) > 0.01) context.addIssue({ code: "custom", path: ["assets"], message: "종목과 현금 목표 비중 합계는 100%여야 합니다." });
   if (new Set(value.assets.map((item) => item.symbol)).size !== value.assets.length) context.addIssue({ code: "custom", path: ["assets"], message: "중복 종목을 제거해 주세요." });
   if (value.startDate > value.endDate) context.addIssue({ code: "custom", path: ["startDate"], message: "시작일은 종료일보다 늦을 수 없습니다." });
   if (value.benchmark === "CUSTOM" && !value.benchmarkSymbol) context.addIssue({ code: "custom", path: ["benchmarkSymbol"], message: "CUSTOM 벤치마크 종목이 필요합니다." });
   if (value.rebalanceFrequency === "threshold" && value.rebalanceThresholdPercent === undefined) context.addIssue({ code: "custom", path: ["rebalanceThresholdPercent"], message: "threshold 기준이 필요합니다." });
+  for (const [index, flow] of value.cashFlows.entries()) {
+    if (flow.date < value.startDate) context.addIssue({ code: "custom", path: ["cashFlows", index, "date"], message: "현금흐름 날짜는 시작일 이상이어야 합니다." });
+    if (flow.date > value.endDate) context.addIssue({ code: "custom", path: ["cashFlows", index, "date"], message: "현금흐름 날짜는 종료일 이하여야 합니다." });
+  }
 }
 const backtest = backtestBase.superRefine(refineBacktest);
 const backtestWithoutReport = backtestBase.omit({ report: true }).superRefine(refineBacktest);
@@ -157,7 +185,7 @@ export const toolSchemas = {
   validate_backtest_config: backtestWithoutReport,
   run_portfolio_backtest: backtest,
   compare_backtests: z.object({ runIds: z.array(runId).min(2).max(20) }).strict(),
-  get_backtest_artifact: z.object({ runId, type: z.enum(["equity", "drawdown", "holdings", "trades", "rolling", "correlation", "risk-contribution", "monthly-returns"]) }).strict(),
+  get_backtest_artifact: z.object({ runId, type: z.enum(["equity", "drawdown", "holdings", "trades", "cash-ledger", "cash-flows", "rolling", "correlation", "risk-contribution", "monthly-returns"]) }).strict(),
   get_current_portfolio: z.object({ accountSelector: z.string().trim().min(8).max(128).optional() }).strict(),
   find_diversifying_assets: diversifyingAssets,
   analyze_market_regimes: z.object({ benchmark: symbol, ...period, currencyMode, volatilityWindow: z.number().int().min(5).max(252).default(20) }).strict(),
@@ -172,6 +200,26 @@ export const toolSchemas = {
   analyze_start_date_sensitivity: z.object({ baseConfig: backtestWithoutReport, offsetsDays: z.array(z.number().int().min(-3_650).max(3_650)).min(1).max(60) }).strict(),
   analyze_rebalance_sensitivity: z.object({ baseConfig: backtestWithoutReport, modes: z.array(z.enum(["none", "monthly", "quarterly", "annually", "threshold"])).min(1).max(5), thresholdPercent: z.number().finite().min(0.1).max(50).default(5) }).strict(),
   analyze_cash_flow_sensitivity: z.object({ baseConfig: backtestWithoutReport, monthlyAmounts: z.array(z.number().finite().min(-1e12).max(1e12)).min(1).max(20), frequencies: z.array(z.enum(["monthly", "quarterly", "annually"])).min(1).max(3).default(["monthly"]), timings: z.array(z.enum(["period_start", "period_end"])).min(1).max(2).default(["period_start"]) }).strict(),
+  simulate_portfolio_monte_carlo: z.object({
+    symbols: z.array(symbol).min(1).max(20),
+    weights: weights,
+    ...period,
+    currencyMode,
+    initialAmount: z.number().finite().positive().max(10_000_000_000_000),
+    horizonDays: z.number().int().min(1).max(25_200).default(252),
+    pathCount: z.number().int().min(100).max(100_000).default(10_000),
+    blockLength: z.number().int().min(1).max(252).default(20),
+    seed: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(12_345),
+    goalAmount: z.number().finite().positive().max(100_000_000_000_000).optional(),
+    quantiles: z.array(z.number().finite().gt(0).lt(1)).min(1).max(19).default([0.05, 0.25, 0.5, 0.75, 0.95]),
+    samplePathCount: z.number().int().min(0).max(100).default(10),
+  }).strict().superRefine((value, context) => {
+    if (value.fromDate > value.toDate) context.addIssue({ code: "custom", path: ["fromDate"], message: "시작일이 종료일보다 늦습니다." });
+    const total = value.symbols.reduce((sum, item) => sum + (value.weights[item] ?? 0), 0);
+    if (Math.abs(total - 1) > 0.0001) context.addIssue({ code: "custom", path: ["weights"], message: "선택 종목 비중 합계는 1이어야 합니다." });
+    if (value.pathCount * value.horizonDays > 25_000_000) context.addIssue({ code: "custom", path: ["pathCount"], message: "pathCount × horizonDays는 25,000,000 이하여야 합니다." });
+    if ((new Set(value.quantiles).size + value.samplePathCount) * (value.horizonDays + 1) > 1_000_000) context.addIssue({ code: "custom", path: ["samplePathCount"], message: "요청한 percentile/sample path 출력점은 1,000,000개 이하여야 합니다." });
+  }),
   explain_data_quality: z.object({ symbols: z.array(symbol).min(1).max(20), benchmark: symbol.optional(), ...period, adjusted: z.boolean().default(true), currencyMode }).strict().superRefine((value, context) => {
     if (value.fromDate > value.toDate) context.addIssue({ code: "custom", path: ["fromDate"], message: "시작일이 종료일보다 늦습니다." });
     if (new Set([...value.symbols, ...(value.benchmark ? [value.benchmark] : [])]).size > 20) context.addIssue({ code: "custom", path: ["benchmark"], message: "벤치마크를 포함한 종목 수는 20개 이하여야 합니다." });

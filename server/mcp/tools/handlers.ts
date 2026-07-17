@@ -21,12 +21,15 @@ import {
   buildWalkForwardWindows,
   optimizePortfolio,
   type OptimizationInput,
+  type OptimizationOutput,
   type OptimizationObjective,
   type PortfolioCandidate,
 } from "../../services/optimization-service.js";
 import { envelope, HISTORICAL_LIMITATION, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "../../services/service-envelope.js";
 import type { McpResourceRegistry } from "../resources.js";
 import type { ToolName } from "../schemas.js";
+import type { RustComputeClient } from "../../worker/rust-client.js";
+import type { ArtifactType } from "../../repositories/artifact-repository.js";
 
 export type ToolHandler = (input: unknown, ownerSubject: string) => Promise<unknown>;
 
@@ -43,6 +46,7 @@ export type McpToolDependencies = {
   reports: ReportService;
   optimizationRepository: OptimizationRepository;
   resources: McpResourceRegistry;
+  rustCompute?: RustComputeClient;
   maxCandidateBudget: number;
   maxAssets: number;
   maxDateRangeYears: number;
@@ -52,6 +56,30 @@ type GenericInput = Record<string, unknown>;
 
 function object(input: unknown): GenericInput {
   return input as GenericInput;
+}
+
+function rustTaskResult(output: Awaited<ReturnType<RustComputeClient["compute"]>>) {
+  return {
+    summary: output.summary,
+    result: output.result,
+    warnings: output.warnings,
+    artifacts: output.artifacts.map((artifact) => ({
+      type: artifact.type as ArtifactType,
+      content: artifact.content,
+      rowCount: artifact.row_count,
+    })),
+  };
+}
+
+function requireRust(dependencies: McpToolDependencies): RustComputeClient {
+  if (!dependencies.rustCompute) {
+    throw new ServiceError({
+      code: "RUST_COMPUTE_UNAVAILABLE",
+      message: "이 계산은 Rust compute 실행 모드에서만 사용할 수 있습니다.",
+      retryable: true,
+    });
+  }
+  return dependencies.rustCompute;
 }
 
 function addDays(date: string, days: number): string {
@@ -144,17 +172,16 @@ async function persistOptimization(
     settings,
   });
   const pareto = new Set(frontier.map(candidateSignature));
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    await dependencies.optimizationRepository.putCandidate({
+  await dependencies.optimizationRepository.putCandidates(candidates.map((candidate, index) => {
+    return {
       runId,
       rank: index + 1,
       weights: candidate.weights,
       metrics: candidate.metrics,
       score: candidate.metrics.robustScore ?? Number.NEGATIVE_INFINITY,
       pareto: pareto.has(candidateSignature(candidate)),
-    });
-  }
+    };
+  }));
 }
 
 function returnsToPrices(series: ReturnSeriesInput, start: number, end: number): PriceSeriesInput {
@@ -684,25 +711,59 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       const loaded = await dependencies.returnSeries.load({ symbols, fromDate: String(value.fromDate), toDate: String(value.toDate), currencyMode: value.currencyMode as never, adjusted: true });
       const budget = Math.min(Number(value.candidateBudget), dependencies.maxCandidateBudget);
       value.candidateBudget = budget;
-      const queued = await dependencies.runs.enqueue({
-        ownerSubject,
-        kind: "optimization",
-        config: value,
-        dataRevision: loaded.dataRevision,
-        totalCandidates: budget,
-        task: async (context) => {
-          await context.throwIfCancelled();
-          const output = optimizePortfolio(optimizationInput(value, loaded));
-          await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, output.candidates, output.paretoFrontier);
-          await context.updateProgress(1, { completedCandidates: output.candidateCount, totalCandidates: budget });
-          return {
-            summary: { best: output.bestByObjective[value.objective as OptimizationObjective], candidate_count: output.candidateCount, pareto_count: output.paretoFrontier.length },
-            result: { ...output, candidates: output.candidates.slice(0, 20), paretoFrontier: output.paretoFrontier.slice(0, 100) },
-            warnings: [...loaded.warnings, ...output.warnings],
-            artifacts: [{ type: "candidates", content: output.candidates, rowCount: output.candidates.length }],
-          };
-        },
-      });
+      const workerPayload = {
+        optimization: optimizationInput(value, loaded),
+        objective: value.objective,
+        market_warnings: loaded.warnings,
+        settings: value,
+      };
+      const queued = dependencies.runs.executionMode === "external"
+        ? await dependencies.runs.enqueueExternal({
+          ownerSubject,
+          kind: "optimization",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: budget,
+          payload: workerPayload,
+        })
+        : dependencies.runs.executionMode === "rust_socket"
+          ? await dependencies.runs.enqueue({
+            ownerSubject,
+            kind: "optimization",
+            config: value,
+            dataRevision: loaded.dataRevision,
+            totalCandidates: budget,
+            task: async (context) => {
+              await context.throwIfCancelled();
+              const output = await requireRust(dependencies).compute<OptimizationOutput>("optimization", workerPayload);
+              const candidates = output.artifacts.find((artifact) => artifact.type === "candidates")?.content as PortfolioCandidate[] | undefined
+                ?? output.result.candidates;
+              const frontier = output.artifacts.find((artifact) => artifact.type === "worker-pareto-frontier")?.content as PortfolioCandidate[] | undefined
+                ?? output.result.paretoFrontier;
+              await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, candidates, frontier);
+              await context.updateProgress(1, { completedCandidates: candidates.length, totalCandidates: budget });
+              return rustTaskResult(output);
+            },
+          })
+        : await dependencies.runs.enqueue({
+          ownerSubject,
+          kind: "optimization",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: budget,
+          task: async (context) => {
+            await context.throwIfCancelled();
+            const output = optimizePortfolio(optimizationInput(value, loaded));
+            await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, output.candidates, output.paretoFrontier);
+            await context.updateProgress(1, { completedCandidates: output.candidateCount, totalCandidates: budget });
+            return {
+              summary: { best: output.bestByObjective[value.objective as OptimizationObjective], candidate_count: output.candidateCount, pareto_count: output.paretoFrontier.length },
+              result: { ...output, candidates: output.candidates.slice(0, 20), paretoFrontier: output.paretoFrontier.slice(0, 100) },
+              warnings: [...loaded.warnings, ...output.warnings],
+              artifacts: [{ type: "candidates", content: output.candidates, rowCount: output.candidates.length }],
+            };
+          },
+        });
       return runResultEnvelope(queued.run, value);
     },
     walk_forward_optimize: async (input, ownerSubject) => {
@@ -710,7 +771,42 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       value.candidateBudget = Math.min(Number(value.candidateBudget), dependencies.maxCandidateBudget);
       const symbols = [...value.symbols as string[], ...(value.benchmark ? [String(value.benchmark)] : [])];
       const loaded = await dependencies.returnSeries.load({ symbols, fromDate: String(value.fromDate), toDate: String(value.toDate), currencyMode: value.currencyMode as never, adjusted: true });
-      const queued = await dependencies.runs.enqueue({
+      const workerPayload = {
+        optimization: optimizationInput(value, loaded),
+        objective: value.objective,
+        walkForwardConfig: {
+          trainWindow: value.trainWindow,
+          testWindow: value.testWindow,
+          step: value.step,
+          minimumTrainObservations: Math.min(Number(value.trainWindow), 20),
+          minimumTestObservations: Math.min(Number(value.testWindow), 5),
+        },
+        market_warnings: loaded.warnings,
+      };
+      const queued = dependencies.runs.executionMode === "external"
+        ? await dependencies.runs.enqueueExternal({
+          ownerSubject,
+          kind: "walk_forward",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: Number(value.candidateBudget),
+          payload: workerPayload,
+        })
+        : dependencies.runs.executionMode === "rust_socket"
+          ? await dependencies.runs.enqueue({
+            ownerSubject,
+            kind: "walk_forward",
+            config: value,
+            dataRevision: loaded.dataRevision,
+            totalCandidates: Number(value.candidateBudget),
+            task: async (context) => {
+              await context.throwIfCancelled();
+              const output = await requireRust(dependencies).compute("walk_forward", workerPayload);
+              await context.updateProgress(1, { completedCandidates: Number(value.candidateBudget), totalCandidates: Number(value.candidateBudget) });
+              return rustTaskResult(output);
+            },
+          })
+        : await dependencies.runs.enqueue({
         ownerSubject,
         kind: "walk_forward",
         config: value,
@@ -731,8 +827,69 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     stress_test_portfolio: async (input, ownerSubject) => {
       const value = object(input);
       const scenarios = value.scenarios as Array<GenericInput>;
+      const requests = scenarios.map((scenario): BacktestRunRequest => {
+        const base = { ...value.baseConfig as BacktestRunRequest };
+        const exclude = new Set((scenario.excludeSymbols as string[] | undefined) ?? []);
+        const assets = base.assets.filter((asset) => !exclude.has(asset.symbol));
+        const total = assets.reduce((sum, asset) => sum + asset.weight, 0);
+        if (!assets.length || total <= 0) {
+          throw new ServiceError({ code: "EMPTY_STRESS_PORTFOLIO", message: "stress scenario가 모든 종목을 제외할 수 없습니다.", retryable: false });
+        }
+        const cashTarget = base.execution?.cashTargetPercent ?? 0;
+        return {
+          ...base,
+          assets: assets.map((asset) => ({ ...asset, weight: asset.weight / total * (100 - cashTarget) })),
+          ...(scenario.startDate !== undefined ? { startDate: String(scenario.startDate) } : {}),
+          ...(scenario.endDate !== undefined ? { endDate: String(scenario.endDate) } : {}),
+          ...(scenario.transactionCostBps !== undefined ? { transactionCostBps: Number(scenario.transactionCostBps) } : {}),
+          ...(scenario.monthlyCashFlow !== undefined ? { monthlyCashFlow: Number(scenario.monthlyCashFlow) } : {}),
+          ...(scenario.cashFlowFrequency ? { cashFlowFrequency: scenario.cashFlowFrequency as NonNullable<BacktestRunRequest["cashFlowFrequency"]> } : {}),
+          ...(scenario.cashFlowTiming ? { cashFlowTiming: scenario.cashFlowTiming as NonNullable<BacktestRunRequest["cashFlowTiming"]> } : {}),
+          ...(scenario.currencyMode ? { currencyMode: scenario.currencyMode as "local" | "KRW" } : {}),
+          ...(scenario.rebalanceFrequency ? { rebalanceFrequency: scenario.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"] } : {}),
+          ...(scenario.rebalanceThresholdPercent !== undefined ? { rebalanceThresholdPercent: Number(scenario.rebalanceThresholdPercent) } : {}),
+        };
+      });
+      const preparedScenarios: Array<{ id: string; name: unknown; config: BacktestRunRequest; simulation: unknown }> = [];
+      const preparationWarnings: string[] = [];
+      if (dependencies.runs.executionMode === "external" || dependencies.runs.executionMode === "rust_socket") {
+        for (let index = 0; index < requests.length; index += 1) {
+          const prepared = await dependencies.backtestEngine.prepare(requests[index]);
+          preparationWarnings.push(...prepared.responseContext.warnings);
+          preparedScenarios.push({
+            id: `stress-${index + 1}`,
+            name: scenarios[index].name,
+            config: requests[index],
+            simulation: prepared.simulation,
+          });
+        }
+      }
       const revision = await dependencies.marketData.repository.dataRevision();
-      const queued = await dependencies.runs.enqueue({
+      const workerPayload = { scenarios: preparedScenarios, market_warnings: Array.from(new Set(preparationWarnings)) };
+      const queued = dependencies.runs.executionMode === "external"
+        ? await dependencies.runs.enqueueExternal({
+          ownerSubject,
+          kind: "stress_test",
+          config: value,
+          dataRevision: revision,
+          totalCandidates: scenarios.length,
+          payload: workerPayload,
+        })
+        : dependencies.runs.executionMode === "rust_socket"
+          ? await dependencies.runs.enqueue({
+            ownerSubject,
+            kind: "stress_test",
+            config: value,
+            dataRevision: revision,
+            totalCandidates: scenarios.length,
+            task: async (context) => {
+              await context.throwIfCancelled();
+              const output = await requireRust(dependencies).compute("stress_test", workerPayload);
+              await context.updateProgress(1, { completedCandidates: scenarios.length, totalCandidates: scenarios.length });
+              return rustTaskResult(output);
+            },
+          })
+        : await dependencies.runs.enqueue({
         ownerSubject,
         kind: "stress_test",
         config: value,
@@ -928,6 +1085,61 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     analyze_start_date_sensitivity: (input, ownerSubject) => enqueueSensitivity(dependencies, "start_date_sensitivity", object(input), ownerSubject),
     analyze_rebalance_sensitivity: (input, ownerSubject) => enqueueSensitivity(dependencies, "rebalance_sensitivity", object(input), ownerSubject),
     analyze_cash_flow_sensitivity: (input, ownerSubject) => enqueueSensitivity(dependencies, "cash_flow_sensitivity", object(input), ownerSubject),
+    simulate_portfolio_monte_carlo: async (input, ownerSubject) => {
+      if (dependencies.runs.executionMode === "inline") {
+        throw new ServiceError({
+          code: "RUST_COMPUTE_REQUIRED",
+          message: "Monte Carlo는 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
+          retryable: false,
+        });
+      }
+      const value = object(input);
+      const loaded = await dependencies.returnSeries.load({
+        symbols: value.symbols as string[],
+        fromDate: String(value.fromDate),
+        toDate: String(value.toDate),
+        currencyMode: value.currencyMode as "local" | "KRW",
+        adjusted: true,
+      });
+      const payload = {
+        monte_carlo: {
+          priceSeries: loaded.prices,
+          weights: value.weights,
+          initialAmount: value.initialAmount,
+          horizonDays: value.horizonDays,
+          pathCount: value.pathCount,
+          blockLength: value.blockLength,
+          seed: value.seed,
+          goalAmount: value.goalAmount,
+          quantiles: value.quantiles,
+          samplePathCount: value.samplePathCount,
+        },
+        market_warnings: loaded.warnings,
+      };
+      const dispatched = dependencies.runs.executionMode === "external"
+        ? await dependencies.runs.enqueueExternal({
+          ownerSubject,
+          kind: "monte_carlo",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: Number(value.pathCount),
+          payload,
+        })
+        : await dependencies.runs.enqueue({
+          ownerSubject,
+          kind: "monte_carlo",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: Number(value.pathCount),
+          task: async (context) => {
+            await context.throwIfCancelled();
+            const output = await requireRust(dependencies).compute("monte_carlo", payload);
+            await context.updateProgress(1, { completedCandidates: Number(value.pathCount), totalCandidates: Number(value.pathCount) });
+            return rustTaskResult(output);
+          },
+        });
+      return runResultEnvelope(dispatched.run, value);
+    },
     explain_data_quality: (input) => dependencies.analytics.dataQuality(object(input) as never),
     get_run_status: async (input, ownerSubject) => {
       const value = object(input);
@@ -981,18 +1193,22 @@ async function enqueueSensitivity(
   ownerSubject: string,
 ) {
   const base = value.baseConfig as BacktestRunRequest;
+  const investedTargetPercent = 100 - (base.execution?.cashTargetPercent ?? 0);
   const scenarios: BacktestRunRequest[] = [];
   if (kind === "weight_sensitivity") {
     const target = String(value.targetSymbol);
     for (const targetWeight of value.targetWeights as number[]) {
+      if (targetWeight * 100 > investedTargetPercent + 0.01) {
+        throw new ServiceError({ code: "TARGET_WEIGHT_EXCEEDS_INVESTED_TARGET", message: "대상 비중이 현금 목표를 제외한 투자 가능 비중보다 큽니다.", retryable: false });
+      }
       const current = base.assets.find((asset) => asset.symbol === target);
       if (!current) throw new ServiceError({ code: "TARGET_ASSET_NOT_FOUND", message: "민감도 대상 종목이 포트폴리오에 없습니다.", retryable: false });
       const others = base.assets.filter((asset) => asset.symbol !== target);
       const otherTotal = others.reduce((sum, asset) => sum + asset.weight, 0);
       const adjustedAssets = [
-        ...(targetWeight > 0 ? [{ symbol: target, weight: targetWeight * 100 }] : []),
+        ...(targetWeight > 0 ? [{ symbol: target, weight: targetWeight * 100, lotSize: current.lotSize }] : []),
         ...others
-          .map((asset) => ({ symbol: asset.symbol, weight: otherTotal > 0 ? asset.weight / otherTotal * (100 - targetWeight * 100) : 0 }))
+          .map((asset) => ({ ...asset, weight: otherTotal > 0 ? asset.weight / otherTotal * (investedTargetPercent - targetWeight * 100) : 0 }))
           .filter((asset) => asset.weight > 0),
       ];
       scenarios.push({
@@ -1024,8 +1240,46 @@ async function enqueueSensitivity(
       }
     }
   }
+  const preparedScenarios: Array<{ id: string; name: string; config: BacktestRunRequest; simulation: unknown }> = [];
+  const preparationWarnings: string[] = [];
+  if (dependencies.runs.executionMode === "external" || dependencies.runs.executionMode === "rust_socket") {
+    for (let index = 0; index < scenarios.length; index += 1) {
+      const prepared = await dependencies.backtestEngine.prepare(scenarios[index]);
+      preparationWarnings.push(...prepared.responseContext.warnings);
+      preparedScenarios.push({
+        id: `s-${String(index + 1).padStart(4, "0")}`,
+        name: `${kind}-${index + 1}`,
+        config: scenarios[index],
+        simulation: prepared.simulation,
+      });
+    }
+  }
   const dataRevision = await dependencies.marketData.repository.dataRevision();
-  const queued = await dependencies.runs.enqueue({
+  const workerPayload = { scenarios: preparedScenarios, market_warnings: Array.from(new Set(preparationWarnings)) };
+  const queued = dependencies.runs.executionMode === "external"
+    ? await dependencies.runs.enqueueExternal({
+      ownerSubject,
+      kind,
+      config: value,
+      dataRevision,
+      totalCandidates: scenarios.length,
+      payload: workerPayload,
+    })
+    : dependencies.runs.executionMode === "rust_socket"
+      ? await dependencies.runs.enqueue({
+        ownerSubject,
+        kind,
+        config: value,
+        dataRevision,
+        totalCandidates: scenarios.length,
+        task: async (context) => {
+          await context.throwIfCancelled();
+          const output = await requireRust(dependencies).compute(kind, workerPayload);
+          await context.updateProgress(1, { completedCandidates: scenarios.length, totalCandidates: scenarios.length });
+          return rustTaskResult(output);
+        },
+      })
+    : await dependencies.runs.enqueue({
     ownerSubject,
     kind,
     config: value,

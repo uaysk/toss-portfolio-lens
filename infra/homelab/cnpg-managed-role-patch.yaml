@@ -1,0 +1,15 @@
+spec:
+  managed:
+    roles:
+      - name: toss_portfolio_lens
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        inherit: true
+        replication: false
+        bypassrls: false
+        connectionLimit: 24
+        passwordSecret:
+          name: toss-portfolio-lens-db

@@ -74,6 +74,7 @@ export class OptimizationRepository {
       return;
     }
     const timestampType = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
+    const scoreType = this.database.dialect === "postgres" ? "DOUBLE PRECISION" : "REAL";
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_optimization_runs (
         run_id TEXT PRIMARY KEY REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE,
@@ -93,12 +94,18 @@ export class OptimizationRepository {
         candidate_rank INTEGER,
         weights_json TEXT NOT NULL,
         metrics_json TEXT NOT NULL,
-        score REAL NOT NULL,
+        score ${scoreType} NOT NULL,
         pareto INTEGER NOT NULL DEFAULT 0,
         created_at ${timestampType} NOT NULL,
         UNIQUE(run_id, candidate_hash)
       )
     `);
+    if (this.database.dialect === "postgres") {
+      await this.database.run(`
+        ALTER TABLE portfolio_optimization_candidates
+        ALTER COLUMN score TYPE DOUBLE PRECISION
+      `);
+    }
     await this.database.run(`
       CREATE INDEX IF NOT EXISTS idx_optimization_candidate_rank
       ON portfolio_optimization_candidates(run_id, candidate_rank)
@@ -178,6 +185,45 @@ export class OptimizationRepository {
     }
   }
 
+  async putCandidates(inputs: Array<Omit<OptimizationCandidateRecord, "id" | "createdAt"> & {
+    createdAt?: number;
+  }>): Promise<void> {
+    if (!inputs.length) return;
+    if (this.database.dialect !== "postgres") {
+      for (const input of inputs) await this.putCandidate(input);
+      return;
+    }
+    const chunkSize = 250;
+    for (let offset = 0; offset < inputs.length; offset += chunkSize) {
+      const chunk = inputs.slice(offset, offset + chunkSize);
+      const values: unknown[] = [];
+      const rows = chunk.map((input) => {
+        const weightsJson = JSON.stringify(input.weights);
+        values.push(
+          randomUUID(),
+          input.runId,
+          createHash("sha256").update(weightsJson).digest("hex"),
+          input.rank,
+          weightsJson,
+          JSON.stringify(input.metrics),
+          input.score,
+          input.pareto ? 1 : 0,
+          input.createdAt ?? Date.now(),
+        );
+        return "(?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      });
+      await this.database.run(`
+        INSERT INTO portfolio_optimization_candidates (
+          candidate_id, run_id, candidate_hash, candidate_rank, weights_json,
+          metrics_json, score, pareto, created_at
+        ) VALUES ${rows.join(", ")}
+        ON CONFLICT(run_id, candidate_hash) DO UPDATE SET
+          candidate_rank = excluded.candidate_rank, metrics_json = excluded.metrics_json,
+          score = excluded.score, pareto = excluded.pareto
+      `, values);
+    }
+  }
+
   async listCandidates(runId: string, limit = 100): Promise<OptimizationCandidateRecord[]> {
     const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
     const rows = await this.database.query<CandidateRow>(`
@@ -190,6 +236,13 @@ export class OptimizationRepository {
       LIMIT ${safeLimit}
     `, [runId]);
     return rows.map(parseCandidate);
+  }
+
+  async candidateCount(runId: string): Promise<number> {
+    const [row] = await this.database.query<{ candidate_count: number | string }>(`
+      SELECT COUNT(*) AS candidate_count FROM portfolio_optimization_candidates WHERE run_id = ?
+    `, [runId]);
+    return Number(row?.candidate_count ?? 0);
   }
 
   async listParetoCandidates(runId: string, limit = 100): Promise<OptimizationCandidateRecord[]> {

@@ -181,7 +181,7 @@ assert(rpc.response.status === 200 && rpc.payload?.result?.serverInfo?.name === 
 assert(rpc.sessionId, "stateful MCP initialize omitted a session ID");
 
 rpc = await mcp(issued.access_token, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, rpc.sessionId);
-assert(rpc.payload?.result?.tools?.length === 30, "tools/list did not return exactly 30 tools");
+assert(rpc.payload?.result?.tools?.length === 31, "tools/list did not return exactly 31 tools");
 
 rpc = await mcp(issued.access_token, {
   jsonrpc: "2.0",

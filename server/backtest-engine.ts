@@ -15,6 +15,7 @@ export type BacktestAssetDefinition = {
   currency: "KRW" | "USD";
   listDate: string;
   weight: number;
+  lotSize?: number;
 };
 
 export type BacktestPricePoint = {
@@ -50,6 +51,7 @@ export type BacktestComparableMetrics = {
 export type BacktestSimulationInput = {
   assets: BacktestAssetDefinition[];
   prices: ReadonlyMap<string, BacktestPricePoint[]>;
+  observedDates?: ReadonlyMap<string, string[]>;
   requestedStartDate: string;
   endDate: string;
   initialAmount: number;
@@ -60,6 +62,14 @@ export type BacktestSimulationInput = {
   riskFreeRatePercent?: number;
   transactionCostBps?: number;
   rebalanceThresholdPercent?: number;
+  cashFlows?: Array<{ date: string; amount: number; memo?: string }>;
+  execution?: {
+    cashTargetPercent?: number;
+    quantityMode?: "fractional" | "whole";
+    cashFlowRebalanceMode?: "target_weights" | "drift_reduction" | "full";
+    tradeDatePolicy?: "next_common_observation";
+    cashAnnualYieldPercent?: number;
+  };
   benchmark?: BacktestBenchmarkDefinition;
 };
 
@@ -73,11 +83,20 @@ export type BacktestSimulationResult = {
     growth: number;
     benchmarkGrowth?: number;
     drawdownPercent: number;
+    cashBalance?: number;
+    investedBalance?: number;
+    unitPrice?: number;
   }>;
   metrics: BacktestComparableMetrics & {
     finalBalance: number;
     totalContributions: number;
     totalWithdrawals: number;
+    endingCashBalance?: number;
+    endingCashWeightPercent?: number;
+    investedBalance?: number;
+    totalTransactionCosts?: number;
+    netProfitLoss?: number;
+    moneyWeightedReturnPercent?: number | null;
   };
   benchmarkMetrics?: BacktestComparableMetrics;
   annualReturns: Array<{ year: number; returnPercent: number }>;
@@ -108,8 +127,14 @@ export type BacktestSimulationResult = {
     amount: number;
     quantity: number;
     price: number;
-    reason: "initial" | "cash-flow" | "rebalance";
+    reason: string;
+    transactionCost?: number;
+    netCashImpact?: number;
+    trigger?: string;
+    lotSize?: number;
   }>;
+  cashFlows?: Array<{ scheduledDate: string; effectiveDate: string; amount: number; source: string; memo?: string }>;
+  execution?: NonNullable<BacktestSimulationInput["execution"]>;
   dataQuality: {
     alignmentPolicy: "carry_forward_for_valuation";
     commonReturnPolicy: "inner_join";
@@ -177,11 +202,13 @@ function shouldRebalance(previousDate: string, currentDate: string, frequency: B
 
 function commonObservedReturns(
   seriesByAsset: BacktestPricePoint[][],
+  observedByAsset: ReadonlySet<string>[],
 ): { returns: number[][]; observations: number } {
   if (!seriesByAsset.length) return { returns: [], observations: 0 };
-  const maps = seriesByAsset.map((series) => new Map(series.map((point) => [point.date, point.close])));
-  const commonDates = seriesByAsset[0]
-    .map((point) => point.date)
+  const maps = seriesByAsset.map((series, index) => new Map(
+    series.filter((point) => observedByAsset[index].has(point.date)).map((point) => [point.date, point.close]),
+  ));
+  const commonDates = Array.from(observedByAsset[0])
     .filter((date) => maps.every((values) => values.has(date)))
     .sort();
   const returns = seriesByAsset.map(() => [] as number[]);
@@ -357,6 +384,12 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       .filter((point) => point.date >= input.requestedStartDate && point.date <= input.endDate && point.close > 0)
       .sort((left, right) => left.date.localeCompare(right.date))
     : [];
+  const observedByAsset = input.assets.map((asset, index) => new Set(
+    input.observedDates?.get(keyForAsset(asset)) ?? seriesByAsset[index].map((point) => point.date),
+  ));
+  const benchmarkObserved = new Set(
+    input.benchmark ? input.observedDates?.get(input.benchmark.key) ?? benchmarkSeries.map((point) => point.date) : [],
+  );
   if (input.benchmark && !benchmarkSeries.length) {
     throw new BacktestValidationError(`${input.benchmark.name}의 선택 기간 일봉이 없습니다.`);
   }
@@ -385,13 +418,17 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       const series = seriesByAsset[assetIndex];
       while (assetCursors[assetIndex] < series.length && series[assetCursors[assetIndex]].date <= date) {
         assetPoints[assetIndex] = series[assetCursors[assetIndex]];
-        assetLastObservedDates[assetIndex] = series[assetCursors[assetIndex]].date;
+        if (observedByAsset[assetIndex].has(series[assetCursors[assetIndex]].date)) {
+          assetLastObservedDates[assetIndex] = series[assetCursors[assetIndex]].date;
+        }
         assetCursors[assetIndex] += 1;
       }
     }
     while (benchmarkCursor < benchmarkSeries.length && benchmarkSeries[benchmarkCursor].date <= date) {
       benchmarkPoint = benchmarkSeries[benchmarkCursor];
-      benchmarkLastObservedDate = benchmarkSeries[benchmarkCursor].date;
+      if (benchmarkObserved.has(benchmarkSeries[benchmarkCursor].date)) {
+        benchmarkLastObservedDate = benchmarkSeries[benchmarkCursor].date;
+      }
       benchmarkCursor += 1;
     }
     if (assetPoints.every((point) => (point?.close ?? 0) > 0) && (!input.benchmark || (benchmarkPoint?.close ?? 0) > 0)) {
@@ -609,7 +646,7 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     };
   }).sort((left, right) => right.contributionPercent - left.contributionPercent);
 
-  const commonReturns = commonObservedReturns(seriesByAsset);
+  const commonReturns = commonObservedReturns(seriesByAsset, observedByAsset);
   const correlations = input.assets.map((_, leftIndex) => (
     input.assets.map((__, rightIndex) => leftIndex === rightIndex
       ? 1
@@ -632,7 +669,11 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
         key: input.benchmark.key,
         name: input.benchmark.name,
         returns: benchmarkReturns,
-        observations: benchmarkSeries.filter((point) => point.date >= effectiveStartDate && point.date <= effectiveEndDate).length,
+        observations: benchmarkSeries.filter((point) => (
+          point.date >= effectiveStartDate
+          && point.date <= effectiveEndDate
+          && benchmarkObserved.has(point.date)
+        )).length,
       },
     } : {}),
     averageWeights,
@@ -642,8 +683,12 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     transactionCostBps,
     riskFreeRatePercent,
     grossReturnPercent: portfolioSummary.metrics.totalReturnPercent,
-    priceCoverage: seriesByAsset.map((series) => {
-      const observations = series.filter((point) => point.date >= effectiveStartDate && point.date <= effectiveEndDate);
+    priceCoverage: seriesByAsset.map((series, assetIndex) => {
+      const observations = series.filter((point) => (
+        point.date >= effectiveStartDate
+        && point.date <= effectiveEndDate
+        && observedByAsset[assetIndex].has(point.date)
+      ));
       return {
         observations: observations.length,
         alignedDays: aligned.length,

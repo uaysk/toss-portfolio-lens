@@ -147,11 +147,22 @@ curl http://localhost:3200/api/health
 | `REPORT_AI_PROVIDER` | `openai` 또는 `bedrock` |
 | `DB_PROVIDER` | 사용할 DB: `sqlite`, `mysql`, `postgresql` |
 | `POSTGRES_*` | `DB_PROVIDER=postgresql` 연결, TLS와 CA 검증 설정 포함 |
+| `EXECUTION_MODE` | `rust_socket`(기본), 명시적 롤백용 `inline`, PostgreSQL durable queue `external` |
+| `RUST_COMPUTE_*` | 로컬 Unix domain socket 경로, pool 크기와 timeout |
+| `RUST_WORKER_*` | external Rust worker의 poll, lease, heartbeat, recovery 설정 |
 | `MYSQL_*` | `DB_PROVIDER=mysql` MySQL/MariaDB 연결, TLS와 CA 검증 설정 포함 |
 | `CANDLE_CACHE_LATEST_TTL_MS` | 최신 candle 페이지 캐시 TTL; 과거 페이지는 만료 없음 |
 | `S3_*` | 선택적 비공개 보고서 저장소 설정 |
 
 전체 예시는 [.env.example](.env.example)을 참고하세요.
+
+기본 Compose는 Node control plane과 별도 Rust compute 프로세스를 함께 시작합니다. Node는 인증·시세/환율 snapshot·run 상태·artifact·MCP 응답만 담당하고, 백테스트 ledger, 최적화, Walk-forward, stress·민감도와 Monte Carlo는 persistent Unix domain socket을 통해 Rust가 계산합니다. 프레임은 4-byte big-endian 길이 + JSON payload이며 요청마다 engine/run/job/revision/request hash를 대조합니다. `npm run dev`도 같은 두 프로세스를 시작하고, 이전 Node 계산기는 `npm run dev:legacy`에서만 명시적으로 사용할 수 있습니다.
+
+`EXECUTION_MODE=external`은 PostgreSQL에서만 시작됩니다. Rust worker가 `FOR UPDATE SKIP LOCKED`로 작업을 claim하고 lease·heartbeat·절대 deadline·취소 fencing을 적용하며, 입력/출력은 크기·checksum이 검증된 immutable gzip DB artifact로 교환합니다. worker에는 Toss/OAuth/보고서 secret을 전달하지 않습니다. 로컬 Compose에서는 `EXECUTION_MODE=external docker compose --profile external-compute up --build -d --no-deps web compute-worker`로 UDS worker 없이 활성화합니다.
+
+Rust UDS가 시작되지 않는 장애에서 inline으로 긴급 롤백할 때는 기본 `web -> compute-ipc` 시작 의존성을 건너뛰어야 합니다. `EXECUTION_MODE=inline docker compose up -d --no-deps web`으로 web만 재생성하고 `/api/health`의 실행 모드를 확인한 뒤, 남아 있는 `compute-ipc`는 중지합니다. 데이터 volume과 run/artifact 기록은 삭제하지 않습니다.
+
+Rust ledger는 과거 USD/KRW 평가 경로, 실제 거래비용 차감, 현금 목표·정수 수량·잔여 현금, 공통 실제 관측일 거래, 임계치/정기/현금흐름 리밸런싱, 사용자 현금흐름과 XIRR을 처리합니다. 같은 worker에서 다중 설정 민감도, stress, Walk-forward, moving-block Monte Carlo와 제약 최적화를 실행합니다. 구현 구조와 실제 Node/Python/Rust 성능은 [Rust 전환 보고서](docs/presentation/rust-migration-report.html), 원시 수치는 [벤치마크 JSON](benchmarks/results/rust-ipc-benchmark-2026-07-18.json)에 있습니다.
 
 ## ChatGPT 앱과 MCP 연결
 
@@ -174,7 +185,7 @@ npm run mcp:oauth:bootstrap
 docker compose -f compose.yaml -f compose.chatgpt.yaml --env-file .env --env-file .env.chatgpt up -d --build web
 ```
 
-Secret 값은 명령 출력에 표시되지 않으며 `secrets/` 전체가 Git과 Docker build context에서 제외됩니다. OAuth Code + PKCE S256, RS256 JWT, 회전형 refresh token, revocation, 네 scope, 30개 도구, 대용량 resource, 선택적 보고서 옵션, Inspector·HTTP smoke와 롤백 절차는 [MCP와 ChatGPT 연결 가이드](docs/mcp-chatgpt.md)에 정리했습니다.
+Secret 값은 명령 출력에 표시되지 않으며 `secrets/` 전체가 Git과 Docker build context에서 제외됩니다. OAuth Code + PKCE S256, RS256 JWT, 회전형 refresh token, revocation, 네 scope, 31개 도구, 대용량 resource, 선택적 보고서 옵션, Inspector·HTTP smoke와 롤백 절차는 [MCP와 ChatGPT 연결 가이드](docs/mcp-chatgpt.md)에 정리했습니다. 도구 호출 감사 로그는 인자·결과·token 없이 실제 JSON-RPC ID, 해시된 subject/session, 도구, 상태, 시간과 연결 run만 DB에 저장하고 기본 90일 후 정리합니다.
 
 ## AWS에 재배포
 
@@ -202,7 +213,8 @@ kubectl --context toss-portfolio-lens -n portfolio-lens rollout status deploy/po
 ## 기술 구성
 
 - React, TypeScript, Vite, shadcn/ui, Recharts
-- Express, Vitest, Playwright
+- Express control plane, Rust/Rayon compute worker, length-prefixed Unix domain socket
+- Vitest, Cargo test/clippy, Playwright
 - SQLite / PostgreSQL / MySQL·MariaDB
 - Docker, Kubernetes, CloudFormation
 - Amazon EKS, ECR, RDS, S3, Secrets Manager, Bedrock, NLB
@@ -213,6 +225,10 @@ kubectl --context toss-portfolio-lens -n portfolio-lens rollout status deploy/po
 npm run typecheck
 npm test
 npm run build
+npm run test:rust-worker
+npm run benchmark:rust-ipc
+# 테스트 PostgreSQL이 있을 때
+npm run test:rust-worker-postgres
 ```
 
 발표용 화면은 Playwright로 같은 데이터와 뷰포트에서 재현하며, 생성 원본은 `docs/presentation/generated/`에 보관합니다. 토스증권 호환 API의 정확한 요청·응답 형식은 [토스증권 Open API 문서](https://developers.tossinvest.com/docs)를 기준으로 합니다.

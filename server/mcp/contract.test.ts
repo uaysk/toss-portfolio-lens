@@ -16,6 +16,7 @@ const expectedTools: ToolName[] = [
   "optimize_portfolio", "walk_forward_optimize", "stress_test_portfolio", "build_pareto_frontier",
   "find_redundant_assets", "analyze_rebalance_plan", "analyze_weight_sensitivity",
   "analyze_start_date_sensitivity", "analyze_rebalance_sensitivity", "analyze_cash_flow_sensitivity",
+  "simulate_portfolio_monte_carlo",
   "explain_data_quality", "get_run_status", "cancel_run", "get_run_result",
   "generate_backtest_report", "get_report",
 ];
@@ -65,6 +66,11 @@ const validToolInputs: Record<ToolName, Record<string, unknown>> = {
   analyze_start_date_sensitivity: { baseConfig: baseBacktest, offsetsDays: [0, 30] },
   analyze_rebalance_sensitivity: { baseConfig: baseBacktest, modes: ["none", "quarterly"] },
   analyze_cash_flow_sensitivity: { baseConfig: baseBacktest, monthlyAmounts: [0, 100_000] },
+  simulate_portfolio_monte_carlo: {
+    symbols: ["AAA", "BBB"], weights: { AAA: 0.6, BBB: 0.4 },
+    fromDate: "2024-01-01", toDate: "2024-12-31", initialAmount: 1_000_000,
+    pathCount: 100, horizonDays: 20, blockLength: 5,
+  },
   explain_data_quality: { symbols: ["AAA", "BBB"], fromDate: "2024-01-01", toDate: "2024-12-31" },
   get_run_status: { runId: run1 },
   cancel_run: { runId: run1 },
@@ -82,7 +88,7 @@ describe("MCP tool contract", () => {
     await server?.close().catch(() => undefined);
   });
 
-  it("tools/list에 정확히 30개 도구와 schema, securitySchemes, annotations를 노출한다", async () => {
+  it("tools/list에 정확히 31개 도구와 schema, securitySchemes, annotations를 노출한다", async () => {
     const resources = { register: vi.fn() };
     const dependencies = {
       resources,
@@ -133,7 +139,7 @@ describe("MCP tool contract", () => {
     }
   });
 
-  it("30개 도구의 대표 유효 입력과 enum·날짜·비중·상한 오류를 스키마에서 검증한다", () => {
+  it("31개 도구의 대표 유효 입력과 enum·날짜·비중·상한 오류를 스키마에서 검증한다", () => {
     for (const name of expectedTools) {
       expect(toolSchemas[name].safeParse(validToolInputs[name]).success, name).toBe(true);
       expect(toolSchemas[name].safeParse({ ...validToolInputs[name], unexpectedField: true }).success, name).toBe(false);
@@ -145,7 +151,7 @@ describe("MCP tool contract", () => {
     expect(toolSchemas.optimize_portfolio.safeParse({ ...optimization, objective: "max_information_ratio" }).success).toBe(false);
   });
 
-  it("30개 handler가 합성 서비스와 저장소에서 유효 입력을 처리하고 공통 envelope를 반환한다", async () => {
+  it("31개 handler가 합성 서비스와 저장소에서 유효 입력을 처리하고 공통 envelope를 반환한다", async () => {
     const dates = Array.from({ length: 80 }, (_, index) => new Date(Date.UTC(2024, 0, 2 + index)).toISOString().slice(0, 10));
     const loaded = (symbols: string[]) => ({
       prices: symbols.map((symbol, symbolIndex) => ({
@@ -305,7 +311,7 @@ describe("MCP tool contract", () => {
     }
   });
 
-  it("30개 도구가 각자의 OAuth scope 부족을 challenge로 반환하고 민감값을 노출하지 않는다", async () => {
+  it("31개 도구가 각자의 OAuth scope 부족을 challenge로 반환하고 민감값을 노출하지 않는다", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const dependencies = {
       resources: { register: vi.fn() },
@@ -339,7 +345,7 @@ describe("MCP tool contract", () => {
       ]);
       expect(JSON.stringify(result), name).not.toContain("must-not-leak-token");
     }
-    expect(info).toHaveBeenCalledTimes(30);
+    expect(info).toHaveBeenCalledTimes(31);
     info.mockRestore();
   });
 

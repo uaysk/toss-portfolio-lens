@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "rust-ipc-benchmark-v2",
+  "generatedAt": "2026-07-17T19:20:29.149Z",
+  "environment": {
+    "platform": "linux-x64",
+    "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "logicalCores": 12,
+    "node": "v22.14.0",
+    "python": "3.12",
+    "rust": "1.97.0",
+    "rayonThreads": "logical-core-default",
+    "ipc": "persistent-unix-domain-socket-length-prefixed-json-v2"
+  },
+  "fixture": {
+    "dayCount": 1260,
+    "assetCount": 8,
+    "candidateBudget": 1000,
+    "backtestIterations": 10,
+    "optimizationIterations": 3
+  },
+  "comparisonBasis": {
+    "backtest": "Node legacy projection and feature-complete Rust ledger share the same core numeric fixture; Rust additionally computes cash/cost/XIRR/full analytics.",
+    "optimization": "Node, Python, and Rust evaluate the same deterministic candidate fixture; Node/Rust numeric parity is verified separately.",
+    "rustUdsRoundTrip": "End-to-end Node stringify + UDS frame + Rust decode/compute/encode + Node parse."
+  },
+  "backtest": {
+    "nodeCompute": { "iterations": 10, "p50Ms": 41.372, "p95Ms": 48.577, "minMs": 38.388, "maxMs": 48.577 },
+    "nodeJsonRoundTrip": { "iterations": 10, "p50Ms": 47.637, "p95Ms": 54.593, "minMs": 43.372, "maxMs": 54.593 },
+    "pythonCompute": { "iterations": 10, "p50Ms": 155.558, "p95Ms": 161.878, "minMs": 146.274, "maxMs": 161.878 },
+    "pythonProcessTotalMs": 1903.133,
+    "rustCompute": { "iterations": 10, "p50Ms": 41.05, "p95Ms": 49.733, "minMs": 39.087, "maxMs": 49.733 },
+    "rustRequestDecode": { "iterations": 10, "p50Ms": 9.265, "p95Ms": 11.217, "minMs": 8.525, "maxMs": 11.217 },
+    "rustWorkerElapsed": { "iterations": 10, "p50Ms": 50.197, "p95Ms": 60.627, "minMs": 47.613, "maxMs": 60.627 },
+    "rustUdsRoundTrip": { "iterations": 10, "p50Ms": 77.08, "p95Ms": 88.478, "minMs": 74.491, "maxMs": 88.478 },
+    "resultBytes": { "node": 575367, "rust": 704925 },
+    "speedup": {
+      "rustVsNodeCompute": 1.008,
+      "rustVsPythonCompute": 3.789,
+      "rustUdsVsNodeCompute": 0.537,
+      "rustUdsVsNodeJsonRoundTrip": 0.618
+    }
+  },
+  "optimization": {
+    "nodeCompute": { "iterations": 3, "p50Ms": 5877.547, "p95Ms": 5887.639, "minMs": 5859.029, "maxMs": 5887.639 },
+    "nodeJsonRoundTrip": { "iterations": 3, "p50Ms": 5886.977, "p95Ms": 5898.289, "minMs": 5868.819, "maxMs": 5898.289 },
+    "pythonCompute": { "iterations": 3, "p50Ms": 210.928, "p95Ms": 230.468, "minMs": 196.235, "maxMs": 230.468 },
+    "pythonProcessTotalMs": 1139.698,
+    "rustCompute": { "iterations": 3, "p50Ms": 90.999, "p95Ms": 93.57, "minMs": 89.621, "maxMs": 93.57 },
+    "rustRequestDecode": { "iterations": 3, "p50Ms": 8.131, "p95Ms": 8.65, "minMs": 5.574, "maxMs": 8.65 },
+    "rustWorkerElapsed": { "iterations": 3, "p50Ms": 99.145, "p95Ms": 99.65, "minMs": 97.753, "maxMs": 99.65 },
+    "rustUdsRoundTrip": { "iterations": 3, "p50Ms": 118.688, "p95Ms": 120.201, "minMs": 116.206, "maxMs": 120.201 },
+    "speedup": {
+      "rustVsNodeCompute": 64.589,
+      "rustVsPythonCompute": 2.318,
+      "rustUdsVsNodeCompute": 49.521,
+      "rustUdsVsNodeJsonRoundTrip": 49.6
+    }
+  }
+}

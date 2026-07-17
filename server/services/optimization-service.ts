@@ -426,7 +426,22 @@ function evaluatePortfolioCandidate(
     transactionCostBps: number;
   },
 ): PortfolioCandidate {
-  const portfolio = buildPortfolioReturnSeries(frame, weights);
+  const grossPortfolio = buildPortfolioReturnSeries(frame, weights);
+  const targetWeight = frame.ids.reduce((sum, id) => sum + (weights[id] ?? 0), 0);
+  const currentWeight = frame.ids.reduce((sum, id) => sum + (options.constraints.currentWeights[id] ?? 0), 0);
+  const assetTurnover = frame.ids.reduce(
+    (sum, id) => sum + Math.abs((weights[id] ?? 0) - (options.constraints.currentWeights[id] ?? 0)),
+    0,
+  );
+  const cashTurnover = Math.abs((1 - targetWeight) - (1 - currentWeight));
+  const turnover = 0.5 * (assetTurnover + cashTurnover);
+  const transactionCost = turnover * options.transactionCostBps / 10_000;
+  const portfolio: ReturnSeriesInput = {
+    ...grossPortfolio,
+    points: grossPortfolio.points.map((point, index) => index === 0
+      ? { ...point, value: (1 - transactionCost) * (1 + point.value) - 1 }
+      : point),
+  };
   const stats = analyzeReturnSeries(portfolio, {
     annualization: options.annualization,
     confidence: options.confidence,
@@ -460,10 +475,9 @@ function evaluatePortfolioCandidate(
     robustScore: null,
     return: stats.cagr,
     maxDrawdown: stats.maxDrawdown,
-    turnover: 0.5 * frame.ids.reduce((sum, id) => sum + Math.abs((weights[id] ?? 0) - (options.constraints.currentWeights[id] ?? 0)), 0),
-    transactionCost: 0,
+    turnover,
+    transactionCost,
   };
-  metrics.transactionCost = metrics.turnover * options.transactionCostBps / 10_000;
 
   const robustValues = [
     metrics.sharpe,

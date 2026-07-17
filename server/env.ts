@@ -48,6 +48,16 @@ export type TossApiAuthConfig =
   };
 
 export type DatabaseProvider = "sqlite" | "mysql" | "postgresql";
+export type ComputeExecutionMode = "inline" | "rust_socket" | "external";
+
+export type ComputeConfig = {
+  executionMode: ComputeExecutionMode;
+  resultPollMs: number;
+  resultDeadlineMs: number;
+  rustSocketPath: string;
+  rustSocketPoolSize: number;
+  rustSocketTimeoutMs: number;
+};
 
 export type McpAuthMode = "oauth" | "none";
 
@@ -74,11 +84,14 @@ export type McpConfig = {
   maxRequestsPerMinute: number;
   maxConcurrentRuns: number;
   maxRunsPerSubject: number;
+  maxQueuedRuns: number;
+  runDeadlineMs: number;
   maxAssets: number;
   maxCandidateBudget: number;
   maxDateRangeYears: number;
   inlineResultMaxRows: number;
   inlineResultMaxBytes: number;
+  auditRetentionDays: number;
 };
 
 export type AppConfig = TossApiAuthConfig & {
@@ -98,6 +111,7 @@ export type AppConfig = TossApiAuthConfig & {
   openAi?: OpenAiConfig;
   bedrock?: BedrockConfig;
   reportStorage: ReportStorageConfig;
+  compute: ComputeConfig;
   mcp: McpConfig;
 };
 
@@ -374,10 +388,13 @@ function readMcpConfig({
     maxConcurrentRuns: readBoundedInteger("MCP_MAX_CONCURRENT_RUNS", 1, 1, 32),
     maxRunsPerSubject: readBoundedInteger("MCP_MAX_RUNS_PER_SUBJECT", 2, 1, 32),
     maxAssets: readBoundedInteger("MCP_MAX_ASSETS", 20, 1, 20),
-    maxCandidateBudget: readBoundedInteger("MCP_MAX_CANDIDATE_BUDGET", 10_000, 1, 100_000),
+    maxCandidateBudget: readBoundedInteger("MCP_MAX_CANDIDATE_BUDGET", 2_000, 1, 100_000),
+    maxQueuedRuns: readBoundedInteger("MCP_MAX_QUEUED_RUNS", 4, 1, 1_000),
+    runDeadlineMs: readBoundedInteger("MCP_RUN_DEADLINE_MS", 120_000, 1_000, 3_600_000),
     maxDateRangeYears: readBoundedInteger("MCP_MAX_DATE_RANGE_YEARS", 20, 1, 50),
     inlineResultMaxRows: readBoundedInteger("MCP_INLINE_RESULT_MAX_ROWS", 1_000, 10, 100_000),
     inlineResultMaxBytes: readBoundedInteger("MCP_INLINE_RESULT_MAX_BYTES", 204_800, 1_024, 10_485_760),
+    auditRetentionDays: readBoundedInteger("MCP_AUDIT_RETENTION_DAYS", 90, 1, 3_650),
   };
   if (!enabled) return { enabled: false, authMode, ...limits };
 
@@ -466,6 +483,28 @@ function readOpenAiConfig(): OpenAiConfig | undefined {
   };
 }
 
+function readComputeConfig(dbProvider: DatabaseProvider): ComputeConfig {
+  const mode = optional("EXECUTION_MODE")?.toLowerCase() || "rust_socket";
+  if (mode !== "inline" && mode !== "rust_socket" && mode !== "external") {
+    throw new Error("EXECUTION_MODE는 inline, rust_socket 또는 external이어야 합니다.");
+  }
+  if (mode === "external" && dbProvider !== "postgresql") {
+    throw new Error("EXECUTION_MODE=external은 DB_PROVIDER=postgresql에서만 사용할 수 있습니다.");
+  }
+  return {
+    executionMode: mode,
+    resultPollMs: optional("RUST_WORKER_RESULT_POLL_MS")
+      ? readBoundedInteger("RUST_WORKER_RESULT_POLL_MS", 250, 25, 10_000)
+      : readBoundedInteger("PYTHON_WORKER_RESULT_POLL_MS", 250, 25, 10_000),
+    resultDeadlineMs: optional("RUST_WORKER_RESULT_DEADLINE_MS")
+      ? readBoundedInteger("RUST_WORKER_RESULT_DEADLINE_MS", 300_000, 1_000, 3_600_000)
+      : readBoundedInteger("PYTHON_WORKER_RESULT_DEADLINE_MS", 300_000, 1_000, 3_600_000),
+    rustSocketPath: optional("RUST_COMPUTE_SOCKET") || "/tmp/toss-portfolio-lens-compute.sock",
+    rustSocketPoolSize: readBoundedInteger("RUST_COMPUTE_POOL_SIZE", 2, 1, 32),
+    rustSocketTimeoutMs: readBoundedInteger("RUST_COMPUTE_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
+  };
+}
+
 function readReportAiConfig(): Pick<AppConfig, "openAi" | "bedrock"> {
   const provider = optional("REPORT_AI_PROVIDER")?.toLowerCase();
   if (provider && provider !== "openai" && provider !== "bedrock") {
@@ -548,6 +587,7 @@ export function loadConfig(): AppConfig {
     publicAppUrl,
     ...reportAi,
     reportStorage: readReportStorage(),
+    compute: readComputeConfig(dbProvider),
     mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
   };
 }

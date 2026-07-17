@@ -9,7 +9,8 @@ export type PortfolioRunKind =
   | "weight_sensitivity"
   | "start_date_sensitivity"
   | "rebalance_sensitivity"
-  | "cash_flow_sensitivity";
+  | "cash_flow_sensitivity"
+  | "monte_carlo";
 
 export type PortfolioRunStatus =
   | "queued"
@@ -368,7 +369,7 @@ export class RunRepository {
     `, [randomUUID(), id, type.slice(0, 64), json(detail), now]);
   }
 
-  async recoverStaleRuns(now = Date.now()): Promise<number> {
+  async recoverStaleRuns(now = Date.now(), preserveExternalJobs = false): Promise<number> {
     const result = await this.database.run(`
       UPDATE portfolio_backtest_runs
       SET status = 'failed',
@@ -376,6 +377,7 @@ export class RunRepository {
           warnings_json = ?,
           finished_at = ?, updated_at = ?
       WHERE status IN ('queued', 'running', 'cancel_requested')
+        ${preserveExternalJobs ? "AND NOT EXISTS (SELECT 1 FROM portfolio_run_jobs job WHERE job.run_id = portfolio_backtest_runs.run_id)" : ""}
     `, [
       json({ code: "STALE_RUN_RECOVERED", message: "서버 재시작으로 실행이 중단되었습니다.", retryable: true }),
       json(["중단 전 저장된 artifact는 보존되었습니다."]),
