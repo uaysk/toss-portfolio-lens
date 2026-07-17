@@ -133,7 +133,7 @@ docker compose up --build -d web
 curl http://localhost:3200/api/health
 ```
 
-기본 데이터베이스는 SQLite입니다. 완전하고 유효한 MySQL 설정이 있으면 MySQL을 사용하고, 기존 SQLite 데이터를 안전하게 마이그레이션합니다. 로컬 AI 보고서는 OpenAI 호환 엔드포인트를, AWS 배포는 Bedrock을 선택할 수 있습니다.
+데이터베이스는 `.env`의 `DB_PROVIDER=sqlite|mysql|postgresql`로 명시합니다. 기본값은 SQLite이며, 외부 DB를 선택하면 기존 SQLite 데이터를 멱등적으로 마이그레이션합니다. 선택한 DB의 연결 또는 마이그레이션이 실패해도 다른 저장소로 자동 전환하지 않고 앱 시작을 중단합니다. 모든 candle은 공통 OHLC 캐시에 저장하며, 동일한 과거 페이지 요청은 원본 응답 캐시에서 반환합니다. 로컬 AI 보고서는 OpenAI 호환 엔드포인트를, AWS 배포는 Bedrock을 선택할 수 있습니다.
 
 주요 환경 변수:
 
@@ -145,7 +145,10 @@ curl http://localhost:3200/api/health
 | `TOSS_API_BASE_URL` | AWS 배포에서는 `https://tpl.uaysk.com/` |
 | `PUBLIC_APP_URL` | 보고서 링크에 사용할 최종 외부 주소 |
 | `REPORT_AI_PROVIDER` | `openai` 또는 `bedrock` |
-| `MYSQL_*` | 선택적 MySQL 연결, TLS와 CA 검증 설정 포함 |
+| `DB_PROVIDER` | 사용할 DB: `sqlite`, `mysql`, `postgresql` |
+| `POSTGRES_*` | `DB_PROVIDER=postgresql` 연결, TLS와 CA 검증 설정 포함 |
+| `MYSQL_*` | `DB_PROVIDER=mysql` MySQL/MariaDB 연결, TLS와 CA 검증 설정 포함 |
+| `CANDLE_CACHE_LATEST_TTL_MS` | 최신 candle 페이지 캐시 TTL; 과거 페이지는 만료 없음 |
 | `S3_*` | 선택적 비공개 보고서 저장소 설정 |
 
 전체 예시는 [.env.example](.env.example)을 참고하세요.
@@ -177,7 +180,7 @@ kubectl --context toss-portfolio-lens -n portfolio-lens rollout status deploy/po
 
 - React, TypeScript, Vite, shadcn/ui, Recharts
 - Express, Vitest, Playwright
-- SQLite / MySQL·MariaDB
+- SQLite / PostgreSQL / MySQL·MariaDB
 - Docker, Kubernetes, CloudFormation
 - Amazon EKS, ECR, RDS, S3, Secrets Manager, Bedrock, NLB
 

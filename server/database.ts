@@ -10,8 +10,13 @@ import {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
+import {
+  Pool as PgPool,
+  type PoolClient as PgPoolClient,
+  type PoolConfig as PgPoolOptions,
+} from "pg";
 
-export type DatabaseDialect = "sqlite" | "mysql";
+export type DatabaseDialect = "sqlite" | "mysql" | "postgres";
 export type DatabaseRow = Record<string, unknown>;
 
 export type RunResult = {
@@ -221,6 +226,93 @@ export async function openMySqlDatabase(config: MySqlConnectionConfig): Promise<
   try {
     await pool.query("SELECT 1");
     return new MySqlConnectionDatabase(pool);
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
+}
+
+export type PostgresConnectionConfig = {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+  connectTimeoutMs: number;
+  ssl?: {
+    rejectUnauthorized: boolean;
+    ca?: string;
+  };
+};
+
+function postgresSql(sql: string): string {
+  let parameter = 0;
+  return sql.replace(/\?/g, () => `$${++parameter}`);
+}
+
+class PostgresConnectionDatabase implements RelationalDatabase {
+  readonly dialect = "postgres" as const;
+
+  constructor(
+    private readonly connection: PgPool | PgPoolClient,
+    private readonly ownsPool = false,
+  ) {}
+
+  async query<T extends DatabaseRow>(sql: string, parameters: unknown[] = []): Promise<T[]> {
+    const result = await this.connection.query(postgresSql(sql), normalizeParameters(parameters));
+    return result.rows as T[];
+  }
+
+  async run(sql: string, parameters: unknown[] = []): Promise<RunResult> {
+    const result = await this.connection.query(postgresSql(sql), normalizeParameters(parameters));
+    return {
+      affectedRows: Number(result.rowCount ?? 0),
+      insertId: 0,
+    };
+  }
+
+  async transaction<T>(work: (database: RelationalDatabase) => Promise<T>): Promise<T> {
+    if (!(this.connection instanceof PgPool)) return work(this);
+    const client = await this.connection.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await work(new PostgresConnectionDatabase(client));
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.ownsPool && this.connection instanceof PgPool) await this.connection.end();
+  }
+}
+
+function postgresPoolOptions(config: PostgresConnectionConfig): PgPoolOptions {
+  return {
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    password: config.password,
+    database: config.database,
+    connectionTimeoutMillis: config.connectTimeoutMs,
+    max: 8,
+    idleTimeoutMillis: 60_000,
+    keepAlive: true,
+    application_name: "toss-portfolio-lens",
+    ...(config.ssl ? { ssl: config.ssl } : {}),
+  };
+}
+
+export async function openPostgresDatabase(config: PostgresConnectionConfig): Promise<RelationalDatabase> {
+  const pool = new PgPool(postgresPoolOptions(config));
+  try {
+    await pool.query("SELECT 1");
+    return new PostgresConnectionDatabase(pool, true);
   } catch (error) {
     await pool.end();
     throw error;

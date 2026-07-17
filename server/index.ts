@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -32,6 +33,7 @@ import {
   type HistoryRange,
 } from "./history.js";
 import {
+  buildReadOnlyMarketPath,
   MarketQueryError,
   type MarketQuery,
   type ReadOnlyMarketFeature,
@@ -41,7 +43,7 @@ import { OpenAiReportWriter, ReportGenerationError } from "./report-ai.js";
 import { createReportStorage } from "./report-storage.js";
 import { isReportId, PortfolioReportService } from "./reports.js";
 import { openConfiguredHistoryStore } from "./storage.js";
-import { TossApiError, TossClient } from "./toss.js";
+import { normalizeCandlePage, TossApiError, TossClient } from "./toss.js";
 
 const config = loadConfig();
 const toss = new TossClient(config);
@@ -244,6 +246,46 @@ async function compatibleMarket(
   setNoStore(response);
   try {
     const query = { ...compatibleMarketQuery(request), ...pathQuery };
+    if (feature === "candles" || feature === "indicator-candles") {
+      const requestPath = buildReadOnlyMarketPath(feature, query);
+      const requestKey = createHash("sha256").update(`${feature}\n${requestPath}`).digest("hex");
+      const cached = await historyStore.getCachedCandleResponse(requestKey);
+      if (cached !== undefined) {
+        response.setHeader("X-Portfolio-Candle-Cache", "HIT");
+        response.json(cached);
+        return;
+      }
+      const result = await toss.getReadOnlyMarketData(feature, query);
+      const fetchedAt = Date.now();
+      const symbol = String(query.symbol).toUpperCase();
+      const interval = query.interval as "1m" | "1d";
+      const adjusted = feature === "candles" && query.adjusted === "true";
+      const page = normalizeCandlePage(result.data, symbol);
+      const expiresAt = query.before ? 0 : fetchedAt + config.candleCacheLatestTtlMs;
+      try {
+        await historyStore.cacheCandleResponse({
+          requestKey,
+          feature,
+          requestPath,
+          source: feature === "indicator-candles" ? "indicator" : "stock",
+          symbol,
+          interval,
+          adjusted,
+          payload: result.data,
+          candles: page.candles,
+          fetchedAt,
+          expiresAt,
+        });
+      } catch (cacheError) {
+        console.warn(
+          "[candle-cache] candle 응답을 저장하지 못했습니다:",
+          cacheError instanceof Error ? cacheError.message : cacheError,
+        );
+      }
+      response.setHeader("X-Portfolio-Candle-Cache", "MISS");
+      response.json(result.data);
+      return;
+    }
     const result = await toss.getReadOnlyMarketData(feature, query);
     response.json(result.data);
   } catch (error) {

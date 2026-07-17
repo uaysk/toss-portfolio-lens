@@ -8,22 +8,20 @@ export type AreaLabelLayout = AreaLabelDatum & {
   anchorY: number;
   labelY: number;
   segmentHeight: number;
-  placement: "inside" | "callout";
 };
 
 type LayoutOptions = {
   scale: (value: number) => number;
   plotTop: number;
   plotBottom: number;
-  minimumInsideHeight?: number;
-  calloutGap?: number;
+  labelGap?: number;
 };
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), maximum);
 }
 
-function distributeCallouts(
+function distributeLabels(
   labels: AreaLabelLayout[],
   plotTop: number,
   plotBottom: number,
@@ -68,8 +66,7 @@ export function layoutAreaLabels(
     scale,
     plotTop,
     plotBottom,
-    minimumInsideHeight = 22,
-    calloutGap = 15,
+    labelGap = 15,
   }: LayoutOptions,
 ): AreaLabelLayout[] {
   let cumulativeValue = 0;
@@ -89,17 +86,11 @@ export function layoutAreaLabels(
       anchorY,
       labelY: anchorY,
       segmentHeight,
-      placement: segmentHeight >= minimumInsideHeight ? "inside" : "callout",
     });
   }
 
-  const callouts = distributeCallouts(
-    labels.filter((label) => label.placement === "callout"),
-    plotTop,
-    plotBottom,
-    calloutGap,
-  );
-  const calloutByKey = new Map(callouts.map((label) => [label.key, label]));
+  const distributed = distributeLabels(labels, plotTop, plotBottom, labelGap);
+  const distributedByKey = new Map(distributed.map((label) => [label.key, label]));
 
-  return labels.map((label) => calloutByKey.get(label.key) ?? label);
+  return labels.map((label) => distributedByKey.get(label.key) ?? label);
 }

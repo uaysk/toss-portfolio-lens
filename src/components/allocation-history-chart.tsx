@@ -22,7 +22,7 @@ import {
 import { layoutAreaLabels } from "@/lib/allocation-labels";
 import { formatMoney } from "@/lib/format";
 import { buildValueChartData, filterPortfolioHistory, type ValueChartPoint } from "@/lib/history-chart";
-import { stockColor, stockForeground } from "@/lib/stock-appearance";
+import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   ApiError,
@@ -47,7 +47,6 @@ type ActiveAreaLabelsProps = {
   yAxisMap?: Record<string, { scale?: unknown }>;
   chartData: ValueChartPoint[];
   series: PortfolioHistorySeries[];
-  theme: Theme;
 };
 
 function estimateLabelWidth(name: string): number {
@@ -62,7 +61,6 @@ function ActiveAreaLabels({
   yAxisMap,
   chartData,
   series,
-  theme,
 }: ActiveAreaLabelsProps) {
   if (!hoveredPoint) return null;
   const row = chartData[hoveredPoint.index];
@@ -92,59 +90,25 @@ function ActiveAreaLabels({
     })),
     { scale: scale as (value: number) => number, plotTop, plotBottom },
   );
-  const calloutToLeft = activeX > plotLeft + plotWidth / 2;
 
   return (
     <g className="allocation-hover-labels" pointerEvents="none" aria-hidden="true">
       {labels.map((label) => {
-        const color = stockColor(label.key, theme);
-        if (label.placement === "inside") {
-          const halfWidth = estimateLabelWidth(label.name) / 2;
-          const textX = Math.min(Math.max(activeX, plotLeft + halfWidth + 4), plotRight - halfWidth - 4);
-          return (
-            <text
-              key={label.key}
-              x={textX}
-              y={label.labelY}
-              dy="0.35em"
-              textAnchor="middle"
-              fill={stockForeground(label.key, theme)}
-              fontSize={11}
-              fontWeight={800}
-            >
-              {label.name}
-            </text>
-          );
-        }
-
-        const textWidth = estimateLabelWidth(label.name);
-        const textX = calloutToLeft ? plotLeft + 4 : plotRight - 4;
-        const lineEndX = calloutToLeft
-          ? Math.min(activeX - 12, textX + textWidth + 5)
-          : Math.max(activeX + 12, textX - textWidth - 5);
-        const elbowX = activeX + (calloutToLeft ? -10 : 10);
+        const halfWidth = estimateLabelWidth(label.name) / 2;
+        const textX = Math.min(Math.max(activeX, plotLeft + halfWidth + 4), plotRight - halfWidth - 4);
         return (
-          <g key={label.key}>
-            <polyline
-              points={`${activeX},${label.anchorY} ${elbowX},${label.anchorY} ${lineEndX},${label.labelY}`}
-              fill="none"
-              stroke={color}
-              strokeWidth={1.5}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <text
-              x={textX}
-              y={label.labelY}
-              dy="0.35em"
-              textAnchor={calloutToLeft ? "start" : "end"}
-              fill={color}
-              fontSize={10.5}
-              fontWeight={800}
-            >
-              {label.name}
-            </text>
-          </g>
+          <text
+            key={label.key}
+            x={textX}
+            y={label.labelY}
+            dy="0.35em"
+            textAnchor="middle"
+            fill="#000000"
+            fontSize={11}
+            fontWeight={800}
+          >
+            {label.name}
+          </text>
         );
       })}
     </g>
@@ -574,7 +538,6 @@ export function AllocationHistoryChart({
                       chartData={chartData}
                       hoveredPoint={hoveredPoint}
                       series={series}
-                      theme={theme}
                     />
                   )}
                 />

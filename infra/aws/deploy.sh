@@ -267,6 +267,7 @@ kubectl create configmap portfolio-lens \
   --from-literal=HOST=0.0.0.0 \
   --from-literal=PORT=3200 \
   --from-literal=NODE_ENV=production \
+  --from-literal=DB_PROVIDER=mysql \
   --from-literal=DATABASE_PATH=/app/data/portfolio-history.sqlite \
   --from-literal=MYSQL_HOST="${DATABASE_HOST}" \
   --from-literal=MYSQL_PORT="${DATABASE_PORT}" \
@@ -275,7 +276,6 @@ kubectl create configmap portfolio-lens \
   --from-literal=MYSQL_SSL=true \
   --from-literal=MYSQL_SSL_CA_PATH=/app/certs/global-bundle.pem \
   --from-literal=MYSQL_SSL_REJECT_UNAUTHORIZED=true \
-  --from-literal=MYSQL_REQUIRED=true \
   --from-literal=TOSS_API_AUTH_MODE=static_bearer \
   --from-literal=TOSS_API_BASE_URL=https://tpl.uaysk.com/ \
   --from-literal=SNAPSHOT_REFRESH_HOURS=6 \

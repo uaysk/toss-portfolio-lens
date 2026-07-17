@@ -186,10 +186,14 @@ try {
     host: "127.0.0.1",
     port: 3200,
     tossApiBaseUrl: "https://example.invalid",
+    dbProvider: "mysql",
     databasePath,
     mysql: mysqlConfig,
+    candleCacheLatestTtlMs: 300_000,
     snapshotRefreshHours: 6,
     nodeEnv: "test",
+    publicAppUrl: "http://localhost:3200",
+    reportStorage: { kind: "local", directory: "/tmp/reports" },
   });
   assert.equal(configured.backend, "mysql");
   assert.equal((await configured.getHistory("integration-account", "KRW", "all")).points.length, 2);
