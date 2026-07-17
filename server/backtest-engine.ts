@@ -4,7 +4,9 @@ import {
   type BacktestTradeEvent,
 } from "./backtest-analytics.js";
 
-export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
+export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually" | "threshold";
+export type BacktestCashFlowFrequency = "monthly" | "quarterly" | "annually";
+export type BacktestCashFlowTiming = "period_start" | "period_end";
 
 export type BacktestAssetDefinition = {
   symbol: string;
@@ -18,6 +20,8 @@ export type BacktestAssetDefinition = {
 export type BacktestPricePoint = {
   date: string;
   close: number;
+  localClose?: number;
+  fxRate?: number;
 };
 
 export type BacktestBenchmarkDefinition = {
@@ -50,9 +54,12 @@ export type BacktestSimulationInput = {
   endDate: string;
   initialAmount: number;
   monthlyCashFlow: number;
+  cashFlowFrequency?: BacktestCashFlowFrequency;
+  cashFlowTiming?: BacktestCashFlowTiming;
   rebalanceFrequency: BacktestRebalanceFrequency;
   riskFreeRatePercent?: number;
   transactionCostBps?: number;
+  rebalanceThresholdPercent?: number;
   benchmark?: BacktestBenchmarkDefinition;
 };
 
@@ -86,11 +93,30 @@ export type BacktestSimulationResult = {
     timeLinkedContributionPercent: number;
     localPriceContributionPercent: number;
     fxContributionPercent: number;
+    upRegimeContributionPercent: number;
+    downRegimeContributionPercent: number;
     assetReturnPercent: number;
   }>;
   correlations: {
     assets: Array<{ symbol: string; name: string }>;
     values: Array<Array<number | null>>;
+  };
+  trades: Array<{
+    date: string;
+    symbol: string;
+    side: "BUY" | "SELL";
+    amount: number;
+    quantity: number;
+    price: number;
+    reason: "initial" | "cash-flow" | "rebalance";
+  }>;
+  dataQuality: {
+    alignmentPolicy: "carry_forward_for_valuation";
+    commonReturnPolicy: "inner_join";
+    alignedValuationDays: number;
+    commonReturnObservations: number;
+    carryForwardByAsset: Array<{ symbol: string; count: number }>;
+    benchmarkCarryForwardCount: number;
   };
   advanced: BacktestAdvancedAnalytics;
 };
@@ -119,8 +145,25 @@ function yearMonth(date: string): string {
   return date.slice(0, 7);
 }
 
+function cashFlowDue(
+  previousDate: string,
+  currentDate: string,
+  nextDate: string | undefined,
+  frequency: BacktestCashFlowFrequency,
+  timing: BacktestCashFlowTiming,
+): boolean {
+  const month = Number(currentDate.slice(5, 7));
+  const interval = frequency === "monthly" ? 1 : frequency === "quarterly" ? 3 : 12;
+  if (timing === "period_start") {
+    if (yearMonth(previousDate) === yearMonth(currentDate)) return false;
+    return (month - 1) % interval === 0;
+  }
+  const atObservedPeriodEnd = !nextDate || yearMonth(currentDate) !== yearMonth(nextDate);
+  return atObservedPeriodEnd && month % interval === 0;
+}
+
 function shouldRebalance(previousDate: string, currentDate: string, frequency: BacktestRebalanceFrequency): boolean {
-  if (frequency === "none") return false;
+  if (frequency === "none" || frequency === "threshold") return false;
   const previousYear = Number(previousDate.slice(0, 4));
   const currentYear = Number(currentDate.slice(0, 4));
   if (frequency === "annually") return previousYear !== currentYear;
@@ -130,6 +173,28 @@ function shouldRebalance(previousDate: string, currentDate: string, frequency: B
     return previousYear !== currentYear || Math.floor((previousMonth - 1) / 3) !== Math.floor((currentMonth - 1) / 3);
   }
   return previousYear !== currentYear || previousMonth !== currentMonth;
+}
+
+function commonObservedReturns(
+  seriesByAsset: BacktestPricePoint[][],
+): { returns: number[][]; observations: number } {
+  if (!seriesByAsset.length) return { returns: [], observations: 0 };
+  const maps = seriesByAsset.map((series) => new Map(series.map((point) => [point.date, point.close])));
+  const commonDates = seriesByAsset[0]
+    .map((point) => point.date)
+    .filter((date) => maps.every((values) => values.has(date)))
+    .sort();
+  const returns = seriesByAsset.map(() => [] as number[]);
+  for (let index = 1; index < commonDates.length; index += 1) {
+    const previousDate = commonDates[index - 1];
+    const currentDate = commonDates[index];
+    for (let assetIndex = 0; assetIndex < maps.length; assetIndex += 1) {
+      const previous = maps[assetIndex].get(previousDate) ?? 0;
+      const current = maps[assetIndex].get(currentDate) ?? 0;
+      if (previous > 0 && current > 0) returns[assetIndex].push(current / previous - 1);
+    }
+  }
+  return { returns, observations: Math.max(0, commonDates.length - 1) };
 }
 
 function standardDeviation(values: number[]): number {
@@ -262,11 +327,18 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   }
   const riskFreeRatePercent = input.riskFreeRatePercent ?? 0;
   const transactionCostBps = input.transactionCostBps ?? 0;
+  const rebalanceThresholdPercent = input.rebalanceThresholdPercent ?? 5;
+  const cashFlowFrequency = input.cashFlowFrequency ?? "monthly";
+  const cashFlowTiming = input.cashFlowTiming ?? "period_start";
   if (!Number.isFinite(riskFreeRatePercent) || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
     throw new BacktestValidationError("무위험수익률은 -10% 이상 50% 이하로 입력해 주세요.");
   }
   if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
     throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
+  }
+  if (input.rebalanceFrequency === "threshold"
+    && (!Number.isFinite(rebalanceThresholdPercent) || rebalanceThresholdPercent < 0.1 || rebalanceThresholdPercent > 50)) {
+    throw new BacktestValidationError("threshold 리밸런싱 기준은 0.1% 이상 50% 이하로 입력해 주세요.");
   }
   const weightTotal = input.assets.reduce((sum, asset) => sum + asset.weight, 0);
   if (input.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0) || Math.abs(weightTotal - 100) > 0.01) {
@@ -294,27 +366,45 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     ...benchmarkSeries.map((point) => point.date),
   ])).sort();
   const assetCursors = input.assets.map(() => 0);
-  const assetCloses = input.assets.map(() => 0);
+  const assetPoints: Array<BacktestPricePoint | undefined> = input.assets.map(() => undefined);
+  const assetLastObservedDates = input.assets.map(() => "");
+  const assetCarryForwardCounts = input.assets.map(() => 0);
   let benchmarkCursor = 0;
-  let benchmarkClose = 0;
-  const aligned: Array<{ date: string; closes: number[]; benchmarkClose?: number }> = [];
+  let benchmarkPoint: BacktestPricePoint | undefined;
+  let benchmarkLastObservedDate = "";
+  let benchmarkCarryForwardCount = 0;
+  const aligned: Array<{
+    date: string;
+    closes: number[];
+    localCloses: number[];
+    fxRates: number[];
+    benchmarkClose?: number;
+  }> = [];
   for (const date of allDates) {
     for (let assetIndex = 0; assetIndex < seriesByAsset.length; assetIndex += 1) {
       const series = seriesByAsset[assetIndex];
       while (assetCursors[assetIndex] < series.length && series[assetCursors[assetIndex]].date <= date) {
-        assetCloses[assetIndex] = series[assetCursors[assetIndex]].close;
+        assetPoints[assetIndex] = series[assetCursors[assetIndex]];
+        assetLastObservedDates[assetIndex] = series[assetCursors[assetIndex]].date;
         assetCursors[assetIndex] += 1;
       }
     }
     while (benchmarkCursor < benchmarkSeries.length && benchmarkSeries[benchmarkCursor].date <= date) {
-      benchmarkClose = benchmarkSeries[benchmarkCursor].close;
+      benchmarkPoint = benchmarkSeries[benchmarkCursor];
+      benchmarkLastObservedDate = benchmarkSeries[benchmarkCursor].date;
       benchmarkCursor += 1;
     }
-    if (assetCloses.every((close) => close > 0) && (!input.benchmark || benchmarkClose > 0)) {
+    if (assetPoints.every((point) => (point?.close ?? 0) > 0) && (!input.benchmark || (benchmarkPoint?.close ?? 0) > 0)) {
+      for (let assetIndex = 0; assetIndex < assetLastObservedDates.length; assetIndex += 1) {
+        if (assetLastObservedDates[assetIndex] !== date) assetCarryForwardCounts[assetIndex] += 1;
+      }
+      if (input.benchmark && benchmarkLastObservedDate !== date) benchmarkCarryForwardCount += 1;
       aligned.push({
         date,
-        closes: [...assetCloses],
-        ...(input.benchmark ? { benchmarkClose } : {}),
+        closes: assetPoints.map((point) => point!.close),
+        localCloses: assetPoints.map((point) => point!.localClose ?? point!.close),
+        fxRates: assetPoints.map((point) => point!.fxRate ?? 1),
+        ...(input.benchmark ? { benchmarkClose: benchmarkPoint!.close } : {}),
       });
     }
   }
@@ -324,6 +414,10 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
   let positionValues = weights.map((weight) => input.initialAmount * weight);
   const marketProfitByAsset = input.assets.map(() => 0);
   const linkedContributionByAsset = input.assets.map(() => 0);
+  const linkedLocalContributionByAsset = input.assets.map(() => 0);
+  const linkedFxContributionByAsset = input.assets.map(() => 0);
+  const linkedUpRegimeContributionByAsset = input.assets.map(() => 0);
+  const linkedDownRegimeContributionByAsset = input.assets.map(() => 0);
   const weightSums = input.assets.map(() => 0);
   let weightObservationCount = 0;
   let totalContributions = input.initialAmount;
@@ -367,12 +461,17 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     }
     weightObservationCount += 1;
     const dailyContributions = input.assets.map(() => 0);
+    const dailyLocalContributions = input.assets.map(() => 0);
+    const dailyFxContributions = input.assets.map(() => 0);
     for (let assetIndex = 0; assetIndex < input.assets.length; assetIndex += 1) {
       const assetReturn = current.closes[assetIndex] / previous.closes[assetIndex] - 1;
+      const localReturn = current.localCloses[assetIndex] / previous.localCloses[assetIndex] - 1;
+      const fxReturn = current.fxRates[assetIndex] / previous.fxRates[assetIndex] - 1;
+      const positionWeight = beforeMarket > 0 ? positionValues[assetIndex] / beforeMarket : 0;
       assetReturns[assetIndex].push(assetReturn);
-      dailyContributions[assetIndex] = beforeMarket > 0
-        ? (positionValues[assetIndex] / beforeMarket) * assetReturn
-        : 0;
+      dailyContributions[assetIndex] = positionWeight * assetReturn;
+      dailyLocalContributions[assetIndex] = positionWeight * localReturn;
+      dailyFxContributions[assetIndex] = positionWeight * (1 + localReturn) * fxReturn;
       marketProfitByAsset[assetIndex] += positionValues[assetIndex] * assetReturn;
       positionValues[assetIndex] *= 1 + assetReturn;
     }
@@ -383,12 +482,26 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     for (let assetIndex = 0; assetIndex < input.assets.length; assetIndex += 1) {
       linkedContributionByAsset[assetIndex] = linkedContributionByAsset[assetIndex] * (1 + portfolioReturn)
         + dailyContributions[assetIndex] * 100;
+      linkedLocalContributionByAsset[assetIndex] = linkedLocalContributionByAsset[assetIndex] * (1 + portfolioReturn)
+        + dailyLocalContributions[assetIndex] * 100;
+      linkedFxContributionByAsset[assetIndex] = linkedFxContributionByAsset[assetIndex] * (1 + portfolioReturn)
+        + dailyFxContributions[assetIndex] * 100;
+      linkedUpRegimeContributionByAsset[assetIndex] = linkedUpRegimeContributionByAsset[assetIndex] * (1 + portfolioReturn)
+        + (portfolioReturn >= 0 ? dailyContributions[assetIndex] * 100 : 0);
+      linkedDownRegimeContributionByAsset[assetIndex] = linkedDownRegimeContributionByAsset[assetIndex] * (1 + portfolioReturn)
+        + (portfolioReturn < 0 ? dailyContributions[assetIndex] * 100 : 0);
     }
     if (input.benchmark) {
       benchmarkReturns.push((current.benchmarkClose ?? benchmarkBase) / (previous.benchmarkClose ?? benchmarkBase) - 1);
     }
 
-    if (yearMonth(previous.date) !== yearMonth(current.date) && input.monthlyCashFlow !== 0) {
+    if (input.monthlyCashFlow !== 0 && cashFlowDue(
+      previous.date,
+      current.date,
+      aligned[dateIndex + 1]?.date,
+      cashFlowFrequency,
+      cashFlowTiming,
+    )) {
       const flow = input.monthlyCashFlow;
       if (afterMarket + flow <= 0) throw new BacktestValidationError("정기 인출금이 포트폴리오 잔액보다 큽니다.");
       if (flow > 0) {
@@ -425,7 +538,10 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       }
     }
 
-    if (shouldRebalance(previous.date, current.date, input.rebalanceFrequency)) {
+    const currentTotal = positionValues.reduce((sum, value) => sum + value, 0);
+    const thresholdTriggered = input.rebalanceFrequency === "threshold" && currentTotal > 0
+      && positionValues.some((value, index) => Math.abs(value / currentTotal - weights[index]) >= rebalanceThresholdPercent / 100);
+    if (shouldRebalance(previous.date, current.date, input.rebalanceFrequency) || thresholdTriggered) {
       const total = positionValues.reduce((sum, value) => sum + value, 0);
       const targets = weights.map((weight) => total * weight);
       for (let assetIndex = 0; assetIndex < positionValues.length; assetIndex += 1) {
@@ -485,14 +601,19 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
       profitLoss: round(profitLoss, 2),
       contributionPercent: round((profitLoss / input.initialAmount) * 100),
       timeLinkedContributionPercent: round(linkedContributionByAsset[index]),
-      localPriceContributionPercent: round(linkedContributionByAsset[index]),
-      fxContributionPercent: 0,
+      localPriceContributionPercent: round(linkedLocalContributionByAsset[index]),
+      fxContributionPercent: round(linkedFxContributionByAsset[index]),
+      upRegimeContributionPercent: round(linkedUpRegimeContributionByAsset[index]),
+      downRegimeContributionPercent: round(linkedDownRegimeContributionByAsset[index]),
       assetReturnPercent: round((lastPrice / firstPrice - 1) * 100),
     };
   }).sort((left, right) => right.contributionPercent - left.contributionPercent);
 
+  const commonReturns = commonObservedReturns(seriesByAsset);
   const correlations = input.assets.map((_, leftIndex) => (
-    input.assets.map((__, rightIndex) => leftIndex === rightIndex ? 1 : pearson(assetReturns[leftIndex], assetReturns[rightIndex]))
+    input.assets.map((__, rightIndex) => leftIndex === rightIndex
+      ? 1
+      : pearson(commonReturns.returns[leftIndex], commonReturns.returns[rightIndex]))
   ));
   const finalBalance = positionValues.reduce((sum, value) => sum + value, 0);
   const endingWeights = positionValues.map((value) => finalBalance > 0 ? value / finalBalance : 0);
@@ -549,6 +670,26 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     correlations: {
       assets: input.assets.map((asset) => ({ symbol: asset.symbol, name: asset.name })),
       values: correlations,
+    },
+    trades: trades.map((trade) => ({
+      date: trade.date,
+      symbol: input.assets[trade.assetIndex].symbol,
+      side: trade.side,
+      amount: round(trade.amount, 2),
+      quantity: round(trade.quantity, 8),
+      price: round(trade.price, 6),
+      reason: trade.reason,
+    })),
+    dataQuality: {
+      alignmentPolicy: "carry_forward_for_valuation",
+      commonReturnPolicy: "inner_join",
+      alignedValuationDays: aligned.length,
+      commonReturnObservations: commonReturns.observations,
+      carryForwardByAsset: input.assets.map((asset, index) => ({
+        symbol: asset.symbol,
+        count: assetCarryForwardCounts[index],
+      })),
+      benchmarkCarryForwardCount,
     },
     advanced,
   };

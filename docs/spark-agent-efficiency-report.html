@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#09090b" />
+  <title>GPT-5.3-Codex-Spark 보조 에이전트 효율성 분석</title>
+  <style>
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 3.9%;
+      --card-foreground: 0 0% 98%;
+      --popover: 240 10% 3.9%;
+      --popover-foreground: 0 0% 98%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 5.9% 10%;
+      --secondary: 240 3.7% 15.9%;
+      --secondary-foreground: 0 0% 98%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --accent: 240 3.7% 15.9%;
+      --accent-foreground: 0 0% 98%;
+      --destructive: 0 62.8% 30.6%;
+      --destructive-foreground: 0 0% 98%;
+      --border: 240 3.7% 15.9%;
+      --input: 240 3.7% 15.9%;
+      --ring: 240 4.9% 83.9%;
+      --radius: 0.75rem;
+      --chart-1: 0 0% 96%;
+      --chart-2: 0 0% 70%;
+      --chart-3: 0 0% 45%;
+      --chart-4: 0 0% 28%;
+      --chart-5: 0 0% 16%;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: hsl(var(--foreground));
+      background:
+        radial-gradient(circle at 15% -10%, rgba(255,255,255,.075), transparent 31rem),
+        radial-gradient(circle at 95% 0%, rgba(255,255,255,.04), transparent 27rem),
+        hsl(var(--background));
+      font-family: Inter, Pretendard, "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "tnum" 1, "ss01" 1;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, a { font: inherit; }
+    button { color: inherit; }
+    a { color: inherit; text-decoration: none; }
+
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      border-bottom: 1px solid hsl(var(--border) / .78);
+      background: hsl(var(--background) / .82);
+      backdrop-filter: blur(18px);
+    }
+
+    .topbar-inner {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border: 1px solid hsl(var(--border));
+      border-radius: 9px;
+      background: hsl(var(--foreground));
+      color: hsl(var(--background));
+      font-weight: 900;
+      letter-spacing: -.08em;
+    }
+    .brand-title { font-size: 14px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .brand-subtitle { color: hsl(var(--muted-foreground)); font-size: 12px; }
+
+    .toolbar { display: flex; align-items: center; gap: 8px; }
+    .button {
+      height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: 1px solid hsl(var(--border));
+      border-radius: calc(var(--radius) - 4px);
+      padding: 0 13px;
+      background: transparent;
+      color: hsl(var(--foreground));
+      cursor: pointer;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    .button:hover { background: hsl(var(--accent)); border-color: hsl(var(--muted-foreground) / .45); }
+    .button:active { transform: translateY(1px); }
+    .button:focus-visible, .tab:focus-visible {
+      outline: 2px solid hsl(var(--ring));
+      outline-offset: 2px;
+    }
+    .button-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border-color: hsl(var(--primary)); }
+    .button-primary:hover { background: hsl(var(--primary) / .9); }
+    .icon { width: 15px; height: 15px; display: block; }
+
+    main { padding: 76px 0 88px; }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 22px;
+      color: hsl(var(--muted-foreground));
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 24px; height: 1px; background: hsl(var(--muted-foreground)); }
+
+    .hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(290px, .75fr); gap: 36px; align-items: end; }
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-size: clamp(38px, 7vw, 78px);
+      line-height: .98;
+      letter-spacing: -.064em;
+      font-weight: 760;
+    }
+    .hero-muted { color: hsl(var(--muted-foreground)); }
+    .hero-copy { max-width: 650px; margin: 27px 0 0; color: hsl(var(--muted-foreground)); font-size: 16px; }
+    .hero-copy strong { color: hsl(var(--foreground)); font-weight: 620; }
+
+    .verdict-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+      padding: 22px;
+      background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.012));
+      box-shadow: 0 20px 50px rgba(0,0,0,.22);
+    }
+    .verdict-card::after {
+      content: "";
+      position: absolute;
+      inset: auto -35px -55px auto;
+      width: 150px;
+      height: 150px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 999px;
+    }
+    .verdict-label { color: hsl(var(--muted-foreground)); font-size: 12px; }
+    .verdict { margin: 8px 0 13px; font-size: 25px; font-weight: 700; letter-spacing: -.035em; }
+    .verdict-note { margin: 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
+
+    .badge {
+      width: fit-content;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid hsl(var(--border));
+      border-radius: 999px;
+      padding: 3px 9px;
+      background: hsl(var(--secondary));
+      color: hsl(var(--secondary-foreground));
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.45;
+      white-space: nowrap;
+    }
+    .badge-outline { background: transparent; color: hsl(var(--muted-foreground)); }
+    .badge-bright { background: hsl(var(--foreground)); color: hsl(var(--background)); border-color: hsl(var(--foreground)); }
+
+    .meta-line { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; }
+
+    .tabs-wrap { margin-top: 62px; }
+    .tabs-list {
+      width: fit-content;
+      max-width: 100%;
+      display: flex;
+      gap: 3px;
+      overflow-x: auto;
+      border: 1px solid hsl(var(--border));
+      border-radius: calc(var(--radius) - 2px);
+      padding: 4px;
+      background: hsl(var(--muted) / .46);
+      scrollbar-width: none;
+    }
+    .tabs-list::-webkit-scrollbar { display: none; }
+    .tab {
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: calc(var(--radius) - 6px);
+      padding: 7px 13px;
+      background: transparent;
+      color: hsl(var(--muted-foreground));
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 570;
+    }
+    .tab[data-active="true"] {
+      background: hsl(var(--background));
+      color: hsl(var(--foreground));
+      box-shadow: 0 1px 2px rgba(0,0,0,.35);
+    }
+    .tab-panel { display: none; padding-top: 24px; animation: panelIn .2s ease; }
+    .tab-panel[data-active="true"] { display: block; }
+    @keyframes panelIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .grid { display: grid; gap: 16px; }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .card {
+      min-width: 0;
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+      background: hsl(var(--card) / .74);
+      box-shadow: 0 1px 0 rgba(255,255,255,.025) inset;
+    }
+    .card-header { padding: 20px 20px 0; }
+    .card-content { padding: 20px; }
+    .card-title { margin: 0; font-size: 15px; font-weight: 640; letter-spacing: -.014em; }
+    .card-description { margin: 5px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+    .metric-value { margin-top: 18px; font-size: clamp(28px, 4vw, 42px); font-weight: 720; letter-spacing: -.052em; line-height: 1; }
+    .metric-unit { margin-left: 4px; color: hsl(var(--muted-foreground)); font-size: 13px; font-weight: 500; letter-spacing: 0; }
+    .metric-foot { display: flex; align-items: center; gap: 7px; margin-top: 13px; color: hsl(var(--muted-foreground)); font-size: 11px; }
+    .dot { width: 6px; height: 6px; border-radius: 999px; background: hsl(var(--foreground)); box-shadow: 0 0 0 3px rgba(255,255,255,.08); }
+
+    .section-head { display: flex; justify-content: space-between; align-items: end; gap: 18px; margin: 46px 0 16px; }
+    .section-head h2 { margin: 0; font-size: 23px; letter-spacing: -.035em; }
+    .section-head p { max-width: 580px; margin: 5px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
+
+    .token-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 28px; align-items: center; }
+    .donut {
+      --oauth: 55.8%;
+      --quant: 83.5%;
+      position: relative;
+      width: 188px;
+      height: 188px;
+      margin: 0 auto;
+      border-radius: 50%;
+      background: conic-gradient(
+        hsl(var(--chart-1)) 0 var(--oauth),
+        hsl(var(--chart-2)) var(--oauth) var(--quant),
+        hsl(var(--chart-3)) var(--quant) 100%
+      );
+      box-shadow: 0 0 0 1px hsl(var(--border));
+    }
+    .donut::before { content: ""; position: absolute; inset: 25px; border-radius: 50%; background: hsl(var(--background)); border: 1px solid hsl(var(--border)); }
+    .donut-center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; z-index: 1; }
+    .donut-number { font-size: 25px; font-weight: 720; letter-spacing: -.04em; }
+    .donut-label { color: hsl(var(--muted-foreground)); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+
+    .legend { display: grid; gap: 16px; }
+    .legend-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+    .legend-swatch { width: 8px; height: 8px; border-radius: 2px; }
+    .legend-main { font-size: 13px; font-weight: 570; }
+    .legend-sub { color: hsl(var(--muted-foreground)); font-size: 11px; }
+    .legend-value { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+    .progress { height: 7px; overflow: hidden; border-radius: 999px; background: hsl(var(--secondary)); }
+    .progress-bar { height: 100%; width: 0; border-radius: inherit; background: hsl(var(--foreground)); transition: width .7s cubic-bezier(.2,.7,.2,1); }
+
+    .callout {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 13px;
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+      padding: 17px;
+      background: hsl(var(--muted) / .32);
+    }
+    .callout-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: hsl(var(--foreground)); color: hsl(var(--background)); font-weight: 800; }
+    .callout h3 { margin: 0; font-size: 13px; }
+    .callout p { margin: 5px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 780px; font-size: 12px; }
+    th { padding: 12px 14px; border-bottom: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); font-weight: 550; text-align: left; }
+    td { padding: 14px; border-bottom: 1px solid hsl(var(--border) / .72); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: hsl(var(--muted) / .25); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .muted { color: hsl(var(--muted-foreground)); }
+
+    .suitability { display: grid; gap: 10px; }
+    .suitability-row { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(190px, 1.2fr) 110px; gap: 16px; align-items: center; padding: 15px 0; border-bottom: 1px solid hsl(var(--border)); }
+    .suitability-row:last-child { border-bottom: 0; }
+    .suitability-name { font-size: 13px; font-weight: 610; }
+    .suitability-note { color: hsl(var(--muted-foreground)); font-size: 12px; }
+
+    .timeline { position: relative; display: grid; gap: 0; }
+    .timeline::before { content: ""; position: absolute; left: 13px; top: 15px; bottom: 15px; width: 1px; background: hsl(var(--border)); }
+    .timeline-item { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 14px; padding: 0 0 22px; }
+    .timeline-item:last-child { padding-bottom: 0; }
+    .timeline-index { width: 28px; height: 28px; display: grid; place-items: center; z-index: 1; border: 1px solid hsl(var(--border)); border-radius: 999px; background: hsl(var(--background)); color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 700; }
+    .timeline-item[data-highlight="true"] .timeline-index { background: hsl(var(--foreground)); color: hsl(var(--background)); border-color: hsl(var(--foreground)); }
+    .timeline-title { margin: 3px 0 3px; font-size: 13px; font-weight: 620; }
+    .timeline-copy { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; }
+
+    .formula { padding: 15px; border: 1px solid hsl(var(--border)); border-radius: 9px; background: rgba(0,0,0,.24); }
+    .formula + .formula { margin-top: 10px; }
+    .formula-name { color: hsl(var(--muted-foreground)); font-size: 11px; }
+    .formula-code { margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
+
+    .footer { padding: 28px 0 40px; border-top: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); font-size: 11px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 50;
+      max-width: calc(100% - 40px);
+      transform: translateY(16px);
+      opacity: 0;
+      pointer-events: none;
+      border: 1px solid hsl(var(--border));
+      border-radius: 9px;
+      padding: 11px 14px;
+      background: hsl(var(--popover));
+      color: hsl(var(--popover-foreground));
+      box-shadow: 0 18px 46px rgba(0,0,0,.45);
+      font-size: 12px;
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .toast[data-open="true"] { transform: translateY(0); opacity: 1; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; align-items: start; }
+      .verdict-card { max-width: 620px; }
+      .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-3 { grid-template-columns: 1fr; }
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, 1180px); }
+      .topbar-inner { min-height: 58px; }
+      .brand-subtitle, .button-label { display: none; }
+      main { padding: 52px 0 66px; }
+      h1 { font-size: clamp(36px, 11vw, 46px); }
+      .hero { gap: 26px; }
+      .hero-copy { font-size: 14px; }
+      .tabs-wrap { margin-top: 44px; }
+      .grid-4 { grid-template-columns: 1fr; }
+      .token-layout { grid-template-columns: 1fr; }
+      .section-head { align-items: start; flex-direction: column; }
+      .suitability-row { grid-template-columns: 1fr; gap: 7px; }
+      .footer-inner { flex-direction: column; }
+    }
+
+    @media print {
+      body { background: #09090b; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .topbar { position: static; }
+      .toolbar, .tabs-list { display: none; }
+      .tab-panel { display: block !important; break-inside: avoid; }
+      .tab-panel + .tab-panel { margin-top: 30px; }
+      main { padding-top: 40px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">S</div>
+        <div>
+          <div class="brand-title">Spark Agent Efficiency</div>
+          <div class="brand-subtitle">관측 기반 · 추정 시간 배제</div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button class="button" id="copySummary" type="button" aria-label="핵심 결론 복사">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          <span class="button-label">결론 복사</span>
+        </button>
+        <button class="button button-primary" id="printReport" type="button">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>
+          <span class="button-label">인쇄</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="shell">
+      <section class="hero" aria-labelledby="report-title">
+        <div>
+          <div class="eyebrow">Independent worker assessment · 2026.07.17</div>
+          <h1 id="report-title">빠르다.<br><span class="hero-muted">하지만 좁게 써야 한다.</span></h1>
+          <p class="hero-copy">
+            GPT-5.3-Codex-Spark는 <strong>파일 탐색, 정적 분석, 테스트 누락 탐지</strong>에서 병렬 처리 효과를 보였다.
+            반면 OAuth 보안과 정량 계산처럼 정합성 비용이 큰 작업에서는 메인 에이전트의 상당한 재검토가 필요했다.
+            따라서 효율의 핵심은 모델 자체보다 <strong>작업 경계와 검증 루프</strong>다.
+          </p>
+          <div class="meta-line">
+            <span class="badge badge-bright">조건부 효율</span>
+            <span class="badge badge-outline">관측 데이터만 사용</span>
+            <span class="badge badge-outline">시간 절감률 미산정</span>
+            <span class="badge badge-outline">단일 파일 · 외부 의존성 없음</span>
+          </div>
+        </div>
+        <aside class="verdict-card" aria-label="최종 판정">
+          <div class="verdict-label">최종 판정</div>
+          <div class="verdict">보조 분석에는 효과적</div>
+          <p class="verdict-note">아키텍처·보안·수학·통합의 최종 권한은 메인 에이전트에 유지해야 한다.</p>
+        </aside>
+      </section>
+
+      <section class="tabs-wrap">
+        <div class="tabs-list" role="tablist" aria-label="보고서 섹션">
+          <button class="tab" role="tab" aria-selected="true" aria-controls="overview" id="tab-overview" data-tab="overview" data-active="true">개요</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="evidence" id="tab-evidence" data-tab="evidence" data-active="false">관측 근거</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="routing" id="tab-routing" data-tab="routing" data-active="false">권장 라우팅</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="method" id="tab-method" data-tab="method" data-active="false">측정 방법</button>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="overview" aria-labelledby="tab-overview" data-active="true">
+          <div class="grid grid-4" id="metricGrid"></div>
+
+          <div class="section-head">
+            <div>
+              <h2>측정된 token 분포</h2>
+              <p>token 기록이 확인되는 3개 실행만 집계했다. 나머지 실행의 사용량은 총합에 포함하지 않았다.</p>
+            </div>
+            <span class="badge badge-outline">부분 관측치</span>
+          </div>
+
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-content token-layout">
+                <div class="donut" id="tokenDonut" aria-label="측정 token 분포">
+                  <div class="donut-center">
+                    <div class="donut-number" id="measuredTokenTotal">—</div>
+                    <div class="donut-label">measured tokens</div>
+                  </div>
+                </div>
+                <div class="legend" id="tokenLegend"></div>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="card-header">
+                <h3 class="card-title">무엇이 효율을 만들었나</h3>
+                <p class="card-description">관측된 이점과 비용을 같은 축에서 본다.</p>
+              </div>
+              <div class="card-content" style="padding-top:18px">
+                <div class="callout">
+                  <div class="callout-icon">+</div>
+                  <div><h3>병렬 탐색의 발견력</h3><p>middleware 적용 범위, refresh reuse, 계산 오류, MCP contract 누락을 별도 관점에서 빠르게 드러냈다.</p></div>
+                </div>
+                <div class="callout" style="margin-top:10px">
+                  <div class="callout-icon">−</div>
+                  <div><h3>통합 재작업 비용</h3><p>Spark가 작성한 OAuth·정량 코드는 상당한 보안 및 수학 수정이 필요해 그대로 채택되지 않았다.</p></div>
+                </div>
+                <div class="callout" style="margin-top:10px">
+                  <div class="callout-icon">!</div>
+                  <div><h3>출력 관리 오버헤드</h3><p>광범위 조사 1건은 truncation으로 폐기됐고, 이번 짧은 분석도 36,609 tokens와 대량 tool log를 사용했다.</p></div>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="section-head">
+            <div><h2>업무 적합도</h2><p>점수는 임의로 만들지 않고, 관측 근거에 따라 높음·조건부·낮음으로만 분류했다.</p></div>
+          </div>
+          <article class="card"><div class="card-content suitability" id="suitabilityList"></div></article>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="evidence" aria-labelledby="tab-evidence" data-active="false">
+          <div class="section-head" style="margin-top:0">
+            <div><h2>실행 기록과 채택 상태</h2><p>이전 MCP 구현 7회와 이 보고서를 위한 추가 read-only audit 1회를 구분했다.</p></div>
+            <span class="badge badge-outline">성공 모델 실행 8회</span>
+          </div>
+          <article class="card table-wrap">
+            <table>
+              <thead><tr><th>작업군</th><th>방식</th><th>관측 token</th><th>결과</th><th>메인 검증</th></tr></thead>
+              <tbody id="evidenceRows"></tbody>
+            </table>
+          </article>
+
+          <div class="grid grid-2" style="margin-top:16px">
+            <article class="card">
+              <div class="card-header"><h3 class="card-title">발견된 대표 문제</h3><p class="card-description">Spark 또는 병렬 리뷰가 탐지에 기여한 항목</p></div>
+              <div class="card-content">
+                <div class="timeline" id="findingTimeline"></div>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-header"><h3 class="card-title">이번 audit의 운영 비용</h3><p class="card-description">짧은 요청도 실행 경계가 넓으면 비싸질 수 있다.</p></div>
+              <div class="card-content">
+                <div class="metric-value">36,609<span class="metric-unit">tokens</span></div>
+                <div class="progress" style="margin-top:18px"><div class="progress-bar" data-progress="100"></div></div>
+                <p class="card-description" style="margin-top:13px">800자 이내 결론을 요청했지만 worker가 여러 파일을 열어 tool log가 22,040 tokens 규모로 집계됐고 상위 수집 출력은 한 번 truncation됐다. 최종 결론은 회수했으나 범위 제한만으로 출력 비용을 완전히 통제하지 못했다.</p>
+                <div class="meta-line" style="margin-top:16px">
+                  <span class="badge badge-outline">모델 헤더 확인</span>
+                  <span class="badge badge-outline">read-only</span>
+                  <span class="badge badge-outline">파일 수정 0</span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="routing" aria-labelledby="tab-routing" data-active="false">
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-header"><h2 class="card-title">권장 작업 흐름</h2><p class="card-description">Spark는 빠른 관찰자, 메인은 의사결정자다.</p></div>
+              <div class="card-content"><div class="timeline" id="routingTimeline"></div></div>
+            </article>
+            <article class="card">
+              <div class="card-header"><h2 class="card-title">작업 배정 규칙</h2><p class="card-description">실행 전에 적용할 최소 guardrail</p></div>
+              <div class="card-content" id="routingRules"></div>
+            </article>
+          </div>
+
+          <div class="section-head">
+            <div><h2>누가 맡아야 하는가</h2><p>속도보다 실패 비용과 상태 공유 범위를 기준으로 라우팅한다.</p></div>
+          </div>
+          <div class="grid grid-3">
+            <article class="card"><div class="card-header"><span class="badge badge-bright">Spark 우선</span><h3 class="card-title" style="margin-top:14px">좁고 검증 가능한 일</h3></div><div class="card-content muted">파일·심볼 탐색, call path 추적, 테스트 gap, 문서-코드 대조, 작은 기계적 변경, focused diff review.</div></article>
+            <article class="card"><div class="card-header"><span class="badge">내장 subagent</span><h3 class="card-title" style="margin-top:14px">조율이 필요한 병렬 검토</h3></div><div class="card-content muted">보안 리뷰, 정량 검증, 테스트 실행, 여러 관점의 교차 검토처럼 steering과 결과 통합이 필요한 작업.</div></article>
+            <article class="card"><div class="card-header"><span class="badge badge-outline">메인 전담</span><h3 class="card-title" style="margin-top:14px">실패 비용이 큰 결정</h3></div><div class="card-content muted">아키텍처, 인증·토큰 수명주기, 수학 모델, 공유 상태 변경, 최종 integration, 배포 판단과 완료 판정.</div></article>
+          </div>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="method" aria-labelledby="tab-method" data-active="false">
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-header"><h2 class="card-title">현재 계산 가능한 지표</h2><p class="card-description">확정 관측치로만 구성</p></div>
+              <div class="card-content" id="currentFormulas"></div>
+            </article>
+            <article class="card">
+              <div class="card-header"><h2 class="card-title">다음부터 수집할 지표</h2><p class="card-description">실제 효율을 정량화하려면 추가 계측이 필요하다.</p></div>
+              <div class="card-content" id="futureFormulas"></div>
+            </article>
+          </div>
+
+          <div class="section-head">
+            <div><h2>해석 제한</h2><p>이 보고서는 속도 향상률이나 ROI를 추정하지 않는다.</p></div>
+          </div>
+          <article class="card">
+            <div class="card-content grid grid-3">
+              <div class="callout"><div class="callout-icon">1</div><div><h3>시간 미측정</h3><p>worker와 메인 작업의 wall-clock 기준선이 없어 “몇 % 빨랐다”를 계산할 수 없다.</p></div></div>
+              <div class="callout"><div class="callout-icon">2</div><div><h3>token 부분 관측</h3><p>8회 성공 실행 중 3회의 token만 확인되어 총비용으로 해석하면 안 된다.</p></div></div>
+              <div class="callout"><div class="callout-icon">3</div><div><h3>채택률 미계측</h3><p>발견 건수, 수정 line 유지율, 재작업 시간을 구조적으로 기록하지 않았다.</p></div></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="shell footer-inner">
+      <span>GPT-5.3-Codex-Spark 효율성 분석 · Toss Portfolio Lens MCP 작업 관측치</span>
+      <span>shadcn/ui 디자인 토큰과 Card · Badge · Tabs · Progress · Table 패턴을 단일 파일에 인라인</span>
+    </div>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">핵심 결론을 복사했습니다.</div>
+
+  <script>
+    const report = {
+      date: "2026-07-17",
+      previousSuccessfulRuns: 7,
+      auditSuccessfulRuns: 1,
+      preModelLaunchFailures: 2,
+      discardedPriorOutputs: 1,
+      measuredTokens: [
+        { label: "OAuth 보정", value: 124034, color: "hsl(var(--chart-1))", note: "메인 보안 수정 필요" },
+        { label: "정량 보정", value: 61638, color: "hsl(var(--chart-2))", note: "메인 수학 수정 필요" },
+        { label: "현재 read-only audit", value: 36609, color: "hsl(var(--chart-3))", note: "최종 결론 부분 채택" }
+      ],
+      contractTools: 30,
+      summary: "Spark는 파일 탐색·정적 분석·테스트 누락 탐지에는 효율적이지만, 보안·수학·통합처럼 실패 비용이 큰 작업은 메인 에이전트가 소유해야 한다. 현재 관측에는 wall-clock과 전체 token이 없어 시간 절감률이나 ROI는 계산할 수 없다."
+    };
+
+    const formatNumber = new Intl.NumberFormat("ko-KR");
+    const measuredTotal = report.measuredTokens.reduce((sum, item) => sum + item.value, 0);
+    const successfulRuns = report.previousSuccessfulRuns + report.auditSuccessfulRuns;
+
+    const metrics = [
+      { label: "성공 모델 실행", value: successfulRuns, unit: "회", foot: "기존 7 + 현재 audit 1" },
+      { label: "측정 token", value: formatNumber.format(measuredTotal), unit: "tokens", foot: "8회 중 3회만 집계" },
+      { label: "폐기 출력", value: report.discardedPriorOutputs, unit: "건", foot: "광범위 조사 truncation" },
+      { label: "계약 검증 대상", value: report.contractTools, unit: "tools", foot: "MCP tools/list 30개" }
+    ];
+
+    document.getElementById("metricGrid").innerHTML = metrics.map(metric => `
+      <article class="card">
+        <div class="card-header"><h3 class="card-title">${metric.label}</h3></div>
+        <div class="card-content">
+          <div class="metric-value">${metric.value}<span class="metric-unit">${metric.unit}</span></div>
+          <div class="metric-foot"><span class="dot"></span>${metric.foot}</div>
+        </div>
+      </article>
+    `).join("");
+
+    document.getElementById("measuredTokenTotal").textContent = formatNumber.format(measuredTotal);
+    let cumulative = 0;
+    const stops = report.measuredTokens.map(item => {
+      cumulative += item.value / measuredTotal * 100;
+      return cumulative;
+    });
+    document.getElementById("tokenDonut").style.setProperty("--oauth", `${stops[0].toFixed(1)}%`);
+    document.getElementById("tokenDonut").style.setProperty("--quant", `${stops[1].toFixed(1)}%`);
+    document.getElementById("tokenLegend").innerHTML = report.measuredTokens.map(item => {
+      const share = item.value / measuredTotal * 100;
+      return `<div class="legend-row">
+        <span class="legend-swatch" style="background:${item.color}"></span>
+        <div><div class="legend-main">${item.label}</div><div class="legend-sub">${item.note} · ${share.toFixed(1)}%</div></div>
+        <div class="legend-value">${formatNumber.format(item.value)}</div>
+      </div>`;
+    }).join("");
+
+    const suitability = [
+      ["파일·심볼 탐색", "범위를 명확히 제한하면 병렬 조사 이점이 크다.", "높음"],
+      ["테스트 gap·contract review", "30개 MCP tool metadata와 scope 누락 탐지에 기여했다.", "높음"],
+      ["작은 기계적 수정", "파일 소유권이 겹치지 않고 main diff review가 있을 때 유효하다.", "조건부"],
+      ["OAuth 보안 구현", "refresh rotation·middleware scope 등 후속 수정 비용이 컸다.", "낮음"],
+      ["정량·최적화 수학", "재귀·정렬·OOS·민감도 계산을 메인이 다시 검증해야 했다.", "낮음"],
+      ["광범위 저장소 리뷰", "도구 로그와 출력 truncation으로 결과가 폐기될 수 있다.", "낮음"]
+    ];
+    document.getElementById("suitabilityList").innerHTML = suitability.map(([name, note, level]) => `
+      <div class="suitability-row">
+        <div class="suitability-name">${name}</div>
+        <div class="suitability-note">${note}</div>
+        <span class="badge ${level === "높음" ? "badge-bright" : level === "낮음" ? "badge-outline" : ""}">${level}</span>
+      </div>
+    `).join("");
+
+    const evidence = [
+      ["OAuth·DB 정적 조사", "read-only", "미기록", "검증 후 채택", "저장소·보안 흐름 직접 대조"],
+      ["테스트·보고서·Compose 조사", "read-only", "미기록", "검증 후 채택", "fixture·빌드·브라우저 직접 검증"],
+      ["광범위 도메인 조사", "read-only", "미기록", "폐기", "출력 truncation으로 근거 불충분"],
+      ["OAuth 구현·보정", "write + fix", "124,034", "수정 후 채택", "rotation·DDL·cookie·오류 처리 재검토"],
+      ["정량 구현·보정", "write + fix", "61,638", "수정 후 채택", "재귀·수학·Walk-forward·민감도 재검토"],
+      ["효율 보고서 audit", "read-only", "36,609", "부분 채택", "모델 헤더·코드 근거·최종 결론 직접 대조"]
+    ];
+    document.getElementById("evidenceRows").innerHTML = evidence.map(row => `
+      <tr><td><strong>${row[0]}</strong></td><td class="mono muted">${row[1]}</td><td class="mono">${row[2]}</td><td><span class="badge ${row[3] === "폐기" ? "badge-outline" : ""}">${row[3]}</span></td><td class="muted">${row[4]}</td></tr>
+    `).join("");
+
+    const findings = [
+      ["MCP middleware scope", "MCP CORS·rate limit·bearer가 다른 Express route까지 막던 범위를 분리했다."],
+      ["Refresh token reuse", "회전 중 이전 token 재사용과 family 폐기 동작을 강화했다."],
+      ["정량 계산 경계", "재귀, 기간 정렬, Walk-forward OOS, 민감도 계산 오류를 재검증했다."],
+      ["30-tool contract", "schema, security scheme, annotations, insufficient scope matrix를 고정했다."]
+    ];
+    document.getElementById("findingTimeline").innerHTML = findings.map((item, index) => `
+      <div class="timeline-item" data-highlight="${index === findings.length - 1}">
+        <div class="timeline-index">${index + 1}</div><div><div class="timeline-title">${item[0]}</div><p class="timeline-copy">${item[1]}</p></div>
+      </div>
+    `).join("");
+
+    const routeSteps = [
+      ["작업 경계 고정", "최대 1개 deliverable, 1~3개 파일 또는 명시된 심볼로 제한한다."],
+      ["Spark read-only 조사", "결론·파일 위치·재현 조건만 요구하고 raw command log는 산출물에서 제외한다."],
+      ["메인 증거 검증", "현재 소스와 diff를 직접 확인하고 보안·수학 가정을 재계산한다."],
+      ["테스트로 수용 결정", "채택·수정 후 채택·폐기를 구분하고 회귀 테스트가 통과해야 종료한다."]
+    ];
+    document.getElementById("routingTimeline").innerHTML = routeSteps.map((item, index) => `
+      <div class="timeline-item" data-highlight="${index === 2}">
+        <div class="timeline-index">${index + 1}</div><div><div class="timeline-title">${item[0]}</div><p class="timeline-copy">${item[1]}</p></div>
+      </div>
+    `).join("");
+
+    const rules = [
+      ["기본 sandbox", "read-only"],
+      ["동시 write", "겹치는 파일 금지"],
+      ["권장 worker 수", "2~3개 이하"],
+      ["최종 결과 수집", "프로세스 종료 후 last message 확인"],
+      ["완료 판정", "메인 diff review + 관련 테스트"],
+      ["중단 조건", "출력 폭증·범위 이탈·근거 없는 추정"]
+    ];
+    document.getElementById("routingRules").innerHTML = rules.map(([name, value]) => `
+      <div class="suitability-row" style="grid-template-columns:minmax(140px,1fr) auto">
+        <div class="suitability-name">${name}</div><span class="badge badge-outline">${value}</span>
+      </div>
+    `).join("");
+
+    const currentFormulas = [
+      ["measured_token_total", "124,034 + 61,638 + 36,609 = 222,281"],
+      ["successful_worker_runs", "7 prior + 1 current audit = 8"],
+      ["prior_discard_ratio", "1 discarded / 7 prior runs = 14.3%"],
+      ["contract_coverage_target", "expected MCP tools = actual tools = 30"]
+    ];
+    const futureFormulas = [
+      ["confirmed_finding_yield", "confirmed defects / worker runs"],
+      ["token_per_confirmed_finding", "worker tokens / confirmed defects"],
+      ["adoption_rate", "adopted findings / total findings"],
+      ["rework_ratio", "main-rewritten Spark lines / adopted Spark lines"],
+      ["wall_clock_speedup", "single-agent baseline / parallel elapsed time"]
+    ];
+    const renderFormulas = items => items.map(([name, formula]) => `<div class="formula"><div class="formula-name mono">${name}</div><div class="formula-code mono">${formula}</div></div>`).join("");
+    document.getElementById("currentFormulas").innerHTML = renderFormulas(currentFormulas);
+    document.getElementById("futureFormulas").innerHTML = renderFormulas(futureFormulas);
+
+    const tabs = [...document.querySelectorAll(".tab")];
+    const panels = [...document.querySelectorAll(".tab-panel")];
+    tabs.forEach(tab => tab.addEventListener("click", () => {
+      const target = tab.dataset.tab;
+      tabs.forEach(item => {
+        const active = item === tab;
+        item.dataset.active = String(active);
+        item.setAttribute("aria-selected", String(active));
+      });
+      panels.forEach(panel => panel.dataset.active = String(panel.id === target));
+      requestAnimationFrame(() => animateProgress());
+    }));
+
+    function animateProgress() {
+      document.querySelectorAll(".progress-bar").forEach(bar => {
+        bar.style.width = `${Math.max(0, Math.min(100, Number(bar.dataset.progress || 0)))}%`;
+      });
+    }
+    requestAnimationFrame(animateProgress);
+
+    const toast = document.getElementById("toast");
+    let toastTimer;
+    function showToast(message) {
+      toast.textContent = message;
+      toast.dataset.open = "true";
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.dataset.open = "false", 2200);
+    }
+
+    document.getElementById("copySummary").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(report.summary);
+        showToast("핵심 결론을 복사했습니다.");
+      } catch {
+        showToast("브라우저 권한으로 복사하지 못했습니다.");
+      }
+    });
+    document.getElementById("printReport").addEventListener("click", () => window.print());
+  </script>
+</body>
+</html>

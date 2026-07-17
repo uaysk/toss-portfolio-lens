@@ -49,6 +49,38 @@ export type TossApiAuthConfig =
 
 export type DatabaseProvider = "sqlite" | "mysql" | "postgresql";
 
+export type McpAuthMode = "oauth" | "none";
+
+export type McpOAuthConfig = {
+  issuer: string;
+  clientId: string;
+  clientName: string;
+  clientSecret: string;
+  redirectUri: string;
+  signingPrivateKeyPem: string;
+  autoApprove: boolean;
+  accessTokenTtlSeconds: number;
+  refreshTokenTtlSeconds: number;
+  authorizationCodeTtlSeconds: number;
+  loginSessionTtlSeconds: number;
+};
+
+export type McpConfig = {
+  enabled: boolean;
+  authMode: McpAuthMode;
+  resourceUrl?: string;
+  oauth?: McpOAuthConfig;
+  allowedOrigins: string[];
+  maxRequestsPerMinute: number;
+  maxConcurrentRuns: number;
+  maxRunsPerSubject: number;
+  maxAssets: number;
+  maxCandidateBudget: number;
+  maxDateRangeYears: number;
+  inlineResultMaxRows: number;
+  inlineResultMaxBytes: number;
+};
+
 export type AppConfig = TossApiAuthConfig & {
   dashboardPassword: string;
   sessionSecret: string;
@@ -66,6 +98,7 @@ export type AppConfig = TossApiAuthConfig & {
   openAi?: OpenAiConfig;
   bedrock?: BedrockConfig;
   reportStorage: ReportStorageConfig;
+  mcp: McpConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -299,6 +332,124 @@ function normalizedHttpUrl(value: string, name: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function isLoopbackHost(host: string): boolean {
+  return ["127.0.0.1", "::1", "localhost"].includes(host.toLowerCase());
+}
+
+function readSecretFile(name: string, fallbackPath: string): string {
+  const filePath = optional(name) || fallbackPath;
+  let value: string;
+  try {
+    value = readFileSync(filePath, "utf8").trimEnd();
+  } catch {
+    throw new Error(`${name} 파일을 읽을 수 없습니다.`);
+  }
+  if (!value) throw new Error(`${name} 파일이 비어 있습니다.`);
+  return value;
+}
+
+function readMcpConfig({
+  host,
+  nodeEnv,
+  publicAppUrl,
+}: {
+  host: string;
+  nodeEnv: string;
+  publicAppUrl: string;
+}): McpConfig {
+  const enabled = readBoolean("MCP_ENABLED", false);
+  const authModeText = optional("MCP_AUTH_MODE")?.toLowerCase() || "oauth";
+  if (authModeText !== "oauth" && authModeText !== "none") {
+    throw new Error("MCP_AUTH_MODE는 oauth 또는 none이어야 합니다.");
+  }
+  const authMode = authModeText as McpAuthMode;
+  const rawOrigins = optional("MCP_ALLOWED_ORIGINS")
+    ?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean) ?? [];
+  const allowedOrigins = rawOrigins.map((origin) => new URL(normalizedHttpUrl(origin, "MCP_ALLOWED_ORIGINS")).origin);
+  const limits = {
+    allowedOrigins,
+    maxRequestsPerMinute: readBoundedInteger("MCP_MAX_REQUESTS_PER_MINUTE", 60, 1, 10_000),
+    maxConcurrentRuns: readBoundedInteger("MCP_MAX_CONCURRENT_RUNS", 1, 1, 32),
+    maxRunsPerSubject: readBoundedInteger("MCP_MAX_RUNS_PER_SUBJECT", 2, 1, 32),
+    maxAssets: readBoundedInteger("MCP_MAX_ASSETS", 20, 1, 20),
+    maxCandidateBudget: readBoundedInteger("MCP_MAX_CANDIDATE_BUDGET", 10_000, 1, 100_000),
+    maxDateRangeYears: readBoundedInteger("MCP_MAX_DATE_RANGE_YEARS", 20, 1, 50),
+    inlineResultMaxRows: readBoundedInteger("MCP_INLINE_RESULT_MAX_ROWS", 1_000, 10, 100_000),
+    inlineResultMaxBytes: readBoundedInteger("MCP_INLINE_RESULT_MAX_BYTES", 204_800, 1_024, 10_485_760),
+  };
+  if (!enabled) return { enabled: false, authMode, ...limits };
+
+  const resourceUrl = normalizedHttpUrl(
+    optional("MCP_RESOURCE_URL") || `${publicAppUrl}/mcp`,
+    "MCP_RESOURCE_URL",
+  );
+  if (new URL(resourceUrl).pathname.replace(/\/+$/, "") !== "/mcp") {
+    throw new Error("MCP_RESOURCE_URL은 canonical /mcp endpoint여야 합니다.");
+  }
+
+  if (authMode === "none") {
+    if (nodeEnv === "production" || !isLoopbackHost(host)) {
+      throw new Error("MCP_AUTH_MODE=none은 production이 아닌 loopback 바인딩에서만 사용할 수 있습니다.");
+    }
+    return { enabled: true, authMode, resourceUrl, ...limits };
+  }
+
+  const issuer = normalizedHttpUrl(required("MCP_OAUTH_ISSUER"), "MCP_OAUTH_ISSUER");
+  const redirectUri = normalizedHttpUrl(required("MCP_OAUTH_REDIRECT_URI"), "MCP_OAUTH_REDIRECT_URI");
+  if (new URL(issuer).pathname !== "/") {
+    throw new Error("MCP_OAUTH_ISSUER는 path가 없는 authorization server origin이어야 합니다.");
+  }
+  if (nodeEnv === "production") {
+    if (new URL(resourceUrl).protocol !== "https:" || new URL(issuer).protocol !== "https:") {
+      throw new Error("production MCP OAuth의 resource URL과 issuer는 HTTPS여야 합니다.");
+    }
+    const redirect = new URL(redirectUri);
+    if (redirect.protocol !== "https:" && !isLoopbackHost(redirect.hostname)) {
+      throw new Error("production MCP OAuth redirect URI는 비-loopback 주소에서 HTTPS여야 합니다.");
+    }
+  }
+  const clientId = required("MCP_OAUTH_CLIENT_ID");
+  if (!/^[A-Za-z0-9._~-]{3,128}$/.test(clientId)) {
+    throw new Error("MCP_OAUTH_CLIENT_ID 형식이 올바르지 않습니다.");
+  }
+  const autoApprove = readBoolean("MCP_OAUTH_AUTO_APPROVE", false);
+  if (autoApprove && nodeEnv !== "test") {
+    throw new Error("MCP_OAUTH_AUTO_APPROVE는 test 환경에서만 사용할 수 있습니다.");
+  }
+  return {
+    enabled: true,
+    authMode,
+    resourceUrl,
+    oauth: {
+      issuer,
+      clientId,
+      clientName: optional("MCP_OAUTH_CLIENT_NAME") || "Toss Portfolio Lens ChatGPT",
+      clientSecret: readSecretFile(
+        "MCP_OAUTH_CLIENT_SECRET_FILE",
+        "/run/secrets/mcp-oauth-client-secret",
+      ),
+      signingPrivateKeyPem: readSecretFile(
+        "MCP_OAUTH_SIGNING_KEY_FILE",
+        "/run/secrets/mcp-oauth-signing-key",
+      ),
+      redirectUri,
+      autoApprove,
+      accessTokenTtlSeconds: readBoundedInteger("MCP_ACCESS_TOKEN_TTL_SECONDS", 3_600, 60, 86_400),
+      refreshTokenTtlSeconds: readBoundedInteger(
+        "MCP_REFRESH_TOKEN_TTL_SECONDS",
+        2_592_000,
+        3_600,
+        31_536_000,
+      ),
+      authorizationCodeTtlSeconds: readBoundedInteger("MCP_AUTH_CODE_TTL_SECONDS", 300, 60, 900),
+      loginSessionTtlSeconds: readBoundedInteger("MCP_OAUTH_SESSION_TTL_SECONDS", 900, 60, 3_600),
+    },
+    ...limits,
+  };
+}
+
 function readOpenAiConfig(): OpenAiConfig | undefined {
   const endpoint = optional("OPENAI_API_ENDPOINT");
   const apiKey = optional("OPENAI_API_KEY");
@@ -369,6 +520,10 @@ export function loadConfig(): AppConfig {
   const host = process.env.HOST?.trim() || "0.0.0.0";
   const port = readPort();
   const configuredPublicUrl = optional("PUBLIC_APP_URL") || optional("APP_URL");
+  const nodeEnv = process.env.NODE_ENV?.trim() || "development";
+  const publicAppUrl = configuredPublicUrl
+    ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
+    : `http://localhost:${port}`;
   const reportAi = readReportAiConfig();
   const dbProvider = readDatabaseProvider();
   const postgres = dbProvider === "postgresql" ? readPostgresConfig(true) : undefined;
@@ -389,11 +544,10 @@ export function loadConfig(): AppConfig {
     mysql,
     candleCacheLatestTtlMs: readBoundedInteger("CANDLE_CACHE_LATEST_TTL_MS", 300_000, 10_000, 86_400_000),
     snapshotRefreshHours: readSnapshotRefreshHours(),
-    nodeEnv: process.env.NODE_ENV?.trim() || "development",
-    publicAppUrl: configuredPublicUrl
-      ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
-      : `http://localhost:${port}`,
+    nodeEnv,
+    publicAppUrl,
     ...reportAi,
     reportStorage: readReportStorage(),
+    mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
   };
 }

@@ -154,6 +154,35 @@ describe("portfolio backtest engine", () => {
     expect(result.advanced.tradeBehavior.unmatchedSellCount).toBe(0);
     expect(result.advanced.dataQuality).toMatchObject({ confidence: "high", commonCoveragePercent: 100 });
     expect(result.contributions.reduce((sum, item) => sum + item.timeLinkedContributionPercent, 0)).toBeCloseTo(result.metrics.totalReturnPercent, 3);
+    expect(result.contributions.reduce((sum, item) => (
+      sum + item.upRegimeContributionPercent + item.downRegimeContributionPercent
+    ), 0)).toBeCloseTo(result.metrics.totalReturnPercent, 3);
+  });
+
+  it("현금흐름 주기와 기간 시작·종료 시점을 관측일 기준으로 구분한다", () => {
+    const single = [{ ...assets[0], weight: 100 }];
+    const run = (dates: string[], timing: "period_start" | "period_end") => simulateBacktest({
+      assets: single,
+      prices: new Map([["KRW:005930", prices(dates.map((date) => [date, 100]))]]),
+      requestedStartDate: dates[0],
+      endDate: dates.at(-1)!,
+      initialAmount: 1_000,
+      monthlyCashFlow: 100,
+      cashFlowFrequency: "quarterly",
+      cashFlowTiming: timing,
+      rebalanceFrequency: "none",
+    });
+    const periodStart = run(["2025-01-02", "2025-02-03", "2025-04-01", "2025-07-01", "2025-10-01", "2026-01-02"], "period_start");
+    const periodEnd = run(["2025-01-02", "2025-03-31", "2025-04-01", "2025-06-30", "2025-07-01", "2025-09-30", "2025-10-01", "2025-12-31", "2026-01-02"], "period_end");
+
+    expect(periodStart.metrics.totalContributions).toBe(1_400);
+    expect(periodStart.trades.filter((trade) => trade.reason === "cash-flow").map((trade) => trade.date)).toEqual([
+      "2025-04-01", "2025-07-01", "2025-10-01", "2026-01-02",
+    ]);
+    expect(periodEnd.metrics.totalContributions).toBe(1_400);
+    expect(periodEnd.trades.filter((trade) => trade.reason === "cash-flow").map((trade) => trade.date)).toEqual([
+      "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31",
+    ]);
   });
 
   it("설정한 무위험수익률을 Sharpe와 Sortino에 반영한다", () => {

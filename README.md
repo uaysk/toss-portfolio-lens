@@ -153,6 +153,29 @@ curl http://localhost:3200/api/health
 
 전체 예시는 [.env.example](.env.example)을 참고하세요.
 
+## ChatGPT 앱과 MCP 연결
+
+공식 TypeScript MCP SDK 기반 Streamable HTTP endpoint와 내장 OAuth Authorization Server를 선택적으로 활성화할 수 있습니다. 기본값 `MCP_ENABLED=false`에서는 기존 앱 동작이 바뀌지 않으며 `/api/health`는 MCP, 인증 모드, 보고서 생성 설정 여부만 반환합니다. 활성화 시에도 주문·정정·취소 도구는 노출하지 않습니다.
+
+ChatGPT 개발자 앱에는 다음 값을 설정합니다.
+
+| 항목 | 값 |
+| --- | --- |
+| App name | `Toss Portfolio Lens` |
+| Description | `포트폴리오 가격·상관관계·백테스트·최적화 앱` |
+| MCP endpoint | `${MCP_RESOURCE_URL}` |
+| OAuth Client ID | `MCP_OAUTH_CLIENT_ID` |
+| OAuth Client Secret | bootstrap으로 생성한 secret 파일의 값 |
+| Redirect URI | ChatGPT 앱 관리 화면의 값을 `MCP_OAUTH_REDIRECT_URI`로 정확히 설정 |
+
+```bash
+cp .env.chatgpt.example .env.chatgpt
+npm run mcp:oauth:bootstrap
+docker compose -f compose.yaml -f compose.chatgpt.yaml --env-file .env --env-file .env.chatgpt up -d --build web
+```
+
+Secret 값은 명령 출력에 표시되지 않으며 `secrets/` 전체가 Git과 Docker build context에서 제외됩니다. OAuth Code + PKCE S256, RS256 JWT, 회전형 refresh token, revocation, 네 scope, 30개 도구, 대용량 resource, 선택적 보고서 옵션, Inspector·HTTP smoke와 롤백 절차는 [MCP와 ChatGPT 연결 가이드](docs/mcp-chatgpt.md)에 정리했습니다.
+
 ## AWS에 재배포
 
 AWS CLI, Docker, kubectl, Helm, jq, curl과 필요한 IAM 권한을 준비한 뒤 프로젝트 루트에서 실행합니다.

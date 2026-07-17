@@ -4,9 +4,12 @@ import {
   type BacktestAssetDefinition,
   type BacktestPricePoint,
   type BacktestRebalanceFrequency,
+  type BacktestCashFlowFrequency,
+  type BacktestCashFlowTiming,
 } from "./backtest-engine.js";
 import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "./history.js";
 import type { InstrumentInfo, TossClient } from "./toss.js";
+import { MarketDataService, type CurrencyMode } from "./services/market-data-service.js";
 
 const API_PACING_MS = 230;
 const MAX_PRICE_PAGES = 100;
@@ -34,9 +37,14 @@ export type BacktestRunRequest = {
   endDate: string;
   initialAmount: number;
   monthlyCashFlow: number;
+  cashFlowFrequency?: BacktestCashFlowFrequency;
+  cashFlowTiming?: BacktestCashFlowTiming;
   rebalanceFrequency: BacktestRebalanceFrequency;
   riskFreeRatePercent?: number;
   transactionCostBps?: number;
+  currencyMode?: CurrencyMode;
+  baseCurrency?: "KRW";
+  rebalanceThresholdPercent?: number;
   benchmark: BacktestBenchmarkKey;
   benchmarkSymbol?: string;
 };
@@ -102,10 +110,15 @@ function exactWeights(values: number[]): number[] {
 }
 
 export class PortfolioBacktestService {
+  private readonly marketData: MarketDataService;
+
   constructor(
     private readonly toss: TossClient,
     private readonly store: PortfolioHistoryStore,
-  ) {}
+    marketData?: MarketDataService,
+  ) {
+    this.marketData = marketData ?? new MarketDataService(toss, store);
+  }
 
   async resolveInstruments(symbols: string[]): Promise<BacktestInstrument[]> {
     const normalized = Array.from(new Set(symbols.map(normalizeSymbol)));
@@ -149,6 +162,22 @@ export class PortfolioBacktestService {
       defaultStartDate: assets.map((asset) => asset.listDate).sort().at(-1)!,
       defaultEndDate: today,
       initialAmount: Math.round(values.reduce((sum, value) => sum + value, 0)),
+    };
+  }
+
+  async getCachedBenchmarkAvailability(
+    key: Exclude<BacktestBenchmarkKey, "NONE" | "CUSTOM">,
+    startDate: string,
+    endDate: string,
+  ): Promise<{ key: string; name: string; firstDate?: string; lastDate?: string; observations: number }> {
+    const bounds = await this.store.getBenchmarkPriceBounds(key);
+    const observations = await this.store.getBenchmarkPrices(key, startDate, endDate);
+    return {
+      key,
+      name: BENCHMARKS[key].name,
+      ...(bounds.earliest ? { firstDate: bounds.earliest } : {}),
+      ...(bounds.latest ? { lastDate: bounds.latest } : {}),
+      observations: observations.length,
     };
   }
 
@@ -209,6 +238,8 @@ export class PortfolioBacktestService {
     const today = kstDateString(new Date());
     const riskFreeRatePercent = request.riskFreeRatePercent ?? 0;
     const transactionCostBps = request.transactionCostBps ?? 0;
+    const currencyMode = request.currencyMode ?? "KRW";
+    const rebalanceThresholdPercent = request.rebalanceThresholdPercent ?? 5;
     if (!isHistoryDate(request.startDate) || !isHistoryDate(request.endDate) || request.startDate > request.endDate || request.endDate > today) {
       throw new BacktestValidationError("백테스트 시작일과 종료일을 확인해 주세요.");
     }
@@ -218,14 +249,30 @@ export class PortfolioBacktestService {
     if (!Number.isFinite(request.monthlyCashFlow) || Math.abs(request.monthlyCashFlow) > 1_000_000_000_000) {
       throw new BacktestValidationError("월 정기 현금흐름은 절댓값 1조원 이하로 입력해 주세요.");
     }
+    if (request.cashFlowFrequency !== undefined && !["monthly", "quarterly", "annually"].includes(request.cashFlowFrequency)) {
+      throw new BacktestValidationError("현금흐름 주기는 monthly, quarterly, annually 중 하나여야 합니다.");
+    }
+    if (request.cashFlowTiming !== undefined && !["period_start", "period_end"].includes(request.cashFlowTiming)) {
+      throw new BacktestValidationError("현금흐름 시점은 period_start 또는 period_end여야 합니다.");
+    }
     if (!Number.isFinite(riskFreeRatePercent) || riskFreeRatePercent < -10 || riskFreeRatePercent > 50) {
       throw new BacktestValidationError("무위험수익률은 -10% 이상 50% 이하로 입력해 주세요.");
     }
     if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
       throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
     }
-    if (!["none", "monthly", "quarterly", "annually"].includes(request.rebalanceFrequency)) {
+    if (!["none", "monthly", "quarterly", "annually", "threshold"].includes(request.rebalanceFrequency)) {
       throw new BacktestValidationError("리밸런싱 주기를 확인해 주세요.");
+    }
+    if (currencyMode !== "local" && currencyMode !== "KRW") {
+      throw new BacktestValidationError("통화 기준은 local 또는 KRW여야 합니다.");
+    }
+    if (request.baseCurrency !== undefined && request.baseCurrency !== "KRW") {
+      throw new BacktestValidationError("기준통화는 KRW만 지원합니다.");
+    }
+    if (request.rebalanceFrequency === "threshold"
+      && (!Number.isFinite(rebalanceThresholdPercent) || rebalanceThresholdPercent < 0.1 || rebalanceThresholdPercent > 50)) {
+      throw new BacktestValidationError("threshold 리밸런싱 기준은 0.1% 이상 50% 이하로 입력해 주세요.");
     }
     if (!["NONE", "KOSPI", "KOSDAQ", "NASDAQ100", "SP500", "CUSTOM"].includes(request.benchmark)) {
       throw new BacktestValidationError("벤치마크를 확인해 주세요.");
@@ -261,13 +308,13 @@ export class PortfolioBacktestService {
       ...instruments.map(instrumentKey),
       ...(customBenchmark ? [instrumentKey(customBenchmark)] : []),
     ]));
-    const prices = await this.store.getBacktestPrices(keys, effectiveRequestedStart, request.endDate);
+    const localPrices = await this.store.getBacktestPrices(keys, effectiveRequestedStart, request.endDate);
     let benchmark: { key: string; name: string; prices: BacktestPricePoint[] } | undefined;
     if (customBenchmark) {
       benchmark = {
         key: `CUSTOM:${instrumentKey(customBenchmark)}`,
         name: customBenchmark.name,
-        prices: prices.get(instrumentKey(customBenchmark)) ?? [],
+        prices: localPrices.get(instrumentKey(customBenchmark)) ?? [],
       };
     } else if (builtInBenchmark) {
       const catalog = BENCHMARKS[builtInBenchmark];
@@ -278,6 +325,57 @@ export class PortfolioBacktestService {
       };
     }
 
+    const usdSeries = [
+      ...instruments.filter((instrument) => instrument.currency === "USD")
+        .map((instrument) => localPrices.get(instrumentKey(instrument)) ?? []),
+      ...(customBenchmark?.currency === "USD" ? [benchmark?.prices ?? []] : []),
+      ...(builtInBenchmark && BENCHMARKS[builtInBenchmark].source === "stock" ? [benchmark?.prices ?? []] : []),
+    ];
+    const exchangeRates = currencyMode === "KRW" && usdSeries.length
+      ? await this.marketData.ensureExchangeRates(usdSeries.flatMap((series) => series.map((point) => point.date)))
+      : new Map<string, number>();
+    const rateEntries = Array.from(exchangeRates.entries())
+      .filter((entry) => Number.isFinite(entry[1]) && entry[1] > 0)
+      .sort((left, right) => left[0].localeCompare(right[0]));
+    let carriedFxObservations = 0;
+    let missingFxObservations = 0;
+    const convertSeries = (series: BacktestPricePoint[], currency: "KRW" | "USD"): BacktestPricePoint[] => {
+      if (currencyMode !== "KRW" || currency === "KRW") {
+        return series.map((point) => ({ ...point, localClose: point.close, fxRate: 1 }));
+      }
+      let rateIndex = 0;
+      let lastRate = 0;
+      let lastRateDate = "";
+      return series.flatMap((point): BacktestPricePoint[] => {
+        while (rateIndex < rateEntries.length && rateEntries[rateIndex][0] <= point.date) {
+          lastRateDate = rateEntries[rateIndex][0];
+          lastRate = rateEntries[rateIndex][1];
+          rateIndex += 1;
+        }
+        if (!(lastRate > 0)) {
+          missingFxObservations += 1;
+          return [];
+        }
+        if (lastRateDate !== point.date) carriedFxObservations += 1;
+        return [{
+          date: point.date,
+          close: point.close * lastRate,
+          localClose: point.close,
+          fxRate: lastRate,
+        }];
+      });
+    };
+    const prices = new Map<string, BacktestPricePoint[]>();
+    for (const instrument of instruments) {
+      const key = instrumentKey(instrument);
+      prices.set(key, convertSeries(localPrices.get(key) ?? [], instrument.currency));
+    }
+    if (benchmark) {
+      const benchmarkCurrency: "KRW" | "USD" = customBenchmark?.currency
+        ?? (builtInBenchmark && BENCHMARKS[builtInBenchmark].source === "stock" ? "USD" : "KRW");
+      benchmark = { ...benchmark, prices: convertSeries(benchmark.prices, benchmarkCurrency) };
+    }
+
     const result = simulateBacktest({
       assets: definitions,
       prices,
@@ -285,17 +383,24 @@ export class PortfolioBacktestService {
       endDate: request.endDate,
       initialAmount: request.initialAmount,
       monthlyCashFlow: request.monthlyCashFlow,
+      cashFlowFrequency: request.cashFlowFrequency,
+      cashFlowTiming: request.cashFlowTiming,
       rebalanceFrequency: request.rebalanceFrequency,
       riskFreeRatePercent,
       transactionCostBps,
+      rebalanceThresholdPercent,
       benchmark,
     });
     const warnings = [
-      "국내·해외 종목을 함께 비교할 때 각 종목의 현지 통화 수정주가 수익률을 사용하며 과거 환율 변동은 반영하지 않습니다.",
+      currencyMode === "KRW"
+        ? "국내·해외 종목의 수정주가를 전체 기간 USD/KRW 환율로 원화 환산해 동일 기준통화로 계산했습니다."
+        : "local 모드는 각 종목의 현지통화 수익률을 합성하므로 국내·해외 혼합 결과는 단일 통화 성과로 해석할 수 없습니다.",
       transactionCostBps > 0
         ? `거래비용은 체결금액의 ${transactionCostBps}bp로 추정하며 성과 경로에는 차감하지 않고 비용 차감 후 추정 수익률로 별도 표시합니다.`
         : "거래비용 가정이 0bp이므로 비용 차감 전 성과와 비용 차감 후 추정 성과가 같습니다.",
-      "수정주가에 반영되지 않은 세금·실제 체결 슬리피지와 과거 환율은 별도로 반영하지 않습니다.",
+      "수정주가에 반영되지 않은 현금배당·세금·실제 체결 슬리피지는 별도로 반영하지 않습니다.",
+      ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 이용 가능 값을 사용했습니다.`] : []),
+      ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 계산에서 제외했습니다.`] : []),
     ];
     if (request.startDate < latestListDate) warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
     if (result.effectiveStartDate > effectiveRequestedStart) {
@@ -304,11 +409,14 @@ export class PortfolioBacktestService {
     return {
       generatedAt: new Date().toISOString(),
       baseCurrency: "KRW" as const,
-      currencyMethod: "LOCAL_RETURN" as const,
+      currencyMethod: currencyMode === "KRW" ? "KRW_FX_CONVERTED" as const : "LOCAL_RETURN" as const,
       config: {
         ...request,
         riskFreeRatePercent,
         transactionCostBps,
+        currencyMode,
+        baseCurrency: "KRW" as const,
+        ...(request.rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
         ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
         requestedStartDate: request.startDate,
         latestListDate,

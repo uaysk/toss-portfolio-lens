@@ -9,23 +9,30 @@
     "start": "node dist/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "vitest run",
-    "test:mysql": "tsx scripts/verify-mysql-storage.ts"
+    "test:mysql": "tsx scripts/verify-mysql-storage.ts",
+    "test:postgres": "tsx scripts/verify-postgres-storage.ts",
+    "mcp:oauth:bootstrap": "node scripts/generate-mcp-oauth-secrets.mjs",
+    "mcp:oauth:smoke": "node scripts/mcp-oauth-http-smoke.mjs",
+    "mcp:browser:smoke": "node scripts/mcp-browser-smoke.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1088.0",
     "@aws-sdk/client-s3": "^3.1087.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@radix-ui/react-select": "2.2.5",
     "@radix-ui/react-slot": "1.2.3",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "express": "5.1.0",
+    "jose": "^6.2.3",
     "lucide-react": "0.468.0",
     "mysql2": "^3.23.0",
     "pg": "^8.22.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "recharts": "2.15.4",
-    "tailwind-merge": "2.6.0"
+    "tailwind-merge": "2.6.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "5.0.3",

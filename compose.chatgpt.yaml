@@ -1,0 +1,18 @@
+services:
+  web:
+    env_file:
+      - .env
+      - .env.chatgpt
+    secrets:
+      - source: mcp-oauth-client-secret
+        target: mcp-oauth-client-secret
+        mode: 0400
+      - source: mcp-oauth-signing-key
+        target: mcp-oauth-signing-key
+        mode: 0400
+
+secrets:
+  mcp-oauth-client-secret:
+    file: ./secrets/mcp-oauth-client-secret
+  mcp-oauth-signing-key:
+    file: ./secrets/mcp-oauth-signing-key

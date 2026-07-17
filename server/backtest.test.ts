@@ -97,6 +97,11 @@ describe("PortfolioBacktestService", () => {
         nextBefore: undefined,
         adjusted,
       })),
+      getUsdKrwExchangeRate: vi.fn().mockImplementation(async (date: string) => ({
+        date,
+        rate: 1,
+        timestamp: `${date}T15:30:00+09:00`,
+      })),
     } as unknown as TossClient;
     const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
@@ -135,6 +140,11 @@ describe("PortfolioBacktestService", () => {
         nextBefore: undefined,
         adjusted,
       })),
+      getUsdKrwExchangeRate: vi.fn().mockImplementation(async (date: string) => ({
+        date,
+        rate: 1,
+        timestamp: `${date}T15:30:00+09:00`,
+      })),
     } as unknown as TossClient;
     const store = await PortfolioHistoryStore.openSqlite(":memory:");
     stores.push(store);
@@ -154,5 +164,45 @@ describe("PortfolioBacktestService", () => {
     expect(result.benchmarkMetrics?.totalReturnPercent).toBe(-10);
     expect(result.config.benchmarkSymbol).toBe("AAPL");
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("AAPL", undefined, true);
+  });
+
+  it("미국 종목의 전체 기간 USD/KRW 경로를 반영하고 현지가격·환율 기여를 분리한다", async () => {
+    const usd = instruments[1];
+    const toss = {
+      getInstruments: vi.fn().mockResolvedValue([usd]),
+      getDailyCandles: vi.fn().mockResolvedValue({
+        candles: [
+          candle("AAPL", "USD", "2024-01-02", 100),
+          candle("AAPL", "USD", "2024-01-03", 100),
+        ],
+        nextBefore: undefined,
+        adjusted: true,
+      }),
+      getUsdKrwExchangeRate: vi.fn().mockImplementation(async (date: string) => ({
+        date,
+        rate: date === "2024-01-02" ? 1_000 : 1_100,
+        timestamp: `${date}T15:30:00+09:00`,
+      })),
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+    const service = new PortfolioBacktestService(toss, store);
+    const base = {
+      assets: [{ symbol: "AAPL", weight: 100 }],
+      startDate: "2024-01-02",
+      endDate: "2024-01-03",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none" as const,
+      benchmark: "NONE" as const,
+    };
+
+    const krw = await service.run({ ...base, currencyMode: "KRW" });
+    const local = await service.run({ ...base, currencyMode: "local" });
+    expect(krw.metrics.totalReturnPercent).toBeCloseTo(10, 8);
+    expect(local.metrics.totalReturnPercent).toBeCloseTo(0, 8);
+    expect(krw.contributions[0].localPriceContributionPercent).toBeCloseTo(0, 8);
+    expect(krw.contributions[0].fxContributionPercent).toBeCloseTo(10, 8);
+    expect(krw.dataQuality.commonReturnPolicy).toBe("inner_join");
   });
 });

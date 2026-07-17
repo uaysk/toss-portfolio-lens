@@ -3,6 +3,8 @@ dist
 .env
 .env.*
 !.env.example
+!.env.chatgpt.example
+secrets/
 *.log
 .DS_Store
 .idea

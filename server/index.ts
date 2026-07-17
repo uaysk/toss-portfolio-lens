@@ -44,13 +44,31 @@ import { createReportStorage } from "./report-storage.js";
 import { isReportId, PortfolioReportService } from "./reports.js";
 import { openConfiguredHistoryStore } from "./storage.js";
 import { normalizeCandlePage, TossApiError, TossClient } from "./toss.js";
+import { createMcpOAuthRuntime, type McpOAuthRuntime } from "./auth/mcp-oauth-routes.js";
+import { ArtifactRepository } from "./repositories/artifact-repository.js";
+import { OptimizationRepository } from "./repositories/optimization-repository.js";
+import { ReportRepository } from "./repositories/report-repository.js";
+import { RunRepository } from "./repositories/run-repository.js";
+import { AnalyticsService } from "./services/analytics-service.js";
+import { ArtifactService } from "./services/artifact-service.js";
+import { BacktestService } from "./services/backtest-service.js";
+import { InstrumentService } from "./services/instrument-service.js";
+import { MarketDataService } from "./services/market-data-service.js";
+import { PortfolioService } from "./services/portfolio-service.js";
+import { ReportService } from "./services/report-service.js";
+import { ReturnSeriesService } from "./services/return-series-service.js";
+import { RunService } from "./services/run-service.js";
+import { McpResourceRegistry } from "./mcp/resources.js";
+import { createMcpServer } from "./mcp/server.js";
+import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
 
 const config = loadConfig();
 const toss = new TossClient(config);
 const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
-const portfolioBacktest = new PortfolioBacktestService(toss, historyStore);
+const marketData = new MarketDataService(toss, historyStore);
+const portfolioBacktest = new PortfolioBacktestService(toss, historyStore, marketData);
 const reportStorage = createReportStorage(config.reportStorage);
 const reportWriter = config.bedrock
   ? new BedrockReportWriter(config.bedrock)
@@ -62,6 +80,96 @@ const portfolioReports = new PortfolioReportService(
   config.publicAppUrl,
   reportWriter,
 );
+let mcpHttpRuntime: McpHttpRuntime | undefined;
+let mcpOAuthRuntime: McpOAuthRuntime | undefined;
+let mcpCleanupTimer: NodeJS.Timeout | undefined;
+
+if (config.mcp.enabled) {
+  const database = historyStore.relationalDatabase;
+  const runRepository = new RunRepository(database);
+  const artifactRepository = new ArtifactRepository(database);
+  const optimizationRepository = new OptimizationRepository(database);
+  const reportRepository = new ReportRepository(database);
+  await runRepository.initialize();
+  await artifactRepository.initialize();
+  await optimizationRepository.initialize();
+  await reportRepository.initialize();
+
+  const artifactService = new ArtifactService(
+    artifactRepository,
+    config.mcp.inlineResultMaxRows,
+    config.mcp.inlineResultMaxBytes,
+  );
+  const runService = new RunService(
+    runRepository,
+    artifactService,
+    config.mcp.maxConcurrentRuns,
+    config.mcp.maxRunsPerSubject,
+  );
+  const staleRuns = await runService.initialize();
+  if (staleRuns > 0) console.warn(`[mcp] ${staleRuns}개의 stale 실행을 failed 상태로 복구했습니다.`);
+  const instrumentService = new InstrumentService(marketData);
+  const returnSeries = new ReturnSeriesService(marketData);
+  const analytics = new AnalyticsService(returnSeries, marketData);
+  const reportService = new ReportService(
+    portfolioReports,
+    reportRepository,
+    config.openAi?.model ?? config.bedrock?.modelId,
+  );
+  const backtests = new BacktestService(portfolioBacktest, marketData, runService, artifactService, reportService);
+  const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
+  const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
+  const resourceMetadataUrl = new URL("/.well-known/oauth-protected-resource", config.mcp.resourceUrl).toString();
+
+  if (config.mcp.authMode === "oauth") {
+    mcpOAuthRuntime = await createMcpOAuthRuntime({
+      database,
+      oauth: config.mcp.oauth!,
+      resourceUrl: config.mcp.resourceUrl!,
+      dashboardPassword: config.dashboardPassword,
+      dashboardSessionSecret: config.sessionSecret,
+      publicAppUrl: config.publicAppUrl,
+      maxRequestsPerMinute: config.mcp.maxRequestsPerMinute,
+    });
+    mcpCleanupTimer = setInterval(
+      () => void mcpOAuthRuntime?.cleanup().catch((error) => {
+        console.warn("[mcp-oauth] 만료 데이터 정리 실패:", error instanceof Error ? error.message : "unknown error");
+      }),
+      5 * 60_000,
+    );
+    mcpCleanupTimer.unref();
+  }
+
+  const dependencies = {
+    instruments: instrumentService,
+    marketData,
+    analytics,
+    returnSeries,
+    backtests,
+    backtestEngine: portfolioBacktest,
+    runs: runService,
+    artifacts: artifactService,
+    portfolio: portfolioService,
+    reports: reportService,
+    optimizationRepository,
+    resources,
+    maxCandidateBudget: config.mcp.maxCandidateBudget,
+    maxAssets: config.mcp.maxAssets,
+    maxDateRangeYears: config.mcp.maxDateRangeYears,
+  };
+  mcpHttpRuntime = createMcpHttpRuntime({
+    serverFactory: () => createMcpServer({
+      dependencies,
+      authMode: config.mcp.authMode,
+      resourceMetadataUrl,
+    }),
+    authMode: config.mcp.authMode,
+    verifier: mcpOAuthRuntime?.verifier,
+    resourceMetadataUrl,
+    allowedOrigins: config.mcp.allowedOrigins,
+    maxRequestsPerMinute: config.mcp.maxRequestsPerMinute,
+  });
+}
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
@@ -78,6 +186,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
+app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 app.use((request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
@@ -92,6 +201,14 @@ app.use((request, response, next) => {
   }
   next();
 });
+
+if (mcpOAuthRuntime) app.use(mcpOAuthRuntime.router);
+if (mcpHttpRuntime) app.use(mcpHttpRuntime.router);
+if (!config.mcp.enabled) {
+  app.all("/mcp", (_request, response) => {
+    response.status(404).json({ error: { code: "mcp-disabled", message: "MCP endpoint is disabled." } });
+  });
+}
 
 function clientIp(request: Request): string {
   return request.socket.remoteAddress || "unknown";
@@ -123,7 +240,11 @@ app.get("/api/health", (_request, response) => {
     service: "portfolio-lens",
     storage: historyStore.backend,
     reportStorage: portfolioReports.storageBackend,
-    reportGeneration: portfolioReports.generationConfigured ? "configured" : "unavailable",
+    reportGeneration: portfolioReports.generationConfigured ? "configured" : "unconfigured",
+    mcp: config.mcp.enabled ? "enabled" : "disabled",
+    mcpAuth: !config.mcp.enabled
+      ? "disabled"
+      : config.mcp.authMode === "oauth" ? "oauth" : "local-none",
   });
 });
 
@@ -609,11 +730,20 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
     endDate: typeof body.endDate === "string" ? body.endDate : "",
     initialAmount: typeof body.initialAmount === "number" ? body.initialAmount : Number.NaN,
     monthlyCashFlow: typeof body.monthlyCashFlow === "number" ? body.monthlyCashFlow : Number.NaN,
+    cashFlowFrequency: typeof body.cashFlowFrequency === "string"
+      ? body.cashFlowFrequency as BacktestRunRequest["cashFlowFrequency"]
+      : "monthly",
+    cashFlowTiming: typeof body.cashFlowTiming === "string"
+      ? body.cashFlowTiming as BacktestRunRequest["cashFlowTiming"]
+      : "period_start",
     riskFreeRatePercent: typeof body.riskFreeRatePercent === "number" ? body.riskFreeRatePercent : 0,
     transactionCostBps: typeof body.transactionCostBps === "number" ? body.transactionCostBps : 0,
+    currencyMode: body.currencyMode === "local" ? "local" : "KRW",
+    baseCurrency: "KRW",
     rebalanceFrequency: typeof body.rebalanceFrequency === "string"
       ? body.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"]
       : "none",
+    ...(typeof body.rebalanceThresholdPercent === "number" ? { rebalanceThresholdPercent: body.rebalanceThresholdPercent } : {}),
     benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
     ...(typeof body.benchmarkSymbol === "string" ? { benchmarkSymbol: body.benchmarkSymbol } : {}),
   };
@@ -780,7 +910,10 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   clearTimeout(initialCollectionTimer);
   clearInterval(collectionInterval);
+  if (mcpCleanupTimer) clearInterval(mcpCleanupTimer);
   server.close(async () => {
+    await mcpHttpRuntime?.close();
+    await mcpOAuthRuntime?.cleanup().catch(() => undefined);
     await historicalBackfill.waitForIdle();
     await historyStore.close();
     console.info("Portfolio Lens stopped by " + signal);

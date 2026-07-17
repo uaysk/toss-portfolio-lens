@@ -206,6 +206,11 @@ export class PortfolioHistoryStore {
     this.backend = db.dialect;
   }
 
+  /** Shared repositories use the same connection pool and transaction semantics. */
+  get relationalDatabase(): RelationalDatabase {
+    return this.db;
+  }
+
   static async open(database: RelationalDatabase): Promise<PortfolioHistoryStore> {
     const store = new PortfolioHistoryStore(database);
     await store.initialize();

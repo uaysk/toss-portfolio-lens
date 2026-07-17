@@ -1,0 +1,424 @@
+import { createHash } from "node:crypto";
+import { BacktestValidationError } from "../backtest-engine.js";
+import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "../history.js";
+import {
+  MarketDataRepository,
+  type CachedMarketCandle,
+} from "../repositories/market-data-repository.js";
+import type { InstrumentInfo, TossClient } from "../toss.js";
+
+const API_PACING_MS = 230;
+const MAX_PRICE_PAGES = 100;
+
+export type MarketInterval = "1d" | "1w" | "1mo";
+export type CurrencyMode = "local" | "KRW";
+
+export type MarketInstrument = {
+  symbol: string;
+  name: string;
+  market: string;
+  currency: "KRW" | "USD";
+  assetType: string;
+  listDate?: string;
+  status?: string;
+};
+
+export type MarketSeriesPoint = {
+  date: string;
+  periodStart: string;
+  periodEnd: string;
+  observations: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  localOpen: number;
+  localHigh: number;
+  localLow: number;
+  localClose: number;
+  fxRate: number;
+};
+
+export type MarketSeriesResult = {
+  instrument: MarketInstrument;
+  interval: MarketInterval;
+  adjusted: boolean;
+  currencyMode: CurrencyMode;
+  currency: "KRW" | "USD";
+  points: MarketSeriesPoint[];
+  requestedPeriod: { from: string; to: string };
+  effectivePeriod?: { from: string; to: string };
+  dataRevision: string;
+  assumptions: string[];
+  warnings: string[];
+  dataQuality: {
+    observations: number;
+    missingFxObservations: number;
+    carriedFxObservations: number;
+  };
+};
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function normalizeSymbol(value: string): string {
+  const symbol = value.trim().toUpperCase();
+  if (!/^[A-Z0-9.-]{1,32}$/.test(symbol)) {
+    throw new BacktestValidationError("종목 코드는 영문, 숫자, 마침표와 하이픈만 사용할 수 있습니다.");
+  }
+  return symbol;
+}
+
+function asInstrument(value: InstrumentInfo): MarketInstrument {
+  if (value.currency !== "KRW" && value.currency !== "USD") {
+    throw new BacktestValidationError(`${value.symbol}의 통화를 지원하지 않습니다.`);
+  }
+  return {
+    symbol: value.symbol.toUpperCase(),
+    name: value.name || value.symbol,
+    market: value.market,
+    currency: value.currency,
+    assetType: value.securityType || "STOCK",
+    ...(value.listDate && isHistoryDate(value.listDate) ? { listDate: value.listDate } : {}),
+    ...(value.status ? { status: value.status } : {}),
+  };
+}
+
+function addDays(date: string, days: number): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+function weekKey(date: string): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  const day = value.getUTCDay() || 7;
+  value.setUTCDate(value.getUTCDate() - day + 1);
+  return value.toISOString().slice(0, 10);
+}
+
+function round(value: number, digits = 6): number {
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
+}
+
+function aggregate(points: MarketSeriesPoint[], interval: MarketInterval): MarketSeriesPoint[] {
+  if (interval === "1d") return points;
+  const groups = new Map<string, MarketSeriesPoint[]>();
+  for (const point of points) {
+    const key = interval === "1mo" ? point.date.slice(0, 7) : weekKey(point.date);
+    const values = groups.get(key) ?? [];
+    values.push(point);
+    groups.set(key, values);
+  }
+  return Array.from(groups.values()).map((values) => {
+    const first = values[0];
+    const last = values.at(-1)!;
+    return {
+      date: last.date,
+      periodStart: first.date,
+      periodEnd: last.date,
+      observations: values.length,
+      open: first.open,
+      high: Math.max(...values.map((item) => item.high)),
+      low: Math.min(...values.map((item) => item.low)),
+      close: last.close,
+      localOpen: first.localOpen,
+      localHigh: Math.max(...values.map((item) => item.localHigh)),
+      localLow: Math.min(...values.map((item) => item.localLow)),
+      localClose: last.localClose,
+      fxRate: last.fxRate,
+    };
+  });
+}
+
+export class MarketDataService {
+  readonly repository: MarketDataRepository;
+  private readonly fxInFlight = new Map<string, Promise<void>>();
+
+  constructor(
+    private readonly toss: TossClient,
+    private readonly store: PortfolioHistoryStore,
+  ) {
+    this.repository = new MarketDataRepository(store.relationalDatabase);
+  }
+
+  async resolveInstruments(symbols: string[]): Promise<MarketInstrument[]> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol)));
+    if (!normalized.length || normalized.length > 20) {
+      throw new BacktestValidationError("조회할 종목은 1~20개까지 입력할 수 있습니다.");
+    }
+    const instruments = (await this.toss.getInstruments(normalized)).map(asInstrument);
+    const bySymbol = new Map(instruments.map((instrument) => [instrument.symbol, instrument]));
+    const missing = normalized.filter((symbol) => !bySymbol.has(symbol));
+    if (missing.length) throw new BacktestValidationError(`종목 정보를 찾을 수 없습니다: ${missing.join(", ")}`);
+    await this.store.upsertInstruments(instruments.map((instrument) => ({
+      symbol: instrument.symbol,
+      name: instrument.name,
+      market: instrument.market,
+      currency: instrument.currency,
+      listDate: instrument.listDate,
+      securityType: instrument.assetType,
+      status: instrument.status,
+    })));
+    return normalized.map((symbol) => bySymbol.get(symbol)!);
+  }
+
+  async searchInstruments(query: string, limit = 20): Promise<MarketInstrument[]> {
+    const text = query.trim();
+    if (!text || text.length > 80) throw new BacktestValidationError("검색어는 1~80자로 입력해 주세요.");
+    const results = await this.repository.searchInstruments(text, limit);
+    let exact: MarketInstrument | undefined;
+    if (/^[A-Za-z0-9.-]{1,32}$/.test(text)) {
+      try {
+        exact = (await this.resolveInstruments([text]))[0];
+      } catch {
+        // A name fragment can also match the symbol grammar; cached name results remain useful.
+      }
+    }
+    const ordered = [
+      ...(exact ? [exact] : []),
+      ...results.filter((item) => item.symbol !== exact?.symbol).map((item) => ({ ...item, assetType: "UNKNOWN" })),
+    ].slice(0, limit);
+    const cachedSymbols = ordered.filter((item) => item.assetType === "UNKNOWN").map((item) => item.symbol);
+    if (!cachedSymbols.length) return ordered;
+    try {
+      const enriched = (await this.toss.getInstruments(cachedSymbols)).map(asInstrument);
+      const bySymbol = new Map(enriched.map((item) => [item.symbol, item]));
+      await this.store.upsertInstruments(enriched.map((item) => ({
+        symbol: item.symbol,
+        name: item.name,
+        market: item.market,
+        currency: item.currency,
+        listDate: item.listDate,
+        securityType: item.assetType,
+        status: item.status,
+      })));
+      return ordered.map((item) => bySymbol.get(item.symbol) ?? item);
+    } catch {
+      return ordered;
+    }
+  }
+
+  private async ensureDailyCandles(
+    instrument: MarketInstrument,
+    fromDate: string,
+    toDate: string,
+    adjusted: boolean,
+  ): Promise<void> {
+    const available = await this.repository.availability({ symbol: instrument.symbol, adjusted });
+    const historicalEnd = toDate < addDays(kstDateString(new Date()), -7);
+    const hasEnd = historicalEnd
+      ? Boolean(available.lastDate && available.lastDate >= toDate)
+      : Boolean(available.lastDate && available.lastDate >= addDays(toDate, -7));
+    if (available.firstDate && available.firstDate <= fromDate && hasEnd) return;
+
+    const seenBefore = new Set<string>();
+    let before: string | undefined;
+    for (let pageIndex = 0; pageIndex < MAX_PRICE_PAGES; pageIndex += 1) {
+      if (pageIndex > 0) await sleep(API_PACING_MS);
+      const page = await this.toss.getDailyCandles(instrument.symbol, before, adjusted);
+      if (adjusted) {
+        await this.store.upsertBacktestPrices(`${instrument.currency}:${instrument.symbol}`, page.candles);
+      } else {
+        await this.store.upsertMarketCandles("stock", instrument.symbol, "1d", false, page.candles);
+      }
+      const oldest = [...page.candles].map((candle) => candle.date).sort()[0];
+      if (!page.nextBefore || !page.candles.length || (oldest && oldest <= fromDate)) return;
+      if (seenBefore.has(page.nextBefore)) {
+        throw new BacktestValidationError(`${instrument.name} 일봉 커서가 반복되었습니다.`);
+      }
+      seenBefore.add(page.nextBefore);
+      before = page.nextBefore;
+    }
+    throw new BacktestValidationError(`${instrument.name}의 일봉 조회 범위가 안전 한도를 초과했습니다.`);
+  }
+
+  private async refreshExchangeRate(date: string): Promise<void> {
+    const existing = this.fxInFlight.get(date);
+    if (existing) return existing;
+    const task = this.toss.getUsdKrwExchangeRate(date)
+      .then((rate) => this.store.upsertExchangeRate(rate.date, rate.rate, rate.timestamp))
+      .finally(() => this.fxInFlight.delete(date));
+    this.fxInFlight.set(date, task);
+    return task;
+  }
+
+  async ensureExchangeRates(dates: string[]): Promise<Map<string, number>> {
+    const sorted = Array.from(new Set(dates.filter(isHistoryDate))).sort();
+    if (!sorted.length) return new Map();
+    const cached = await this.store.getExchangeRates(sorted[0], sorted.at(-1)!);
+    const missing = sorted.filter((date) => !cached.has(date));
+    let cursor = 0;
+    const workers = Math.min(2, missing.length);
+    await Promise.all(Array.from({ length: workers }, async () => {
+      while (cursor < missing.length) {
+        const date = missing[cursor++];
+        await this.refreshExchangeRate(date);
+        if (cursor < missing.length) await sleep(API_PACING_MS);
+      }
+    }));
+    return this.store.getExchangeRates(sorted[0], sorted.at(-1)!);
+  }
+
+  async getCachedExchangeRateAvailability(fromDate: string, toDate: string): Promise<{
+    firstDate?: string;
+    lastDate?: string;
+    observations: number;
+  }> {
+    const rates = await this.store.getExchangeRates(fromDate, toDate);
+    const dates = Array.from(rates.keys()).sort();
+    return {
+      ...(dates[0] ? { firstDate: dates[0] } : {}),
+      ...(dates.at(-1) ? { lastDate: dates.at(-1)! } : {}),
+      observations: dates.length,
+    };
+  }
+
+  async getPriceSeries(input: {
+    symbol: string;
+    fromDate: string;
+    toDate: string;
+    interval?: MarketInterval;
+    adjusted?: boolean;
+    currencyMode?: CurrencyMode;
+  }): Promise<MarketSeriesResult> {
+    if (!isHistoryDate(input.fromDate) || !isHistoryDate(input.toDate) || input.fromDate > input.toDate) {
+      throw new BacktestValidationError("가격 조회 시작일과 종료일을 확인해 주세요.");
+    }
+    const interval = input.interval ?? "1d";
+    const adjusted = input.adjusted ?? true;
+    const currencyMode = input.currencyMode ?? "KRW";
+    if (!["1d", "1w", "1mo"].includes(interval) || !["local", "KRW"].includes(currencyMode)) {
+      throw new BacktestValidationError("가격 interval 또는 통화 기준을 확인해 주세요.");
+    }
+    const instrument = (await this.resolveInstruments([input.symbol]))[0];
+    await this.ensureDailyCandles(instrument, input.fromDate, input.toDate, adjusted);
+    const candles = await this.repository.getCandles({
+      symbol: instrument.symbol,
+      adjusted,
+      fromDate: input.fromDate,
+      toDate: input.toDate,
+    });
+    const needsFx = currencyMode === "KRW" && instrument.currency === "USD";
+    const exchangeRates = needsFx ? await this.ensureExchangeRates(candles.map((item) => item.date)) : new Map<string, number>();
+    let latestRate = instrument.currency === "USD" && currencyMode === "local" ? 1 : 0;
+    let missingFxObservations = 0;
+    let carriedFxObservations = 0;
+    const points = candles.flatMap((candle): MarketSeriesPoint[] => {
+      const exactRate = needsFx ? exchangeRates.get(candle.date) : 1;
+      if (exactRate && exactRate > 0) latestRate = exactRate;
+      else if (needsFx && latestRate > 0) carriedFxObservations += 1;
+      else if (needsFx) missingFxObservations += 1;
+      const rate = needsFx ? latestRate : 1;
+      if (!(rate > 0)) return [];
+      return [{
+        date: candle.date,
+        periodStart: candle.date,
+        periodEnd: candle.date,
+        observations: 1,
+        open: round(candle.open * rate),
+        high: round(candle.high * rate),
+        low: round(candle.low * rate),
+        close: round(candle.close * rate),
+        localOpen: candle.open,
+        localHigh: candle.high,
+        localLow: candle.low,
+        localClose: candle.close,
+        fxRate: rate,
+      }];
+    });
+    const aggregated = aggregate(points, interval);
+    const dataRevision = createHash("sha256")
+      .update(`${await this.repository.dataRevision()}:${instrument.symbol}:${adjusted}:${input.fromDate}:${input.toDate}`)
+      .digest("hex");
+    return {
+      instrument,
+      interval,
+      adjusted,
+      currencyMode,
+      currency: currencyMode === "KRW" ? "KRW" : instrument.currency,
+      points: aggregated,
+      requestedPeriod: { from: input.fromDate, to: input.toDate },
+      ...(aggregated.length ? {
+        effectivePeriod: { from: aggregated[0].periodStart, to: aggregated.at(-1)!.periodEnd },
+      } : {}),
+      dataRevision,
+      assumptions: [
+        adjusted
+          ? "투자 성과 계산에는 데이터 공급자가 제공하는 수정주가를 사용합니다."
+          : "계좌 과거 평가 복원용 비수정 가격입니다. 투자 성과 비교에 사용하지 마세요.",
+        "수정주가에 포함된 기업행위 범위는 공급자 정의를 따릅니다.",
+        "별도 현금배당, 세금, 거래비용과 슬리피지는 가격 시계열에 추가하지 않습니다.",
+      ],
+      warnings: [
+        ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 값을 사용했습니다.`] : []),
+        ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 제외했습니다.`] : []),
+        "모든 결과는 역사적 관측이며 미래 성과를 보장하지 않습니다.",
+      ],
+      dataQuality: {
+        observations: aggregated.reduce((sum, item) => sum + item.observations, 0),
+        missingFxObservations,
+        carriedFxObservations,
+      },
+    };
+  }
+
+  async getDataAvailability(symbols: string[], adjusted = true): Promise<{
+    assets: Array<MarketInstrument & {
+      firstDate?: string;
+      lastDate?: string;
+      observations: number;
+      commonObservations: number;
+      missingObservations: number;
+      observationRate: number;
+      adjustedSupported: boolean;
+    }>;
+    commonPeriod?: { from: string; to: string };
+    commonObservations: number;
+    unionObservations: number;
+    dataRevision: string;
+  }> {
+    const instruments = await this.resolveInstruments(symbols);
+    const available = await Promise.all(instruments.map(async (instrument) => ({
+      ...instrument,
+      ...await this.repository.availability({ symbol: instrument.symbol, adjusted }),
+      adjustedSupported: true,
+    })));
+    const starts = available.flatMap((item) => item.firstDate ? [item.firstDate] : []);
+    const ends = available.flatMap((item) => item.lastDate ? [item.lastDate] : []);
+    const from = starts.sort().at(-1);
+    const to = ends.sort()[0];
+    const commonPeriod = from && to && from <= to ? { from, to } : undefined;
+    const observedDates = commonPeriod
+      ? await Promise.all(instruments.map(async (instrument) => new Set((await this.repository.getCandles({
+          symbol: instrument.symbol,
+          adjusted,
+          fromDate: commonPeriod.from,
+          toDate: commonPeriod.to,
+        })).map((item) => item.date))))
+      : instruments.map(() => new Set<string>());
+    const union = new Set(observedDates.flatMap((dates) => Array.from(dates)));
+    const common = observedDates.length
+      ? new Set(Array.from(observedDates[0]).filter((date) => observedDates.every((dates) => dates.has(date))))
+      : new Set<string>();
+    const assets = available.map((item, index) => ({
+      ...item,
+      commonObservations: observedDates[index].size,
+      missingObservations: Math.max(0, union.size - observedDates[index].size),
+      observationRate: union.size ? observedDates[index].size / union.size : 0,
+    }));
+    return {
+      assets: assets.map(({ revision: _revision, ...item }) => item),
+      ...(commonPeriod ? { commonPeriod } : {}),
+      commonObservations: common.size,
+      unionObservations: union.size,
+      dataRevision: await this.repository.dataRevision(),
+    };
+  }
+}
+
+export function cachedCandlesToPrices(candles: CachedMarketCandle[]): Array<{ date: string; close: number }> {
+  return candles.map((candle) => ({ date: candle.date, close: candle.close }));
+}
