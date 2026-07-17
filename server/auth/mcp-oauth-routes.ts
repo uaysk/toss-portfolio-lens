@@ -23,6 +23,7 @@ import { McpTokenVerifier } from "./mcp-token-verifier.js";
 
 type PendingAuthorization = {
   sessionId: string;
+  ownerSessionId: string;
   clientId: string;
   redirectUri: string;
   resource: string;
@@ -68,6 +69,7 @@ function ownerPage(input: {
   clientName: string;
   scopes: McpScopeId[];
   csrf: string;
+  authorizationSessionId: string;
   authenticated: boolean;
   error?: string;
 }): string {
@@ -89,7 +91,7 @@ function ownerPage(input: {
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${escapeHtml(input.title)}</title><style>
   :root{color-scheme:light dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6f8;color:#191f28}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(100%,560px);background:#fff;border:1px solid #e5e8eb;border-radius:20px;padding:32px;box-shadow:0 12px 36px rgba(0,0,0,.08);overflow-wrap:anywhere}.eyebrow{margin:0 0 8px;color:#3182f6;font-weight:700}.intro{line-height:1.6}h1{font-size:28px;margin:0 0 18px}label{display:block;margin:20px 0 8px;font-weight:650}input{width:100%;min-width:0;border:1px solid #d1d6db;border-radius:12px;padding:14px;font:inherit;background:transparent;color:inherit}ul{list-style:none;margin:20px 0;padding:0;display:grid;gap:10px}li{display:grid;gap:4px;padding:14px;background:#f2f4f6;border-radius:12px}li span{color:#6b7684;font-size:14px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:24px}button{border:0;border-radius:12px;padding:14px 18px;font:inherit;font-weight:700;cursor:pointer}.primary{background:#3182f6;color:#fff}.secondary{background:#e5e8eb;color:#333}.full{width:100%;margin-top:18px}.error{padding:12px;border-radius:10px;background:#fff0f0;color:#d22030}@media(prefers-color-scheme:dark){:root{background:#101214;color:#f2f4f6}.card{background:#17191c;border-color:#33383e}li{background:#22262a}li span{color:#b0b8c1}.secondary{background:#343a40;color:#fff}input{border-color:#4e5968}}@media(max-width:480px){body{padding:16px}.card{padding:24px 18px;border-radius:16px}h1{font-size:24px}.actions{grid-template-columns:1fr}}
-  </style></head><body><main class="card"><p class="eyebrow">Toss Portfolio Lens</p><h1>${escapeHtml(input.title)}</h1>${input.error ? `<p class="error" role="alert">${escapeHtml(input.error)}</p>` : ""}<form method="post" action="/oauth/authorize"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">${body}</form></main></body></html>`;
+  </style></head><body><main class="card"><p class="eyebrow">Toss Portfolio Lens</p><h1>${escapeHtml(input.title)}</h1>${input.error ? `<p class="error" role="alert">${escapeHtml(input.error)}</p>` : ""}<form method="post" action="/oauth/authorize"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><input type="hidden" name="authorization_session" value="${escapeHtml(input.authorizationSessionId)}">${body}</form></main></body></html>`;
 }
 
 function oauthError(response: Response, status: number, error: string, description: string): void {
@@ -224,9 +226,14 @@ export async function createMcpOAuthRuntime(input: {
       const scopes = validateRequestedScopes(typeof request.query.scope === "string" ? request.query.scope : "");
       if (!scopes.length) throw new Error("하나 이상의 scope가 필요합니다.");
       const now = Math.floor(Date.now() / 1000);
+      const existingCookie = service.readSignedOAuthSessionCookie(request.headers.cookie, cookieName);
+      const ownerSessionId = existingCookie?.clientId === input.oauth.clientId
+        ? existingCookie.sessionId
+        : randomUUID();
       const sessionId = randomUUID();
       const pending: PendingAuthorization = {
         sessionId,
+        ownerSessionId,
         clientId: input.oauth.clientId,
         redirectUri: input.oauth.redirectUri,
         resource: input.resourceUrl,
@@ -245,7 +252,7 @@ export async function createMcpOAuthRuntime(input: {
       const cookie: OAuthSessionCookiePayload = {
         subject: "pending-owner",
         clientId: input.oauth.clientId,
-        sessionId,
+        sessionId: ownerSessionId,
         issuedAt: now,
         expiresAt: pending.expiresAt,
       };
@@ -260,6 +267,7 @@ export async function createMcpOAuthRuntime(input: {
         clientName: input.oauth.clientName,
         scopes,
         csrf: pending.csrfToken,
+        authorizationSessionId: pending.sessionId,
         authenticated: false,
       }));
     } catch (error) {
@@ -269,9 +277,11 @@ export async function createMcpOAuthRuntime(input: {
   router.post("/oauth/authorize", async (request, response) => {
     setNoStore(response);
     const cookie = service.readSignedOAuthSessionCookie(request.headers.cookie, cookieName);
-    const pending = cookie ? sessions.get(cookie.sessionId) : undefined;
+    const pendingSessionId = stringField(request, "authorization_session");
+    const pending = cookie && pendingSessionId ? sessions.get(pendingSessionId) : undefined;
     if (!pending || pending.expiresAt <= Math.floor(Date.now() / 1000)
-      || cookie?.clientId !== input.oauth.clientId || stringField(request, "csrf") !== pending.csrfToken) {
+      || cookie?.clientId !== input.oauth.clientId || cookie.sessionId !== pending.ownerSessionId
+      || stringField(request, "csrf") !== pending.csrfToken) {
       oauthError(response, 400, "invalid_request", "OAuth 세션이 만료되었거나 CSRF 검증에 실패했습니다.");
       return;
     }
@@ -288,6 +298,7 @@ export async function createMcpOAuthRuntime(input: {
           clientName: input.oauth.clientName,
           scopes: pending.scopes,
           csrf: pending.csrfToken,
+          authorizationSessionId: pending.sessionId,
           authenticated: false,
           error: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
         }));
@@ -301,6 +312,7 @@ export async function createMcpOAuthRuntime(input: {
           clientName: input.oauth.clientName,
           scopes: pending.scopes,
           csrf: pending.csrfToken,
+          authorizationSessionId: pending.sessionId,
           authenticated: false,
           error: "비밀번호가 올바르지 않습니다.",
         }));
@@ -315,6 +327,7 @@ export async function createMcpOAuthRuntime(input: {
           clientName: input.oauth.clientName,
           scopes: pending.scopes,
           csrf: pending.csrfToken,
+          authorizationSessionId: pending.sessionId,
           authenticated: true,
         }));
         return;

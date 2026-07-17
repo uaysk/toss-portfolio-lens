@@ -15,6 +15,12 @@ function csrf(html: string): string {
   return value;
 }
 
+function authorizationSession(html: string): string {
+  const value = html.match(/name="authorization_session" value="([^"]+)"/)?.[1];
+  if (!value) throw new Error("Authorization session not found");
+  return value;
+}
+
 describe("MCP OAuth HTTP routes", () => {
   let database: SqliteDatabase | undefined;
   let runtime: McpOAuthRuntime | undefined;
@@ -104,15 +110,30 @@ describe("MCP OAuth HTTP routes", () => {
     const setCookie = loginPage.headers.get("set-cookie")!;
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=Lax");
-    const ownerCookie = setCookie.split(";", 1)[0];
+    let ownerCookie = setCookie.split(";", 1)[0];
     const loginHtml = await loginPage.text();
     expect(loginHtml).toContain("대시보드 비밀번호");
     expect(loginHtml).not.toContain("client-secret-not-for-owner-session");
 
+    const overlappingLoginPage = await fetch(authorize, {
+      redirect: "manual",
+      headers: { cookie: ownerCookie },
+    });
+    expect(overlappingLoginPage.status).toBe(200);
+    const overlappingCookie = overlappingLoginPage.headers.get("set-cookie")!;
+    ownerCookie = overlappingCookie.split(";", 1)[0];
+    const overlappingLoginHtml = await overlappingLoginPage.text();
+    expect(authorizationSession(overlappingLoginHtml)).not.toBe(authorizationSession(loginHtml));
+
     const login = await fetch(`${base}/oauth/authorize`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
-      body: form({ csrf: csrf(loginHtml), action: "login", password: "owner-password" }),
+      body: form({
+        csrf: csrf(loginHtml),
+        authorization_session: authorizationSession(loginHtml),
+        action: "login",
+        password: "owner-password",
+      }),
     });
     expect(login.status).toBe(200);
     const approvalHtml = await login.text();
@@ -126,7 +147,11 @@ describe("MCP OAuth HTTP routes", () => {
       method: "POST",
       redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
-      body: form({ csrf: csrf(approvalHtml), action: "approve" }),
+      body: form({
+        csrf: csrf(approvalHtml),
+        authorization_session: authorizationSession(approvalHtml),
+        action: "approve",
+      }),
     });
     expect(approval.status).toBe(302);
     const callback = new URL(approval.headers.get("location")!);

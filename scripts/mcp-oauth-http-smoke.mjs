@@ -32,6 +32,12 @@ function csrf(html) {
   return match[1];
 }
 
+function authorizationSession(html) {
+  const match = html.match(/name="authorization_session" value="([^"]+)"/);
+  if (!match) throw new Error("OAuth page did not contain an authorization session");
+  return match[1];
+}
+
 function cookie(response) {
   const value = response.headers.get("set-cookie");
   if (!value) throw new Error("OAuth authorize response did not set a session cookie");
@@ -68,7 +74,12 @@ async function authorize(scope = "backtest:run") {
     method: "POST",
     redirect: "manual",
     headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
-    body: form({ csrf: csrf(loginHtml), action: "login", password }),
+    body: form({
+      csrf: csrf(loginHtml),
+      authorization_session: authorizationSession(loginHtml),
+      action: "login",
+      password,
+    }),
   });
   assert(login.status === 200, `owner login returned ${login.status}`);
   const approvalHtml = await login.text();
@@ -79,7 +90,11 @@ async function authorize(scope = "backtest:run") {
     method: "POST",
     redirect: "manual",
     headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
-    body: form({ csrf: csrf(approvalHtml), action: "approve" }),
+    body: form({
+      csrf: csrf(approvalHtml),
+      authorization_session: authorizationSession(approvalHtml),
+      action: "approve",
+    }),
   });
   assert(approval.status === 302, `approval returned ${approval.status}`);
   const location = approval.headers.get("location");
