@@ -77,6 +77,64 @@ describe("RunService persistence and cancellation", () => {
     }
     expect(stored?.status).toBe("cancelled");
     expect(stored?.summary).toEqual({ cancelled: true });
+
+    const retryTask = vi.fn().mockResolvedValue({ summary: { retried: true }, result: { ok: true } });
+    const retried = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 1 },
+      dataRevision: "revision-1",
+      totalCandidates: 10,
+      task: retryTask,
+    });
+    expect(retried.run.id).toBe(queued.run.id);
+    expect(retried.reused).toBe(false);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      stored = await service.get(queued.run.id, "owner");
+      if (stored?.status === "completed") break;
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(stored).toMatchObject({ status: "completed", summary: { retried: true }, result: { ok: true } });
+    expect(stored?.error).toBeUndefined();
+    expect(retryTask).toHaveBeenCalledOnce();
+  });
+
+  it("실패한 동일 execute 요청을 같은 run id로 다시 실행한다", async () => {
+    const { service } = await setup();
+    await expect(service.execute({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["A"] },
+      dataRevision: "revision-1",
+      task: vi.fn().mockRejectedValue(new Error("synthetic failure")),
+    })).rejects.toThrow("synthetic failure");
+    const failed = await service.findReusable({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["A"] },
+      dataRevision: "revision-1",
+    });
+    expect(failed).toBeUndefined();
+    const terminal = await service.create({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["A"] },
+      dataRevision: "revision-1",
+    });
+    expect(terminal.status).toBe("failed");
+    const retryTask = vi.fn().mockResolvedValue({ summary: { retried: true }, result: { ok: true } });
+    const retried = await service.execute({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["A"] },
+      dataRevision: "revision-1",
+      task: retryTask,
+    });
+    expect(retried.run.id).toBe(terminal.id);
+    expect(retried.reused).toBe(false);
+    expect(retried.run).toMatchObject({ status: "completed", summary: { retried: true }, result: { ok: true } });
+    expect(retried.run.error).toBeUndefined();
+    expect(retryTask).toHaveBeenCalledOnce();
   });
 
   it("서버 재시작 시 queued/running/cancel_requested run을 failed로 복구한다", async () => {

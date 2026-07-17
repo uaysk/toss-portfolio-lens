@@ -8,6 +8,7 @@ import { toolMetadata, securitySchemes } from "./tools/metadata.js";
 import { createToolHandlers, type McpToolDependencies } from "./tools/handlers.js";
 import { toolError } from "./errors.js";
 import { ServiceError } from "../services/service-envelope.js";
+import { enforceToolRequestLimits } from "../services/tool-request-limits.js";
 import type { McpAuditRepository, McpAuditStatus } from "../repositories/mcp-audit-repository.js";
 import { anonymizedAuditValue, persistMcpAudit, protocolRequestId } from "./audit.js";
 
@@ -40,42 +41,6 @@ function asStructured(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : { result: value };
-}
-
-function dateRangeDays(from: unknown, to: unknown): number | undefined {
-  if (typeof from !== "string" || typeof to !== "string") return undefined;
-  const start = Date.parse(`${from}T00:00:00Z`);
-  const end = Date.parse(`${to}T00:00:00Z`);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.floor((end - start) / 86_400_000) : undefined;
-}
-
-function enforceLimits(value: unknown, dependencies: McpToolDependencies): void {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const input = value as Record<string, unknown>;
-  const nested = input.baseConfig && typeof input.baseConfig === "object"
-    ? input.baseConfig as Record<string, unknown>
-    : undefined;
-  const days = dateRangeDays(input.fromDate ?? input.startDate, input.toDate ?? input.endDate)
-    ?? (nested ? dateRangeDays(nested.startDate, nested.endDate) : undefined);
-  if (days !== undefined && days > dependencies.maxDateRangeYears * 366) {
-    throw new ServiceError({
-      code: "DATE_RANGE_LIMIT",
-      message: `요청 기간은 최대 ${dependencies.maxDateRangeYears}년입니다.`,
-      retryable: false,
-      field: "fromDate",
-    });
-  }
-  const assets = Array.isArray(input.assets) ? input.assets
-    : nested && Array.isArray(nested.assets) ? nested.assets
-      : Array.isArray(input.symbols) ? input.symbols : undefined;
-  if (assets && assets.length > dependencies.maxAssets) {
-    throw new ServiceError({
-      code: "ASSET_LIMIT",
-      message: `종목은 최대 ${dependencies.maxAssets}개까지 사용할 수 있습니다.`,
-      retryable: false,
-      field: "assets",
-    });
-  }
 }
 
 export function createMcpServer(input: {
@@ -144,7 +109,7 @@ export function createMcpServer(input: {
       let errorCode: string | undefined;
       let associatedRunId: string | undefined;
       try {
-        enforceLimits(argumentsValue, input.dependencies);
+        enforceToolRequestLimits(argumentsValue, input.dependencies);
         const result = await handlers[name](argumentsValue, subject);
         associatedRunId = runId(result);
         const structuredContent = outputEnvelopeSchema.parse(asStructured(result));

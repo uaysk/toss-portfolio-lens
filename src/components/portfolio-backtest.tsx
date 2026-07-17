@@ -31,9 +31,11 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
+import { PortfolioStrategyLab } from "@/components/portfolio-strategy-lab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
+import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -41,9 +43,15 @@ import type {
   ApiError,
   BacktestAsset,
   BacktestBenchmarkKey,
+  BacktestCashFlowFrequency,
+  BacktestCashFlowRebalanceMode,
+  BacktestCashFlowTiming,
+  BacktestCustomCashFlow,
   BacktestInstrument,
+  BacktestQuantityMode,
   BacktestRebalanceFrequency,
   BacktestResult,
+  BacktestRunConfiguration,
   CurrentBacktestPortfolio,
   Portfolio,
 } from "@/types";
@@ -62,14 +70,15 @@ const rebalanceOptions: Array<{ value: BacktestRebalanceFrequency; label: string
   { value: "monthly", label: "매월" },
   { value: "quarterly", label: "분기" },
   { value: "annually", label: "매년" },
+  { value: "threshold", label: "비중 이탈 임계치" },
 ];
 
-function rebalanceEvenly(assets: BacktestAsset[]): BacktestAsset[] {
+function rebalanceEvenly(assets: BacktestAsset[], totalWeight = 100): BacktestAsset[] {
   if (!assets.length) return [];
-  const base = Math.floor((100 / assets.length) * 100) / 100;
+  const base = Math.floor((totalWeight / assets.length) * 100) / 100;
   return assets.map((asset, index) => ({
     ...asset,
-    weight: index === assets.length - 1 ? Math.round((100 - base * (assets.length - 1)) * 100) / 100 : base,
+    weight: index === assets.length - 1 ? Math.round((totalWeight - base * (assets.length - 1)) * 100) / 100 : base,
   }));
 }
 
@@ -126,9 +135,18 @@ export function PortfolioBacktestView({
   const [endDate, setEndDate] = useState(today);
   const [initialAmount, setInitialAmount] = useState(10_000_000);
   const [monthlyCashFlow, setMonthlyCashFlow] = useState(0);
+  const [cashFlowFrequency, setCashFlowFrequency] = useState<BacktestCashFlowFrequency>("monthly");
+  const [cashFlowTiming, setCashFlowTiming] = useState<BacktestCashFlowTiming>("period_start");
   const [rebalanceFrequency, setRebalanceFrequency] = useState<BacktestRebalanceFrequency>("annually");
+  const [rebalanceThresholdPercent, setRebalanceThresholdPercent] = useState(5);
   const [riskFreeRatePercent, setRiskFreeRatePercent] = useState(0);
   const [transactionCostBps, setTransactionCostBps] = useState(0);
+  const [currencyMode, setCurrencyMode] = useState<"local" | "KRW">("KRW");
+  const [cashTargetPercent, setCashTargetPercent] = useState(0);
+  const [quantityMode, setQuantityMode] = useState<BacktestQuantityMode>("fractional");
+  const [cashFlowRebalanceMode, setCashFlowRebalanceMode] = useState<BacktestCashFlowRebalanceMode>("target_weights");
+  const [cashAnnualYieldPercent, setCashAnnualYieldPercent] = useState(0);
+  const [customCashFlows, setCustomCashFlows] = useState<BacktestCustomCashFlow[]>([]);
   const [benchmark, setBenchmark] = useState<BacktestBenchmarkKey>("KOSPI");
   const [benchmarkSymbol, setBenchmarkSymbol] = useState("");
   const [loadingCurrent, setLoadingCurrent] = useState(false);
@@ -136,6 +154,7 @@ export function PortfolioBacktestView({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<BacktestResult>();
+  const [backtestRuns, setBacktestRuns] = useState<Array<{ runId: string; label: string }>>([]);
   const manuallyEditedStart = useRef(false);
 
   const loadCurrentPortfolio = useCallback(async () => {
@@ -151,6 +170,7 @@ export function PortfolioBacktestView({
       }
       if (!response.ok) throw new Error(payload.error?.message || "현재 포트폴리오를 불러오지 못했습니다.");
       setAssets(payload.assets);
+      setCashTargetPercent(0);
       setStartDate(payload.defaultStartDate);
       setEndDate(payload.defaultEndDate);
       if (payload.initialAmount >= 10_000) setInitialAmount(payload.initialAmount);
@@ -184,7 +204,7 @@ export function PortfolioBacktestView({
       if (!response.ok || !payload.instruments?.length) {
         throw new Error(payload.error?.message || "종목 정보를 찾지 못했습니다.");
       }
-      const next = rebalanceEvenly([...assets, { ...payload.instruments[0], weight: 0 }]);
+      const next = rebalanceEvenly([...assets, { ...payload.instruments[0], weight: 0, lotSize: 1 }], 100 - cashTargetPercent);
       setAssets(next);
       if (!manuallyEditedStart.current) setStartDate(latestListDate(next));
       setSymbol("");
@@ -205,7 +225,7 @@ export function PortfolioBacktestView({
 
   const weightTotal = assets.reduce((sum, asset) => sum + asset.weight, 0);
   const canRun = assets.length > 0
-    && Math.abs(weightTotal - 100) <= 0.01
+    && Math.abs(weightTotal + cashTargetPercent - 100) <= 0.01
     && Boolean(startDate)
     && startDate <= endDate
     && endDate <= today
@@ -216,7 +236,40 @@ export function PortfolioBacktestView({
     && Number.isFinite(transactionCostBps)
     && transactionCostBps >= 0
     && transactionCostBps <= 500
+    && cashTargetPercent >= 0
+    && cashTargetPercent < 100
+    && cashAnnualYieldPercent >= -100
+    && cashAnnualYieldPercent <= 100
+    && (quantityMode !== "whole" || assets.every((asset) => Number.isFinite(asset.lotSize ?? 1) && (asset.lotSize ?? 1) > 0))
+    && (rebalanceFrequency !== "threshold" || (rebalanceThresholdPercent >= 0.1 && rebalanceThresholdPercent <= 50))
+    && customCashFlows.every((flow) => Boolean(flow.date) && flow.date >= startDate && flow.date <= endDate && Number.isFinite(flow.amount))
     && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
+
+  const baseConfig = useMemo<BacktestRunConfiguration>(() => ({
+    assets: assets.map((asset) => ({ symbol: asset.symbol, weight: asset.weight, lotSize: asset.lotSize ?? 1 })),
+    startDate,
+    endDate,
+    initialAmount,
+    monthlyCashFlow,
+    cashFlowFrequency,
+    cashFlowTiming,
+    rebalanceFrequency,
+    ...(rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
+    riskFreeRatePercent,
+    transactionCostBps,
+    currencyMode,
+    baseCurrency: "KRW",
+    cashFlows: customCashFlows.map((flow) => ({ ...flow, ...(flow.memo?.trim() ? { memo: flow.memo.trim() } : {}) })),
+    execution: {
+      cashTargetPercent,
+      quantityMode,
+      cashFlowRebalanceMode,
+      tradeDatePolicy: "next_common_observation",
+      cashAnnualYieldPercent,
+    },
+    benchmark,
+    ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
+  }), [assets, benchmark, benchmarkSymbol, cashAnnualYieldPercent, cashFlowFrequency, cashFlowRebalanceMode, cashFlowTiming, cashTargetPercent, currencyMode, customCashFlows, endDate, initialAmount, monthlyCashFlow, quantityMode, rebalanceFrequency, rebalanceThresholdPercent, riskFreeRatePercent, startDate, transactionCostBps]);
 
   const runBacktest = async () => {
     if (!canRun) return;
@@ -226,18 +279,7 @@ export function PortfolioBacktestView({
       const response = await fetch("/api/portfolio/backtest", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assets: assets.map((asset) => ({ symbol: asset.symbol, weight: asset.weight })),
-          startDate,
-          endDate,
-          initialAmount,
-          monthlyCashFlow,
-          rebalanceFrequency,
-          riskFreeRatePercent,
-          transactionCostBps,
-          benchmark,
-          ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
-        }),
+        body: JSON.stringify(baseConfig),
       });
       const payload = await response.json().catch(() => ({})) as BacktestResult & ApiError;
       if (response.status === 401) {
@@ -246,6 +288,10 @@ export function PortfolioBacktestView({
       }
       if (!response.ok) throw new Error(payload.error?.message || "백테스트를 실행하지 못했습니다.");
       setResult(payload);
+      if (payload.runId) {
+        const label = `${new Date(payload.generatedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} · ${payload.config.assets.length}종목 · CAGR ${payload.metrics.cagrPercent === null ? "-" : formatPercent(payload.metrics.cagrPercent, true)}`;
+        setBacktestRuns((current) => [{ runId: payload.runId!, label }, ...current.filter((item) => item.runId !== payload.runId)].slice(0, 20));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "백테스트를 실행하지 못했습니다.");
     } finally {
@@ -308,7 +354,7 @@ export function PortfolioBacktestView({
               {adding ? <LoaderCircle className="animate-spin" /> : <Plus />}
               종목 추가
             </Button>
-            <Button type="button" variant="secondary" onClick={() => setAssets(rebalanceEvenly(assets))} disabled={!assets.length}>
+            <Button type="button" variant="secondary" onClick={() => setAssets(rebalanceEvenly(assets, 100 - cashTargetPercent))} disabled={!assets.length}>
               <Scale />균등 배분
             </Button>
           </div>
@@ -317,7 +363,7 @@ export function PortfolioBacktestView({
 
         <div className="mt-3 space-y-2">
           {assets.map((asset) => (
-            <div key={`${asset.currency}:${asset.symbol}`} className="grid gap-3 rounded-[22px] bg-card p-4 sm:grid-cols-[minmax(0,1fr)_132px_44px] sm:items-center">
+            <div key={`${asset.currency}:${asset.symbol}`} className={cn("grid gap-3 rounded-[22px] bg-card p-4 sm:items-center", quantityMode === "whole" ? "sm:grid-cols-[minmax(0,1fr)_132px_112px_44px]" : "sm:grid-cols-[minmax(0,1fr)_132px_44px]")}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="truncate text-sm font-black">{asset.name}</p>
@@ -347,6 +393,25 @@ export function PortfolioBacktestView({
                   <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground">%</span>
                 </div>
               </label>
+              {quantityMode === "whole" ? (
+                <label>
+                  <span className="mb-1 block text-[10px] font-bold text-muted-foreground">거래 단위</span>
+                  <Input
+                    type="number"
+                    min={0.000001}
+                    max={1_000_000}
+                    step={1}
+                    value={asset.lotSize ?? 1}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setAssets((current) => current.map((candidate) => candidate.symbol === asset.symbol ? { ...candidate, lotSize: value } : candidate));
+                      setResult(undefined);
+                    }}
+                    className="h-11 bg-secondary text-right font-black"
+                    aria-label={`${asset.name} 거래 단위`}
+                  />
+                </label>
+              ) : null}
               <Button type="button" variant="ghost" size="icon" onClick={() => removeAsset(asset.symbol)} aria-label={`${asset.name} 제거`}>
                 <Trash2 />
               </Button>
@@ -358,8 +423,8 @@ export function PortfolioBacktestView({
         </div>
 
         <div className="mt-3 flex items-center justify-between rounded-[18px] bg-card px-4 py-3 text-xs font-bold">
-          <span className="text-muted-foreground">총 {assets.length}종목 · 비중 합계</span>
-          <span className={cn(Math.abs(weightTotal - 100) > 0.01 && "text-rose-500")}>{weightTotal.toFixed(2)}%</span>
+          <span className="text-muted-foreground">총 {assets.length}종목 · 주식 {weightTotal.toFixed(2)}% + 현금 {cashTargetPercent.toFixed(2)}%</span>
+          <span className={cn(Math.abs(weightTotal + cashTargetPercent - 100) > 0.01 && "text-rose-500")}>{(weightTotal + cashTargetPercent).toFixed(2)}%</span>
         </div>
       </Card>
 
@@ -406,6 +471,13 @@ export function PortfolioBacktestView({
             </Select>
             <span className="mt-2 block text-[10px] text-muted-foreground">기간 첫 거래일에 목표 비중으로 조정</span>
           </label>
+          {rebalanceFrequency === "threshold" ? (
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">비중 이탈 임계치 · %p</span>
+              <Input type="number" min={0.1} max={50} step={0.1} value={rebalanceThresholdPercent} onChange={(event) => { setRebalanceThresholdPercent(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+              <span className="mt-2 block text-[10px] text-muted-foreground">목표 비중과 실제 비중 차이가 기준을 넘을 때만 조정</span>
+            </label>
+          ) : null}
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">벤치마크</span>
             <Select value={benchmark} onValueChange={(value) => { setBenchmark(value as BacktestBenchmarkKey); setResult(undefined); }}>
@@ -436,12 +508,92 @@ export function PortfolioBacktestView({
           </label>
         </div>
 
+        <div className="mt-6 border-t border-border pt-6">
+          <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">EXECUTION & CASH</p>
+          <h4 className="mt-2 text-lg font-black tracking-[-0.03em]">체결·현금·환율 경로</h4>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">수익 경로 통화</span>
+              <Select value={currencyMode} onValueChange={(value) => { setCurrencyMode(value as "local" | "KRW"); setResult(undefined); }}>
+                <SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="KRW">과거 USD/KRW 환율 반영</SelectItem><SelectItem value="local">현지통화 수익률 합성</SelectItem></SelectContent>
+              </Select>
+              <span className="mt-2 block text-[10px] text-muted-foreground">KRW는 해외 종목 가격을 날짜별 환율로 원화 환산</span>
+            </label>
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">현금 목표 비중 · %</span>
+              <Input
+                type="number" min={0} max={99.99} step={0.1} value={cashTargetPercent}
+                onChange={(event) => {
+                  const next = Math.min(99.99, Math.max(0, Number(event.target.value)));
+                  setCashTargetPercent(next);
+                  setAssets((current) => scaleBacktestAssetWeights(current, 100 - next));
+                  setResult(undefined);
+                }}
+                className="bg-secondary text-right font-black"
+              />
+              <span className="mt-2 block text-[10px] text-muted-foreground">변경 시 종목 비중을 투자 가능 비중에 맞춰 비례 조정</span>
+            </label>
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">수량 체결 방식</span>
+              <Select value={quantityMode} onValueChange={(value) => { setQuantityMode(value as BacktestQuantityMode); setResult(undefined); }}>
+                <SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="fractional">소수 수량 허용</SelectItem><SelectItem value="whole">정수·lot 수량</SelectItem></SelectContent>
+              </Select>
+              <span className="mt-2 block text-[10px] text-muted-foreground">정수 모드는 매수 후 남은 금액을 현금으로 유지</span>
+            </label>
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">현금 연수익률 · %</span>
+              <Input type="number" min={-100} max={100} step={0.1} value={cashAnnualYieldPercent} onChange={(event) => { setCashAnnualYieldPercent(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+              <span className="mt-2 block text-[10px] text-muted-foreground">잔여 현금과 목표 현금 포지션에 일할 적용</span>
+            </label>
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">정기 현금흐름 주기</span>
+              <Select value={cashFlowFrequency} onValueChange={(value) => { setCashFlowFrequency(value as BacktestCashFlowFrequency); setResult(undefined); }}><SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="monthly">매월</SelectItem><SelectItem value="quarterly">분기</SelectItem><SelectItem value="annually">매년</SelectItem></SelectContent></Select>
+            </label>
+            <label className="rounded-[20px] bg-card p-4">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">정기 현금흐름 시점</span>
+              <Select value={cashFlowTiming} onValueChange={(value) => { setCashFlowTiming(value as BacktestCashFlowTiming); setResult(undefined); }}><SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="period_start">기간 시작</SelectItem><SelectItem value="period_end">기간 종료</SelectItem></SelectContent></Select>
+            </label>
+            <label className="rounded-[20px] bg-card p-4 md:col-span-2">
+              <span className="mb-2 block text-[11px] font-bold text-muted-foreground">현금흐름 기반 리밸런싱</span>
+              <Select value={cashFlowRebalanceMode} onValueChange={(value) => { setCashFlowRebalanceMode(value as BacktestCashFlowRebalanceMode); setResult(undefined); }}><SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="target_weights">목표 비중대로 신규 매수</SelectItem><SelectItem value="drift_reduction">저비중 종목부터 보정</SelectItem><SelectItem value="full">매도 포함 완전 재조정</SelectItem></SelectContent></Select>
+              <span className="mt-2 block text-[10px] text-muted-foreground">입출금 발생일에 적용할 종목별 배분·매도 정책</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-6 border-t border-border pt-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div><p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">CUSTOM CASH FLOWS</p><h4 className="mt-2 text-lg font-black tracking-[-0.03em]">사용자 지정 입출금</h4></div>
+            <Button type="button" variant="secondary" onClick={() => setCustomCashFlows((current) => [...current, { date: startDate || today, amount: 0, memo: "" }])} disabled={customCashFlows.length >= 1000}><Plus />현금흐름 추가</Button>
+          </div>
+          <div className="mt-4 space-y-2">
+            {customCashFlows.map((flow, index) => (
+              <div key={`${index}:${flow.date}`} className="grid gap-2 rounded-[18px] bg-card p-3 sm:grid-cols-[150px_180px_minmax(0,1fr)_44px]">
+                <Input type="date" min={startDate} max={endDate} value={flow.date} aria-label={`사용자 현금흐름 ${index + 1} 날짜`} onChange={(event) => { setCustomCashFlows((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, date: event.target.value } : item)); setResult(undefined); }} className="bg-secondary" />
+                <Input type="number" step={100_000} value={flow.amount} aria-label={`사용자 현금흐름 ${index + 1} 금액`} onChange={(event) => { setCustomCashFlows((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, amount: Number(event.target.value) } : item)); setResult(undefined); }} className="bg-secondary text-right" />
+                <Input value={flow.memo ?? ""} maxLength={200} placeholder="메모 · 선택" aria-label={`사용자 현금흐름 ${index + 1} 메모`} onChange={(event) => setCustomCashFlows((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, memo: event.target.value } : item))} className="bg-secondary" />
+                <Button type="button" variant="ghost" size="icon" onClick={() => { setCustomCashFlows((current) => current.filter((_, itemIndex) => itemIndex !== index)); setResult(undefined); }} aria-label={`사용자 현금흐름 ${index + 1} 제거`}><Trash2 /></Button>
+              </div>
+            ))}
+            {!customCashFlows.length ? <p className="rounded-[18px] bg-card px-4 py-3 text-xs text-muted-foreground">정기 현금흐름 외의 일회성 납입·인출을 추가하면 실제 공통 거래일로 이동해 XIRR에 반영합니다.</p> : null}
+          </div>
+        </div>
+
         {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
         <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void runBacktest()} disabled={!canRun || running}>
           {running ? <LoaderCircle className="animate-spin" /> : <TrendingUp />}
           {running ? "수정주가를 수집하고 계산하는 중" : "백테스트 실행"}
         </Button>
       </Card>
+
+      <PortfolioStrategyLab
+        baseConfig={baseConfig}
+        canAnalyze={canRun}
+        backtestRuns={backtestRuns}
+        onUnauthorized={onUnauthorized}
+      />
 
       {result ? (
         <>
@@ -461,9 +613,16 @@ export function PortfolioBacktestView({
                   endDate: result.config.endDate,
                   initialAmount: result.config.initialAmount,
                   monthlyCashFlow: result.config.monthlyCashFlow,
+                  cashFlowFrequency: result.config.cashFlowFrequency,
+                  cashFlowTiming: result.config.cashFlowTiming,
                   rebalanceFrequency: result.config.rebalanceFrequency,
+                  ...(result.config.rebalanceThresholdPercent !== undefined ? { rebalanceThresholdPercent: result.config.rebalanceThresholdPercent } : {}),
                   riskFreeRatePercent: result.config.riskFreeRatePercent ?? 0,
                   transactionCostBps: result.config.transactionCostBps ?? 0,
+                  currencyMode: result.config.currencyMode,
+                  baseCurrency: "KRW",
+                  cashFlows: result.config.cashFlows,
+                  execution: result.config.execution,
                   benchmark: result.config.benchmark,
                   ...(result.config.benchmarkSymbol ? { benchmarkSymbol: result.config.benchmarkSymbol } : {}),
                 }}
@@ -479,9 +638,10 @@ export function PortfolioBacktestView({
                 <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">현금흐름 제거 성장 비교</h3>
                 <p className="mt-2 text-sm text-muted-foreground">{result.effectiveStartDate}~{result.endDate} · 시작금 {formatMoney(result.config.initialAmount, "KRW")}</p>
               </div>
-              <p className="text-sm font-black">최종 잔액 {formatMoney(result.metrics.finalBalance, "KRW")}</p>
+              <div className="text-right"><p className="text-sm font-black">최종 잔액 {formatMoney(result.metrics.finalBalance, "KRW")}</p><p className="mt-1 text-[10px] font-bold text-muted-foreground">{result.currencyMethod === "KRW_FX_CONVERTED" ? "과거 환율 반영 KRW 경로" : "현지통화 수익률 합성"}</p></div>
             </div>
-            <div className="mt-6 h-[360px] min-w-0 sm:h-[430px]">
+            <p className="mt-6 text-xs font-black">시간가중 성장 경로</p>
+            <div className="mt-3 h-[300px] min-w-0 sm:h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
                   <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
@@ -489,17 +649,34 @@ export function PortfolioBacktestView({
                   <YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={62} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip
                     labelFormatter={(value) => String(value)}
-                    formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오" : result.benchmark?.name || "비교 지수"]}
+                    formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오 성장" : result.benchmark?.name || "비교 지수"]}
                     contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }}
                   />
-                  <Line type="monotone" dataKey="growth" name="growth" stroke="#5eead4" strokeWidth={2.5} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-                  {result.benchmark ? <Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke="#fbbf24" strokeWidth={2} strokeDasharray="6 5" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} /> : null}
+                  <Line type="monotone" dataKey="growth" name="growth" stroke="hsl(var(--foreground))" strokeWidth={2.5} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
+                  {result.benchmark ? <Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke="hsl(var(--muted-foreground))" strokeWidth={2} strokeDasharray="6 5" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} /> : null}
                 </LineChart>
               </ResponsiveContainer>
             </div>
             <div className="mt-4 flex flex-wrap gap-4 text-xs font-bold text-muted-foreground">
-              <span className="flex items-center gap-2"><i className="h-0.5 w-5 bg-[#5eead4]" />포트폴리오</span>
-              {result.benchmark ? <span className="flex items-center gap-2"><i className="h-0.5 w-5 bg-[#fbbf24]" />{result.benchmark.name}</span> : null}
+              <span className="flex items-center gap-2"><i className="h-0.5 w-5 bg-foreground" />포트폴리오 TWR 성장</span>
+              {result.benchmark ? <span className="flex items-center gap-2"><i className="h-0.5 w-5 bg-muted-foreground" />{result.benchmark.name}</span> : null}
+            </div>
+            <div className="mt-7 border-t border-border pt-6">
+              <p className="text-xs font-black">실제 포트폴리오 잔액 구성</p>
+              <p className="mt-1 text-[10px] text-muted-foreground">입출금·거래비용·잔여 현금을 포함한 명목 잔액입니다.</p>
+              <div className="mt-3 h-[300px] min-w-0 sm:h-[360px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
+                    <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                    <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                    <YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={62} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                    <Tooltip labelFormatter={(value) => String(value)} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "balance" ? "총 잔액" : name === "investedBalance" ? "투자 자산" : "현금"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                    <Line type="monotone" dataKey="balance" name="balance" stroke="hsl(var(--foreground))" strokeWidth={2.5} dot={false} />
+                    {result.points.some((point) => point.investedBalance !== undefined) ? <Line type="monotone" dataKey="investedBalance" name="investedBalance" stroke="hsl(var(--muted-foreground))" strokeWidth={1.8} dot={false} /> : null}
+                    {result.points.some((point) => point.cashBalance !== undefined) ? <Line type="monotone" dataKey="cashBalance" name="cashBalance" stroke="hsl(var(--muted-foreground))" strokeWidth={1.5} strokeDasharray="3 4" dot={false} /> : null}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
           </Card>
 
@@ -516,7 +693,33 @@ export function PortfolioBacktestView({
             <ResultMetric icon={TrendingUp} label="최고 일간수익률" value={metricValue(result.metrics.bestDailyReturnPercent)} detail="현금흐름 제거 일간 경로" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.bestDailyReturnPercent) } : undefined} />
             <ResultMetric icon={TrendingDown} label="최저 일간수익률" value={metricValue(result.metrics.worstDailyReturnPercent)} detail="현금흐름 제거 일간 경로" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.worstDailyReturnPercent) } : undefined} />
             <ResultMetric icon={CalendarDays} label="상승일 비율" value={metricValue(result.metrics.positiveDaysPercent)} detail="일간수익률이 0%보다 높은 날" benchmark={result.benchmark && result.benchmarkMetrics ? { name: result.benchmark.name, value: metricValue(result.benchmarkMetrics.positiveDaysPercent) } : undefined} />
+            <ResultMetric icon={CircleDollarSign} label="XIRR · 금액가중" value={metricValue(result.metrics.moneyWeightedReturnPercent ?? null)} detail="실제 사용자·정기 현금흐름 날짜 기준" />
+            <ResultMetric icon={WalletCards} label="종료 현금" value={formatMoney(result.metrics.endingCashBalance ?? 0, "KRW")} detail={`현금 비중 ${metricValue(result.metrics.endingCashWeightPercent ?? null)}`} />
+            <ResultMetric icon={WalletCards} label="종료 투자 자산" value={formatMoney(result.metrics.investedBalance ?? result.metrics.finalBalance, "KRW")} detail={`${result.execution?.quantityMode === "whole" ? "정수" : "소수"} 수량 체결`} />
+            <ResultMetric icon={CircleDollarSign} label="실제 차감 거래비용" value={formatMoney(result.metrics.totalTransactionCosts ?? 0, "KRW")} detail={`${(result.config.transactionCostBps ?? 0).toFixed(2)}bp · 포트폴리오 경로 차감`} />
+            <ResultMetric icon={TrendingUp} label="순손익" value={formatSignedMoney(result.metrics.netProfitLoss ?? result.metrics.finalBalance - result.config.initialAmount, "KRW")} detail="납입·인출·비용 반영" />
+            <ResultMetric icon={Scale} label="체결 정책" value={result.execution?.cashFlowRebalanceMode === "full" ? "완전 재조정" : result.execution?.cashFlowRebalanceMode === "drift_reduction" ? "이탈 축소" : "목표 비중 매수"} detail={`목표 현금 ${formatPercent(result.execution?.cashTargetPercent ?? 0)}`} />
           </div>
+
+          {(result.cashFlows?.length || result.trades?.length) ? (
+            <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+              <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">CASH FLOW LEDGER</p>
+                <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">현금흐름 적용 기록</h3>
+                <div className="mt-5 max-h-[360px] overflow-auto rounded-[20px] bg-card p-3">
+                  <table className="w-full min-w-[560px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">예정일</th><th className="p-3">실제 거래일</th><th className="p-3">금액</th><th className="p-3">구분·메모</th></tr></thead><tbody>{(result.cashFlows ?? []).map((flow, index) => <tr key={`${flow.effectiveDate}:${index}`} className="border-t border-border"><td className="p-3">{flow.scheduledDate}</td><td className="p-3 font-black">{flow.effectiveDate}</td><td className="p-3">{formatSignedMoney(flow.amount, "KRW")}</td><td className="p-3">{flow.source}{flow.memo ? ` · ${flow.memo}` : ""}</td></tr>)}</tbody></table>
+                  {!result.cashFlows?.length ? <p className="p-3 text-xs text-muted-foreground">적용된 현금흐름이 없습니다.</p> : null}
+                </div>
+              </Card>
+              <Card className="min-w-0 bg-secondary p-5 sm:p-7">
+                <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">EXECUTION LEDGER</p>
+                <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">실제 시뮬레이션 체결</h3>
+                <div className="mt-5 max-h-[360px] overflow-auto rounded-[20px] bg-card p-3">
+                  <table className="w-full min-w-[720px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">일자·종목</th><th className="p-3">구분</th><th className="p-3">수량 · lot</th><th className="p-3">체결금액</th><th className="p-3">비용</th><th className="p-3">현금 영향</th></tr></thead><tbody>{(result.trades ?? []).map((trade, index) => <tr key={`${trade.date}:${trade.symbol}:${index}`} className="border-t border-border"><td className="p-3"><p className="font-black">{trade.symbol}</p><p className="mt-1 text-[9px] text-muted-foreground">{trade.date} · {trade.trigger ?? trade.reason}</p></td><td className="p-3 font-black">{trade.side}</td><td className="p-3">{trade.quantity.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} · {trade.lotSize ?? 1}</td><td className="p-3">{formatMoney(trade.amount, "KRW")}</td><td className="p-3">{formatMoney(trade.transactionCost ?? 0, "KRW")}</td><td className="p-3">{formatSignedMoney(trade.netCashImpact ?? (trade.side === "BUY" ? -trade.amount : trade.amount), "KRW")}</td></tr>)}</tbody></table>
+                </div>
+              </Card>
+            </div>
+          ) : null}
 
           {advanced?.benchmarkComparison ? (
             <Card className="bg-secondary p-5 sm:p-7">

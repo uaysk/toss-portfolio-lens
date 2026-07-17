@@ -258,6 +258,64 @@ try {
     retryable: true,
   });
 
+  const retryNow = 8_000_000;
+  assert.equal(await jobs.retryTerminal({
+    runId: duplicate.run.id,
+    ownerSubject: duplicate.run.ownerSubject,
+    totalCandidates: 10,
+    maxAttempts: 2,
+    deadlineAt: retryNow + 10_000,
+    now: retryNow,
+  }), true);
+  assert.deepEqual(await jobs.get(duplicate.run.id), {
+    ...duplicate.job,
+    state: "queued",
+    availableAt: retryNow,
+    deadlineAt: retryNow + 10_000,
+    attemptCount: 0,
+    maxAttempts: 2,
+    updatedAt: retryNow,
+  });
+  assert.deepEqual(await runs.get(duplicate.run.id), {
+    ...duplicate.run,
+    status: "queued",
+    progress: 0,
+    completedCandidates: 0,
+    totalCandidates: 10,
+    warnings: [],
+    updatedAt: retryNow,
+  });
+  assert.equal(await jobs.retryTerminal({
+    runId: duplicate.run.id,
+    ownerSubject: duplicate.run.ownerSubject,
+    deadlineAt: retryNow + 20_000,
+    now: retryNow + 1,
+  }), false);
+  assert.equal(await jobs.cancel(duplicate.run.id, duplicate.run.ownerSubject, retryNow + 2), "cancelled");
+
+  assert.equal(await jobs.retryTerminal({
+    runId: deadlineJob.run.id,
+    ownerSubject: deadlineJob.run.ownerSubject,
+    deadlineAt: retryNow + 30_000,
+    now: retryNow + 3,
+  }), true);
+  assert.equal((await jobs.get(deadlineJob.run.id))?.state, "queued");
+  assert.equal((await runs.get(deadlineJob.run.id))?.error, undefined);
+  assert.equal(await jobs.cancel(deadlineJob.run.id, deadlineJob.run.ownerSubject, retryNow + 4), "cancelled");
+
+  assert.equal(await jobs.retryTerminal({
+    runId: completed.run.id,
+    ownerSubject: completed.run.ownerSubject,
+    deadlineAt: retryNow + 40_000,
+    now: retryNow + 5,
+  }), false);
+  assert.equal(await jobs.retryTerminal({
+    runId: duplicate.run.id,
+    ownerSubject: "wrong-owner",
+    deadlineAt: retryNow + 50_000,
+    now: retryNow + 6,
+  }), false);
+
   console.info(JSON.stringify({
     schema: WORKER_PAYLOAD_SCHEMA_VERSION,
     concurrentClaims: claimed.length,
@@ -266,6 +324,7 @@ try {
     cancellation: "queued-and-running",
     durableDeadline: "heartbeat-fenced-and-terminally-failed",
     jobIdentity: "run-kind-fenced",
+    terminalRetry: "cancelled-and-failed-reset-then-requeued",
   }));
 } finally {
   await database.close();

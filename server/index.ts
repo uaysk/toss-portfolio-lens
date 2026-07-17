@@ -65,6 +65,12 @@ import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
 import { EventLoopLagMonitor } from "./observability/event-loop-monitor.js";
 import { RustComputeClient } from "./worker/rust-client.js";
+import {
+  createDashboardAnalysisExecutor,
+  dashboardAnalysisError,
+  parseDashboardRunId,
+} from "./dashboard-analysis.js";
+import type { ArtifactType } from "./repositories/artifact-repository.js";
 
 const config = loadConfig();
 const eventLoopLag = new EventLoopLagMonitor();
@@ -150,12 +156,32 @@ const reportService = new ReportService(
 );
 const backtests = new BacktestService(portfolioBacktest, marketData, runService, artifactService, reportService, rustCompute);
 
+const instrumentService = new InstrumentService(marketData);
+const returnSeries = new ReturnSeriesService(marketData);
+const analytics = new AnalyticsService(returnSeries, marketData);
+const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
+const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
+const computeToolDependencies = {
+  instruments: instrumentService,
+  marketData,
+  analytics,
+  returnSeries,
+  backtests,
+  backtestEngine: portfolioBacktest,
+  runs: runService,
+  artifacts: artifactService,
+  portfolio: portfolioService,
+  reports: reportService,
+  optimizationRepository,
+  resources,
+  rustCompute,
+  maxCandidateBudget: config.mcp.maxCandidateBudget,
+  maxAssets: config.mcp.maxAssets,
+  maxDateRangeYears: config.mcp.maxDateRangeYears,
+};
+const executeDashboardAnalysis = createDashboardAnalysisExecutor(computeToolDependencies);
+
 if (config.mcp.enabled) {
-  const instrumentService = new InstrumentService(marketData);
-  const returnSeries = new ReturnSeriesService(marketData);
-  const analytics = new AnalyticsService(returnSeries, marketData);
-  const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
-  const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
   const resourceMetadataUrl = new URL("/.well-known/oauth-protected-resource", config.mcp.resourceUrl).toString();
 
   if (config.mcp.authMode === "oauth") {
@@ -177,27 +203,9 @@ if (config.mcp.enabled) {
     mcpCleanupTimer.unref();
   }
 
-  const dependencies = {
-    instruments: instrumentService,
-    marketData,
-    analytics,
-    returnSeries,
-    backtests,
-    backtestEngine: portfolioBacktest,
-    runs: runService,
-    artifacts: artifactService,
-    portfolio: portfolioService,
-    reports: reportService,
-    optimizationRepository,
-    resources,
-    rustCompute,
-    maxCandidateBudget: config.mcp.maxCandidateBudget,
-    maxAssets: config.mcp.maxAssets,
-    maxDateRangeYears: config.mcp.maxDateRangeYears,
-  };
   mcpHttpRuntime = createMcpHttpRuntime({
     serverFactory: () => createMcpServer({
-      dependencies,
+      dependencies: computeToolDependencies,
       authMode: config.mcp.authMode,
       resourceMetadataUrl,
       audit: mcpAuditRepository,
@@ -230,6 +238,10 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 5;
 
 app.disable("x-powered-by");
+const portfolioComputeJson = express.json({ limit: "1mb" });
+app.use("/api/portfolio/backtest", portfolioComputeJson);
+app.use("/api/portfolio/advanced", portfolioComputeJson);
+app.use("/api/reports/backtest", portfolioComputeJson);
 app.use(express.json({ limit: "16kb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 app.use((request, response, next) => {
@@ -760,10 +772,151 @@ app.post("/api/portfolio/backtest", requireSession, async (request, response) =>
   setNoStore(response);
   const payload = parseBacktestPayload(request.body);
   try {
-    response.json(await backtests.runRaw({ ownerSubject: "dashboard-http", request: payload }));
+    const completed = await backtests.runRawWithMetadata({ ownerSubject: "dashboard-http", request: payload });
+    response.json({ ...completed.result, runId: completed.runId, reused: completed.reused });
   } catch (error) {
     backtestError(response, error);
   }
+});
+
+const DASHBOARD_RUN_OWNER = "dashboard-http";
+const dashboardArtifactTypes = new Set<ArtifactType>([
+  "equity", "drawdown", "holdings", "trades", "rolling", "correlation", "risk-contribution",
+  "monthly-returns", "cash-ledger", "cash-flows", "candidates", "walk-forward", "worker-pareto-frontier",
+  "scenario-comparison", "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths",
+  "worker-metrics", "result",
+]);
+
+function sendDashboardAnalysisError(response: Response, error: unknown): void {
+  const adapted = dashboardAnalysisError(error);
+  if (adapted.status >= 500) {
+    console.error("[dashboard-analysis]", error instanceof Error ? error.message : error);
+  }
+  response.status(adapted.status).json(adapted.body);
+}
+
+function dashboardRunResponse(run: NonNullable<Awaited<ReturnType<typeof runService.get>>>, includeResult = false) {
+  return {
+    runId: run.id,
+    kind: run.kind,
+    status: run.status,
+    progress: run.progress,
+    completedCandidates: run.completedCandidates,
+    totalCandidates: run.totalCandidates,
+    ...(run.currentValidationWindow ? { currentValidationWindow: run.currentValidationWindow } : {}),
+    ...(run.summary !== undefined ? { summary: run.summary } : {}),
+    ...(includeResult && run.result !== undefined ? { result: run.result } : {}),
+    ...(run.error !== undefined ? { error: run.error } : {}),
+    warnings: run.warnings,
+  };
+}
+
+app.post("/api/portfolio/advanced/:operation", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const result = await executeDashboardAnalysis(String(request.params.operation ?? ""), request.body, DASHBOARD_RUN_OWNER);
+    const runResult = (result as { result?: { status?: string; result?: unknown; result_externalized?: boolean } })?.result;
+    if (runResult?.result !== undefined && artifactService.shouldExternalize(runResult.result)) {
+      delete runResult.result;
+      runResult.result_externalized = true;
+    }
+    const status = runResult?.status;
+    response.status(status && ["queued", "running", "cancel_requested"].includes(status) ? 202 : 200).json(result);
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/advanced/runs/:runId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const runId = parseDashboardRunId(request.params.runId);
+    const run = await runService.get(runId, DASHBOARD_RUN_OWNER);
+    if (!run) {
+      response.status(404).json({ error: { code: "RUN_NOT_FOUND", message: "실행 기록을 찾을 수 없습니다." } });
+      return;
+    }
+    response.json(dashboardRunResponse(run));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/advanced/runs/:runId/result", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const runId = parseDashboardRunId(request.params.runId);
+    const run = await runService.get(runId, DASHBOARD_RUN_OWNER);
+    if (!run) {
+      response.status(404).json({ error: { code: "RUN_NOT_FOUND", message: "실행 기록을 찾을 수 없습니다." } });
+      return;
+    }
+    const artifacts = await artifactService.list(run.id);
+    const resultExternalized = run.result !== undefined && artifactService.shouldExternalize(run.result);
+    response.status(["queued", "running", "cancel_requested"].includes(run.status) ? 202 : 200).json({
+      ...dashboardRunResponse(run, !resultExternalized),
+      ...(resultExternalized ? { resultExternalized: true } : {}),
+      artifacts,
+    });
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/advanced/runs/:runId/cancel", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const runId = parseDashboardRunId(request.params.runId);
+    const accepted = await runService.cancel(runId, DASHBOARD_RUN_OWNER);
+    const run = await runService.get(runId, DASHBOARD_RUN_OWNER);
+    if (!run) {
+      response.status(404).json({ error: { code: "RUN_NOT_FOUND", message: "실행 기록을 찾을 수 없습니다." } });
+      return;
+    }
+    response.json({ ...dashboardRunResponse(run), cancelRequested: accepted });
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/advanced/runs/:runId/artifacts/:type", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const runId = parseDashboardRunId(request.params.runId);
+    const type = String(request.params.type ?? "") as ArtifactType;
+    if (!dashboardArtifactTypes.has(type)) {
+      response.status(404).json({ error: { code: "ARTIFACT_NOT_FOUND", message: "지원하지 않는 결과 자료입니다." } });
+      return;
+    }
+    const run = await runService.get(runId, DASHBOARD_RUN_OWNER);
+    if (!run) {
+      response.status(404).json({ error: { code: "RUN_NOT_FOUND", message: "실행 기록을 찾을 수 없습니다." } });
+      return;
+    }
+    const artifact = await artifactService.get(run.id, type);
+    if (!artifact) {
+      response.status(404).json({ error: { code: "ARTIFACT_NOT_FOUND", message: "결과 자료를 찾을 수 없습니다." } });
+      return;
+    }
+    response.json(artifact);
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/advanced/resources/market/:requestHash", requireSession, (request, response) => {
+  setNoStore(response);
+  const requestHash = String(request.params.requestHash ?? "");
+  if (!/^[a-f0-9]{64}$/.test(requestHash)) {
+    response.status(400).json({ error: { code: "INVALID_RESOURCE_ID", message: "시장 자료 식별자가 올바르지 않습니다." } });
+    return;
+  }
+  const stored = resources.getMarket(requestHash, DASHBOARD_RUN_OWNER);
+  if (!stored) {
+    response.status(404).json({ error: { code: "RESOURCE_NOT_FOUND", message: "시장 자료가 만료되었거나 없습니다." } });
+    return;
+  }
+  response.json({ descriptor: stored.descriptor, data: stored.content });
 });
 
 function parseBacktestPayload(value: unknown): BacktestRunRequest {

@@ -41,6 +41,10 @@ export class McpResourceRegistry {
     private readonly maxMarketBytes = 20 * 1024 * 1024,
   ) {}
 
+  private marketKey(requestHash: string, ownerSubject: string): string {
+    return `${ownerSubject.length}:${ownerSubject}${requestHash}`;
+  }
+
   storeMarket(requestHash: string, content: unknown, dataRevision: string, ownerSubject: string): MarketResource["descriptor"] {
     const json = JSON.stringify(content);
     const descriptor: MarketResource["descriptor"] = {
@@ -53,9 +57,10 @@ export class McpResourceRegistry {
       schema_version: MCP_SCHEMA_VERSION,
       data_revision: dataRevision,
     };
-    const previous = this.market.get(requestHash);
+    const key = this.marketKey(requestHash, ownerSubject);
+    const previous = this.market.get(key);
     if (previous) this.marketBytes -= previous.descriptor.byte_count;
-    this.market.set(requestHash, { ownerSubject, content, descriptor });
+    this.market.set(key, { ownerSubject, content, descriptor });
     this.marketBytes += descriptor.byte_count;
     while (this.market.size > 200 || this.marketBytes > this.maxMarketBytes) {
       const oldest = this.market.keys().next().value as string | undefined;
@@ -67,6 +72,10 @@ export class McpResourceRegistry {
     return descriptor;
   }
 
+  getMarket(requestHash: string, ownerSubject: string): MarketResource | undefined {
+    return this.market.get(this.marketKey(requestHash, ownerSubject));
+  }
+
   register(server: McpServer): void {
     server.registerResource(
       "market-price-series",
@@ -75,9 +84,8 @@ export class McpResourceRegistry {
       async (_uri, variables, extra) => {
         const ownerSubject = authorizeResource(extra, "market:read", this.authMode);
         const key = String(variables.requestHash ?? "");
-        const stored = this.market.get(key);
+        const stored = this.getMarket(key, ownerSubject);
         if (!stored) throw new Error("시장 시계열 resource가 만료되었거나 없습니다.");
-        if (stored.ownerSubject !== ownerSubject) throw new Error("시장 시계열 resource를 찾을 수 없습니다.");
         return {
           contents: [{
             uri: stored.descriptor.uri,

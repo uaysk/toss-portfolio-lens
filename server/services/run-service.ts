@@ -125,8 +125,26 @@ export class RunService {
     dataRevision: string;
     task: (context: RunTaskContext) => Promise<RunTaskResult>;
   }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
-    const run = await this.create(input);
+    let run = await this.create(input);
     if (run.status === "completed") return { run, reused: true };
+    if (run.status === "failed" || run.status === "cancelled") {
+      const retried = await this.repository.retryTerminal({
+        runId: run.id,
+        ownerSubject: input.ownerSubject,
+        expectedStatus: run.status,
+      });
+      const current = await this.repository.get(run.id, input.ownerSubject);
+      if (!retried || !current) {
+        if (current?.status === "completed") return { run: current, reused: true };
+        throw new ServiceError({
+          code: "RUN_ALREADY_ACTIVE",
+          message: "동일한 입력의 재실행이 이미 진행 중입니다.",
+          retryable: true,
+          details: { run_id: run.id },
+        });
+      }
+      run = current;
+    }
     if (!await this.repository.markRunning(run.id)) {
       const current = await this.repository.get(run.id, input.ownerSubject);
       if (current?.status === "completed") return { run: current, reused: true };
@@ -182,7 +200,19 @@ export class RunService {
     if (this.executionMode === "external" && !input.allowInlineInExternal) {
       throw new Error("external 실행은 serializable worker payload로 enqueueExternal을 호출해야 합니다.");
     }
-    const run = await this.create(input);
+    let run = await this.create(input);
+    if (run.status === "failed" || run.status === "cancelled") {
+      const retried = await this.repository.retryTerminal({
+        runId: run.id,
+        ownerSubject: input.ownerSubject,
+        expectedStatus: run.status,
+        totalCandidates: input.totalCandidates,
+      });
+      const current = await this.repository.get(run.id, input.ownerSubject);
+      if (!current) throw new Error("재실행할 run을 찾을 수 없습니다.");
+      if (!retried) return { run: current, reused: true };
+      run = current;
+    }
     if (run.status !== "queued") return { run, reused: true };
     if (this.executionMode === "external") {
       await this.repository.addEvent(run.id, "external_inline_fallback", {
@@ -251,13 +281,58 @@ export class RunService {
   }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     const jobs = this.options.jobRepository;
     if (!jobs) throw new Error("external compute queue가 초기화되지 않았습니다.");
-    const run = await this.create(input);
+    let run = await this.create(input);
     if (run.status === "completed") {
       await this.materializeExternalArtifacts(run);
       return { run, reused: true };
     }
     const existing = await jobs.get(run.id);
-    if (existing) return { run, reused: true };
+    if (existing) {
+      if ((run.status === "failed" || run.status === "cancelled") && existing.state === run.status) {
+        const activeForOwner = await this.repository.activeCount(input.ownerSubject);
+        if (activeForOwner >= this.maxRunsPerSubject) {
+          throw new ServiceError({
+            code: "SUBJECT_RUN_LIMIT",
+            message: "사용자별 동시 실행 상한을 초과했습니다.",
+            retryable: true,
+          });
+        }
+        const activeTotal = await this.repository.activeCount();
+        if (activeTotal >= (this.options.maxQueuedRuns ?? 4)) {
+          throw new ServiceError({
+            code: "GLOBAL_RUN_LIMIT",
+            message: "전체 실행 대기열 상한을 초과했습니다.",
+            retryable: true,
+          });
+        }
+        const now = Date.now();
+        const retried = await jobs.retryTerminal({
+          runId: run.id,
+          ownerSubject: input.ownerSubject,
+          totalCandidates: input.totalCandidates,
+          priority: input.priority,
+          maxAttempts: input.maxAttempts,
+          deadlineAt: now + (this.options.runDeadlineMs ?? 120_000),
+          now,
+        });
+        const current = await this.repository.get(run.id, input.ownerSubject);
+        if (!current) throw new Error("재실행할 external run을 찾을 수 없습니다.");
+        return { run: current, reused: !retried };
+      }
+      return { run, reused: true };
+    }
+    if (run.status === "failed" || run.status === "cancelled") {
+      const retried = await this.repository.retryTerminal({
+        runId: run.id,
+        ownerSubject: input.ownerSubject,
+        expectedStatus: run.status,
+        totalCandidates: input.totalCandidates,
+      });
+      const current = await this.repository.get(run.id, input.ownerSubject);
+      if (!current) throw new Error("재실행할 external run을 찾을 수 없습니다.");
+      if (!retried) return { run: current, reused: true };
+      run = current;
+    }
     const activeForOwner = await this.repository.activeCount(input.ownerSubject);
     if (activeForOwner > this.maxRunsPerSubject) {
       await this.repository.fail(run.id, {

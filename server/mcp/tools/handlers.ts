@@ -934,7 +934,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
             warnings.push(...result.warnings.map((warning) => `${scenario.name}: ${warning}`));
             await context.updateProgress((index + 1) / scenarios.length, { completedCandidates: index + 1, totalCandidates: scenarios.length });
           }
-          return { summary: { scenario_count: results.length }, result: { scenarios: results }, warnings: Array.from(new Set(warnings)), artifacts: [{ type: "result", content: results, rowCount: results.length }] };
+          return { summary: { scenario_count: results.length }, result: { scenarios: results }, warnings: Array.from(new Set(warnings)), artifacts: [{ type: "result", content: { scenarios: results }, rowCount: results.length }] };
         },
       });
       return runResultEnvelope(queued.run, value);
@@ -1300,10 +1300,12 @@ async function enqueueSensitivity(
         });
         await context.updateProgress((index + 1) / scenarios.length, { completedCandidates: index + 1, totalCandidates: scenarios.length });
       }
+      const distributions = metricDistributions(results);
+      const result = { scenarios: results, distributions, limitation: HISTORICAL_LIMITATION };
       return {
-        summary: { scenario_count: results.length, distributions: metricDistributions(results) },
-        result: { scenarios: results, distributions: metricDistributions(results), limitation: HISTORICAL_LIMITATION },
-        artifacts: [{ type: "result", content: results, rowCount: results.length }],
+        summary: { scenario_count: results.length, distributions },
+        result,
+        artifacts: [{ type: "result", content: result, rowCount: results.length }],
       };
     },
   });

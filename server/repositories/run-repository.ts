@@ -274,6 +274,32 @@ export class RunRepository {
     return row ? asRun(row) : undefined;
   }
 
+  async retryTerminal(input: {
+    runId: string;
+    ownerSubject: string;
+    expectedStatus: "failed" | "cancelled";
+    totalCandidates?: number;
+    now?: number;
+  }): Promise<boolean> {
+    const now = input.now ?? Date.now();
+    return this.database.transaction(async (database) => {
+      const updated = await database.run(`
+        UPDATE portfolio_backtest_runs
+        SET status = 'queued', progress = 0, completed_candidates = 0,
+            total_candidates = COALESCE(?, total_candidates), current_validation_window = NULL,
+            summary_json = NULL, result_json = NULL, error_json = NULL, warnings_json = '[]',
+            started_at = NULL, finished_at = NULL, updated_at = ?
+        WHERE run_id = ? AND owner_subject = ? AND status = ?
+      `, [input.totalCandidates, now, input.runId, input.ownerSubject, input.expectedStatus]);
+      if (updated.affectedRows !== 1) return false;
+      await database.run(`
+        INSERT INTO portfolio_run_events (event_id, run_id, event_type, event_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `, [randomUUID(), input.runId, "retry_requested", json({ previous_status: input.expectedStatus }), now]);
+      return true;
+    });
+  }
+
   async activeCount(ownerSubject?: string): Promise<number> {
     const [row] = ownerSubject
       ? await this.database.query<{ count: number }>(`

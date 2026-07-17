@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { enforceToolRequestLimits } from "./tool-request-limits.js";
+import { ServiceError } from "./service-envelope.js";
+
+describe("shared tool request limits", () => {
+  it("Web과 MCP가 같은 중첩 backtest 기간 제한을 적용한다", () => {
+    expect(() => enforceToolRequestLimits({
+      baseConfig: { startDate: "2010-01-01", endDate: "2025-01-01", assets: [{ symbol: "AAA" }] },
+    }, { maxAssets: 20, maxDateRangeYears: 10 })).toThrow(ServiceError);
+  });
+
+  it("symbols 기반 고급 분석의 종목 상한을 적용한다", () => {
+    expect(() => enforceToolRequestLimits({ symbols: ["A", "B", "C"] }, {
+      maxAssets: 2,
+      maxDateRangeYears: 10,
+    })).toThrowError(/최대 2개/);
+    expect(() => enforceToolRequestLimits({ baseSymbols: ["A", "B"], candidateSymbols: ["C"] }, {
+      maxAssets: 2,
+      maxDateRangeYears: 10,
+    })).toThrowError(/최대 2개/);
+    expect(() => enforceToolRequestLimits({ currentWeights: { A: 0.5, B: 0.5 }, targetWeights: { A: 0.4, B: 0.4, C: 0.2 } }, {
+      maxAssets: 2,
+      maxDateRangeYears: 10,
+    })).toThrowError(/최대 2개/);
+  });
+
+  it("상한 안의 요청은 통과시킨다", () => {
+    expect(() => enforceToolRequestLimits({
+      fromDate: "2020-01-01",
+      toDate: "2025-01-01",
+      symbols: ["A", "B"],
+    }, { maxAssets: 20, maxDateRangeYears: 10 })).not.toThrow();
+  });
+
+  it("stress 시나리오가 기준 기간을 확장해 상한을 우회하지 못하게 한다", () => {
+    expect(() => enforceToolRequestLimits({
+      baseConfig: { startDate: "2020-01-01", endDate: "2025-01-01", assets: [{ symbol: "AAA" }] },
+      scenarios: [{ name: "long", startDate: "2010-01-01" }],
+    }, { maxAssets: 20, maxDateRangeYears: 10 })).toThrowError(/최대 10년/);
+  });
+
+  it("음수 시작일 offset으로 확장된 실제 기간에도 상한을 적용한다", () => {
+    expect(() => enforceToolRequestLimits({
+      baseConfig: { startDate: "2015-01-01", endDate: "2025-01-01", assets: [{ symbol: "AAA" }] },
+      offsetsDays: [-3_650, 0],
+    }, { maxAssets: 20, maxDateRangeYears: 10 })).toThrowError(/최대 10년/);
+  });
+});

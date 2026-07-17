@@ -332,6 +332,60 @@ export class RunJobRepository {
     return row ? jobRecord(row) : undefined;
   }
 
+  async retryTerminal(input: {
+    runId: string;
+    ownerSubject: string;
+    totalCandidates?: number;
+    priority?: number;
+    maxAttempts?: number;
+    availableAt?: number;
+    deadlineAt: number;
+    now?: number;
+  }): Promise<boolean> {
+    this.assertPostgres();
+    const now = input.now ?? Date.now();
+    const deadlineAt = Math.trunc(input.deadlineAt);
+    if (deadlineAt <= now) throw new Error("external compute job retry deadline은 현재 시각보다 늦어야 합니다.");
+    const priority = Math.max(-100, Math.min(100, Math.trunc(input.priority ?? 0)));
+    const maxAttempts = Math.max(1, Math.min(10, Math.trunc(input.maxAttempts ?? 3)));
+    return this.database.transaction(async (database) => {
+      const [row] = await database.query<JobRow & { run_status: string; owner_subject: string }>(`
+        SELECT job.*, run.status AS run_status, run.owner_subject
+        FROM portfolio_run_jobs job
+        JOIN portfolio_backtest_runs run ON run.run_id = job.run_id
+        WHERE job.run_id = ?
+        FOR UPDATE OF job, run
+      `, [input.runId]);
+      if (!row || row.owner_subject !== input.ownerSubject) return false;
+      if (!["failed", "cancelled"].includes(row.state) || row.run_status !== row.state) return false;
+      if (row.result_artifact_id) throw new Error("완료 output이 연결된 external job은 재시도할 수 없습니다.");
+      const jobUpdate = await database.run(`
+        UPDATE portfolio_run_jobs
+        SET priority = ?, state = 'queued', available_at = ?, deadline_at = ?,
+            lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+            attempt_count = 0, max_attempts = ?, result_artifact_id = NULL,
+            last_error_json = NULL, finished_at = NULL, updated_at = ?
+        WHERE run_id = ? AND state = ?
+      `, [priority, input.availableAt ?? now, deadlineAt, maxAttempts, now, input.runId, row.state]);
+      const runUpdate = await database.run(`
+        UPDATE portfolio_backtest_runs
+        SET status = 'queued', progress = 0, completed_candidates = 0,
+            total_candidates = COALESCE(?, total_candidates), current_validation_window = NULL,
+            summary_json = NULL, result_json = NULL, error_json = NULL, warnings_json = '[]',
+            started_at = NULL, finished_at = NULL, updated_at = ?
+        WHERE run_id = ? AND owner_subject = ? AND status = ?
+      `, [input.totalCandidates, now, input.runId, input.ownerSubject, row.run_status]);
+      if (jobUpdate.affectedRows !== 1 || runUpdate.affectedRows !== 1) throw new Error("external job 재시도 상태 전이가 충돌했습니다.");
+      await this.addEvent(database, input.runId, "external_retry_requested", {
+        previous_status: row.run_status,
+        priority,
+        max_attempts: maxAttempts,
+        deadline_at: deadlineAt,
+      }, now);
+      return true;
+    });
+  }
+
   async claim(workerId: string, leaseMs: number, now = Date.now()): Promise<RunJobRecord | undefined> {
     this.assertPostgres();
     if (!workerId.trim()) throw new Error("worker id가 필요합니다.");

@@ -205,10 +205,18 @@ export class BacktestService {
   }
 
   async runRaw(input: { ownerSubject: string; request: BacktestRunRequest }): Promise<BacktestRunResult> {
+    return (await this.runRawWithMetadata(input)).result;
+  }
+
+  async runRawWithMetadata(input: { ownerSubject: string; request: BacktestRunRequest }): Promise<{
+    runId: string;
+    reused: boolean;
+    result: BacktestRunResult;
+  }> {
     const executed = await this.executeBacktest(input.ownerSubject, input.request);
     const result = executed.run.result as BacktestRunResult | undefined;
     if (!result) throw new ServiceError({ code: "RUN_RESULT_NOT_FOUND", message: "완료된 백테스트 결과를 찾을 수 없습니다.", retryable: true });
-    return result;
+    return { runId: executed.run.id, reused: executed.reused, result };
   }
 
   async generateReport(input: {

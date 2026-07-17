@@ -166,4 +166,15 @@ describe("BacktestService report option", () => {
     }));
     expect(result).toBe(calculated);
   });
+
+  it("Web UI 비교를 위해 raw 결과와 영속 run id를 함께 반환한다", async () => {
+    const context = setup();
+    const completed = await context.service.runRawWithMetadata({ ownerSubject: "dashboard-http", request });
+
+    expect(completed).toEqual({
+      runId: "00000000-0000-4000-8000-000000000001",
+      reused: false,
+      result: calculated,
+    });
+  });
 });

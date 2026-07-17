@@ -9,6 +9,7 @@ const outputDirectory = path.join(projectRoot, "docs", "presentation", "generate
 const appUrl = (process.env.PRESENTATION_APP_URL || "http://127.0.0.1:4173").replace(/\/$/, "");
 const captureApp = process.env.PRESENTATION_SKIP_APP !== "1";
 const captureArchitecture = process.env.PRESENTATION_SKIP_ARCHITECTURE !== "1";
+const verifyOnly = process.env.PRESENTATION_VERIFY_ONLY === "1";
 
 const portfolioAssets = [
   { symbol: "069500", name: "KODEX 200", market: "KOSPI", currency: "KRW", listDate: "2002-10-14", weight: 20 },
@@ -354,7 +355,8 @@ function backtestFixture() {
     const growth = round(INITIAL_VALUE * (1 + 0.58 * progress + Math.sin(index * 0.21) * 0.018 * Math.sin(progress * Math.PI)), 0);
     const benchmarkGrowth = round(INITIAL_VALUE * (1 + 0.43 * progress + Math.sin(index * 0.18 + 0.4) * 0.015 * Math.sin(progress * Math.PI)), 0);
     const drawdownPercent = round(-Math.abs(Math.sin(index * 0.29)) * (index % 13 === 0 ? 7.2 : 3.1), 2);
-    return { date, balance: growth, growth, benchmarkGrowth, drawdownPercent };
+    const cashBalance = round(500_000 + Math.sin(index * 0.17) * 80_000, 0);
+    return { date, balance: growth, growth, benchmarkGrowth, drawdownPercent, cashBalance, investedBalance: growth - cashBalance, unitPrice: growth / INITIAL_VALUE * 100 };
   });
   const comparable = {
     totalReturnPercent: 58,
@@ -388,21 +390,29 @@ function backtestFixture() {
   }));
   const correlations = portfolioAssets.map((_, row) => portfolioAssets.map((__, column) => row === column ? 1 : round(0.2 + ((row + column) % 6) * 0.09, 2)));
   return {
+    runId: "10000000-0000-4000-8000-000000000001",
+    reused: false,
     generatedAt: AS_OF,
     baseCurrency: "KRW",
-    currencyMethod: "LOCAL_RETURN",
+    currencyMethod: "KRW_FX_CONVERTED",
     requestedStartDate: "2022-08-30",
     effectiveStartDate: "2022-08-30",
     endDate: "2026-07-16",
     config: {
-      assets: portfolioAssets.map(({ symbol, weight }) => ({ symbol, weight })),
+      assets: portfolioAssets.map(({ symbol, weight }) => ({ symbol, weight, lotSize: 1 })),
       startDate: "2022-08-30",
       endDate: "2026-07-16",
       initialAmount: INITIAL_VALUE,
       monthlyCashFlow: 0,
+      cashFlowFrequency: "monthly",
+      cashFlowTiming: "period_start",
       rebalanceFrequency: "annually",
       riskFreeRatePercent: 0,
       transactionCostBps: 0,
+      currencyMode: "KRW",
+      baseCurrency: "KRW",
+      cashFlows: [],
+      execution: { cashTargetPercent: 5, quantityMode: "whole", cashFlowRebalanceMode: "drift_reduction", tradeDatePolicy: "next_common_observation", cashAnnualYieldPercent: 2 },
       benchmark: "KOSPI",
       requestedStartDate: "2022-08-30",
       latestListDate: "2022-08-30",
@@ -413,7 +423,7 @@ function backtestFixture() {
     benchmark: { key: "KOSPI", name: "KOSPI", symbol: "KOSPI" },
     warnings: [],
     points,
-    metrics: { ...comparable, finalBalance: 15_800_000, totalContributions: 0, totalWithdrawals: 0 },
+    metrics: { ...comparable, finalBalance: 15_800_000, totalContributions: 0, totalWithdrawals: 0, endingCashBalance: 500_000, endingCashWeightPercent: 3.16, investedBalance: 15_300_000, totalTransactionCosts: 41_200, netProfitLoss: 5_800_000, moneyWeightedReturnPercent: 12.7 },
     benchmarkMetrics: { ...comparable, totalReturnPercent: 43, cagrPercent: 9.6, annualizedVolatilityPercent: 16.1, maxDrawdownPercent: -17.2, maxDrawdownDays: 112, sharpeRatio: 0.6, sortinoRatio: 0.82, calmarRatio: 0.56 },
     annualReturns: [
       { year: 2022, returnPercent: 3.9 },
@@ -424,6 +434,10 @@ function backtestFixture() {
     ],
     contributions,
     correlations: { assets: portfolioAssets.map(({ symbol, name }) => ({ symbol, name })), values: correlations },
+    trades: [{ date: "2026-07-16", symbol: "069500", side: "BUY", amount: 240_000, quantity: 8, price: 30_000, reason: "cash_flow", transactionCost: 240, netCashImpact: -240_240, trigger: "drift_reduction", lotSize: 1 }],
+    cashFlows: [{ scheduledDate: "2026-07-15", effectiveDate: "2026-07-16", amount: 500_000, source: "custom", memo: "추가 납입" }],
+    execution: { cashTargetPercent: 5, quantityMode: "whole", cashFlowRebalanceMode: "drift_reduction", tradeDatePolicy: "next_common_observation", cashAnnualYieldPercent: 2 },
+    dataQuality: { alignmentPolicy: "carry_forward_for_valuation", commonReturnPolicy: "inner_join", alignedValuationDays: points.length, commonReturnObservations: points.length - 1, carryForwardByAsset: [], benchmarkCarryForwardCount: 0 },
     advanced: {
       benchmarkComparison: {
         key: "KOSPI", name: "KOSPI", observations: points.length, returnPercent: 43, excessReturnPercent: 15,
@@ -526,6 +540,54 @@ const fixtures = {
   },
 };
 
+const monteCarloRunId = "20000000-0000-4000-8000-000000000001";
+const optimizationRunId = "30000000-0000-4000-8000-000000000001";
+const walkForwardRunId = "40000000-0000-4000-8000-000000000001";
+const marketResourceHash = "b".repeat(64);
+const monteCarloFixture = {
+  method: "correlated_moving_block_bootstrap",
+  seed: 12345,
+  pathCount: 10000,
+  horizonDays: 252,
+  distributions: {
+    terminalBalance: { count: 10000, min: 6_100_000, max: 21_400_000, mean: 12_900_000, standardDeviation: 2_100_000, percentiles: [{ quantile: 0.05, value: 9_100_000 }, { quantile: 0.5, value: 12_700_000 }, { quantile: 0.95, value: 16_800_000 }] },
+  },
+  probabilities: { terminalLossProbabilityPercent: 8.4, everDepletedProbabilityPercent: 0, terminalGoalProbabilityPercent: 35.2 },
+  percentilePaths: [0.05, 0.5, 0.95].map((quantile, pathIndex) => ({ quantile, points: Array.from({ length: 13 }, (_, index) => ({ step: index * 21, balance: INITIAL_VALUE * (1 + index * (0.006 + pathIndex * 0.008)) })) })),
+  samplePaths: [],
+  warnings: [],
+};
+
+const optimizationFixture = {
+  candidateCount: 500,
+  seed: 12345,
+  bestByObjective: {
+    robust_score: {
+      weights: Object.fromEntries(portfolioAssets.map((asset) => [asset.symbol, asset.weight / 100])),
+      metrics: { return: 0.124, volatility: 0.147, maxDrawdown: -0.128, sharpe: 0.84, cvar: -0.022, robustScore: 0.91 },
+    },
+  },
+  paretoFrontier: [{ weights: { "069500": 0.5, "379810": 0.5 }, metrics: { return: 0.13, volatility: 0.15, maxDrawdown: -0.12 } }],
+};
+
+const walkForwardFixture = {
+  folds: [{ trainStart: "2022-08-30", trainEnd: "2024-12-31", testStart: "2025-01-02", testEnd: "2025-03-31", oos: { return: 0.031, maxDrawdown: -0.021, turnover: 0.14 } }],
+  oosSummary: { foldCount: 1, averageReturn: 0.031, worstReturn: 0.031, bestReturn: 0.031 },
+};
+
+function scenarioFixture(name) {
+  return { scenarios: [{ id: name, name, config: { rebalanceFrequency: "quarterly" }, metrics: { totalReturnPercent: 12.4, cagrPercent: 8.1, annualizedVolatilityPercent: 10.2, maxDrawdownPercent: -5.3, sharpeRatio: 0.79, moneyWeightedReturnPercent: 8.2, totalTransactionCosts: 1200 } }] };
+}
+
+const researchFixtures = {
+  "diversifying-assets": { base_portfolio_metrics: {}, candidates: [{ symbol: "GLD", correlation: 0.18, down_market_correlation: 0.12, beta: 0.2, expected_variance_effect: { volatility_reduction: 0.03 }, mixed_portfolio_metrics: { cagr: 0.118, max_drawdown: -0.105 } }], universe: "explicit", universe_size: 1 },
+  "market-regimes": { thresholds: { return_median: 0.001, volatility_median: 0.012 }, regimes: [{ regime: "up_low_vol", observations: 320, average_return: 0.0012, annualized_volatility: 0.11 }], observations: [], observations_resource: { uri: `market://series/${marketResourceHash}`, row_count: 1, byte_count: 120 } },
+  "return-contribution": { contributions: fixtures.backtest.contributions, risk_contributions: fixtures.backtest.advanced.riskContributions },
+  "pareto-frontier": { candidates: [{ id: "candidate-1", rank: 1, score: 0.91, weights: { "069500": 0.5, "379810": 0.5 }, metrics: { return: 0.13, volatility: 0.15, maxDrawdown: -0.12 }, pareto: true }] },
+  "redundant-assets": { redundant_pairs: [{ left: "379810", right: "426030", correlation: 0.96 }], pair_details: [{ left: "379810", right: "426030", correlation: 0.96, beta: 1.03, drawdown_path_correlation: 0.92, observations: 700, redundant: true }], removal_impact_by_asset: {} },
+  "rebalance-plan": { changes: [{ symbol: "069500", current: 0.2, target: 0.25, change: 0.05, action: "buy", notional_change: 500000 }], turnover: 0.05, estimated_cost_rate: 0.00005, estimated_cost: 500, risk_change: { sharpe_ratio: 0.08 }, order_generated: false },
+};
+
 async function firstExecutable(candidates) {
   for (const candidate of candidates) {
     if (!candidate) continue;
@@ -572,6 +634,25 @@ async function routeApplicationApi(page) {
     if (url.pathname === "/api/portfolio/backtest/current") return json(fixtures.currentBacktest);
     if (url.pathname === "/api/portfolio/backtest" && request.method() === "POST") return json(fixtures.backtest);
     if (url.pathname === "/api/portfolio/backtest/instruments") return json({ instruments: [] });
+    if (url.pathname === "/api/portfolio/advanced/monte-carlo" && request.method() === "POST") {
+      const body = request.postDataJSON();
+      if (!body.fromDate || !body.toDate) return json({ error: { code: "invalid-fixture-request", message: "Monte Carlo 요청에는 fromDate와 toDate가 모두 필요합니다." } }, 400);
+      return json({ warnings: [], result: { run_id: monteCarloRunId, kind: "monte_carlo", status: "completed", progress: 1, completed_candidates: 10000, total_candidates: 10000 } }, 200);
+    }
+    if (url.pathname === `/api/portfolio/advanced/runs/${monteCarloRunId}/result`) return json({ runId: monteCarloRunId, kind: "monte_carlo", status: "completed", progress: 1, completedCandidates: 10000, totalCandidates: 10000, summary: { distributions: monteCarloFixture.distributions, probabilities: monteCarloFixture.probabilities }, resultExternalized: true, warnings: [], artifacts: [{ type: "monte-carlo-distribution", rowCount: 1, byteCount: 200 }, { type: "monte-carlo-percentile-paths", rowCount: 3, byteCount: 300000 }, { type: "monte-carlo-sample-paths", rowCount: 0, byteCount: 2 }] });
+    if (url.pathname === `/api/portfolio/advanced/runs/${monteCarloRunId}/artifacts/monte-carlo-distribution`) return json({ content: monteCarloFixture.distributions });
+    if (url.pathname === `/api/portfolio/advanced/runs/${monteCarloRunId}/artifacts/monte-carlo-percentile-paths`) return json({ content: monteCarloFixture.percentilePaths });
+    if (url.pathname === `/api/portfolio/advanced/resources/market/${marketResourceHash}`) return json({ data: [{ date: "2026-07-16", return: 0.0012, volatility: 0.011, regime: "up_low_vol" }] });
+    if (url.pathname === "/api/portfolio/advanced/optimization" && request.method() === "POST") return json({ warnings: [], result: { run_id: optimizationRunId, kind: "optimization", status: "completed", progress: 1, completed_candidates: 500, total_candidates: 500 } }, 200);
+    if (url.pathname === `/api/portfolio/advanced/runs/${optimizationRunId}/result`) return json({ runId: optimizationRunId, kind: "optimization", status: "completed", progress: 1, completedCandidates: 500, totalCandidates: 500, result: optimizationFixture, warnings: [], artifacts: [] });
+    if (url.pathname === "/api/portfolio/advanced/walk-forward" && request.method() === "POST") return json({ warnings: [], result: { run_id: walkForwardRunId, kind: "walk_forward", status: "completed", progress: 1, completed_candidates: 500, total_candidates: 500 } }, 200);
+    if (url.pathname === `/api/portfolio/advanced/runs/${walkForwardRunId}/result`) return json({ runId: walkForwardRunId, kind: "walk_forward", status: "completed", progress: 1, completedCandidates: 500, totalCandidates: 500, summary: { fold_count: 1 }, resultExternalized: true, warnings: [], artifacts: [{ type: "walk-forward", rowCount: 1, byteCount: 300000 }] });
+    if (url.pathname === `/api/portfolio/advanced/runs/${walkForwardRunId}/artifacts/walk-forward`) return json({ content: walkForwardFixture });
+    if (url.pathname === "/api/portfolio/advanced/stress-test" && request.method() === "POST") return json({ warnings: [], result: scenarioFixture("스트레스 합성 결과") });
+    const sensitivityOperation = url.pathname.match(/^\/api\/portfolio\/advanced\/(sensitivity-weight|sensitivity-start-date|sensitivity-rebalance|sensitivity-cash-flow)$/)?.[1];
+    if (sensitivityOperation && request.method() === "POST") return json({ warnings: [], result: scenarioFixture(`민감도 ${sensitivityOperation}`) });
+    const researchOperation = url.pathname.match(/^\/api\/portfolio\/advanced\/(diversifying-assets|market-regimes|return-contribution|pareto-frontier|redundant-assets|rebalance-plan)$/)?.[1];
+    if (researchOperation && request.method() === "POST") return json({ warnings: [], result: researchFixtures[researchOperation] });
     return json({ error: { code: "presentation-route-missing", message: `합성 fixture가 없는 경로입니다: ${url.pathname}` } }, 404);
   });
 }
@@ -602,6 +683,7 @@ async function prepareAppPage(browser) {
 }
 
 async function screenshotViewport(page, filename) {
+  if (verifyOnly) return;
   await page.mouse.move(1410, 18);
   await page.waitForTimeout(240);
   await page.screenshot({
@@ -629,7 +711,7 @@ async function captureApplication(browser) {
 
     await page.getByRole("button", { name: "포트폴리오 백테스트" }).click();
     await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor();
-    await page.getByText("총 6종목 · 비중 합계", { exact: false }).waitFor();
+    await page.getByText("총 6종목 · 주식", { exact: false }).waitFor();
     await Promise.all(portfolioAssets.map((asset) => (
       page.getByText(`${asset.market} · ${asset.symbol} · 상장 ${asset.listDate}`, { exact: true }).waitFor()
     )));
@@ -647,6 +729,77 @@ async function captureApplication(browser) {
     // Recharts의 선 그리기 애니메이션이 끝난 뒤 전체 경로를 캡처한다.
     await page.waitForTimeout(1_200);
     await screenshotViewport(page, "app-backtest-result.png");
+
+    await page.getByRole("button", { name: "Monte Carlo", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByText("손실 종료 확률", { exact: true }).waitFor();
+    await page.getByText("8.40%", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "분위수 경로 불러오기", exact: true }).click();
+    await page.getByRole("button", { name: "분위수 경로 불러오기", exact: true }).waitFor({ state: "detached" });
+
+    await page.getByRole("button", { name: "최적화", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByText("추천 비중", { exact: true }).waitFor();
+
+    await page.getByRole("button", { name: "Walk-forward", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByRole("button", { name: "Walk-forward fold 불러오기", exact: true }).click();
+    await page.getByText("2025-01-02~2025-03-31", { exact: true }).waitFor();
+
+    await page.getByRole("button", { name: "스트레스", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByText("스트레스 합성 결과", { exact: true }).waitFor();
+
+    await page.getByRole("button", { name: "민감도", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByText("민감도 sensitivity-rebalance", { exact: true }).waitFor();
+
+    await page.getByRole("button", { name: "연구 도구", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("GLD", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "시장 국면", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("up_low_vol", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "관측값 불러오기", exact: true }).click();
+    await page.getByText("2026-07-16", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "수익 기여", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("시간연결 기여", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Pareto", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("0.910", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "중복 자산", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("중복 후보", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "리밸런싱 계획", exact: true }).click();
+    await page.getByRole("button", { name: "연구 도구 실행", exact: true }).click();
+    await page.getByText("분석 결과는 계획만 계산하며 주문을 생성하지 않습니다.", { exact: true }).waitFor();
+  } finally {
+    await context.close();
+  }
+}
+
+async function verifyMobileApplication(browser) {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 1,
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
+    reducedMotion: "reduce",
+    colorScheme: "dark",
+  });
+  await context.addInitScript(() => window.localStorage.setItem("portfolio-theme", "dark"));
+  const page = await context.newPage();
+  await routeApplicationApi(page);
+  try {
+    await page.goto(`${appUrl}/#backtest`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "백테스트", exact: true }).click();
+    await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor();
+    await page.getByRole("button", { name: "Monte Carlo", exact: true }).click();
+    await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
+    await page.getByText("평균 최종 잔액", { exact: true }).waitFor();
+    const hasViewportOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    if (hasViewportOverflow) throw new Error("모바일 페이지에 의도하지 않은 전체 가로 스크롤이 있습니다.");
   } finally {
     await context.close();
   }
@@ -672,7 +825,10 @@ async function captureArchitectureSlides(browser) {
 await mkdir(outputDirectory, { recursive: true });
 const browser = await launchBrowser();
 try {
-  if (captureApp) await captureApplication(browser);
+  if (captureApp) {
+    await captureApplication(browser);
+    await verifyMobileApplication(browser);
+  }
   if (captureArchitecture) await captureArchitectureSlides(browser);
 } finally {
   await browser.close();
