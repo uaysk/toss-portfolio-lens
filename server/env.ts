@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { MySqlConnectionConfig } from "./database.js";
+import type { MySqlConnectionConfig, PostgresConnectionConfig } from "./database.js";
 
 export type OpenAiConfig = {
   endpoint: string;
@@ -47,15 +47,19 @@ export type TossApiAuthConfig =
     tossApiBearerToken: string;
   };
 
+export type DatabaseProvider = "sqlite" | "mysql" | "postgresql";
+
 export type AppConfig = TossApiAuthConfig & {
   dashboardPassword: string;
   sessionSecret: string;
   host: string;
   port: number;
   tossApiBaseUrl: string;
+  dbProvider: DatabaseProvider;
   databasePath: string;
+  postgres?: PostgresConnectionConfig;
   mysql?: MySqlConnectionConfig;
-  mysqlRequired: boolean;
+  candleCacheLatestTtlMs: number;
   snapshotRefreshHours: number;
   nodeEnv: string;
   publicAppUrl: string;
@@ -78,11 +82,14 @@ function readBoolean(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
-function readMySqlConfig(): MySqlConnectionConfig | undefined {
+function readMySqlConfig(requiredForProvider = false): MySqlConnectionConfig | undefined {
   const mysqlUrl = optional("MYSQL_URL");
   const individualNames = ["MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"];
   const hasIndividualValue = individualNames.some((name) => process.env[name] !== undefined);
-  if (!mysqlUrl && !hasIndividualValue) return undefined;
+  if (!mysqlUrl && !hasIndividualValue) {
+    if (requiredForProvider) throw new Error("DB_PROVIDER=mysql이면 유효한 MySQL 연결 설정이 필요합니다.");
+    return undefined;
+  }
 
   try {
     let host: string | undefined;
@@ -138,9 +145,94 @@ function readMySqlConfig(): MySqlConnectionConfig | undefined {
       } : {}),
     };
   } catch (error) {
+    if (requiredForProvider) throw error;
     console.warn("[storage] MySQL 설정을 사용할 수 없어 SQLite를 사용합니다:", error instanceof Error ? error.message : error);
     return undefined;
   }
+}
+
+function readPostgresConfig(requiredForProvider = false): PostgresConnectionConfig | undefined {
+  const postgresUrl = optional("POSTGRES_URL") || optional("DATABASE_URL");
+  const individualNames = [
+    "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DATABASE",
+  ];
+  const hasIndividualValue = individualNames.some((name) => process.env[name] !== undefined);
+  if (!postgresUrl && !hasIndividualValue) {
+    if (requiredForProvider) throw new Error("DB_PROVIDER=postgresql이면 유효한 PostgreSQL 연결 설정이 필요합니다.");
+    return undefined;
+  }
+
+  try {
+    let host: string | undefined;
+    let portText: string | undefined;
+    let user: string | undefined;
+    let password: string | undefined;
+    let database: string | undefined;
+    if (postgresUrl) {
+      const parsed = new URL(postgresUrl);
+      if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+        throw new Error("POSTGRES_URL/DATABASE_URL은 postgresql:// 형식이어야 합니다.");
+      }
+      host = parsed.hostname;
+      portText = parsed.port || "5432";
+      user = decodeURIComponent(parsed.username);
+      password = decodeURIComponent(parsed.password);
+      database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+    } else {
+      host = optional("POSTGRES_HOST");
+      portText = optional("POSTGRES_PORT") || "5432";
+      user = optional("POSTGRES_USER");
+      password = process.env.POSTGRES_PASSWORD;
+      database = optional("POSTGRES_DATABASE");
+    }
+
+    if (!host || !user || password === undefined || !database) {
+      throw new Error("POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE가 모두 필요합니다.");
+    }
+    if (!/^[A-Za-z0-9_-]{1,63}$/.test(database)) {
+      throw new Error("POSTGRES_DATABASE 이름은 영문, 숫자, _, -만 사용할 수 있습니다.");
+    }
+    const port = Number.parseInt(portText || "5432", 10);
+    if (!Number.isFinite(port) || port < 1 || port > 65535) throw new Error("POSTGRES_PORT가 올바르지 않습니다.");
+    const connectTimeoutMs = Number.parseInt(optional("POSTGRES_CONNECT_TIMEOUT_MS") || "3000", 10);
+    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs < 500 || connectTimeoutMs > 30_000) {
+      throw new Error("POSTGRES_CONNECT_TIMEOUT_MS는 500~30000 범위여야 합니다.");
+    }
+    const useSsl = readBoolean("POSTGRES_SSL", false);
+    const caPath = optional("POSTGRES_SSL_CA_PATH");
+    if (caPath && !useSsl) throw new Error("POSTGRES_SSL_CA_PATH를 사용하려면 POSTGRES_SSL=true가 필요합니다.");
+    const ca = caPath ? readFileSync(caPath, "utf8") : undefined;
+    if (caPath && !ca?.trim()) throw new Error("POSTGRES_SSL_CA_PATH의 인증서가 비어 있습니다.");
+    return {
+      host,
+      port,
+      user,
+      password,
+      database,
+      connectTimeoutMs,
+      ...(useSsl ? {
+        ssl: {
+          rejectUnauthorized: readBoolean("POSTGRES_SSL_REJECT_UNAUTHORIZED", true),
+          ...(ca ? { ca } : {}),
+        },
+      } : {}),
+    };
+  } catch (error) {
+    if (requiredForProvider) throw error;
+    console.warn(
+      "[storage] PostgreSQL 설정을 사용할 수 없어 다른 저장소를 확인합니다:",
+      error instanceof Error ? error.message : error,
+    );
+    return undefined;
+  }
+}
+
+function readDatabaseProvider(): DatabaseProvider {
+  const provider = optional("DB_PROVIDER")?.toLowerCase() || "sqlite";
+  if (provider !== "sqlite" && provider !== "mysql" && provider !== "postgresql") {
+    throw new Error("DB_PROVIDER는 sqlite, mysql, postgresql 중 하나여야 합니다.");
+  }
+  return provider;
 }
 
 function required(name: string): string {
@@ -278,11 +370,9 @@ export function loadConfig(): AppConfig {
   const port = readPort();
   const configuredPublicUrl = optional("PUBLIC_APP_URL") || optional("APP_URL");
   const reportAi = readReportAiConfig();
-  const mysql = readMySqlConfig();
-  const mysqlRequired = readBoolean("MYSQL_REQUIRED", false);
-  if (mysqlRequired && !mysql) {
-    throw new Error("MYSQL_REQUIRED=true이면 유효한 MySQL 연결 설정이 필요합니다.");
-  }
+  const dbProvider = readDatabaseProvider();
+  const postgres = dbProvider === "postgresql" ? readPostgresConfig(true) : undefined;
+  const mysql = dbProvider === "mysql" ? readMySqlConfig(true) : undefined;
   return {
     ...tossApiAuth,
     dashboardPassword,
@@ -293,9 +383,11 @@ export function loadConfig(): AppConfig {
       optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
       "TOSS_API_BASE_URL",
     ),
+    dbProvider,
     databasePath: process.env.DATABASE_PATH?.trim() || "./data/portfolio-history.sqlite",
+    postgres,
     mysql,
-    mysqlRequired,
+    candleCacheLatestTtlMs: readBoundedInteger("CANDLE_CACHE_LATEST_TTL_MS", 300_000, 10_000, 86_400_000),
     snapshotRefreshHours: readSnapshotRefreshHours(),
     nodeEnv: process.env.NODE_ENV?.trim() || "development",
     publicAppUrl: configuredPublicUrl

@@ -257,4 +257,55 @@ describe("PortfolioHistoryStore", () => {
     expect(history.series).toEqual([expect.objectContaining({ symbol: "PAST-US", market: "NASDAQ" })]);
     expect(history.points.map((point) => point.totalValue)).toEqual([250, 0]);
   });
+
+  it("candle 원본 응답과 정규화 OHLC를 공통 캐시에 저장한다", async () => {
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+    const payload = {
+      result: {
+        candles: [{ timestamp: "2026-07-01T00:00:00+09:00", closePrice: "73500" }],
+        nextBefore: "2026-06-30T00:00:00+09:00",
+      },
+    };
+    await store.cacheCandleResponse({
+      requestKey: "request-1",
+      feature: "candles",
+      requestPath: "/api/v1/candles?symbol=005930&interval=1d&before=2026-07-02T00%3A00%3A00%2B09%3A00",
+      source: "stock",
+      symbol: "005930",
+      interval: "1d",
+      adjusted: false,
+      payload,
+      candles: [{
+        symbol: "005930",
+        date: "2026-07-01",
+        timestamp: "2026-07-01T00:00:00+09:00",
+        currency: "KRW",
+        openPrice: 72000,
+        highPrice: 74000,
+        lowPrice: 71500,
+        closePrice: 73500,
+      }],
+      fetchedAt: 1000,
+      expiresAt: 0,
+    });
+
+    expect(await store.getCachedCandleResponse("request-1", 10_000)).toEqual(payload);
+    expect(await store.getMarketCandleCount()).toBe(1);
+
+    await store.cacheCandleResponse({
+      requestKey: "expired",
+      feature: "indicator-candles",
+      requestPath: "/api/v1/market-indicators/KOSPI/candles?interval=1d",
+      source: "indicator",
+      symbol: "KOSPI",
+      interval: "1d",
+      adjusted: false,
+      payload,
+      candles: [],
+      fetchedAt: 1000,
+      expiresAt: 2000,
+    });
+    expect(await store.getCachedCandleResponse("expired", 2000)).toBeUndefined();
+  });
 });

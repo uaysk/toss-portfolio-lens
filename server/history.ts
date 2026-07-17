@@ -80,6 +80,22 @@ export type BenchmarkPricePoint = {
   close: number;
 };
 
+export type MarketCandleSource = "stock" | "indicator" | "benchmark";
+
+export type MarketCandleCacheInput = {
+  requestKey: string;
+  feature: "candles" | "indicator-candles";
+  requestPath: string;
+  source: MarketCandleSource;
+  symbol: string;
+  interval: "1m" | "1d";
+  adjusted: boolean;
+  payload: unknown;
+  candles: DailyCandle[];
+  fetchedAt: number;
+  expiresAt: number;
+};
+
 type SnapshotRow = {
   id: number;
   snapshot_date: string;
@@ -122,6 +138,34 @@ async function batchUpsertMySql(
   }
 }
 
+async function batchUpsertPostgres(
+  database: RelationalDatabase,
+  table: string,
+  columns: string[],
+  rows: DatabaseRow[],
+  conflictColumns: string[],
+  updateColumns: string[],
+  freshnessColumn?: string,
+  batchSize = 400,
+): Promise<void> {
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const batch = rows.slice(offset, offset + batchSize);
+    if (!batch.length) continue;
+    const placeholders = batch.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
+    const parameters = batch.flatMap((row) => columns.map((column) => row[column]));
+    const conflict = conflictColumns.join(", ");
+    const update = updateColumns.length
+      ? `DO UPDATE SET ${updateColumns.map((column) => `${column} = EXCLUDED.${column}`).join(", ")}${
+        freshnessColumn ? ` WHERE EXCLUDED.${freshnessColumn} >= ${table}.${freshnessColumn}` : ""
+      }`
+      : "DO NOTHING";
+    await database.run(
+      `INSERT INTO ${table} (${columns.join(", ")}) VALUES ${placeholders} ON CONFLICT (${conflict}) ${update}`,
+      parameters,
+    );
+  }
+}
+
 function round(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
@@ -156,7 +200,7 @@ function seriesKey(market: string, symbol: string): string {
 }
 
 export class PortfolioHistoryStore {
-  readonly backend: "sqlite" | "mysql";
+  readonly backend: "sqlite" | "mysql" | "postgres";
 
   private constructor(private readonly db: RelationalDatabase) {
     this.backend = db.dialect;
@@ -177,11 +221,11 @@ export class PortfolioHistoryStore {
     target: PortfolioHistoryStore,
     fingerprint: string,
   ): Promise<SqliteMigrationResult> {
-    if (source.backend !== "sqlite" || target.backend !== "mysql") {
-      throw new Error("SQLite에서 MySQL로만 데이터를 마이그레이션할 수 있습니다.");
+    if (source.backend !== "sqlite" || !["mysql", "postgres"].includes(target.backend)) {
+      throw new Error("SQLite에서 MySQL 또는 PostgreSQL로만 데이터를 마이그레이션할 수 있습니다.");
     }
     const [previous] = await target.db.query<{ meta_value: string }>(`
-      SELECT meta_value FROM portfolio_storage_meta WHERE meta_key = 'sqlite_migration_fingerprint_v1'
+      SELECT meta_value FROM portfolio_storage_meta WHERE meta_key = 'sqlite_migration_fingerprint_v2'
     `);
     if (previous?.meta_value === fingerprint) {
       return { skipped: true, fingerprint, rows: {} };
@@ -207,6 +251,12 @@ export class PortfolioHistoryStore {
     const cashLedger = await source.hasTable("portfolio_cash_ledger")
       ? await source.db.query<DatabaseRow>("SELECT * FROM portfolio_cash_ledger")
       : [];
+    const marketCandles = await source.hasTable("portfolio_market_candles")
+      ? await source.db.query<DatabaseRow>("SELECT * FROM portfolio_market_candles")
+      : [];
+    const candleResponses = await source.hasTable("portfolio_candle_responses")
+      ? await source.db.query<DatabaseRow>("SELECT * FROM portfolio_candle_responses")
+      : [];
     const rows = {
       portfolio_instruments: instruments.length,
       portfolio_orders: orders.length,
@@ -218,7 +268,211 @@ export class PortfolioHistoryStore {
       portfolio_exchange_rates: exchangeRates.length,
       portfolio_backfill_state: backfillStates.length,
       portfolio_cash_ledger: cashLedger.length,
+      portfolio_market_candles: marketCandles.length,
+      portfolio_candle_responses: candleResponses.length,
     };
+
+    if (target.backend === "postgres") {
+      await target.db.transaction(async (database) => {
+        await batchUpsertPostgres(
+          database,
+          "portfolio_instruments",
+          ["instrument_key", "symbol", "name", "market", "currency", "updated_at"],
+          instruments,
+          ["instrument_key"],
+          ["symbol", "name", "market", "currency", "updated_at"],
+          "updated_at",
+        );
+        await batchUpsertPostgres(
+          database,
+          "portfolio_orders",
+          [
+            "account_id", "order_id", "symbol", "side", "currency", "status", "ordered_at", "filled_at",
+            "filled_quantity", "average_filled_price", "filled_amount", "commission", "tax", "fetched_at",
+          ],
+          orders,
+          ["account_id", "order_id"],
+          [
+            "symbol", "side", "currency", "status", "ordered_at", "filled_at", "filled_quantity",
+            "average_filled_price", "filled_amount", "commission", "tax", "fetched_at",
+          ],
+          "fetched_at",
+        );
+        await batchUpsertPostgres(
+          database,
+          "portfolio_snapshots",
+          ["account_id", "snapshot_date", "captured_at", "origin"],
+          snapshots,
+          ["account_id", "snapshot_date"],
+          ["captured_at", "origin"],
+          "captured_at",
+        );
+
+        const targetSnapshots = await database.query<{
+          id: number;
+          account_id: string;
+          snapshot_date: string;
+          captured_at: number;
+        }>("SELECT id, account_id, snapshot_date, captured_at FROM portfolio_snapshots");
+        const targetByKey = new Map(targetSnapshots.map((snapshot) => [
+          `${snapshot.account_id}\u0000${snapshot.snapshot_date}`,
+          snapshot,
+        ]));
+        const authoritativeSnapshotIds = new Set<number>();
+        for (const snapshot of snapshots) {
+          const key = `${String(snapshot.account_id)}\u0000${String(snapshot.snapshot_date)}`;
+          const targetSnapshot = targetByKey.get(key);
+          if (targetSnapshot && Number(snapshot.captured_at) >= Number(targetSnapshot.captured_at)) {
+            authoritativeSnapshotIds.add(Number(targetSnapshot.id));
+          }
+        }
+        const migratedItems: DatabaseRow[] = [];
+        for (const item of snapshotItems) {
+          const key = `${String(item.account_id)}\u0000${String(item.snapshot_date)}`;
+          const targetSnapshot = targetByKey.get(key);
+          if (!targetSnapshot || Number(item.source_captured_at) < Number(targetSnapshot.captured_at)) continue;
+          authoritativeSnapshotIds.add(Number(targetSnapshot.id));
+          migratedItems.push({
+            snapshot_id: Number(targetSnapshot.id),
+            symbol: item.symbol,
+            name: item.name,
+            market: item.market,
+            currency: item.currency,
+            evaluation_amount: item.evaluation_amount,
+            weight_percent: item.weight_percent,
+          });
+        }
+        for (const snapshotId of authoritativeSnapshotIds) {
+          await database.run("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?", [snapshotId]);
+        }
+        await batchUpsertPostgres(
+          database,
+          "portfolio_snapshot_items",
+          ["snapshot_id", "symbol", "name", "market", "currency", "evaluation_amount", "weight_percent"],
+          migratedItems,
+          ["snapshot_id", "market", "symbol", "currency"],
+          ["name", "evaluation_amount", "weight_percent"],
+        );
+
+        const timestampedTables: Array<{
+          table: string;
+          columns: string[];
+          rows: DatabaseRow[];
+          conflicts: string[];
+          updates: string[];
+          freshness: string;
+        }> = [
+          {
+            table: "portfolio_daily_prices",
+            columns: [
+              "instrument_key", "price_date", "open_price", "high_price", "low_price", "close_price",
+              "currency", "timestamp", "updated_at",
+            ],
+            rows: dailyPrices,
+            conflicts: ["instrument_key", "price_date"],
+            updates: ["open_price", "high_price", "low_price", "close_price", "currency", "timestamp", "updated_at"],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_backtest_prices",
+            columns: ["instrument_key", "price_date", "close_price", "currency", "timestamp", "updated_at"],
+            rows: backtestPrices,
+            conflicts: ["instrument_key", "price_date"],
+            updates: ["close_price", "currency", "timestamp", "updated_at"],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_benchmark_prices",
+            columns: ["benchmark_key", "price_date", "close_price", "timestamp", "updated_at"],
+            rows: benchmarkPrices,
+            conflicts: ["benchmark_key", "price_date"],
+            updates: ["close_price", "timestamp", "updated_at"],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_exchange_rates",
+            columns: ["rate_date", "base_currency", "quote_currency", "rate", "timestamp", "updated_at"],
+            rows: exchangeRates,
+            conflicts: ["rate_date", "base_currency", "quote_currency"],
+            updates: ["rate", "timestamp", "updated_at"],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_backfill_state",
+            columns: [
+              "account_id", "status", "phase", "started_at", "completed_at", "updated_at", "first_trade_date",
+              "last_backfilled_date", "orders_imported", "symbols_total", "symbols_processed", "prices_imported",
+              "snapshots_created", "reconciled_symbols", "discrepancy_symbols", "failed_symbols", "message",
+            ],
+            rows: backfillStates,
+            conflicts: ["account_id"],
+            updates: [
+              "status", "phase", "started_at", "completed_at", "updated_at", "first_trade_date",
+              "last_backfilled_date", "orders_imported", "symbols_total", "symbols_processed", "prices_imported",
+              "snapshots_created", "reconciled_symbols", "discrepancy_symbols", "failed_symbols", "message",
+            ],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_cash_ledger",
+            columns: [
+              "account_id", "entry_id", "transaction_date", "transaction_time", "occurred_at", "title",
+              "category", "kind", "currency", "amount", "balance", "instrument_name", "quantity", "source",
+              "imported_at",
+            ],
+            rows: cashLedger,
+            conflicts: ["account_id", "entry_id"],
+            updates: [
+              "transaction_date", "transaction_time", "occurred_at", "title", "category", "kind", "currency",
+              "amount", "balance", "instrument_name", "quantity", "source", "imported_at",
+            ],
+            freshness: "imported_at",
+          },
+          {
+            table: "portfolio_market_candles",
+            columns: [
+              "source_kind", "symbol", "candle_interval", "adjusted", "price_date", "timestamp", "currency",
+              "open_price", "high_price", "low_price", "close_price", "updated_at",
+            ],
+            rows: marketCandles,
+            conflicts: ["source_kind", "symbol", "candle_interval", "adjusted", "timestamp"],
+            updates: ["price_date", "currency", "open_price", "high_price", "low_price", "close_price", "updated_at"],
+            freshness: "updated_at",
+          },
+          {
+            table: "portfolio_candle_responses",
+            columns: [
+              "request_key", "feature", "request_path", "source_kind", "symbol", "candle_interval", "adjusted",
+              "payload_json", "fetched_at", "expires_at",
+            ],
+            rows: candleResponses,
+            conflicts: ["request_key"],
+            updates: [
+              "feature", "request_path", "source_kind", "symbol", "candle_interval", "adjusted", "payload_json",
+              "fetched_at", "expires_at",
+            ],
+            freshness: "fetched_at",
+          },
+        ];
+        for (const table of timestampedTables) {
+          await batchUpsertPostgres(
+            database,
+            table.table,
+            table.columns,
+            table.rows,
+            table.conflicts,
+            table.updates,
+            table.freshness,
+          );
+        }
+        await database.run(`
+          INSERT INTO portfolio_storage_meta (meta_key, meta_value, updated_at)
+          VALUES ('sqlite_migration_fingerprint_v2', ?, ?)
+          ON CONFLICT(meta_key) DO UPDATE SET meta_value = EXCLUDED.meta_value, updated_at = EXCLUDED.updated_at
+        `, [fingerprint, new Date().toISOString()]);
+      });
+      return { skipped: false, fingerprint, rows };
+    }
 
     await target.db.transaction(async (database) => {
       await batchUpsertMySql(
@@ -399,9 +653,43 @@ export class PortfolioHistoryStore {
          source = IF(VALUES(imported_at) >= imported_at, VALUES(source), source),
          imported_at = GREATEST(imported_at, VALUES(imported_at))`,
       );
+      await batchUpsertMySql(
+        database,
+        "portfolio_market_candles",
+        [
+          "source_kind", "symbol", "candle_interval", "adjusted", "price_date", "timestamp", "currency",
+          "open_price", "high_price", "low_price", "close_price", "updated_at",
+        ],
+        marketCandles,
+        `price_date = IF(VALUES(updated_at) >= updated_at, VALUES(price_date), price_date),
+         currency = IF(VALUES(updated_at) >= updated_at, VALUES(currency), currency),
+         open_price = IF(VALUES(updated_at) >= updated_at, VALUES(open_price), open_price),
+         high_price = IF(VALUES(updated_at) >= updated_at, VALUES(high_price), high_price),
+         low_price = IF(VALUES(updated_at) >= updated_at, VALUES(low_price), low_price),
+         close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
+         updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+      );
+      await batchUpsertMySql(
+        database,
+        "portfolio_candle_responses",
+        [
+          "request_key", "feature", "request_path", "source_kind", "symbol", "candle_interval", "adjusted",
+          "payload_json", "fetched_at", "expires_at",
+        ],
+        candleResponses,
+        `feature = IF(VALUES(fetched_at) >= fetched_at, VALUES(feature), feature),
+         request_path = IF(VALUES(fetched_at) >= fetched_at, VALUES(request_path), request_path),
+         source_kind = IF(VALUES(fetched_at) >= fetched_at, VALUES(source_kind), source_kind),
+         symbol = IF(VALUES(fetched_at) >= fetched_at, VALUES(symbol), symbol),
+         candle_interval = IF(VALUES(fetched_at) >= fetched_at, VALUES(candle_interval), candle_interval),
+         adjusted = IF(VALUES(fetched_at) >= fetched_at, VALUES(adjusted), adjusted),
+         payload_json = IF(VALUES(fetched_at) >= fetched_at, VALUES(payload_json), payload_json),
+         expires_at = IF(VALUES(fetched_at) >= fetched_at, VALUES(expires_at), expires_at),
+         fetched_at = GREATEST(fetched_at, VALUES(fetched_at))`,
+      );
       await database.run(`
         INSERT INTO portfolio_storage_meta (meta_key, meta_value, updated_at)
-        VALUES ('sqlite_migration_fingerprint_v1', ?, ?)
+        VALUES ('sqlite_migration_fingerprint_v2', ?, ?)
         ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value), updated_at = VALUES(updated_at)
       `, [fingerprint, new Date().toISOString()]);
     });
@@ -522,6 +810,55 @@ export class PortfolioHistoryStore {
         discrepancy_symbols INTEGER NOT NULL DEFAULT 0,
         failed_symbols INTEGER NOT NULL DEFAULT 0,
         message TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_cash_ledger (
+        account_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        transaction_date TEXT NOT NULL,
+        transaction_time TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        amount REAL NOT NULL,
+        balance REAL NOT NULL,
+        instrument_name TEXT,
+        quantity REAL,
+        source TEXT NOT NULL DEFAULT 'WTS_PASTE',
+        imported_at INTEGER NOT NULL,
+        PRIMARY KEY(account_id, entry_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_cash_ledger_account_date
+        ON portfolio_cash_ledger(account_id, transaction_date, transaction_time)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_market_candles (
+        source_kind TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        candle_interval TEXT NOT NULL,
+        adjusted INTEGER NOT NULL,
+        price_date TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        open_price REAL NOT NULL,
+        high_price REAL NOT NULL,
+        low_price REAL NOT NULL,
+        close_price REAL NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_market_candles_lookup
+        ON portfolio_market_candles(source_kind, symbol, candle_interval, adjusted, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_candle_responses (
+        request_key TEXT PRIMARY KEY,
+        feature TEXT NOT NULL,
+        request_path TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        candle_interval TEXT NOT NULL,
+        adjusted INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        fetched_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS portfolio_storage_meta (
         meta_key TEXT PRIMARY KEY,
@@ -659,28 +996,278 @@ export class PortfolioHistoryStore {
         PRIMARY KEY(account_id, entry_id),
         KEY idx_cash_ledger_account_date (account_id, transaction_date, transaction_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_market_candles (
+        source_kind VARCHAR(16) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        candle_interval VARCHAR(8) NOT NULL,
+        adjusted TINYINT UNSIGNED NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        open_price DOUBLE NOT NULL,
+        high_price DOUBLE NOT NULL,
+        low_price DOUBLE NOT NULL,
+        close_price DOUBLE NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp),
+        KEY idx_market_candles_lookup (source_kind, symbol, candle_interval, adjusted, price_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS portfolio_candle_responses (
+        request_key CHAR(64) NOT NULL PRIMARY KEY,
+        feature VARCHAR(32) NOT NULL,
+        request_path VARCHAR(512) NOT NULL,
+        source_kind VARCHAR(16) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        candle_interval VARCHAR(8) NOT NULL,
+        adjusted TINYINT UNSIGNED NOT NULL,
+        payload_json LONGTEXT NOT NULL,
+        fetched_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       `CREATE TABLE IF NOT EXISTS portfolio_storage_meta (
         meta_key VARCHAR(191) NOT NULL PRIMARY KEY,
         meta_value TEXT NOT NULL,
         updated_at VARCHAR(64) NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     ];
+    const postgresSchema = [
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        account_id VARCHAR(128) NOT NULL,
+        snapshot_date CHAR(10) NOT NULL,
+        captured_at BIGINT NOT NULL,
+        origin VARCHAR(16) NOT NULL DEFAULT 'LIVE',
+        UNIQUE(account_id, snapshot_date)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_snapshots_account_date
+        ON portfolio_snapshots(account_id, snapshot_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_snapshot_items (
+        snapshot_id BIGINT NOT NULL REFERENCES portfolio_snapshots(id) ON DELETE CASCADE,
+        symbol VARCHAR(64) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        market VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        evaluation_amount DOUBLE PRECISION NOT NULL,
+        weight_percent DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY(snapshot_id, market, symbol, currency)
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_orders (
+        account_id VARCHAR(128) NOT NULL,
+        order_id VARCHAR(128) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        side VARCHAR(16) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        ordered_at VARCHAR(64) NOT NULL,
+        filled_at VARCHAR(64) NOT NULL,
+        filled_quantity DOUBLE PRECISION NOT NULL,
+        average_filled_price DOUBLE PRECISION NOT NULL,
+        filled_amount DOUBLE PRECISION NOT NULL,
+        commission DOUBLE PRECISION NOT NULL,
+        tax DOUBLE PRECISION NOT NULL,
+        fetched_at BIGINT NOT NULL,
+        PRIMARY KEY(account_id, order_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_orders_account_filled_at
+        ON portfolio_orders(account_id, filled_at)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_instruments (
+        instrument_key VARCHAR(96) PRIMARY KEY,
+        symbol VARCHAR(64) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        market VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        updated_at BIGINT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
+        instrument_key VARCHAR(96) NOT NULL REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE,
+        price_date CHAR(10) NOT NULL,
+        open_price DOUBLE PRECISION,
+        high_price DOUBLE PRECISION,
+        low_price DOUBLE PRECISION,
+        close_price DOUBLE PRECISION NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(instrument_key, price_date)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
+        ON portfolio_daily_prices(instrument_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backtest_prices (
+        instrument_key VARCHAR(96) NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        close_price DOUBLE PRECISION NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(instrument_key, price_date)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_backtest_prices_key_date
+        ON portfolio_backtest_prices(instrument_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
+        benchmark_key VARCHAR(32) NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        close_price DOUBLE PRECISION NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(benchmark_key, price_date)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
+        ON portfolio_benchmark_prices(benchmark_key, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
+        rate_date CHAR(10) NOT NULL,
+        base_currency VARCHAR(8) NOT NULL,
+        quote_currency VARCHAR(8) NOT NULL,
+        rate DOUBLE PRECISION NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(rate_date, base_currency, quote_currency)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date
+        ON portfolio_exchange_rates(base_currency, quote_currency, rate_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
+        account_id VARCHAR(128) PRIMARY KEY,
+        status VARCHAR(16) NOT NULL,
+        phase VARCHAR(24) NOT NULL,
+        started_at VARCHAR(64),
+        completed_at VARCHAR(64),
+        updated_at VARCHAR(64) NOT NULL,
+        first_trade_date CHAR(10),
+        last_backfilled_date CHAR(10),
+        orders_imported BIGINT NOT NULL DEFAULT 0,
+        symbols_total BIGINT NOT NULL DEFAULT 0,
+        symbols_processed BIGINT NOT NULL DEFAULT 0,
+        prices_imported BIGINT NOT NULL DEFAULT 0,
+        snapshots_created BIGINT NOT NULL DEFAULT 0,
+        reconciled_symbols BIGINT NOT NULL DEFAULT 0,
+        discrepancy_symbols BIGINT NOT NULL DEFAULT 0,
+        failed_symbols BIGINT NOT NULL DEFAULT 0,
+        message TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_cash_ledger (
+        account_id VARCHAR(128) NOT NULL,
+        entry_id VARCHAR(128) NOT NULL,
+        transaction_date CHAR(10) NOT NULL,
+        transaction_time CHAR(5) NOT NULL,
+        occurred_at VARCHAR(64) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        category VARCHAR(64) NOT NULL,
+        kind VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        amount DOUBLE PRECISION NOT NULL,
+        balance DOUBLE PRECISION NOT NULL,
+        instrument_name VARCHAR(255),
+        quantity DOUBLE PRECISION,
+        source VARCHAR(32) NOT NULL DEFAULT 'WTS_PASTE',
+        imported_at BIGINT NOT NULL,
+        PRIMARY KEY(account_id, entry_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_cash_ledger_account_date
+        ON portfolio_cash_ledger(account_id, transaction_date, transaction_time)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_market_candles (
+        source_kind VARCHAR(16) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        candle_interval VARCHAR(8) NOT NULL,
+        adjusted SMALLINT NOT NULL,
+        price_date CHAR(10) NOT NULL,
+        timestamp VARCHAR(64) NOT NULL,
+        currency VARCHAR(8) NOT NULL,
+        open_price DOUBLE PRECISION NOT NULL,
+        high_price DOUBLE PRECISION NOT NULL,
+        low_price DOUBLE PRECISION NOT NULL,
+        close_price DOUBLE PRECISION NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_market_candles_lookup
+        ON portfolio_market_candles(source_kind, symbol, candle_interval, adjusted, price_date)`,
+      `CREATE TABLE IF NOT EXISTS portfolio_candle_responses (
+        request_key CHAR(64) PRIMARY KEY,
+        feature VARCHAR(32) NOT NULL,
+        request_path VARCHAR(512) NOT NULL,
+        source_kind VARCHAR(16) NOT NULL,
+        symbol VARCHAR(64) NOT NULL,
+        candle_interval VARCHAR(8) NOT NULL,
+        adjusted SMALLINT NOT NULL,
+        payload_json TEXT NOT NULL,
+        fetched_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS portfolio_storage_meta (
+        meta_key VARCHAR(191) PRIMARY KEY,
+        meta_value TEXT NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+      )`,
+    ];
 
-    for (const statement of this.db.dialect === "mysql" ? mysqlSchema : sqliteSchema) {
+    const schema = this.db.dialect === "mysql"
+      ? mysqlSchema
+      : this.db.dialect === "postgres"
+        ? postgresSchema
+        : sqliteSchema;
+    for (const statement of schema) {
       await this.db.run(statement);
     }
-    if (this.db.dialect === "mysql") return;
-
-    const snapshotColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_snapshots)");
-    if (!snapshotColumns.some((column) => column.name === "origin")) {
-      await this.db.run("ALTER TABLE portfolio_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'LIVE'");
-    }
-    const priceColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_daily_prices)");
-    for (const column of ["open_price", "high_price", "low_price"]) {
-      if (!priceColumns.some((candidate) => candidate.name === column)) {
-        await this.db.run(`ALTER TABLE portfolio_daily_prices ADD COLUMN ${column} REAL`);
+    if (this.db.dialect === "sqlite") {
+      const snapshotColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_snapshots)");
+      if (!snapshotColumns.some((column) => column.name === "origin")) {
+        await this.db.run("ALTER TABLE portfolio_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'LIVE'");
+      }
+      const priceColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_daily_prices)");
+      for (const column of ["open_price", "high_price", "low_price"]) {
+        if (!priceColumns.some((candidate) => candidate.name === column)) {
+          await this.db.run(`ALTER TABLE portfolio_daily_prices ADD COLUMN ${column} REAL`);
+        }
       }
     }
+    await this.backfillCommonCandles();
+  }
+
+  private async backfillCommonCandles(): Promise<void> {
+    const conflict = this.db.dialect === "mysql" ? "INSERT IGNORE" : "INSERT";
+    const suffix = this.db.dialect === "mysql" ? "" : " ON CONFLICT DO NOTHING";
+    await this.db.run(`
+      ${conflict} INTO portfolio_market_candles (
+        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+        open_price, high_price, low_price, close_price, updated_at
+      )
+      SELECT 'stock', instruments.symbol, '1d', 0, prices.price_date, prices.timestamp, prices.currency,
+             COALESCE(prices.open_price, prices.close_price),
+             COALESCE(prices.high_price, prices.close_price),
+             COALESCE(prices.low_price, prices.close_price),
+             prices.close_price, prices.updated_at
+      FROM portfolio_daily_prices AS prices
+      JOIN portfolio_instruments AS instruments ON instruments.instrument_key = prices.instrument_key
+      WHERE 1 = 1${suffix}
+    `);
+
+    const backtestSymbol = this.db.dialect === "mysql"
+      ? "SUBSTRING_INDEX(prices.instrument_key, ':', -1)"
+      : this.db.dialect === "postgres"
+        ? "SPLIT_PART(prices.instrument_key, ':', 2)"
+        : "CASE WHEN INSTR(prices.instrument_key, ':') > 0 THEN SUBSTR(prices.instrument_key, INSTR(prices.instrument_key, ':') + 1) ELSE prices.instrument_key END";
+    await this.db.run(`
+      ${conflict} INTO portfolio_market_candles (
+        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+        open_price, high_price, low_price, close_price, updated_at
+      )
+      SELECT 'stock', ${backtestSymbol}, '1d', 1, prices.price_date, prices.timestamp, prices.currency,
+             prices.close_price, prices.close_price, prices.close_price, prices.close_price, prices.updated_at
+      FROM portfolio_backtest_prices AS prices
+      WHERE 1 = 1${suffix}
+    `);
+
+    await this.db.run(`
+      ${conflict} INTO portfolio_market_candles (
+        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+        open_price, high_price, low_price, close_price, updated_at
+      )
+      SELECT CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 'indicator' ELSE 'stock' END,
+             CASE benchmark_key WHEN 'NASDAQ100' THEN 'QQQ' WHEN 'SP500' THEN 'SPY' ELSE benchmark_key END,
+             '1d', CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 0 ELSE 1 END,
+             price_date, timestamp, '', close_price, close_price, close_price, close_price, updated_at
+      FROM portfolio_benchmark_prices
+      WHERE 1 = 1${suffix}
+    `);
   }
 
   close(): Promise<void> {
@@ -697,7 +1284,12 @@ export class PortfolioHistoryStore {
           SELECT 1 AS present FROM information_schema.tables
           WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1
         `, [table])
-      : await this.db.query<DatabaseRow>(`
+      : this.db.dialect === "postgres"
+        ? await this.db.query<DatabaseRow>(`
+          SELECT 1 AS present FROM information_schema.tables
+          WHERE table_schema = current_schema() AND table_name = ? LIMIT 1
+        `, [table])
+        : await this.db.query<DatabaseRow>(`
           SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
         `, [table]);
     return rows.length > 0;
@@ -714,6 +1306,8 @@ export class PortfolioHistoryStore {
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_benchmark_prices"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(rate), 0) AS sum_value FROM portfolio_exchange_rates"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS max_value FROM portfolio_backfill_state"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_market_candles"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(fetched_at), 0) AS max_value FROM portfolio_candle_responses"),
     ]);
     if (await this.hasTable("portfolio_cash_ledger")) {
       signatures.push(await this.db.query<DatabaseRow>(
@@ -721,6 +1315,144 @@ export class PortfolioHistoryStore {
       ));
     }
     return createHash("sha256").update(JSON.stringify(signatures.map(([row]) => row ?? {}))).digest("hex");
+  }
+
+  private marketCandleStatement(): string {
+    return this.sql(`
+      INSERT INTO portfolio_market_candles (
+        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+        open_price, high_price, low_price, close_price, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_kind, symbol, candle_interval, adjusted, timestamp) DO UPDATE SET
+        price_date = excluded.price_date,
+        currency = excluded.currency,
+        open_price = excluded.open_price,
+        high_price = excluded.high_price,
+        low_price = excluded.low_price,
+        close_price = excluded.close_price,
+        updated_at = excluded.updated_at
+    `, `
+      INSERT INTO portfolio_market_candles (
+        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+        open_price, high_price, low_price, close_price, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        price_date = VALUES(price_date), currency = VALUES(currency), open_price = VALUES(open_price),
+        high_price = VALUES(high_price), low_price = VALUES(low_price), close_price = VALUES(close_price),
+        updated_at = VALUES(updated_at)
+    `);
+  }
+
+  private async writeMarketCandles(
+    database: RelationalDatabase,
+    source: MarketCandleSource,
+    symbol: string,
+    interval: "1m" | "1d",
+    adjusted: boolean,
+    candles: DailyCandle[],
+    updatedAt: number,
+  ): Promise<void> {
+    const statement = this.marketCandleStatement();
+    for (const candle of candles) {
+      await database.run(statement, [
+        source,
+        symbol,
+        interval,
+        adjusted ? 1 : 0,
+        candle.date,
+        candle.timestamp,
+        candle.currency,
+        candle.openPrice,
+        candle.highPrice,
+        candle.lowPrice,
+        candle.closePrice,
+        updatedAt,
+      ]);
+    }
+  }
+
+  async upsertMarketCandles(
+    source: MarketCandleSource,
+    symbol: string,
+    interval: "1m" | "1d",
+    adjusted: boolean,
+    candles: DailyCandle[],
+    updatedAt = Date.now(),
+  ): Promise<number> {
+    await this.db.transaction((database) => (
+      this.writeMarketCandles(database, source, symbol, interval, adjusted, candles, updatedAt)
+    ));
+    return candles.length;
+  }
+
+  async getCachedCandleResponse(requestKey: string, now = Date.now()): Promise<unknown | undefined> {
+    const [row] = await this.db.query<{ payload_json: string; expires_at: number }>(`
+      SELECT payload_json, expires_at
+      FROM portfolio_candle_responses
+      WHERE request_key = ? AND (expires_at = 0 OR expires_at > ?)
+    `, [requestKey, now]);
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.payload_json);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async cacheCandleResponse(input: MarketCandleCacheInput): Promise<void> {
+    const responseStatement = this.sql(`
+      INSERT INTO portfolio_candle_responses (
+        request_key, feature, request_path, source_kind, symbol, candle_interval, adjusted,
+        payload_json, fetched_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_key) DO UPDATE SET
+        feature = excluded.feature,
+        request_path = excluded.request_path,
+        source_kind = excluded.source_kind,
+        symbol = excluded.symbol,
+        candle_interval = excluded.candle_interval,
+        adjusted = excluded.adjusted,
+        payload_json = excluded.payload_json,
+        fetched_at = excluded.fetched_at,
+        expires_at = excluded.expires_at
+    `, `
+      INSERT INTO portfolio_candle_responses (
+        request_key, feature, request_path, source_kind, symbol, candle_interval, adjusted,
+        payload_json, fetched_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        feature = VALUES(feature), request_path = VALUES(request_path), source_kind = VALUES(source_kind),
+        symbol = VALUES(symbol), candle_interval = VALUES(candle_interval), adjusted = VALUES(adjusted),
+        payload_json = VALUES(payload_json), fetched_at = VALUES(fetched_at), expires_at = VALUES(expires_at)
+    `);
+    await this.db.transaction(async (database) => {
+      await this.writeMarketCandles(
+        database,
+        input.source,
+        input.symbol,
+        input.interval,
+        input.adjusted,
+        input.candles,
+        input.fetchedAt,
+      );
+      await database.run(responseStatement, [
+        input.requestKey,
+        input.feature,
+        input.requestPath,
+        input.source,
+        input.symbol,
+        input.interval,
+        input.adjusted ? 1 : 0,
+        JSON.stringify(input.payload),
+        input.fetchedAt,
+        input.expiresAt,
+      ]);
+    });
+  }
+
+  async getMarketCandleCount(): Promise<number> {
+    const [row] = await this.db.query<{ count: number }>("SELECT COUNT(*) AS count FROM portfolio_market_candles");
+    return Number(row?.count ?? 0);
   }
 
   async recordPortfolio(portfolio: Portfolio, capturedAt = new Date()): Promise<void> {
@@ -921,6 +1653,14 @@ export class PortfolioHistoryStore {
         ]);
       }
     });
+    await this.upsertMarketCandles(
+      "stock",
+      instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
+      "1d",
+      false,
+      candles,
+      updatedAt,
+    );
     return candles.length;
   }
 
@@ -1013,6 +1753,14 @@ export class PortfolioHistoryStore {
         ]);
       }
     });
+    await this.upsertMarketCandles(
+      "stock",
+      instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
+      "1d",
+      true,
+      candles,
+      updatedAt,
+    );
     return candles.length;
   }
 
@@ -1158,6 +1906,16 @@ export class PortfolioHistoryStore {
         await database.run(statement, [benchmarkKey, candle.date, candle.closePrice, candle.timestamp, updatedAt]);
       }
     });
+    const indicator = benchmarkKey === "KOSPI" || benchmarkKey === "KOSDAQ";
+    const symbol = benchmarkKey === "NASDAQ100" ? "QQQ" : benchmarkKey === "SP500" ? "SPY" : benchmarkKey;
+    await this.upsertMarketCandles(
+      indicator ? "indicator" : "stock",
+      symbol,
+      "1d",
+      !indicator,
+      candles,
+      updatedAt,
+    );
     return candles.length;
   }
 
@@ -1455,14 +2213,14 @@ export class PortfolioHistoryStore {
       clauses.push("snapshot_date <= ?");
       parameters.push(endDate);
     }
-    const snapshots = await this.db.query<SnapshotRow & DatabaseRow>(`
+    const snapshotRows = await this.db.query<SnapshotRow & DatabaseRow>(`
       SELECT id, snapshot_date, captured_at, origin
       FROM portfolio_snapshots
       WHERE ${clauses.join(" AND ")}
       ORDER BY snapshot_date ASC
     `, parameters);
 
-    if (!snapshots.length) {
+    if (!snapshotRows.length) {
       return {
         accountId,
         currency,
@@ -1473,14 +2231,25 @@ export class PortfolioHistoryStore {
         points: [],
       };
     }
+    const snapshots = snapshotRows.map((snapshot) => ({
+      ...snapshot,
+      id: Number(snapshot.id),
+      captured_at: Number(snapshot.captured_at),
+    }));
 
     const placeholders = snapshots.map(() => "?").join(", ");
-    const items = await this.db.query<ItemRow & DatabaseRow>(`
+    const itemRows = await this.db.query<ItemRow & DatabaseRow>(`
       SELECT snapshot_id, symbol, name, market, evaluation_amount, weight_percent
       FROM portfolio_snapshot_items
       WHERE currency = ? AND snapshot_id IN (${placeholders})
       ORDER BY snapshot_id ASC, weight_percent DESC
     `, [currency, ...snapshots.map((snapshot) => snapshot.id)]);
+    const items = itemRows.map((item) => ({
+      ...item,
+      snapshot_id: Number(item.snapshot_id),
+      evaluation_amount: Number(item.evaluation_amount),
+      weight_percent: Number(item.weight_percent),
+    }));
 
     const itemsBySnapshot = new Map<number, ItemRow[]>();
     const seriesMap = new Map<string, {

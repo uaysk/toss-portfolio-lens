@@ -12,10 +12,13 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     host: "127.0.0.1",
     port: 3200,
     tossApiBaseUrl: "https://example.invalid",
+    dbProvider: "sqlite",
     databasePath: ":memory:",
-    mysqlRequired: false,
+    candleCacheLatestTtlMs: 300_000,
     snapshotRefreshHours: 6,
     nodeEnv: "test",
+    publicAppUrl: "http://localhost:3200",
+    reportStorage: { kind: "local", directory: "/tmp/reports" },
     ...overrides,
   };
 }
@@ -28,16 +31,51 @@ describe("configured history storage", () => {
     vi.restoreAllMocks();
   });
 
-  it("MySQL 설정이 없으면 SQLite를 연다", async () => {
+  it("DB_PROVIDER=sqlite이면 SQLite를 연다", async () => {
     vi.spyOn(console, "info").mockImplementation(() => undefined);
     const store = await openConfiguredHistoryStore(config());
     stores.push(store);
     expect(store.backend).toBe("sqlite");
   });
 
-  it("MySQL에 연결할 수 없으면 SQLite로 fallback한다", async () => {
+  it("DB_PROVIDER=mysql이면 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(openConfiguredHistoryStore(config({
+      dbProvider: "mysql",
+      mysql: {
+        host: "127.0.0.1",
+        port: 1,
+        user: "unavailable",
+        password: "unavailable",
+        database: "portfolio_lens",
+        connectTimeoutMs: 500,
+      },
+    }))).rejects.toThrow();
+  });
+
+  it("DB_PROVIDER=postgresql이면 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(openConfiguredHistoryStore(config({
+      dbProvider: "postgresql",
+      postgres: {
+        host: "127.0.0.1",
+        port: 1,
+        user: "unavailable",
+        password: "unavailable",
+        database: "portfolio_lens",
+        connectTimeoutMs: 500,
+      },
+    }))).rejects.toThrow();
+  });
+
+  it("선택한 외부 DB 설정이 없으면 시작하지 않는다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(openConfiguredHistoryStore(config({ dbProvider: "postgresql" })))
+      .rejects.toThrow("DB_PROVIDER=postgresql 연결 설정이 없습니다");
+  });
+
+  it("DB_PROVIDER=sqlite이면 외부 DB 설정이 있어도 SQLite만 사용한다", async () => {
     vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const store = await openConfiguredHistoryStore(config({
       mysql: {
         host: "127.0.0.1",
@@ -50,24 +88,5 @@ describe("configured history storage", () => {
     }));
     stores.push(store);
     expect(store.backend).toBe("sqlite");
-    expect(warning).toHaveBeenCalledWith(
-      expect.stringContaining("MySQL 연결 또는 마이그레이션에 실패해 SQLite를 사용합니다"),
-      expect.anything(),
-    );
-  });
-
-  it("MYSQL_REQUIRED이면 MySQL 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(openConfiguredHistoryStore(config({
-      mysqlRequired: true,
-      mysql: {
-        host: "127.0.0.1",
-        port: 1,
-        user: "unavailable",
-        password: "unavailable",
-        database: "portfolio_lens",
-        connectTimeoutMs: 500,
-      },
-    }))).rejects.toThrow();
   });
 });

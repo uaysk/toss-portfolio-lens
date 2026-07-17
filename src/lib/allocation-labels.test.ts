@@ -4,7 +4,7 @@ import { layoutAreaLabels } from "@/lib/allocation-labels";
 const scale = (value: number) => 300 - value;
 
 describe("layoutAreaLabels", () => {
-  it("keeps roomy segments inside and excludes zero-weight series", () => {
+  it("keeps every positive-weight label on the plot and excludes zero-weight series", () => {
     const labels = layoutAreaLabels([
       { key: "large", name: "큰 종목", value: 60 },
       { key: "zero", name: "비중 없음", value: 0 },
@@ -12,18 +12,17 @@ describe("layoutAreaLabels", () => {
     ], { scale, plotTop: 0, plotBottom: 300 });
 
     expect(labels.map((label) => label.key)).toEqual(["large", "small"]);
-    expect(labels[0]).toMatchObject({ placement: "inside", anchorY: 270, segmentHeight: 60 });
-    expect(labels[1]).toMatchObject({ placement: "callout", anchorY: 236, segmentHeight: 8 });
+    expect(labels[0]).toMatchObject({ anchorY: 270, segmentHeight: 60 });
+    expect(labels[1]).toMatchObject({ anchorY: 236, segmentHeight: 8 });
   });
 
-  it("separates callout labels while keeping them inside the plot", () => {
+  it("separates all labels while keeping them inside the plot", () => {
     const labels = layoutAreaLabels([
       { key: "a", name: "A", value: 4 },
       { key: "b", name: "B", value: 4 },
       { key: "c", name: "C", value: 4 },
-    ], { scale, plotTop: 200, plotBottom: 300, calloutGap: 15 });
+    ], { scale, plotTop: 200, plotBottom: 300, labelGap: 15 });
 
-    expect(labels.every((label) => label.placement === "callout")).toBe(true);
     const positions = labels.map((label) => label.labelY).sort((a, b) => a - b);
     expect(positions[0]).toBeGreaterThanOrEqual(208);
     expect(positions.at(-1)).toBeLessThanOrEqual(292);

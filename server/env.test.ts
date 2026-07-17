@@ -3,8 +3,9 @@ import { rmSync, writeFileSync } from "node:fs";
 import { loadConfig } from "./env.js";
 
 const mysqlCaPath = "/tmp/toss-portfolio-lens-env-test-ca.pem";
+const postgresCaPath = "/tmp/toss-portfolio-lens-env-test-postgres-ca.pem";
 
-describe("MySQL environment configuration", () => {
+describe("database environment configuration", () => {
   const originalEnvironment = { ...process.env };
 
   beforeEach(() => {
@@ -18,17 +19,19 @@ describe("MySQL environment configuration", () => {
 
   afterEach(() => {
     rmSync(mysqlCaPath, { force: true });
+    rmSync(postgresCaPath, { force: true });
     process.env = { ...originalEnvironment };
     vi.restoreAllMocks();
   });
 
-  it("MySQL 값이 없으면 SQLite를 기본값으로 사용한다", () => {
+  it("DB_PROVIDER가 없으면 SQLite를 기본값으로 사용한다", () => {
     const config = loadConfig();
     expect(config).toMatchObject({
       tossApiAuthMode: "oauth_client_credentials",
       clientId: "client-id",
       clientSecret: "client-secret",
       tossApiBaseUrl: "https://openapi.tossinvest.com",
+      dbProvider: "sqlite",
     });
     expect(config.mysql).toBeUndefined();
     expect(config.databasePath).toBe("./data/portfolio-history.sqlite");
@@ -73,6 +76,7 @@ describe("MySQL environment configuration", () => {
   it("개별 MySQL 값을 모두 설정하면 연결 구성을 만든다", () => {
     writeFileSync(mysqlCaPath, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n");
     Object.assign(process.env, {
+      DB_PROVIDER: "mysql",
       MYSQL_HOST: "mysql.internal",
       MYSQL_PORT: "3307",
       MYSQL_USER: "portfolio",
@@ -82,7 +86,6 @@ describe("MySQL environment configuration", () => {
       MYSQL_SSL: "true",
       MYSQL_SSL_CA_PATH: mysqlCaPath,
       MYSQL_SSL_REJECT_UNAUTHORIZED: "false",
-      MYSQL_REQUIRED: "true",
     });
 
     expect(loadConfig().mysql).toEqual({
@@ -97,10 +100,11 @@ describe("MySQL environment configuration", () => {
         ca: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
       },
     });
-    expect(loadConfig().mysqlRequired).toBe(true);
+    expect(loadConfig().dbProvider).toBe("mysql");
   });
 
-  it("MYSQL_URL도 지원하고 일부만 설정된 값은 안전하게 무시한다", () => {
+  it("DB_PROVIDER=mysql에서 MYSQL_URL을 지원하고 일부 설정은 거부한다", () => {
+    process.env.DB_PROVIDER = "mysql";
     process.env.MYSQL_URL = "mysql://portfolio:p%40ss@mysql.internal:3306/portfolio_lens";
     expect(loadConfig().mysql).toMatchObject({
       host: "mysql.internal",
@@ -112,21 +116,66 @@ describe("MySQL environment configuration", () => {
 
     delete process.env.MYSQL_URL;
     process.env.MYSQL_HOST = "mysql.internal";
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(loadConfig().mysql).toBeUndefined();
-    expect(warning).toHaveBeenCalledWith(
-      expect.stringContaining("MySQL 설정을 사용할 수 없어 SQLite를 사용합니다"),
-      expect.stringContaining("모두 필요합니다"),
-    );
+    expect(() => loadConfig()).toThrow("MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE가 모두 필요합니다");
   });
 
-  it("MYSQL_REQUIRED이면 유효하지 않은 설정으로 시작하지 않는다", () => {
+  it("선택한 DB의 연결 설정이 없으면 시작하지 않는다", () => {
+    process.env.DB_PROVIDER = "mysql";
+    expect(() => loadConfig()).toThrow("DB_PROVIDER=mysql이면 유효한 MySQL 연결 설정");
+
+    process.env.DB_PROVIDER = "postgresql";
+    expect(() => loadConfig()).toThrow("DB_PROVIDER=postgresql이면 유효한 PostgreSQL 연결 설정");
+  });
+
+  it("개별 PostgreSQL 값과 TLS CA를 연결 구성으로 만든다", () => {
+    writeFileSync(postgresCaPath, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n");
     Object.assign(process.env, {
-      MYSQL_HOST: "mysql.internal",
-      MYSQL_REQUIRED: "true",
+      DB_PROVIDER: "postgresql",
+      POSTGRES_HOST: "postgres.internal",
+      POSTGRES_PORT: "5433",
+      POSTGRES_USER: "portfolio",
+      POSTGRES_PASSWORD: "database-password",
+      POSTGRES_DATABASE: "portfolio_lens",
+      POSTGRES_CONNECT_TIMEOUT_MS: "2500",
+      POSTGRES_SSL: "true",
+      POSTGRES_SSL_CA_PATH: postgresCaPath,
+      POSTGRES_SSL_REJECT_UNAUTHORIZED: "false",
     });
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(() => loadConfig()).toThrow("MYSQL_REQUIRED=true이면 유효한 MySQL 연결 설정");
+
+    expect(loadConfig().postgres).toEqual({
+      host: "postgres.internal",
+      port: 5433,
+      user: "portfolio",
+      password: "database-password",
+      database: "portfolio_lens",
+      connectTimeoutMs: 2500,
+      ssl: {
+        rejectUnauthorized: false,
+        ca: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
+      },
+    });
+    expect(loadConfig().dbProvider).toBe("postgresql");
+  });
+
+  it("DB_PROVIDER=postgresql에서 POSTGRES_URL을 지원하고 일부 설정은 거부한다", () => {
+    process.env.DB_PROVIDER = "postgresql";
+    process.env.POSTGRES_URL = "postgresql://portfolio:p%40ss@postgres.internal:5432/portfolio_lens";
+    expect(loadConfig().postgres).toMatchObject({
+      host: "postgres.internal",
+      port: 5432,
+      user: "portfolio",
+      password: "p@ss",
+      database: "portfolio_lens",
+    });
+
+    delete process.env.POSTGRES_URL;
+    process.env.POSTGRES_HOST = "postgres.internal";
+    expect(() => loadConfig()).toThrow("POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE가 모두 필요합니다");
+  });
+
+  it("지원하지 않는 DB_PROVIDER 값을 거부한다", () => {
+    process.env.DB_PROVIDER = "postgres";
+    expect(() => loadConfig()).toThrow("DB_PROVIDER는 sqlite, mysql, postgresql 중 하나");
   });
 
   it("공개 URL과 OpenAI 보고서 설정을 정규화한다", () => {
