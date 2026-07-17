@@ -174,6 +174,9 @@ const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
 const secureSessionCookie = new URL(config.publicAppUrl).protocol === "https:";
+const oauthCallbackOrigin = config.mcp.oauth
+  ? new URL(config.mcp.oauth.redirectUri).origin
+  : undefined;
 
 type AttemptState = {
   count: number;
@@ -188,13 +191,16 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 app.use((request, response, next) => {
+  const formAction = request.path === "/oauth/authorize" && oauthCallbackOrigin
+    ? `'self' ${oauthCallbackOrigin}`
+    : "'self'";
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   response.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action ${formAction}`,
   );
   if (request.path.startsWith("/reports/") || request.path.startsWith("/api/reports/")) {
     response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");

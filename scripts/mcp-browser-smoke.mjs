@@ -193,9 +193,18 @@ async function verifyOAuth(browser, baseUrl, redirectUri, viewport, colorScheme,
     code_challenge: challenge,
     code_challenge_method: "S256",
   });
-  await page.route(`${redirectUri}*`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>OAuth callback</title>" }));
+  const callbackUrl = new URL(redirectUri);
+  await context.route(
+    (url) => url.origin === callbackUrl.origin && url.pathname === callbackUrl.pathname,
+    (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>OAuth callback</title>" }),
+  );
   const response = await page.goto(`${baseUrl}/oauth/authorize?${query}`, { waitUntil: "domcontentloaded" });
   assert(response?.status() === 200, `OAuth login HTTP status (${viewport.width})`);
+  const contentSecurityPolicy = response.headers()["content-security-policy"] || "";
+  assert(
+    contentSecurityPolicy.includes(`form-action 'self' ${callbackUrl.origin}`),
+    `OAuth CSP omitted callback origin (${viewport.width})`,
+  );
   await page.getByText("Toss Portfolio Lens", { exact: true }).waitFor();
   await page.getByLabel("대시보드 비밀번호").fill("invalid-synthetic-password");
   await page.getByRole("button", { name: "계속" }).click();
@@ -267,7 +276,7 @@ let exitCode = 0;
 try {
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const redirectUri = `${baseUrl}/oauth/callback`;
+  const redirectUri = `http://localhost:${port}/oauth/callback`;
   const secretDirectory = path.join(temporaryRoot, "secrets");
   const reportsDirectory = path.join(temporaryRoot, "reports");
   const clientSecretPath = path.join(secretDirectory, "mcp-oauth-client-secret");
