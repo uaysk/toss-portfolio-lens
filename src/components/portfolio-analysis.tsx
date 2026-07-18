@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
+import { StockSwatch } from "@/components/stock-swatch";
 import {
   chartTooltipStyle,
   MONOCHROME_DASHES,
@@ -34,6 +35,7 @@ import {
 } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
+import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   AnalysisRange,
@@ -41,6 +43,7 @@ import type {
   BenchmarkKey,
   Portfolio,
   PortfolioAnalysis,
+  Theme,
 } from "@/types";
 
 const ranges: Array<{ value: AnalysisRange; label: string }> = [
@@ -87,7 +90,7 @@ function CandleShape(input: unknown) {
   const { x = 0, y = 0, width = 0, height = 0, payload } = input as CandleShapeProps;
   if (!payload) return <g />;
   const rising = payload.normalizedClose >= payload.normalizedOpen;
-  const color = "hsl(var(--foreground))";
+  const color = rising ? "var(--candle-rise)" : "var(--candle-fall)";
   const spread = payload.normalizedHigh - payload.normalizedLow;
   const pixelsPerUnit = spread > 0 ? height / spread : 0;
   const bodyTop = spread > 0
@@ -100,7 +103,7 @@ function CandleShape(input: unknown) {
   const bodyWidth = Math.max(1.5, Math.min(width * 0.72, 10));
   const bodyHeight = Math.max(1.5, bodyBottom - bodyTop);
   return (
-    <g>
+    <g data-candle-direction={rising ? "rise" : "fall"}>
       <line x1={center} y1={y} x2={center} y2={y + Math.max(height, 1)} stroke={color} strokeWidth={1} />
       <rect
         x={center - bodyWidth / 2}
@@ -108,7 +111,8 @@ function CandleShape(input: unknown) {
         width={bodyWidth}
         height={bodyHeight}
         rx={1}
-        fill={rising ? color : "hsl(var(--card))"}
+        fill={color}
+        fillOpacity={0.9}
         stroke={color}
         strokeWidth={1.2}
       />
@@ -172,9 +176,11 @@ function MetricCard({ label, value, detail }: { label: string; value: string; de
 
 export function PortfolioAnalysisView({
   portfolio,
+  theme,
   onUnauthorized,
 }: {
   portfolio: Portfolio;
+  theme: Theme;
   onUnauthorized: () => void;
 }) {
   const today = useMemo(() => seoulDateString(), []);
@@ -665,12 +671,12 @@ export function PortfolioAnalysisView({
                   return (
                     <div key={`${item.currency}:${item.key}`} className="grid gap-2 sm:grid-cols-[minmax(130px,0.8fr)_minmax(180px,2fr)_auto] sm:items-center">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-black">{item.name}</p>
+                        <div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-sm font-black">{item.name}</p></div>
                         <p className="text-[10px] font-bold text-muted-foreground">{item.market} · {item.symbol}</p>
                         <p className="mt-1 text-[10px] font-bold text-muted-foreground">시간연결 {formatPercent(item.timeLinkedContributionPercent, true)} · 가격 {formatPercent(item.localPriceContributionPercent, true)} · 환율 {formatPercent(item.fxContributionPercent, true)}</p>
                       </div>
                       <div className="h-2.5 overflow-hidden rounded-full bg-card">
-                        <div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%`, opacity: item.estimatedProfitLoss >= 0 ? 0.9 : 0.45 }} />
+                        <div className="h-full rounded-full" style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%`, backgroundColor: stockColor(item.symbol, theme), opacity: item.estimatedProfitLoss >= 0 ? 0.96 : 0.58 }} />
                       </div>
                       <div className="text-left sm:text-right">
                         <p className="text-sm font-black">{formatSignedMoney(item.estimatedProfitLoss, "KRW")}</p>
@@ -737,10 +743,10 @@ export function PortfolioAnalysisView({
                   return (
                     <div key={item.key} className="rounded-[18px] bg-card p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0"><p className="truncate text-xs font-black">{item.name}</p><p className="mt-1 text-[10px] text-muted-foreground">비중 {formatPercent(item.weightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent)}</p></div>
+                        <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">비중 {formatPercent(item.weightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent)}</p></div>
                         <p className="text-sm font-black">{metricPercent(item.riskContributionPercent)}</p>
                       </div>
-                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%` }} /></div>
+                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
                       <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricRatio(item.correlationToPortfolio)}</p>
                     </div>
                   );
@@ -754,10 +760,10 @@ export function PortfolioAnalysisView({
               <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">현재 보유종목 일간 상관관계</h3>
               <div className="mt-5 w-full min-w-0 overflow-x-auto rounded-[20px] bg-card p-3">
                 <table className="w-full min-w-[520px] border-separate border-spacing-1 text-center text-xs">
-                  <thead><tr><th className="p-2 text-left text-muted-foreground">종목명</th>{analysis.correlations.assets.map((asset) => <th key={asset.key} className="min-w-[94px] p-2 font-black">{correlationAssetLabel(asset)}</th>)}</tr></thead>
+                  <thead><tr><th className="p-2 text-left text-muted-foreground">종목명</th>{analysis.correlations.assets.map((asset) => <th key={asset.key} className="min-w-[94px] p-2 font-black"><span className="inline-flex items-center justify-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" />{correlationAssetLabel(asset)}</span></th>)}</tr></thead>
                   <tbody>{analysis.correlations.assets.map((asset, rowIndex) => (
                     <tr key={asset.key}>
-                      <th className="max-w-[160px] truncate p-2 text-left font-black">{correlationAssetLabel(asset)}</th>
+                      <th className="max-w-[160px] p-2 text-left font-black"><span className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" /><span className="truncate">{correlationAssetLabel(asset)}</span></span></th>
                       {analysis.correlations.values[rowIndex].map((value, columnIndex) => (
                         <td key={`${asset.key}:${columnIndex}`} className="rounded-xl p-3 font-black" style={correlationCellStyle(value)}>{value === null ? "-" : value.toFixed(2)}</td>
                       ))}

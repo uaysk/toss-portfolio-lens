@@ -364,7 +364,7 @@ function AllocationCard({ portfolio, theme }: { portfolio: Portfolio; theme: The
               const percent = total > 0 ? (item.value / total) * 100 : 0;
               return (
                 <div key={item.key} className="flex items-center gap-3">
-                  <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: stockColor(item.key, theme) }} />
+                  <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: stockColor(item.symbol, theme) }} />
                   <span className="min-w-0 flex-1 truncate text-sm font-semibold">{item.name}</span>
                   <span className="text-sm font-black tabular-nums">{formatPercent(percent)}</span>
                 </div>
@@ -391,7 +391,7 @@ function AllocationCard({ portfolio, theme }: { portfolio: Portfolio; theme: The
                     stroke="none"
                   >
                     {allocation.map((item) => (
-                      <Cell key={item.key} fill={stockColor(item.key, theme)} />
+                      <Cell key={item.key} fill={stockColor(item.symbol, theme)} />
                     ))}
                   </Pie>
                   <Tooltip
@@ -432,13 +432,12 @@ function AllocationCard({ portfolio, theme }: { portfolio: Portfolio; theme: The
 }
 
 function HoldingDesktopRow({ holding, theme }: { holding: Holding; theme: Theme }) {
-  const key = holdingKey(holding);
   return (
     <div className="holding-grid items-center rounded-[20px] bg-muted px-4 py-3.5 transition-transform hover:-translate-y-0.5">
       <div className="flex min-w-0 items-center gap-3">
         <span
           className="grid size-11 shrink-0 place-items-center rounded-2xl text-xs font-black"
-          style={{ backgroundColor: stockColor(key, theme), color: stockForeground(key, theme) }}
+          style={{ backgroundColor: stockColor(holding.symbol, theme), color: stockForeground(holding.symbol, theme) }}
         >
           {initials(holding.name, holding.symbol)}
         </span>
@@ -468,13 +467,12 @@ function HoldingDesktopRow({ holding, theme }: { holding: Holding; theme: Theme 
 }
 
 function HoldingMobileCard({ holding, theme }: { holding: Holding; theme: Theme }) {
-  const key = holdingKey(holding);
   return (
     <article className="rounded-[22px] bg-muted p-4">
       <div className="flex items-center gap-3">
         <span
           className="grid size-11 shrink-0 place-items-center rounded-2xl text-xs font-black"
-          style={{ backgroundColor: stockColor(key, theme), color: stockForeground(key, theme) }}
+          style={{ backgroundColor: stockColor(holding.symbol, theme), color: stockForeground(holding.symbol, theme) }}
         >
           {initials(holding.name, holding.symbol)}
         </span>
@@ -876,11 +874,11 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
             <HoldingsCard portfolio={visiblePortfolio} theme={theme} hiddenCount={hiddenCurrentCount} />
           </div>
         ) : view === "analysis" ? (
-          <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
+          <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} />
         ) : view === "backtest" ? (
-          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:backtest`} portfolio={portfolio} onUnauthorized={onUnauthorized} mode="backtest" />
+          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:backtest`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="backtest" />
         ) : (
-          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:optimization`} portfolio={portfolio} onUnauthorized={onUnauthorized} mode="optimization" />
+          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:optimization`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="optimization" />
         )}
 
         <footer className="mt-10 flex flex-col gap-2 pb-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">

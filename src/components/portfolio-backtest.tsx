@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
+import { StockSwatch } from "@/components/stock-swatch";
 import { PortfolioStrategyLab } from "@/components/portfolio-strategy-lab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
@@ -40,6 +41,7 @@ import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
+import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   ApiError,
@@ -56,6 +58,7 @@ import type {
   BacktestRunConfiguration,
   CurrentBacktestPortfolio,
   Portfolio,
+  Theme,
 } from "@/types";
 
 const benchmarkOptions: Array<{ value: BacktestBenchmarkKey; label: string }> = [
@@ -125,10 +128,12 @@ function ResultMetric({ icon: Icon, label, value, detail, benchmark }: {
 
 export function PortfolioBacktestView({
   portfolio,
+  theme,
   onUnauthorized,
   mode = "backtest",
 }: {
   portfolio: Portfolio;
+  theme: Theme;
   onUnauthorized: () => void;
   mode?: "backtest" | "optimization";
 }) {
@@ -373,6 +378,7 @@ export function PortfolioBacktestView({
             <div key={`${asset.currency}:${asset.symbol}`} className={cn("grid gap-3 rounded-[22px] bg-card p-4 sm:items-center", quantityMode === "whole" ? "sm:grid-cols-[minmax(0,1fr)_132px_112px_44px]" : "sm:grid-cols-[minmax(0,1fr)_132px_44px]")}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
+                  <StockSwatch symbol={asset.symbol} theme={theme} />
                   <p className="truncate text-sm font-black">{asset.name}</p>
                   <span className="rounded-full bg-secondary px-2.5 py-1 text-[10px] font-black text-muted-foreground">{asset.currency}</span>
                 </div>
@@ -601,6 +607,7 @@ export function PortfolioBacktestView({
             baseConfig={baseConfig}
             canAnalyze={canRun}
             backtestRuns={backtestRuns}
+            theme={theme}
             onUnauthorized={onUnauthorized}
           />
         </div>
@@ -726,7 +733,7 @@ export function PortfolioBacktestView({
                 <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">EXECUTION LEDGER</p>
                 <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">실제 시뮬레이션 체결</h3>
                 <div className="mt-5 max-h-[360px] overflow-auto rounded-[20px] bg-card p-3">
-                  <table className="w-full min-w-[720px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">일자·종목</th><th className="p-3">구분</th><th className="p-3">수량 · lot</th><th className="p-3">체결금액</th><th className="p-3">비용</th><th className="p-3">현금 영향</th></tr></thead><tbody>{(result.trades ?? []).map((trade, index) => <tr key={`${trade.date}:${trade.symbol}:${index}`} className="border-t border-border"><td className="p-3"><p className="font-black">{trade.symbol}</p><p className="mt-1 text-[9px] text-muted-foreground">{trade.date} · {trade.trigger ?? trade.reason}</p></td><td className="p-3 font-black">{trade.side}</td><td className="p-3">{trade.quantity.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} · {trade.lotSize ?? 1}</td><td className="p-3">{formatMoney(trade.amount, "KRW")}</td><td className="p-3">{formatMoney(trade.transactionCost ?? 0, "KRW")}</td><td className="p-3">{formatSignedMoney(trade.netCashImpact ?? (trade.side === "BUY" ? -trade.amount : trade.amount), "KRW")}</td></tr>)}</tbody></table>
+                  <table className="w-full min-w-[720px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">일자·종목</th><th className="p-3">구분</th><th className="p-3">수량 · lot</th><th className="p-3">체결금액</th><th className="p-3">비용</th><th className="p-3">현금 영향</th></tr></thead><tbody>{(result.trades ?? []).map((trade, index) => <tr key={`${trade.date}:${trade.symbol}:${index}`} className="border-t border-border"><td className="p-3"><div className="flex items-center gap-2"><StockSwatch symbol={trade.symbol} theme={theme} className="size-2" /><p className="font-black">{trade.symbol}</p></div><p className="mt-1 text-[9px] text-muted-foreground">{trade.date} · {trade.trigger ?? trade.reason}</p></td><td className="p-3 font-black">{trade.side}</td><td className="p-3">{trade.quantity.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} · {trade.lotSize ?? 1}</td><td className="p-3">{formatMoney(trade.amount, "KRW")}</td><td className="p-3">{formatMoney(trade.transactionCost ?? 0, "KRW")}</td><td className="p-3">{formatSignedMoney(trade.netCashImpact ?? (trade.side === "BUY" ? -trade.amount : trade.amount), "KRW")}</td></tr>)}</tbody></table>
                 </div>
               </Card>
             </div>
@@ -849,7 +856,7 @@ export function PortfolioBacktestView({
                 {result.contributions.map((item) => (
                   <div key={`${item.currency}:${item.symbol}`} className="grid gap-2 rounded-[18px] bg-card p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-black">{item.name}</p>
+                      <div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-sm font-black">{item.name}</p></div>
                       <p className="mt-1 text-[10px] font-bold text-muted-foreground">{item.market} · {item.symbol} · 목표 {item.weight.toFixed(2)}% · 종목 {formatPercent(item.assetReturnPercent, true)}</p>
                       <p className="mt-1 text-[10px] font-bold text-muted-foreground">시간연결 {formatPercent(item.timeLinkedContributionPercent ?? item.contributionPercent, true)} · 현지가격 {formatPercent(item.localPriceContributionPercent ?? item.timeLinkedContributionPercent ?? item.contributionPercent, true)} · 환율 {formatPercent(item.fxContributionPercent ?? 0, true)}</p>
                     </div>
@@ -910,10 +917,10 @@ export function PortfolioBacktestView({
                       return (
                         <div key={item.key} className="rounded-[18px] bg-card p-4">
                           <div className="flex items-center justify-between gap-3">
-                            <div className="min-w-0"><p className="truncate text-xs font-black">{item.name}</p><p className="mt-1 text-[10px] text-muted-foreground">평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricValue(item.annualizedVolatilityPercent)}</p></div>
+                            <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricValue(item.annualizedVolatilityPercent)}</p></div>
                             <p className="text-sm font-black">{metricValue(item.riskContributionPercent)}</p>
                           </div>
-                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%` }} /></div>
+                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
                           <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricValue(item.correlationToPortfolio, "ratio")}</p>
                         </div>
                       );
@@ -987,7 +994,7 @@ export function PortfolioBacktestView({
                   <ResultMetric icon={BarChart3} label="벤치마크 관측" value={`${advanced.dataQuality.benchmarkObservations.toLocaleString("ko-KR")}일`} detail={result.benchmark?.name ?? "비교 지수 없음"} />
                 </div>
                 <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                  {advanced.dataQuality.assets.map((asset) => <div key={asset.key} className="rounded-[18px] bg-card p-4"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.observations}/{asset.alignedDays}일 · {formatPercent(asset.coveragePercent)} · {asset.firstDate}~{asset.lastDate}</p></div>)}
+                  {advanced.dataQuality.assets.map((asset) => <div key={asset.key} className="rounded-[18px] bg-card p-4"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} /><p className="truncate text-xs font-black">{asset.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">{asset.observations}/{asset.alignedDays}일 · {formatPercent(asset.coveragePercent)} · {asset.firstDate}~{asset.lastDate}</p></div>)}
                 </div>
                 <div className="mt-4 rounded-[18px] bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">{advanced.dataQuality.notes.map((note) => <p key={note}>{note}</p>)}</div>
               </Card>
@@ -1009,7 +1016,8 @@ export function PortfolioBacktestView({
                         title={asset.symbol}
                         className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"
                       >
-                        <span className="block whitespace-normal break-keep leading-4">
+                        <span className="inline-flex items-center justify-center gap-2 whitespace-normal break-keep leading-4">
+                          <StockSwatch symbol={asset.symbol} theme={theme} className="size-2" />
                           {correlationAssetLabel(asset)}
                         </span>
                       </th>
@@ -1019,8 +1027,8 @@ export function PortfolioBacktestView({
                 <tbody>
                   {result.correlations.assets.map((asset, rowIndex) => (
                     <tr key={asset.symbol}>
-                      <th scope="row" title={asset.symbol} className="max-w-[170px] truncate p-2 text-left font-black">
-                        {correlationAssetLabel(asset)}
+                      <th scope="row" title={asset.symbol} className="max-w-[170px] p-2 text-left font-black">
+                        <span className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" /><span className="truncate">{correlationAssetLabel(asset)}</span></span>
                       </th>
                       {result.correlations.values[rowIndex].map((value, columnIndex) => (
                         <td

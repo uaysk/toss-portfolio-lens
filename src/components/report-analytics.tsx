@@ -12,14 +12,17 @@ import {
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { StockSwatch } from "@/components/stock-swatch";
 import { chartTooltipStyle, MONOCHROME_DASHES, MONOCHROME_SERIES } from "@/lib/chart-theme";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
+import { stockColor } from "@/lib/stock-appearance";
 import type {
   BacktestAdvancedAnalytics,
   BacktestResult,
   BenchmarkKey,
   PortfolioAnalysis,
+  Theme,
 } from "@/types";
 
 type AnalysisData = Omit<PortfolioAnalysis, "accountId">;
@@ -176,8 +179,9 @@ function DrawdownAnalytics({ data }: { data: DrawdownData }) {
   );
 }
 
-function CorrelationMatrix({ correlations }: {
+function CorrelationMatrix({ correlations, theme }: {
   correlations: { assets: Array<{ symbol: string; name: string }>; values: Array<Array<number | null>> };
+  theme: Theme;
 }) {
   return (
     <Card className="bg-secondary p-5 sm:p-7">
@@ -187,13 +191,13 @@ function CorrelationMatrix({ correlations }: {
           <thead>
             <tr>
               <th scope="col" className="p-2 text-left text-muted-foreground">종목명</th>
-              {correlations.assets.map((asset) => <th key={asset.symbol} scope="col" title={asset.symbol} className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"><span className="block whitespace-normal break-keep leading-4">{correlationAssetLabel(asset)}</span></th>)}
+              {correlations.assets.map((asset) => <th key={asset.symbol} scope="col" title={asset.symbol} className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"><span className="inline-flex items-center justify-center gap-2 whitespace-normal break-keep leading-4"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" />{correlationAssetLabel(asset)}</span></th>)}
             </tr>
           </thead>
           <tbody>
             {correlations.assets.map((asset, rowIndex) => (
               <tr key={asset.symbol}>
-                <th scope="row" title={asset.symbol} className="max-w-[170px] truncate p-2 text-left font-black">{correlationAssetLabel(asset)}</th>
+                <th scope="row" title={asset.symbol} className="max-w-[170px] p-2 text-left font-black"><span className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" /><span className="truncate">{correlationAssetLabel(asset)}</span></span></th>
                 {(correlations.values[rowIndex] ?? []).map((value, columnIndex) => <td key={`${asset.symbol}:${columnIndex}`} className="rounded-xl p-3 font-black" style={correlationCellStyle(value)}>{value === null ? "-" : value.toFixed(2)}</td>)}
               </tr>
             ))}
@@ -333,7 +337,7 @@ function TailRiskMetrics({ values }: { values: AnalysisData["tailRisk"] | Backte
   );
 }
 
-function AnalysisRiskAndExposure({ analysis }: { analysis: AnalysisData }) {
+function AnalysisRiskAndExposure({ analysis, theme }: { analysis: AnalysisData; theme: Theme }) {
   const maximum = Math.max(...(analysis.riskContributions ?? []).map((item) => Math.abs(item.riskContributionPercent ?? 0)), 1);
   return (
     <div className="grid min-w-0 gap-3 xl:grid-cols-[1.15fr_0.85fr]">
@@ -343,10 +347,10 @@ function AnalysisRiskAndExposure({ analysis }: { analysis: AnalysisData }) {
           {(analysis.riskContributions ?? []).map((item) => (
             <div key={item.key} className="rounded-[18px] bg-card p-4">
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0"><p className="truncate text-xs font-black">{item.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{item.symbol} · 비중 {formatPercent(item.weightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent, false)}</p></div>
+                <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">{item.symbol} · 비중 {formatPercent(item.weightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent, false)}</p></div>
                 <p className="text-sm font-black">{metricPercent(item.riskContributionPercent)}</p>
               </div>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%` }} /></div>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
               <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricRatio(item.correlationToPortfolio)}</p>
             </div>
           ))}
@@ -436,7 +440,7 @@ function AnalysisDataQuality({ analysis }: { analysis: AnalysisData }) {
   );
 }
 
-export function AnalysisReportAnalytics({ analysis }: { analysis: AnalysisData }) {
+export function AnalysisReportAnalytics({ analysis, theme }: { analysis: AnalysisData; theme: Theme }) {
   const comparisons: BenchmarkComparison[] = (analysis.benchmarkComparisons ?? []).map((item) => ({
     ...item,
     name: analysis.benchmarks.find((benchmark) => benchmark.key === item.key)?.name ?? benchmarkLabels[item.key],
@@ -451,9 +455,9 @@ export function AnalysisReportAnalytics({ analysis }: { analysis: AnalysisData }
         {analysis.tailRisk ? <TailRiskMetrics values={analysis.tailRisk} /> : null}
         <MonthlyReturnHeatmap values={analysis.monthlyReturns ?? []} />
       </div>
-      {analysis.riskContributions && analysis.exposure ? <AnalysisRiskAndExposure analysis={analysis} /> : null}
+      {analysis.riskContributions && analysis.exposure ? <AnalysisRiskAndExposure analysis={analysis} theme={theme} /> : null}
       {analysis.costEfficiency && analysis.tradeBehavior ? <AnalysisCostAndTrades analysis={analysis} /> : null}
-      <CorrelationMatrix correlations={correlation} />
+      <CorrelationMatrix correlations={correlation} theme={theme} />
       {analysis.dataQuality ? <AnalysisDataQuality analysis={analysis} /> : null}
     </>
   );
@@ -508,7 +512,7 @@ function BacktestRolling({ advanced, benchmarkName }: { advanced: BacktestAdvanc
   );
 }
 
-function BacktestRiskAndExposure({ advanced }: { advanced: BacktestAdvancedAnalytics }) {
+function BacktestRiskAndExposure({ advanced, theme }: { advanced: BacktestAdvancedAnalytics; theme: Theme }) {
   const maximum = Math.max(...advanced.riskContributions.map((item) => Math.abs(item.riskContributionPercent ?? 0)), 1);
   return (
     <div className="grid min-w-0 gap-3 xl:grid-cols-[1.15fr_0.85fr]">
@@ -518,10 +522,10 @@ function BacktestRiskAndExposure({ advanced }: { advanced: BacktestAdvancedAnaly
           {advanced.riskContributions.map((item) => (
             <div key={item.key} className="rounded-[18px] bg-card p-4">
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0"><p className="truncate text-xs font-black">{item.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{item.symbol} · 평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent, false)}</p></div>
+                <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">{item.symbol} · 평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent, false)}</p></div>
                 <p className="text-sm font-black">{metricPercent(item.riskContributionPercent)}</p>
               </div>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%` }} /></div>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
               <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricRatio(item.correlationToPortfolio)}</p>
             </div>
           ))}
@@ -590,7 +594,7 @@ function BacktestCostAndTrades({ advanced }: { advanced: BacktestAdvancedAnalyti
   );
 }
 
-function BacktestDataQuality({ advanced, benchmarkName }: { advanced: BacktestAdvancedAnalytics; benchmarkName?: string }) {
+function BacktestDataQuality({ advanced, benchmarkName, theme }: { advanced: BacktestAdvancedAnalytics; benchmarkName?: string; theme: Theme }) {
   const quality = advanced.dataQuality;
   return (
     <Card className="bg-secondary p-5 sm:p-7">
@@ -605,7 +609,7 @@ function BacktestDataQuality({ advanced, benchmarkName }: { advanced: BacktestAd
         <AnalyticsMetric label="벤치마크 관측" value={`${quality.benchmarkObservations.toLocaleString("ko-KR")}일`} detail={benchmarkName ?? "비교 지수 없음"} />
       </div>
       <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        {quality.assets.map((asset) => <div key={asset.key} className="rounded-[18px] bg-card p-4"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.symbol} · {asset.observations}/{asset.alignedDays}일 · {formatPercent(asset.coveragePercent)} · {asset.firstDate}~{asset.lastDate}</p></div>)}
+        {quality.assets.map((asset) => <div key={asset.key} className="rounded-[18px] bg-card p-4"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} /><p className="truncate text-xs font-black">{asset.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">{asset.symbol} · {asset.observations}/{asset.alignedDays}일 · {formatPercent(asset.coveragePercent)} · {asset.firstDate}~{asset.lastDate}</p></div>)}
       </div>
       <div className="mt-4 rounded-[18px] bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">
         {quality.notes.map((note) => <p key={note}>{note}</p>)}
@@ -615,7 +619,7 @@ function BacktestDataQuality({ advanced, benchmarkName }: { advanced: BacktestAd
   );
 }
 
-export function BacktestReportAnalytics({ result }: { result: BacktestResult }) {
+export function BacktestReportAnalytics({ result, theme }: { result: BacktestResult; theme: Theme }) {
   const advanced = result.advanced;
   if (!advanced) {
     return <Card className="bg-secondary p-5 text-sm text-muted-foreground sm:p-7">이 보고서는 고급 분석 지표가 도입되기 전에 생성되어 상세 지표가 저장되어 있지 않습니다.</Card>;
@@ -630,9 +634,9 @@ export function BacktestReportAnalytics({ result }: { result: BacktestResult }) 
         <TailRiskMetrics values={advanced.tailRisk} />
         <MonthlyReturnHeatmap values={advanced.monthlyReturns} />
       </div>
-      <BacktestRiskAndExposure advanced={advanced} />
+      <BacktestRiskAndExposure advanced={advanced} theme={theme} />
       <BacktestCostAndTrades advanced={advanced} />
-      <BacktestDataQuality advanced={advanced} benchmarkName={result.benchmark?.name} />
+      <BacktestDataQuality advanced={advanced} benchmarkName={result.benchmark?.name} theme={theme} />
     </>
   );
 }

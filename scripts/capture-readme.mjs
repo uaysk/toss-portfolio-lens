@@ -142,8 +142,7 @@ function analysisFixture() {
   const dates = history.points.map((point) => point.date);
   const candles = history.points.map((point, index) => {
     const close = point.totalValue;
-    const previousClose = index ? history.points[index - 1].totalValue : INITIAL_VALUE;
-    const open = round(previousClose * (1 + Math.sin(index * 1.71) * 0.0015), 0);
+    const open = round(close * (index % 5 === 2 ? 1.004 : 0.997), 0);
     return {
       date: point.date,
       open,

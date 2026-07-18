@@ -26,6 +26,7 @@ import {
 } from "recharts";
 import { Logo } from "@/components/logo";
 import { AnalysisReportAnalytics, BacktestReportAnalytics } from "@/components/report-analytics";
+import { StockSwatch } from "@/components/stock-swatch";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -33,6 +34,7 @@ import { analysisComparisonDomain, buildAnalysisChartData } from "@/lib/analysis
 import { MONOCHROME_DASHES, MONOCHROME_SERIES } from "@/lib/chart-theme";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
+import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   AnalysisReport,
@@ -148,7 +150,7 @@ function NarrativePanel({ narrative }: { narrative: ReportNarrative }) {
   );
 }
 
-function AnalysisReportContent({ report }: { report: AnalysisReport }) {
+function AnalysisReportContent({ report, theme }: { report: AnalysisReport; theme: Theme }) {
   const [chartMode, setChartMode] = useState<"relative" | "value">("relative");
   const analysis = report.data;
   const chartData = useMemo(() => buildAnalysisChartData(analysis), [analysis]);
@@ -269,14 +271,14 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
             {analysis.contributions.map((item) => (
               <div key={`${item.currency}:${item.key}`} className="grid gap-2 rounded-[18px] bg-card p-4 sm:grid-cols-[minmax(120px,0.8fr)_minmax(130px,1.2fr)_auto] sm:items-center">
                 <div className="min-w-0">
-                  <p className="truncate text-xs font-black">{item.name}</p>
+                  <div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div>
                   <p className="mt-1 text-[10px] text-muted-foreground">{item.market} · {item.symbol}</p>
                   <p className="mt-1 text-[10px] text-muted-foreground">시간연결 {percent(item.timeLinkedContributionPercent)} · 현지가격 {percent(item.localPriceContributionPercent)} · 환율 {percent(item.fxContributionPercent)}</p>
                 </div>
                 <div className="h-2 overflow-hidden rounded-full bg-secondary">
                   <div
-                    className="h-full rounded-full bg-foreground"
-                    style={{ width: `${Math.max(3, Math.abs(item.estimatedProfitLoss) / maximumContribution * 100)}%`, opacity: item.estimatedProfitLoss >= 0 ? 0.9 : 0.45 }}
+                    className="h-full rounded-full"
+                    style={{ width: `${Math.max(3, Math.abs(item.estimatedProfitLoss) / maximumContribution * 100)}%`, backgroundColor: stockColor(item.symbol, theme), opacity: item.estimatedProfitLoss >= 0 ? 0.96 : 0.58 }}
                   />
                 </div>
                 <div className="sm:text-right">
@@ -300,12 +302,12 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
         </div>
       </Card>
 
-      <AnalysisReportAnalytics analysis={analysis} />
+      <AnalysisReportAnalytics analysis={analysis} theme={theme} />
     </>
   );
 }
 
-function BacktestReportContent({ report }: { report: BacktestReport }) {
+function BacktestReportContent({ report, theme }: { report: BacktestReport; theme: Theme }) {
   const [chartMode, setChartMode] = useState<"growth" | "drawdown">("growth");
   const result = report.data;
   const metrics = result.metrics;
@@ -380,7 +382,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
         <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {result.assets.map((asset) => (
             <div key={`${asset.currency}:${asset.symbol}`} className="rounded-[18px] bg-card p-4">
-              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.market} · {asset.symbol} · {asset.currency}</p></div><span className="rounded-full bg-secondary px-2.5 py-1 text-[10px] font-black">{formatPercent(asset.weight)}</span></div>
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} /><p className="truncate text-xs font-black">{asset.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">{asset.market} · {asset.symbol} · {asset.currency}</p></div><span className="rounded-full bg-secondary px-2.5 py-1 text-[10px] font-black">{formatPercent(asset.weight)}</span></div>
               <p className="mt-2 text-[10px] text-muted-foreground">상장 {asset.listDate} · {asset.securityType} · {asset.status}</p>
             </div>
           ))}
@@ -409,7 +411,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
             {result.contributions.map((item) => (
               <div key={`${item.currency}:${item.symbol}`} className="grid gap-2 rounded-[18px] bg-card p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2"><p className="truncate text-xs font-black">{item.name}</p><span className="rounded-full bg-secondary px-2 py-1 text-[9px] font-black text-muted-foreground">{item.weight.toFixed(1)}%</span></div>
+                  <div className="flex items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p><span className="rounded-full bg-secondary px-2 py-1 text-[9px] font-black text-muted-foreground">{item.weight.toFixed(1)}%</span></div>
                   <p className="mt-1 text-[10px] text-muted-foreground">{item.market} · {item.symbol} · 종목 수익 {formatPercent(item.assetReturnPercent, true)}</p>
                   <p className="mt-1 text-[10px] text-muted-foreground">시간연결 {percent(item.timeLinkedContributionPercent ?? item.contributionPercent)} · 현지가격 {percent(item.localPriceContributionPercent ?? item.timeLinkedContributionPercent ?? item.contributionPercent)} · 환율 {percent(item.fxContributionPercent ?? 0)} · 종료 {formatMoney(item.endingValue, "KRW")}</p>
                 </div>
@@ -437,8 +439,9 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
                     title={asset.symbol}
                     className="min-w-[104px] max-w-[140px] p-2 align-bottom font-black"
                   >
-                    <span className="block whitespace-normal break-keep leading-4">
-                      {correlationAssetLabel(asset)}
+                        <span className="inline-flex items-center justify-center gap-2 whitespace-normal break-keep leading-4">
+                          <StockSwatch symbol={asset.symbol} theme={theme} className="size-2" />
+                          {correlationAssetLabel(asset)}
                     </span>
                   </th>
                 ))}
@@ -447,8 +450,8 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
             <tbody>
               {result.correlations.assets.map((asset, row) => (
                 <tr key={asset.symbol}>
-                  <th scope="row" title={asset.symbol} className="max-w-[170px] truncate p-2 text-left font-black">
-                    {correlationAssetLabel(asset)}
+                  <th scope="row" title={asset.symbol} className="max-w-[170px] p-2 text-left font-black">
+                    <span className="flex min-w-0 items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} className="size-2" /><span className="truncate">{correlationAssetLabel(asset)}</span></span>
                   </th>
                   {result.correlations.values[row].map((value, column) => (
                     <td key={`${asset.symbol}:${column}`} className="rounded-xl p-3 font-black" style={correlationCellStyle(value)}>{value === null ? "-" : value.toFixed(2)}</td>
@@ -460,7 +463,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
         </div>
       </Card>
 
-      <BacktestReportAnalytics result={result} />
+      <BacktestReportAnalytics result={result} theme={theme} />
     </>
   );
 }
@@ -502,7 +505,7 @@ function ReportDocument({ report, theme, onToggleTheme }: { report: StoredReport
 
         <div className="mt-3 space-y-3">
           <NarrativePanel narrative={report.narrative} />
-          {report.kind === "analysis" ? <AnalysisReportContent report={report} /> : <BacktestReportContent report={report} />}
+          {report.kind === "analysis" ? <AnalysisReportContent report={report} theme={theme} /> : <BacktestReportContent report={report} theme={theme} />}
 
           <Card className="bg-secondary p-5 sm:p-7">
             <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">

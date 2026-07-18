@@ -25,6 +25,8 @@
     --shell: #ececea;
     --panel: #ffffff;
     --chart-grid: 0 0% 78%;
+    --candle-rise: #a63e49;
+    --candle-fall: #355f96;
   }
 
   .dark {
@@ -48,6 +50,8 @@
     --shell: #050505;
     --panel: #0d0d0d;
     --chart-grid: 0 0% 25%;
+    --candle-rise: #d06c75;
+    --candle-fall: #5f83b7;
   }
 
   * {

@@ -59,7 +59,7 @@ export function StockVisibilitySettings({
               >
                 <span
                   className="size-3 shrink-0 rounded-full"
-                  style={{ backgroundColor: stockColor(stock.key, theme) }}
+                  style={{ backgroundColor: stockColor(stock.symbol, theme) }}
                   aria-hidden="true"
                 />
                 <span className="min-w-0 flex-1">

@@ -61,6 +61,12 @@ try {
   ` });
   await page.getByText("보유 주식 평가액", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "자산 구성 · KRW" }).waitFor();
+  const allocationAreaPaths = page.locator('[aria-label="일별 종목 평가금 누적 영역 차트"] .recharts-area-area');
+  await allocationAreaPaths.first().waitFor();
+  const areaCurvePaths = await allocationAreaPaths.evaluateAll((paths) => paths.map((path) => path.getAttribute("d") ?? ""));
+  if (areaCurvePaths.some((path) => !path.includes("C"))) {
+    throw new Error("종목별 비중 영역 차트가 곡선 보간으로 렌더링되지 않았습니다.");
+  }
   const firstAllocationSector = page.locator("#allocation .recharts-pie-sector path").first();
   await firstAllocationSector.hover();
   const tooltip = page.locator("#allocation .recharts-default-tooltip");
@@ -84,6 +90,18 @@ try {
   await page.getByRole("button", { name: "포트폴리오 분석", exact: true }).click();
   await page.getByRole("heading", { name: "포트폴리오 전체 평가금 일봉" }).waitFor();
   await page.locator('[aria-label="포트폴리오 평가금 일봉과 비교 지수 차트"]').waitFor();
+  const candleColors = await page.locator('[data-candle-direction] rect').evaluateAll((candles) => candles.map((candle) => ({
+    direction: candle.parentElement?.getAttribute("data-candle-direction"),
+    fill: getComputedStyle(candle).fill,
+  })));
+  const risingCandle = candleColors.find((candle) => candle.direction === "rise");
+  const fallingCandle = candleColors.find((candle) => candle.direction === "fall");
+  const rgbChannels = (value) => (value.match(/\d+(?:\.\d+)?/g) ?? []).slice(0, 3).map(Number);
+  const risingChannels = rgbChannels(risingCandle?.fill ?? "");
+  const fallingChannels = rgbChannels(fallingCandle?.fill ?? "");
+  if (!risingCandle || !fallingCandle || risingChannels[0] <= risingChannels[2] || fallingChannels[2] <= fallingChannels[0]) {
+    throw new Error(`캔들 상승/하락 색상 검증 실패: ${JSON.stringify({ risingCandle, fallingCandle })}`);
+  }
 
   await page.getByRole("button", { name: "백테스트", exact: true }).click();
   await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor();

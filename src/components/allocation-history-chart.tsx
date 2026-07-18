@@ -474,7 +474,7 @@ export function AllocationHistoryChart({
                   <div
                     key={item.key}
                     className="grid min-w-1 place-items-center overflow-hidden text-[10px] font-black"
-                    style={{ width: `${weight}%`, backgroundColor: stockColor(item.key, theme) }}
+                    style={{ width: `${weight}%`, backgroundColor: stockColor(item.symbol, theme) }}
                     title={`${item.name} ${weight.toFixed(1)}%`}
                   />
                 ) : null;
@@ -482,7 +482,7 @@ export function AllocationHistoryChart({
             </div>
           </div>
         ) : (
-          <div className="mt-7 h-[300px] w-full sm:h-[370px]" aria-label="일별 종목 평가금 누적 영역 차트">
+          <div className="mt-7 h-[300px] w-full overflow-hidden rounded-[24px] sm:h-[370px]" aria-label="일별 종목 평가금 누적 영역 차트">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={chartData}
@@ -521,14 +521,17 @@ export function AllocationHistoryChart({
                 {series.map((item, index) => (
                   <Area
                     key={item.key}
-                    type="linear"
+                    type="monotoneX"
                     dataKey={`series${index}`}
                     name={item.name}
                     stackId="portfolio"
-                    stroke="none"
-                    fill={stockColor(item.key, theme)}
-                    strokeWidth={0}
-                    fillOpacity={0.82}
+                    stroke={stockColor(item.symbol, theme)}
+                    fill={stockColor(item.symbol, theme)}
+                    strokeWidth={1.4}
+                    strokeOpacity={0.96}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fillOpacity={0.78}
                     isAnimationActive={false}
                   />
                 ))}
@@ -550,7 +553,7 @@ export function AllocationHistoryChart({
           <div className="mt-6 flex flex-wrap gap-x-5 gap-y-3" aria-label="종목 범례">
             {series.map((item) => (
               <div key={item.key} className="flex min-w-0 items-center gap-2 text-xs">
-                <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: stockColor(item.key, theme) }} />
+                <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: stockColor(item.symbol, theme) }} />
                 <span className="max-w-40 truncate font-bold">{item.name}</span>
                 <span className="text-muted-foreground">평균 {item.averageWeight.toFixed(1)}%</span>
               </div>
