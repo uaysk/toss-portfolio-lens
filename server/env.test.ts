@@ -4,6 +4,8 @@ import { loadConfig } from "./env.js";
 
 const mysqlCaPath = "/tmp/toss-portfolio-lens-env-test-ca.pem";
 const postgresCaPath = "/tmp/toss-portfolio-lens-env-test-postgres-ca.pem";
+const mcpClientSecretPath = "/tmp/toss-portfolio-lens-env-test-mcp-client";
+const mcpSigningKeyPath = "/tmp/toss-portfolio-lens-env-test-mcp-key";
 
 describe("database environment configuration", () => {
   const originalEnvironment = { ...process.env };
@@ -20,6 +22,8 @@ describe("database environment configuration", () => {
   afterEach(() => {
     rmSync(mysqlCaPath, { force: true });
     rmSync(postgresCaPath, { force: true });
+    rmSync(mcpClientSecretPath, { force: true });
+    rmSync(mcpSigningKeyPath, { force: true });
     process.env = { ...originalEnvironment };
     vi.restoreAllMocks();
   });
@@ -35,6 +39,41 @@ describe("database environment configuration", () => {
     });
     expect(config.mysql).toBeUndefined();
     expect(config.databasePath).toBe("./data/portfolio-history.sqlite");
+    expect(config.mcp).toMatchObject({ enabled: false, authMode: "oauth" });
+    expect(config.compute).toMatchObject({
+      executionMode: "rust_socket",
+      resultPollMs: 250,
+      resultDeadlineMs: 300_000,
+    });
+  });
+
+  it("external compute는 PostgreSQL에서만 허용하고 실행 제한값을 검증한다", () => {
+    process.env.EXECUTION_MODE = "external";
+    expect(() => loadConfig()).toThrow("EXECUTION_MODE=external은 DB_PROVIDER=postgresql");
+
+    Object.assign(process.env, {
+      DB_PROVIDER: "postgresql",
+      POSTGRES_URL: "postgresql://portfolio:password@postgres.internal:5432/portfolio_lens",
+      PYTHON_WORKER_RESULT_POLL_MS: "50",
+      PYTHON_WORKER_RESULT_DEADLINE_MS: "120000",
+      MCP_MAX_QUEUED_RUNS: "8",
+      MCP_RUN_DEADLINE_MS: "90000",
+    });
+    expect(loadConfig()).toMatchObject({
+      compute: {
+        executionMode: "external",
+        resultPollMs: 50,
+        resultDeadlineMs: 120_000,
+      },
+      mcp: { maxQueuedRuns: 8, runDeadlineMs: 90_000 },
+    });
+
+    process.env.RUST_WORKER_RESULT_POLL_MS = "75";
+    process.env.RUST_WORKER_RESULT_DEADLINE_MS = "180000";
+    expect(loadConfig().compute).toMatchObject({ resultPollMs: 75, resultDeadlineMs: 180_000 });
+
+    process.env.EXECUTION_MODE = "process";
+    expect(() => loadConfig()).toThrow("EXECUTION_MODE는 inline, rust_socket 또는 external");
   });
 
   it("정적 Bearer 모드에서는 OAuth 자격증명 없이 호환 API를 설정한다", () => {
@@ -237,5 +276,69 @@ describe("database environment configuration", () => {
       forcePathStyle: true,
       credentials: { accessKeyId: "access-key", secretAccessKey: "secret-key" },
     });
+  });
+
+  it("MCP OAuth를 활성화하면 secret 파일과 제한값을 읽는다", () => {
+    writeFileSync(mcpClientSecretPath, "client-secret-value\n");
+    writeFileSync(mcpSigningKeyPath, "private-key-value\n");
+    Object.assign(process.env, {
+      MCP_ENABLED: "true",
+      MCP_AUTH_MODE: "oauth",
+      MCP_RESOURCE_URL: "https://portfolio.example/mcp",
+      MCP_OAUTH_ISSUER: "https://portfolio.example",
+      MCP_OAUTH_CLIENT_ID: "chatgpt-client",
+      MCP_OAUTH_REDIRECT_URI: "https://chatgpt.example/oauth/callback",
+      MCP_OAUTH_CLIENT_SECRET_FILE: mcpClientSecretPath,
+      MCP_OAUTH_SIGNING_KEY_FILE: mcpSigningKeyPath,
+      MCP_MAX_ASSETS: "12",
+      MCP_MAX_CANDIDATE_BUDGET: "2500",
+    });
+    expect(loadConfig().mcp).toMatchObject({
+      enabled: true,
+      authMode: "oauth",
+      resourceUrl: "https://portfolio.example/mcp",
+      maxAssets: 12,
+      maxCandidateBudget: 2_500,
+      oauth: {
+        issuer: "https://portfolio.example",
+        clientId: "chatgpt-client",
+        clientSecret: "client-secret-value",
+        signingPrivateKeyPem: "private-key-value",
+        autoApprove: false,
+        accessTokenTtlSeconds: 3_600,
+      },
+    });
+  });
+
+  it("활성 OAuth 설정 누락, 운영 HTTP, 운영 무인증 모드를 fail-closed로 거부한다", () => {
+    process.env.MCP_ENABLED = "true";
+    expect(() => loadConfig()).toThrow("MCP_OAUTH_ISSUER");
+
+    writeFileSync(mcpClientSecretPath, "client-secret-value\n");
+    writeFileSync(mcpSigningKeyPath, "private-key-value\n");
+    Object.assign(process.env, {
+      NODE_ENV: "production",
+      MCP_RESOURCE_URL: "http://portfolio.example/mcp",
+      MCP_OAUTH_ISSUER: "http://portfolio.example",
+      MCP_OAUTH_CLIENT_ID: "chatgpt-client",
+      MCP_OAUTH_REDIRECT_URI: "http://portfolio.example/callback",
+      MCP_OAUTH_CLIENT_SECRET_FILE: mcpClientSecretPath,
+      MCP_OAUTH_SIGNING_KEY_FILE: mcpSigningKeyPath,
+    });
+    expect(() => loadConfig()).toThrow("HTTPS");
+
+    Object.assign(process.env, { MCP_AUTH_MODE: "none", HOST: "127.0.0.1" });
+    expect(() => loadConfig()).toThrow("production이 아닌 loopback");
+  });
+
+  it("개발 loopback에서만 명시적인 MCP_AUTH_MODE=none을 허용한다", () => {
+    Object.assign(process.env, {
+      MCP_ENABLED: "true",
+      MCP_AUTH_MODE: "none",
+      HOST: "127.0.0.1",
+      NODE_ENV: "development",
+      MCP_RESOURCE_URL: "http://127.0.0.1:3200/mcp",
+    });
+    expect(loadConfig().mcp).toMatchObject({ enabled: true, authMode: "none" });
   });
 });

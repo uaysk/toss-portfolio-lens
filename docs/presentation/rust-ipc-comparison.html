@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="ko" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Toss Portfolio Lens · Rust IPC Architecture Lab</title>
+    <style>
+      :root {
+        --background: 0 0% 4%;
+        --foreground: 0 0% 96%;
+        --card: 0 0% 7%;
+        --card-foreground: 0 0% 96%;
+        --popover: 0 0% 8%;
+        --popover-foreground: 0 0% 96%;
+        --primary: 0 0% 96%;
+        --primary-foreground: 0 0% 5%;
+        --secondary: 0 0% 13%;
+        --secondary-foreground: 0 0% 94%;
+        --muted: 0 0% 12%;
+        --muted-foreground: 0 0% 61%;
+        --accent: 0 0% 16%;
+        --accent-foreground: 0 0% 96%;
+        --border: 0 0% 18%;
+        --input: 0 0% 20%;
+        --ring: 0 0% 72%;
+        --radius: 1rem;
+        --measured: #f4f4f5;
+        --estimated: #a1a1aa;
+        --queue: #52525b;
+        --compute: #d4d4d8;
+        --transport: #71717a;
+        --materialize: #3f3f46;
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; background: hsl(var(--background)); }
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        color: hsl(var(--foreground));
+        background:
+          radial-gradient(circle at 76% -10%, rgba(255,255,255,.08), transparent 28rem),
+          linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+          hsl(var(--background));
+        background-size: auto, 40px 40px, 40px 40px, auto;
+        font-family: Pretendard, "Pretendard Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-feature-settings: "tnum" 1, "ss01" 1;
+        -webkit-font-smoothing: antialiased;
+      }
+      button, input { font: inherit; }
+      button { color: inherit; }
+      ::selection { background: #f4f4f5; color: #09090b; }
+
+      .shell { width: min(1480px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 56px; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 68px; }
+      .brand { display: flex; align-items: center; gap: 11px; color: #fafafa; font-size: 13px; font-weight: 750; letter-spacing: -.01em; }
+      .brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 10px; background: #f4f4f5; color: #09090b; }
+      .brand-mark svg { width: 16px; height: 16px; }
+      .top-meta { display: flex; align-items: center; gap: 10px; color: hsl(var(--muted-foreground)); font: 650 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
+      .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #d4d4d8; box-shadow: 0 0 0 4px rgba(212,212,216,.09); }
+
+      .hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(380px, .75fr); gap: 48px; align-items: end; margin-bottom: 48px; }
+      .eyebrow { margin-bottom: 18px; color: hsl(var(--muted-foreground)); font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; }
+      h1 { max-width: 860px; margin: 0; font-size: clamp(42px, 5.2vw, 76px); line-height: .98; letter-spacing: -.065em; font-weight: 750; }
+      .hero-copy { max-width: 720px; margin: 24px 0 0; color: hsl(var(--muted-foreground)); font-size: 16px; line-height: 1.75; word-break: keep-all; }
+      .hero-note { padding: 22px; border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) + 8px); background: rgba(14,14,14,.82); backdrop-filter: blur(12px); }
+      .hero-note strong { display: block; margin-bottom: 9px; font-size: 14px; }
+      .hero-note p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.65; }
+      .legend { display: flex; gap: 17px; margin-top: 18px; color: #a1a1aa; font-size: 11px; }
+      .legend span { display: inline-flex; align-items: center; gap: 7px; }
+      .legend i { width: 15px; height: 2px; background: #f4f4f5; }
+      .legend .estimate i { background: #71717a; background-image: linear-gradient(90deg,#a1a1aa 50%,transparent 50%); background-size: 5px 2px; }
+
+      .card { border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) + 8px); background: rgba(16,16,16,.88); box-shadow: 0 22px 70px rgba(0,0,0,.18); }
+      .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 24px 24px 0; }
+      .card-title { margin: 0; font-size: 16px; letter-spacing: -.025em; }
+      .card-description { margin: 7px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.55; }
+      .card-content { padding: 24px; }
+
+      .tabs { display: inline-flex; align-items: center; gap: 3px; padding: 4px; border: 1px solid hsl(var(--border)); border-radius: 999px; background: hsl(var(--muted)); }
+      .tab { min-height: 34px; padding: 0 14px; border: 0; border-radius: 999px; color: hsl(var(--muted-foreground)); background: transparent; font-size: 12px; font-weight: 700; cursor: pointer; transition: .18s ease; }
+      .tab:hover { color: hsl(var(--foreground)); }
+      .tab[aria-selected="true"] { color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); box-shadow: 0 1px 3px rgba(0,0,0,.28); }
+
+      .section-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(350px, .7fr); gap: 16px; margin-bottom: 16px; }
+      .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
+      .metric { min-width: 0; padding: 17px; border-radius: var(--radius); background: hsl(var(--muted)); }
+      .metric-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: hsl(var(--muted-foreground)); font: 650 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+      .badge { display: inline-flex; min-height: 22px; align-items: center; padding: 0 8px; border: 1px solid hsl(var(--border)); border-radius: 999px; color: #a1a1aa; background: #111; font-size: 9px; font-weight: 800; letter-spacing: .04em; }
+      .badge.estimate { border-style: dashed; }
+      .metric-value { margin-top: 22px; font-size: clamp(25px, 3vw, 40px); font-weight: 720; letter-spacing: -.055em; white-space: nowrap; }
+      .metric-value small { margin-left: 3px; color: hsl(var(--muted-foreground)); font-size: 13px; letter-spacing: 0; }
+      .metric-delta { margin-top: 8px; color: #a1a1aa; font-size: 11px; }
+
+      .waterfall { display: grid; gap: 13px; }
+      .waterfall-row { display: grid; grid-template-columns: 116px minmax(0, 1fr) 65px; gap: 12px; align-items: center; }
+      .row-label { color: #d4d4d8; font-size: 11px; font-weight: 650; }
+      .bar-track { position: relative; display: flex; height: 36px; overflow: hidden; border-radius: 9px; background: #0b0b0b; box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
+      .bar-segment { position: relative; min-width: 2px; height: 100%; transition: width .35s cubic-bezier(.22,.8,.3,1); }
+      .bar-segment::after { content: attr(data-label); position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; color: #09090b; font: 800 9px/1 ui-monospace, monospace; white-space: nowrap; }
+      .bar-segment.queue { background: var(--queue); }
+      .bar-segment.compute { background: var(--compute); }
+      .bar-segment.transport { background: var(--transport); }
+      .bar-segment.materialize { background: var(--materialize); }
+      .bar-segment.queue::after, .bar-segment.transport::after, .bar-segment.materialize::after { color: #f4f4f5; }
+      .row-value { color: #fafafa; font: 720 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+      .waterfall-key { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 5px; color: #71717a; font-size: 10px; }
+      .waterfall-key span { display: inline-flex; align-items: center; gap: 6px; }
+      .waterfall-key i { width: 8px; height: 8px; border-radius: 2px; }
+
+      .controls { display: grid; gap: 21px; }
+      .control-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+      .control-head label { color: #d4d4d8; font-size: 12px; font-weight: 650; }
+      .control-value { min-width: 58px; color: #fafafa; font: 700 11px/1 ui-monospace, monospace; text-align: right; }
+      input[type="range"] { width: 100%; height: 4px; margin: 0; border-radius: 999px; appearance: none; background: #27272a; outline: none; }
+      input[type="range"]::-webkit-slider-thumb { width: 16px; height: 16px; border: 3px solid #09090b; border-radius: 50%; appearance: none; background: #fafafa; box-shadow: 0 0 0 1px #52525b; cursor: grab; }
+      input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 3px solid #09090b; border-radius: 50%; background: #fafafa; box-shadow: 0 0 0 1px #52525b; cursor: grab; }
+      .preset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+      .button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 14px; border: 1px solid hsl(var(--border)); border-radius: 999px; background: hsl(var(--secondary)); color: hsl(var(--secondary-foreground)); font-size: 11px; font-weight: 700; cursor: pointer; transition: .18s ease; }
+      .button:hover { background: hsl(var(--accent)); border-color: #3f3f46; }
+      .button:active { transform: scale(.98); }
+      .button.active { border-color: #f4f4f5; background: #f4f4f5; color: #09090b; }
+      .button svg { width: 14px; height: 14px; }
+      .callout { padding: 14px; border: 1px dashed #3f3f46; border-radius: 13px; color: #a1a1aa; background: #0b0b0b; font-size: 11px; line-height: 1.65; }
+      .callout strong { color: #f4f4f5; }
+
+      .architecture { margin-bottom: 16px; overflow: hidden; }
+      .architecture .card-header { align-items: center; }
+      .architecture-stage { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 34px; min-height: 232px; align-items: center; padding: 24px; }
+      .architecture-stage::before { content: ""; position: absolute; top: 50%; right: 8%; left: 8%; height: 1px; background: #27272a; }
+      .node { position: relative; z-index: 1; min-height: 132px; padding: 17px; border: 1px solid #2d2d30; border-radius: 18px; background: #111; transition: opacity .2s, transform .2s, border-color .2s; }
+      .node.dim { opacity: .24; transform: scale(.96); }
+      .node.focus { border-color: #71717a; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 20px 55px rgba(0,0,0,.3); }
+      .node-icon { display: grid; width: 31px; height: 31px; margin-bottom: 24px; place-items: center; border-radius: 10px; background: #27272a; color: #f4f4f5; }
+      .node-icon svg { width: 15px; height: 15px; }
+      .node strong { display: block; font-size: 12px; }
+      .node small { display: block; margin-top: 6px; color: #71717a; font-size: 10px; line-height: 1.45; }
+      .flow-pulse { position: absolute; z-index: 2; top: calc(50% - 4px); left: 8%; width: 8px; height: 8px; border: 2px solid #09090b; border-radius: 50%; background: #fafafa; box-shadow: 0 0 0 3px rgba(255,255,255,.11); animation: travel 4.4s infinite cubic-bezier(.6,0,.4,1); }
+      @keyframes travel { 0% { left: 8%; opacity: 0; } 8% { opacity: 1; } 88% { opacity: 1; } 100% { left: 91%; opacity: 0; } }
+      .path-caption { display: flex; align-items: center; gap: 8px; padding: 0 24px 22px; color: #71717a; font: 650 10px/1.5 ui-monospace, monospace; }
+      .path-caption svg { width: 13px; height: 13px; }
+
+      .tradeoffs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+      .tradeoff { min-height: 180px; padding: 20px; border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) + 3px); background: #0e0e0e; }
+      .tradeoff-icon { display: grid; width: 33px; height: 33px; margin-bottom: 32px; place-items: center; border-radius: 11px; background: #202022; }
+      .tradeoff-icon svg { width: 16px; height: 16px; }
+      .tradeoff-kicker { color: #71717a; font: 650 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+      .tradeoff strong { display: block; margin-top: 9px; font-size: 14px; }
+      .tradeoff p { margin: 8px 0 0; color: #8b8b91; font-size: 11px; line-height: 1.6; }
+
+      .decision { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .route-list { display: grid; gap: 10px; }
+      .route { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 13px; align-items: center; padding: 13px; border-radius: 14px; background: hsl(var(--muted)); }
+      .route-index { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid #343438; border-radius: 11px; color: #a1a1aa; font: 750 10px/1 ui-monospace, monospace; }
+      .route strong { display: block; font-size: 12px; }
+      .route span { display: block; margin-top: 4px; color: #71717a; font-size: 10px; }
+      .route-tag { color: #d4d4d8; font: 700 9px/1 ui-monospace, monospace; }
+      .formula { display: flex; min-height: 100%; flex-direction: column; justify-content: space-between; padding: 20px; border-radius: 17px; background: #f4f4f5; color: #09090b; }
+      .formula-label { color: #52525b; font: 750 10px/1 ui-monospace, monospace; letter-spacing: .08em; }
+      .formula-value { margin: 30px 0; font-size: clamp(34px, 4vw, 58px); font-weight: 780; letter-spacing: -.065em; }
+      .formula-value small { color: #52525b; font-size: 15px; letter-spacing: -.02em; }
+      .formula p { margin: 0; color: #52525b; font-size: 11px; line-height: 1.6; }
+
+      footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 28px 4px 0; color: #5f5f66; font: 650 10px/1.5 ui-monospace, monospace; }
+
+      @media (max-width: 1050px) {
+        .hero, .section-grid, .decision { grid-template-columns: 1fr; }
+        .hero { align-items: start; }
+        .tradeoffs { grid-template-columns: 1fr 1fr; }
+        .architecture-stage { grid-template-columns: repeat(3, 1fr); }
+        .architecture-stage .node:nth-of-type(4), .architecture-stage .node:nth-of-type(5) { grid-column: span 1; }
+        .architecture-stage::before, .flow-pulse { display: none; }
+      }
+      @media (max-width: 700px) {
+        .shell { width: min(100% - 20px, 1480px); padding-top: 16px; }
+        .topbar { margin-bottom: 46px; }
+        .top-meta span:last-child { display: none; }
+        h1 { font-size: 43px; }
+        .metric-grid, .tradeoffs { grid-template-columns: 1fr; }
+        .metric { display: grid; grid-template-columns: 1fr auto; align-items: center; }
+        .metric-value { margin-top: 0; }
+        .metric-delta { grid-column: 1 / -1; }
+        .architecture .card-header { align-items: flex-start; flex-direction: column; }
+        .architecture-stage { grid-template-columns: 1fr; gap: 9px; }
+        .node { min-height: auto; }
+        .node-icon { margin-bottom: 16px; }
+        .waterfall-row { grid-template-columns: 78px minmax(0,1fr) 52px; gap: 8px; }
+        .bar-segment::after { display: none; }
+        footer { align-items: flex-start; flex-direction: column; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar" aria-label="페이지 정보">
+        <div class="brand">
+          <span class="brand-mark" data-icon="orbit"></span>
+          <span>Portfolio Lens / Architecture Lab</span>
+        </div>
+        <div class="top-meta"><i class="live-dot"></i><span>RYZEN 5 5600G · P50 MODEL</span><span>2026.07.18</span></div>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Rust low-latency path proposal</div>
+          <h1>계산보다 긴 대기열을<br />요청 경로에서 걷어냅니다.</h1>
+          <p class="hero-copy">빠른 단일 백테스트는 Unix socket으로 Rust에 직접 전달하고, 내구성이 필요한 최적화는 기존 PostgreSQL 큐에 남깁니다. 언어 교체보다 전송 경로 분리가 실제 체감 속도를 결정합니다.</p>
+        </div>
+        <aside class="hero-note">
+          <strong>읽는 방법</strong>
+          <p>현재 수치는 실제 로컬 벤치마크입니다. Rust·IPC 수치는 같은 하드웨어를 전제로 한 설계 추정치이며, 아래 슬라이더로 보수적·기준·공격적 가정을 직접 바꿀 수 있습니다.</p>
+          <div class="legend"><span><i></i> 측정값</span><span class="estimate"><i></i> 추정값</span></div>
+        </aside>
+      </header>
+
+      <section class="section-grid" aria-label="지연시간 비교와 시뮬레이터">
+        <article class="card">
+          <div class="card-header">
+            <div><h2 class="card-title">P50 latency breakdown</h2><p class="card-description" id="workload-description">단일 백테스트의 요청부터 응답까지 걸린 시간입니다.</p></div>
+            <div class="tabs" role="tablist" aria-label="워크로드 선택">
+              <button class="tab" role="tab" aria-selected="true" data-workload="backtest">백테스트</button>
+              <button class="tab" role="tab" aria-selected="false" data-workload="optimization">최적화 1,000</button>
+            </div>
+          </div>
+          <div class="card-content">
+            <div class="metric-grid">
+              <div class="metric"><div class="metric-label"><span>Node inline</span><span class="badge">측정</span></div><div class="metric-value" id="metric-node">43<small>ms</small></div><div class="metric-delta">API 프로세스에서 직접 계산</div></div>
+              <div class="metric"><div class="metric-label"><span>Python queue</span><span class="badge">측정</span></div><div class="metric-value" id="metric-current">373<small>ms</small></div><div class="metric-delta" id="delta-current">Node 대비 8.7× 지연</div></div>
+              <div class="metric"><div class="metric-label"><span>Rust IPC</span><span class="badge estimate">추정</span></div><div class="metric-value" id="metric-proposed">31<small>ms</small></div><div class="metric-delta" id="delta-proposed">Node 대비 1.4× 빠름</div></div>
+            </div>
+            <div class="waterfall" id="waterfall" aria-label="경로별 지연시간 누적 막대"></div>
+            <div class="waterfall-key"><span><i style="background:var(--queue)"></i>DB 큐</span><span><i style="background:var(--transport)"></i>IPC/검증</span><span><i style="background:var(--compute)"></i>계산</span><span><i style="background:var(--materialize)"></i>결과 저장·구성</span></div>
+          </div>
+        </article>
+
+        <aside class="card">
+          <div class="card-header"><div><h2 class="card-title">Rust IPC simulator</h2><p class="card-description">제안 구조의 비용 가정을 조정합니다.</p></div></div>
+          <div class="card-content controls">
+            <div class="preset-row" role="group" aria-label="추정 프리셋">
+              <button class="button" data-preset="conservative">보수적</button>
+              <button class="button active" data-preset="expected">기준</button>
+              <button class="button" data-preset="aggressive">공격적</button>
+            </div>
+            <div>
+              <div class="control-head"><label for="compute">Rust 계산 커널</label><output class="control-value" id="compute-value">18 ms</output></div>
+              <input id="compute" type="range" min="6" max="90" value="18" step="1" />
+            </div>
+            <div>
+              <div class="control-head"><label for="ipc">Unix socket 왕복</label><output class="control-value" id="ipc-value">8 ms</output></div>
+              <input id="ipc" type="range" min="2" max="55" value="8" step="1" />
+            </div>
+            <div>
+              <div class="control-head"><label for="serialization">검증·직렬화</label><output class="control-value" id="serialization-value">5 ms</output></div>
+              <input id="serialization" type="range" min="1" max="35" value="5" step="1" />
+            </div>
+            <div class="callout" id="simulator-callout"><strong>31ms 예상.</strong> Node 인라인보다 약 12ms 빠르며, DB 큐 경로보다 약 342ms 짧습니다.</div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="card architecture" aria-label="아키텍처 경로 비교">
+        <div class="card-header">
+          <div><h2 class="card-title">Request path</h2><p class="card-description" id="path-description">현재 Python worker는 내구성을 얻는 대신 모든 요청이 PostgreSQL을 두 번 통과합니다.</p></div>
+          <div class="tabs" role="tablist" aria-label="아키텍처 선택">
+            <button class="tab" role="tab" aria-selected="true" data-path="current">현재 구조</button>
+            <button class="tab" role="tab" aria-selected="false" data-path="rust-queue">Rust + 큐</button>
+            <button class="tab" role="tab" aria-selected="false" data-path="rust-ipc">Rust + IPC</button>
+          </div>
+        </div>
+        <div class="architecture-stage" id="architecture-stage">
+          <div class="flow-pulse" aria-hidden="true"></div>
+          <div class="node focus" data-node="client"><span class="node-icon" data-icon="monitor"></span><strong>Client</strong><small>백테스트 요청<br />HTTP / MCP</small></div>
+          <div class="node focus" data-node="node"><span class="node-icon" data-icon="server"></span><strong>Node API</strong><small>I/O · 인증 · 검증<br />응답 소유권</small></div>
+          <div class="node focus" data-node="queue"><span class="node-icon" data-icon="database"></span><strong>PostgreSQL</strong><small>enqueue · lease<br />artifact</small></div>
+          <div class="node focus" data-node="worker"><span class="node-icon" data-icon="cpu"></span><strong>Python worker</strong><small>백테스트 계산<br />resident process</small></div>
+          <div class="node focus" data-node="response"><span class="node-icon" data-icon="check"></span><strong>Materialize</strong><small>결과 재조회<br />응답 구성</small></div>
+        </div>
+        <div class="path-caption" id="path-caption"><span data-icon="arrow"></span> HTTP → INSERT/CLAIM → Python compute → artifact INSERT → polling/materialize</div>
+      </section>
+
+      <section class="tradeoffs" aria-label="구조별 트레이드오프">
+        <article class="tradeoff"><span class="tradeoff-icon" data-icon="zap"></span><div class="tradeoff-kicker">Latency</div><strong id="tradeoff-latency">저지연 경로 31ms</strong><p>DB 왕복과 durable artifact 생성을 동기 응답 경로에서 제거합니다.</p></article>
+        <article class="tradeoff"><span class="tradeoff-icon" data-icon="shield"></span><div class="tradeoff-kicker">Isolation</div><strong>프로세스 격리 유지</strong><p>N-API가 아닌 Rust sidecar를 쓰면 계산 실패가 Node API 프로세스를 직접 종료하지 않습니다.</p></article>
+        <article class="tradeoff"><span class="tradeoff-icon" data-icon="hard-drive"></span><div class="tradeoff-kicker">Durability</div><strong>작업별 이중 경로</strong><p>빠른 백테스트는 IPC, 재시도·감사가 중요한 대규모 최적화는 PostgreSQL 큐를 유지합니다.</p></article>
+        <article class="tradeoff"><span class="tradeoff-icon" data-icon="layers"></span><div class="tradeoff-kicker">Complexity</div><strong>계약 하나, 전송 둘</strong><p>동일한 버전 계약과 checksum을 공유하되 socket backpressure·timeout·재연결 정책이 추가됩니다.</p></article>
+      </section>
+
+      <section class="decision" aria-label="권장 라우팅과 속도 계산">
+        <article class="card">
+          <div class="card-header"><div><h2 class="card-title">Recommended routing</h2><p class="card-description">속도와 복구 가능성을 작업 성격에 맞춰 분리합니다.</p></div></div>
+          <div class="card-content route-list">
+            <div class="route"><span class="route-index">01</span><div><strong>단일·대화형 백테스트</strong><span>Node → Unix socket → Rust → Node</span></div><b class="route-tag">FAST PATH</b></div>
+            <div class="route"><span class="route-index">02</span><div><strong>1,000+ 후보 최적화</strong><span>Node → PostgreSQL queue → Rust worker</span></div><b class="route-tag">DURABLE</b></div>
+            <div class="route"><span class="route-index">03</span><div><strong>worker 장애·과부하</strong><span>빠른 실패 또는 명시적 queue 승격</span></div><b class="route-tag">FALLBACK</b></div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-content" style="height:100%">
+            <div class="formula">
+              <div class="formula-label">NODE INLINE ÷ RUST IPC</div>
+              <div class="formula-value" id="speedup-formula">1.39<small>× faster</small></div>
+              <p id="formula-caption">43ms ÷ (18ms compute + 8ms IPC + 5ms validation). 1~3× 개선은 Rust 자체보다 DB 큐를 우회할 때 가능한 범위입니다.</p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <footer><span>SHADCN/UI TOKENS · CARD / TABS / BUTTON / SLIDER PRIMITIVES · SINGLE FILE</span><span>측정: 2026-07-17 · 추정은 구현 전 가설이며 벤치마크로 교체 필요</span></footer>
+    </main>
+
+    <script>
+      const icons = {
+        orbit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 5 0 1 0 0 10 10 5 0 1 0 0-10Z" transform="rotate(45 12 12)"/></svg>',
+        monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>',
+        server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg>',
+        database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+        cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></svg>',
+        check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>',
+        arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
+        zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>',
+        shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>',
+        'hard-drive': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12H2l3-8h14z"/><rect x="2" y="12" width="20" height="8" rx="2"/><path d="M6 16h.01M10 16h.01"/></svg>',
+        layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></svg>'
+      };
+      document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = icons[node.dataset.icon] || ''; });
+
+      const workloadData = {
+        backtest: {
+          description: '단일 백테스트의 요청부터 응답까지 걸린 시간입니다.',
+          node: 43.05,
+          current: { queue: 45.15, transport: 0, compute: 175.57, materialize: 151.88 },
+          rustQueueCompute: 28,
+          rustQueueLabel: 'Rust + 기존 큐'
+        },
+        optimization: {
+          description: '후보 1,000개를 평가하는 최적화 요청의 P50입니다.',
+          node: 6139.8,
+          current: { queue: 45.15, transport: 0, compute: 259.31, materialize: 101.19 },
+          rustQueueCompute: 110,
+          rustQueueLabel: 'Rust + 기존 큐'
+        }
+      };
+
+      const presets = {
+        backtest: {
+          conservative: { compute: 45, ipc: 28, serialization: 17 },
+          expected: { compute: 18, ipc: 8, serialization: 5 },
+          aggressive: { compute: 8, ipc: 3, serialization: 3 }
+        },
+        optimization: {
+          conservative: { compute: 180, ipc: 28, serialization: 17 },
+          expected: { compute: 110, ipc: 8, serialization: 5 },
+          aggressive: { compute: 50, ipc: 3, serialization: 3 }
+        }
+      };
+
+      const pathData = {
+        current: {
+          description: '현재 Python worker는 내구성을 얻는 대신 모든 요청이 PostgreSQL을 두 번 통과합니다.',
+          caption: 'HTTP → INSERT/CLAIM → Python compute → artifact INSERT → polling/materialize',
+          worker: ['Python worker', '백테스트 계산<br>resident process'],
+          response: ['Materialize', '결과 재조회<br>응답 구성'],
+          dim: []
+        },
+        'rust-queue': {
+          description: '계산 언어만 Rust로 바꾸면 커널은 빨라지지만 DB 큐의 고정 비용은 그대로 남습니다.',
+          caption: 'HTTP → INSERT/CLAIM → Rust compute → artifact INSERT → polling/materialize',
+          worker: ['Rust worker', '빠른 네이티브 계산<br>동일 durable contract'],
+          response: ['Materialize', '결과 재조회<br>응답 구성'],
+          dim: []
+        },
+        'rust-ipc': {
+          description: '대화형 요청은 Unix socket으로 바로 전달하고 PostgreSQL은 비동기 최적화에만 사용합니다.',
+          caption: 'HTTP → validation → Unix socket / MessagePack → Rust compute → direct response',
+          worker: ['Rust sidecar', 'thread pool · SIMD<br>timeout / backpressure'],
+          response: ['Direct response', 'Node가 검증 후<br>즉시 반환'],
+          dim: ['queue']
+        }
+      };
+
+      let workload = 'backtest';
+      const sliders = {
+        compute: document.querySelector('#compute'),
+        ipc: document.querySelector('#ipc'),
+        serialization: document.querySelector('#serialization')
+      };
+
+      const fmt = (value) => value >= 100 ? Math.round(value).toLocaleString('ko-KR') : Number(value.toFixed(1)).toLocaleString('ko-KR');
+      const total = (parts) => Object.values(parts).reduce((sum, value) => sum + value, 0);
+      const proposedTotal = () => Number(sliders.compute.value) + Number(sliders.ipc.value) + Number(sliders.serialization.value);
+
+      function relativeText(reference, value) {
+        const ratio = reference / value;
+        if (ratio >= 1) return `Node 대비 ${ratio.toFixed(1)}× 빠름`;
+        return `Node 대비 ${(1 / ratio).toFixed(1)}× 지연`;
+      }
+
+      function segment(part, value, scale, label) {
+        const width = Math.max(0, value / scale * 100);
+        return `<div class="bar-segment ${part}" style="width:${width}%" data-label="${width > 13 ? label : ''}" title="${label}: ${fmt(value)}ms"></div>`;
+      }
+
+      function renderWaterfall() {
+        const data = workloadData[workload];
+        const currentTotal = total(data.current);
+        const proposed = proposedTotal();
+        const rustQueue = { queue: data.current.queue, transport: 0, compute: data.rustQueueCompute, materialize: data.current.materialize };
+        const rustQueueTotal = total(rustQueue);
+        const scale = Math.max(data.node, currentTotal, rustQueueTotal, proposed);
+        const rows = [
+          { label: 'Node inline', value: data.node, parts: { compute: data.node } },
+          { label: 'Python queue', value: currentTotal, parts: data.current },
+          { label: data.rustQueueLabel, value: rustQueueTotal, parts: rustQueue },
+          { label: 'Rust IPC', value: proposed, parts: { transport: Number(sliders.ipc.value) + Number(sliders.serialization.value), compute: Number(sliders.compute.value) } }
+        ];
+        document.querySelector('#waterfall').innerHTML = rows.map((row) => {
+          const bars = Object.entries(row.parts).map(([part, value]) => value ? segment(part, value, scale, part === 'compute' ? '계산' : part === 'queue' ? 'DB 큐' : part === 'transport' ? 'IPC/검증' : '결과 구성') : '').join('');
+          return `<div class="waterfall-row"><div class="row-label">${row.label}</div><div class="bar-track">${bars}</div><div class="row-value">${fmt(row.value)}ms</div></div>`;
+        }).join('');
+      }
+
+      function renderMetrics() {
+        const data = workloadData[workload];
+        const current = total(data.current);
+        const proposed = proposedTotal();
+        document.querySelector('#workload-description').textContent = data.description;
+        document.querySelector('#metric-node').innerHTML = `${fmt(data.node)}<small>ms</small>`;
+        document.querySelector('#metric-current').innerHTML = `${fmt(current)}<small>ms</small>`;
+        document.querySelector('#metric-proposed').innerHTML = `${fmt(proposed)}<small>ms</small>`;
+        document.querySelector('#delta-current').textContent = relativeText(data.node, current);
+        document.querySelector('#delta-proposed').textContent = relativeText(data.node, proposed);
+        const speedup = data.node / proposed;
+        document.querySelector('#speedup-formula').innerHTML = `${speedup.toFixed(2)}<small>× ${speedup >= 1 ? 'faster' : 'of Node speed'}</small>`;
+        document.querySelector('#formula-caption').textContent = `${fmt(data.node)}ms ÷ (${sliders.compute.value}ms compute + ${sliders.ipc.value}ms IPC + ${sliders.serialization.value}ms validation). 1~3× 개선은 Rust 자체보다 DB 큐를 우회할 때 가능한 범위입니다.`;
+        document.querySelector('#tradeoff-latency').textContent = `저지연 경로 ${fmt(proposed)}ms`;
+        const gapNode = Math.abs(data.node - proposed);
+        const direction = proposed <= data.node ? '빠르며' : '느리지만';
+        document.querySelector('#simulator-callout').innerHTML = `<strong>${fmt(proposed)}ms 예상.</strong> Node 인라인보다 약 ${fmt(gapNode)}ms ${direction}, DB 큐 경로보다 약 ${fmt(Math.max(0, current - proposed))}ms 짧습니다.`;
+        renderWaterfall();
+      }
+
+      function updateSliderLabels() {
+        Object.entries(sliders).forEach(([key, input]) => { document.querySelector(`#${key}-value`).textContent = `${input.value} ms`; });
+      }
+
+      Object.values(sliders).forEach((input) => input.addEventListener('input', () => {
+        document.querySelectorAll('[data-preset]').forEach((button) => button.classList.remove('active'));
+        updateSliderLabels();
+        renderMetrics();
+      }));
+
+      function applyPreset(name) {
+        const values = presets[workload][name];
+        sliders.compute.max = workload === 'optimization' ? 320 : 90;
+        Object.entries(values).forEach(([key, value]) => { sliders[key].value = value; });
+        document.querySelectorAll('[data-preset]').forEach((item) => item.classList.toggle('active', item.dataset.preset === name));
+        updateSliderLabels();
+        renderMetrics();
+      }
+
+      document.querySelectorAll('[data-preset]').forEach((button) => button.addEventListener('click', () => {
+        applyPreset(button.dataset.preset);
+      }));
+
+      document.querySelectorAll('[data-workload]').forEach((button) => button.addEventListener('click', () => {
+        workload = button.dataset.workload;
+        document.querySelectorAll('[data-workload]').forEach((item) => item.setAttribute('aria-selected', String(item === button)));
+        applyPreset('expected');
+      }));
+
+      document.querySelectorAll('[data-path]').forEach((button) => button.addEventListener('click', () => {
+        const selected = pathData[button.dataset.path];
+        document.querySelectorAll('[data-path]').forEach((item) => item.setAttribute('aria-selected', String(item === button)));
+        document.querySelector('#path-description').textContent = selected.description;
+        document.querySelector('#path-caption').innerHTML = `${icons.arrow} ${selected.caption}`;
+        const worker = document.querySelector('[data-node="worker"]');
+        worker.querySelector('strong').textContent = selected.worker[0];
+        worker.querySelector('small').innerHTML = selected.worker[1];
+        const response = document.querySelector('[data-node="response"]');
+        response.querySelector('strong').textContent = selected.response[0];
+        response.querySelector('small').innerHTML = selected.response[1];
+        document.querySelectorAll('[data-node]').forEach((node) => node.classList.toggle('dim', selected.dim.includes(node.dataset.node)));
+      }));
+
+      updateSliderLabels();
+      renderMetrics();
+    </script>
+  </body>
+</html>

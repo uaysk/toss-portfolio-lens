@@ -1,4 +1,9 @@
 node_modules
+worker/python/.venv
+worker/rust/target
+**/__pycache__
+**/.pytest_cache
+**/*.py[cod]
 dist
 .git
 .env
@@ -12,4 +17,7 @@ data
 .playwright-mcp
 playwright-report
 test-results
+secrets
+*.pem
+*.key
 토스증권 _ 거래 내역.html

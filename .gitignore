@@ -1,8 +1,15 @@
 node_modules
+worker/python/.venv
+worker/rust/target
+__pycache__/
+*.py[cod]
+.pytest_cache/
 dist
 .env
 .env.*
 !.env.example
+!.env.chatgpt.example
+secrets/
 *.log
 .DS_Store
 .idea

@@ -1,0 +1,14 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: toss-portfolio-lens
+  namespace: pg
+spec:
+  name: toss_portfolio_lens
+  owner: toss_portfolio_lens
+  cluster:
+    name: pg-prod-block
+  ensure: present
+  allowConnections: true
+  connectionLimit: 24
+  databaseReclaimPolicy: retain

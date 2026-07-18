@@ -298,8 +298,46 @@ export type PortfolioAnalysis = {
   };
 };
 
-export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually";
+export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually" | "threshold";
+export type BacktestCashFlowFrequency = "monthly" | "quarterly" | "annually";
+export type BacktestCashFlowTiming = "period_start" | "period_end";
+export type BacktestQuantityMode = "fractional" | "whole";
+export type BacktestCashFlowRebalanceMode = "target_weights" | "drift_reduction" | "full";
 export type BacktestBenchmarkKey = "NONE" | "KOSPI" | "KOSDAQ" | "NASDAQ100" | "SP500" | "CUSTOM";
+
+export type BacktestCustomCashFlow = {
+  date: string;
+  amount: number;
+  memo?: string;
+};
+
+export type BacktestExecutionPolicy = {
+  cashTargetPercent: number;
+  quantityMode: BacktestQuantityMode;
+  cashFlowRebalanceMode: BacktestCashFlowRebalanceMode;
+  tradeDatePolicy: "next_common_observation";
+  cashAnnualYieldPercent: number;
+};
+
+export type BacktestRunConfiguration = {
+  assets: Array<{ symbol: string; weight: number; lotSize?: number }>;
+  startDate: string;
+  endDate: string;
+  initialAmount: number;
+  monthlyCashFlow: number;
+  cashFlowFrequency: BacktestCashFlowFrequency;
+  cashFlowTiming: BacktestCashFlowTiming;
+  rebalanceFrequency: BacktestRebalanceFrequency;
+  rebalanceThresholdPercent?: number;
+  riskFreeRatePercent: number;
+  transactionCostBps: number;
+  currencyMode: "local" | "KRW";
+  baseCurrency: "KRW";
+  cashFlows: BacktestCustomCashFlow[];
+  execution: BacktestExecutionPolicy;
+  benchmark: BacktestBenchmarkKey;
+  benchmarkSymbol?: string;
+};
 
 export type BacktestComparableMetrics = {
   totalReturnPercent: number;
@@ -330,6 +368,7 @@ export type BacktestInstrument = {
 
 export type BacktestAsset = BacktestInstrument & {
   weight: number;
+  lotSize?: number;
   currentValueKrw?: number;
 };
 
@@ -477,23 +516,15 @@ export type BacktestAdvancedAnalytics = {
 };
 
 export type BacktestResult = {
+  runId?: string;
+  reused?: boolean;
   generatedAt: string;
   baseCurrency: "KRW";
-  currencyMethod: "LOCAL_RETURN";
+  currencyMethod: "KRW_FX_CONVERTED" | "LOCAL_RETURN";
   requestedStartDate: string;
   effectiveStartDate: string;
   endDate: string;
-  config: {
-    assets: Array<{ symbol: string; weight: number }>;
-    startDate: string;
-    endDate: string;
-    initialAmount: number;
-    monthlyCashFlow: number;
-    rebalanceFrequency: BacktestRebalanceFrequency;
-    riskFreeRatePercent?: number;
-    transactionCostBps?: number;
-    benchmark: BacktestBenchmarkKey;
-    benchmarkSymbol?: string;
+  config: BacktestRunConfiguration & {
     requestedStartDate: string;
     latestListDate: string;
     effectiveStartDate: string;
@@ -508,11 +539,20 @@ export type BacktestResult = {
     growth: number;
     benchmarkGrowth?: number;
     drawdownPercent: number;
+    cashBalance?: number;
+    investedBalance?: number;
+    unitPrice?: number;
   }>;
   metrics: BacktestComparableMetrics & {
     finalBalance: number;
     totalContributions: number;
     totalWithdrawals: number;
+    endingCashBalance?: number;
+    endingCashWeightPercent?: number;
+    investedBalance?: number;
+    totalTransactionCosts?: number;
+    netProfitLoss?: number;
+    moneyWeightedReturnPercent?: number | null;
   };
   benchmarkMetrics?: BacktestComparableMetrics;
   annualReturns: Array<{ year: number; returnPercent: number }>;
@@ -534,7 +574,54 @@ export type BacktestResult = {
     assets: Array<{ symbol: string; name: string }>;
     values: Array<Array<number | null>>;
   };
+  trades: Array<{
+    date: string;
+    symbol: string;
+    side: "BUY" | "SELL";
+    amount: number;
+    quantity: number;
+    price: number;
+    reason: string;
+    transactionCost?: number;
+    netCashImpact?: number;
+    trigger?: string;
+    lotSize?: number;
+  }>;
+  cashFlows?: Array<{
+    scheduledDate: string;
+    effectiveDate: string;
+    amount: number;
+    source: string;
+    memo?: string;
+  }>;
+  execution?: BacktestExecutionPolicy;
+  dataQuality: {
+    alignmentPolicy: "carry_forward_for_valuation";
+    commonReturnPolicy: "inner_join";
+    alignedValuationDays: number;
+    commonReturnObservations: number;
+    carryForwardByAsset: Array<{ symbol: string; count: number }>;
+    benchmarkCarryForwardCount: number;
+  };
   advanced?: BacktestAdvancedAnalytics;
+};
+
+export type AdvancedRunStatus = "queued" | "running" | "cancel_requested" | "cancelled" | "completed" | "failed";
+
+export type AdvancedRunSnapshot = {
+  runId: string;
+  kind: string;
+  status: AdvancedRunStatus;
+  progress: number;
+  completedCandidates: number;
+  totalCandidates: number;
+  currentValidationWindow?: string;
+  summary?: unknown;
+  result?: unknown;
+  resultExternalized?: boolean;
+  error?: unknown;
+  warnings: string[];
+  artifacts?: Array<{ type: string; rowCount: number; byteCount: number }>;
 };
 
 export type ReportStance = "strong" | "balanced" | "cautious" | "high-risk";

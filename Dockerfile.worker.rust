@@ -1,0 +1,20 @@
+FROM rust:1.97-bookworm AS build
+WORKDIR /build
+COPY worker/rust/Cargo.toml worker/rust/Cargo.lock ./
+COPY worker/rust/src ./src
+RUN cargo build --release --locked
+
+FROM debian:bookworm-slim AS runtime
+ENV RUST_BACKTRACE=1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 portfolio \
+    && useradd --uid 10001 --gid portfolio --no-create-home portfolio \
+    && mkdir -p /app/run \
+    && chown portfolio:portfolio /app/run
+COPY --from=build /build/target/release/portfolio-lens-worker /usr/local/bin/portfolio-lens-worker
+USER portfolio
+ENTRYPOINT ["portfolio-lens-worker"]
+CMD ["run"]
