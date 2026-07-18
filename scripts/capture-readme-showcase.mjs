@@ -9,6 +9,7 @@ const output = path.join(root, "docs", "readme");
 const port = Number.parseInt(process.env.README_CAPTURE_PORT || "4174", 10);
 const baseUrl = `http://127.0.0.1:${port}`;
 const views = ["overview", "backtest", "optimization"];
+const rustCaptures = ["rust-why", "rust-performance", "rust-architecture"];
 
 await mkdir(output, { recursive: true });
 
@@ -44,6 +45,11 @@ try {
     await page.goto(`${baseUrl}/readme-showcase?view=${view}`, { waitUntil: "networkidle" });
     await page.locator(`[data-showcase-view="${view}"]`).waitFor();
     await page.screenshot({ path: path.join(output, `${view}.png`), fullPage: false });
+  }
+  await page.goto(`${baseUrl}/docs/readme/rust-engine.html`, { waitUntil: "networkidle" });
+  await page.locator("html[data-ready='true']").waitFor();
+  for (const capture of rustCaptures) {
+    await page.locator(`[data-capture="${capture}"]`).screenshot({ path: path.join(output, `${capture}.png`) });
   }
 } finally {
   await browser?.close();

@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ko" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Toss Portfolio Lens Rust compute README capture source" />
+    <title>Portfolio Lens · Rust Compute</title>
+    <style>
+      :root {
+        --background: 0 0% 2%;
+        --foreground: 0 0% 96%;
+        --card: 0 0% 6%;
+        --card-foreground: 0 0% 96%;
+        --secondary: 0 0% 11%;
+        --secondary-foreground: 0 0% 92%;
+        --muted: 0 0% 9%;
+        --muted-foreground: 0 0% 48%;
+        --accent: 0 0% 15%;
+        --radius: 28px;
+        --sans: Inter, Pretendard, "Pretendard Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-width: 1440px; background: #000; color: hsl(var(--foreground)); }
+      body { font-family: var(--sans); font-feature-settings: "tnum" 1, "ss01" 1; -webkit-font-smoothing: antialiased; }
+      h1, h2, h3, p { margin: 0; }
+
+      .capture {
+        position: relative;
+        width: 1440px;
+        height: 900px;
+        overflow: hidden;
+        padding: 40px;
+        background:
+          radial-gradient(circle at 90% -10%, rgba(255,255,255,.075), transparent 420px),
+          #050505;
+      }
+      .capture + .capture { margin-top: 40px; }
+      .shell { height: 100%; padding: 34px 36px; border-radius: 38px; background: #0b0b0c; box-shadow: 0 28px 90px rgba(0,0,0,.5); }
+      .topbar { display: flex; align-items: center; justify-content: space-between; }
+      .brand { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 850; letter-spacing: -.03em; }
+      .brand-mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 14px; color: #09090b; background: #fafafa; font: 900 12px/1 var(--mono); }
+      .meta { display: flex; align-items: center; gap: 8px; color: #77777f; font: 700 9px/1 var(--mono); }
+      .meta span { padding: 9px 12px; border-radius: 999px; background: #151517; }
+      .eyebrow { color: #71717a; font: 800 10px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+      .title { max-width: 950px; margin-top: 17px; font-size: 48px; font-weight: 860; line-height: 1.02; letter-spacing: -.065em; }
+      .lede { max-width: 760px; margin-top: 16px; color: #7f7f87; font-size: 13px; line-height: 1.7; word-break: keep-all; }
+      .panel { border-radius: var(--radius); background: hsl(var(--card)); }
+      .soft { background: #111113; }
+      .light { color: #09090b; background: #f4f4f5; }
+      .label { color: #66666e; font: 800 9px/1 var(--mono); letter-spacing: .11em; text-transform: uppercase; }
+
+      /* Why Rust */
+      .why-hero { display: grid; grid-template-columns: 1.25fr .75fr; gap: 14px; margin-top: 31px; }
+      .why-statement { min-height: 286px; padding: 28px 30px; }
+      .why-statement h2 { max-width: 730px; margin-top: 38px; font-size: 44px; line-height: 1.02; letter-spacing: -.06em; }
+      .why-statement p { max-width: 690px; margin-top: 18px; color: #52525b; font-size: 12px; line-height: 1.65; }
+      .why-signal { padding: 27px; }
+      .signal-head { display: flex; align-items: center; justify-content: space-between; }
+      .signal-head strong { font-size: 12px; }
+      .signal-head span { padding: 7px 9px; border-radius: 999px; color: #a1a1aa; background: #202023; font: 750 8px/1 var(--mono); }
+      .signal-number { margin-top: 35px; font-size: 58px; font-weight: 900; line-height: .9; letter-spacing: -.075em; }
+      .signal-number small { margin-left: 8px; color: #71717a; font-size: 13px; letter-spacing: -.02em; }
+      .signal-copy { margin-top: 19px; color: #77777f; font-size: 11px; line-height: 1.6; }
+      .signal-row { display: flex; justify-content: space-between; margin-top: 21px; padding: 13px 14px; border-radius: 16px; background: #18181b; font-size: 9px; }
+      .signal-row span { color: #686870; }
+      .reason-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
+      .reason { min-height: 206px; padding: 22px; }
+      .reason-index { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 11px; color: #d4d4d8; background: #202023; font: 800 9px/1 var(--mono); }
+      .reason h3 { margin-top: 28px; font-size: 15px; letter-spacing: -.035em; }
+      .reason p { margin-top: 10px; color: #74747c; font-size: 10px; line-height: 1.65; word-break: keep-all; }
+      .reason code { display: inline-block; margin-top: 15px; color: #a1a1aa; font: 700 8px/1 var(--mono); }
+
+      /* Performance */
+      .performance-head { display: flex; align-items: end; justify-content: space-between; margin-top: 31px; }
+      .performance-head .title { max-width: 760px; }
+      .fixture { display: grid; grid-template-columns: repeat(3, auto); gap: 8px; }
+      .fixture div { min-width: 106px; padding: 12px 14px; border-radius: 16px; background: #141416; }
+      .fixture span { display: block; color: #626269; font: 750 8px/1 var(--mono); text-transform: uppercase; }
+      .fixture strong { display: block; margin-top: 7px; font-size: 10px; }
+      .performance-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; margin-top: 24px; }
+      .chart-panel { min-height: 480px; padding: 25px; }
+      .chart-head { display: flex; align-items: start; justify-content: space-between; }
+      .chart-head h3 { margin-top: 8px; font-size: 18px; letter-spacing: -.04em; }
+      .chart-head p { margin-top: 6px; color: #696971; font-size: 9px; }
+      .scale-badge { padding: 8px 10px; border-radius: 999px; color: #8b8b93; background: #1b1b1e; font: 750 8px/1 var(--mono); }
+      .bars { display: grid; gap: 14px; margin-top: 27px; }
+      .bar-row { display: grid; grid-template-columns: 145px minmax(0, 1fr) 118px; gap: 14px; align-items: center; }
+      .bar-name strong { display: block; font-size: 10px; }
+      .bar-name span { display: block; margin-top: 5px; color: #5f5f67; font: 650 8px/1 var(--mono); }
+      .bar-track { height: 30px; padding: 5px; border-radius: 11px; background: #171719; }
+      .bar-fill { height: 20px; min-width: 7px; border-radius: 7px; background: #55555d; }
+      .bar-row.rust .bar-fill { background: #f4f4f5; }
+      .bar-value { text-align: right; }
+      .bar-value strong { display: block; font: 850 12px/1 var(--mono); }
+      .bar-value span { display: block; margin-top: 5px; color: #66666e; font: 650 8px/1 var(--mono); }
+      .benchmark-note { margin-top: 24px; padding: 15px 17px; border-radius: 18px; color: #77777f; background: #171719; font-size: 9px; line-height: 1.6; }
+      .benchmark-note strong { color: #d4d4d8; }
+      .performance-side { display: grid; grid-template-rows: .9fr 1.1fr; gap: 14px; }
+      .speed-card { padding: 26px; }
+      .speed-card .value { margin-top: 28px; font-size: 63px; font-weight: 900; line-height: .85; letter-spacing: -.08em; }
+      .speed-card .value small { margin-left: 7px; color: #52525b; font-size: 16px; letter-spacing: -.02em; }
+      .speed-card p { margin-top: 20px; color: #52525b; font-size: 10px; line-height: 1.65; }
+      .truth-card { padding: 24px; }
+      .truth-card h3 { margin-top: 18px; font-size: 21px; letter-spacing: -.045em; }
+      .truth-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 21px; }
+      .truth-grid div { padding: 13px; border-radius: 15px; background: #18181b; }
+      .truth-grid span { display: block; color: #64646c; font: 700 8px/1 var(--mono); }
+      .truth-grid strong { display: block; margin-top: 8px; font: 850 11px/1 var(--mono); }
+      .truth-card p { margin-top: 17px; color: #6f6f77; font-size: 9px; line-height: 1.6; }
+
+      /* Architecture */
+      .architecture-head { display: grid; grid-template-columns: 1fr 430px; gap: 40px; align-items: end; margin-top: 28px; }
+      .architecture-head .title { max-width: 820px; }
+      .architecture-summary { padding: 18px 20px; }
+      .summary-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; font-size: 9px; }
+      .summary-row span { color: #64646c; }
+      .summary-row strong { font-family: var(--mono); font-size: 9px; }
+      .flow-panel { margin-top: 23px; padding: 25px; }
+      .flow-title { display: flex; align-items: center; justify-content: space-between; }
+      .flow-title h3 { font-size: 14px; }
+      .flow-title span { color: #66666e; font: 700 8px/1 var(--mono); }
+      .flow { display: grid; grid-template-columns: 1fr 46px 1.25fr 46px .8fr 46px 1.2fr 46px 1fr; align-items: center; margin-top: 22px; }
+      .node { min-height: 163px; padding: 19px; border-radius: 22px; background: #18181b; }
+      .node.rust { color: #09090b; background: #f4f4f5; }
+      .node-index { display: grid; width: 29px; height: 29px; place-items: center; border-radius: 10px; color: #a1a1aa; background: #27272a; font: 800 8px/1 var(--mono); }
+      .node.rust .node-index { color: #fafafa; background: #18181b; }
+      .node h4 { margin: 24px 0 0; font-size: 12px; letter-spacing: -.03em; }
+      .node p { margin-top: 8px; color: #6f6f77; font-size: 9px; line-height: 1.55; }
+      .node.rust p { color: #52525b; }
+      .node code { display: block; margin-top: 12px; color: #8b8b93; font: 700 8px/1.3 var(--mono); }
+      .node.rust code { color: #3f3f46; }
+      .arrow { position: relative; height: 1px; background: #35353a; }
+      .arrow::after { content: ""; position: absolute; right: -1px; top: -3px; width: 7px; height: 7px; border-top: 1px solid #71717a; border-right: 1px solid #71717a; transform: rotate(45deg); }
+      .durable { display: grid; grid-template-columns: 1.2fr 42px 1fr 42px 1.15fr 42px 1fr; align-items: center; gap: 0; margin-top: 13px; }
+      .durable .node { min-height: 112px; padding: 16px 18px; }
+      .durable .node h4 { margin-top: 17px; }
+      .durable .node p { margin-top: 6px; }
+      .responsibility-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin-top: 13px; }
+      .responsibility { padding: 18px; border-radius: 21px; background: #121214; }
+      .responsibility strong { display: block; font-size: 11px; }
+      .responsibility p { margin-top: 8px; color: #66666e; font-size: 9px; line-height: 1.55; }
+      .responsibility code { display: block; margin-top: 11px; color: #8b8b93; font: 700 8px/1 var(--mono); }
+    </style>
+  </head>
+  <body>
+    <section class="capture" data-capture="rust-why">
+      <div class="shell">
+        <div class="topbar">
+          <div class="brand"><span class="brand-mark">PL</span>Portfolio Lens</div>
+          <div class="meta"><span>RUST COMPUTE</span><span>README EVIDENCE</span></div>
+        </div>
+        <div class="why-hero">
+          <article class="why-statement light panel">
+            <div class="eyebrow">Why Rust · engineering decision</div>
+            <h2>속도 하나가 아니라<br />정확한 계산 경계를 위해.</h2>
+            <p>웹과 MCP는 Node.js의 생산성을 유지하고, 현금·수량·비용·환율을 다루는 ledger와 반복 후보 탐색만 Rust로 분리했습니다.</p>
+          </article>
+          <aside class="why-signal panel soft">
+            <div class="signal-head"><strong>가장 큰 실측 이점</strong><span>OPTIMIZATION · P50</span></div>
+            <div class="signal-number">49.521×<small>UDS 포함</small></div>
+            <p class="signal-copy">Node stringify부터 Rust 계산과 결과 parse까지 포함해도 반복 최적화 fixture에서 약 49.5배 빠릅니다.</p>
+            <div class="signal-row"><span>Backtest UDS</span><strong>77.080 ms · 속도보다 격리</strong></div>
+          </aside>
+        </div>
+        <div class="reason-grid">
+          <article class="reason panel"><span class="reason-index">01</span><h3>기능 완전 ledger</h3><p>환율, 거래비용, 현금 목표, 정수 수량, 현금흐름과 XIRR을 하나의 결정적 경로에서 계산합니다.</p><code>cash · cost · FX · XIRR</code></article>
+          <article class="reason panel"><span class="reason-index">02</span><h3>병렬 후보 평가</h3><p>최적화 후보와 Monte Carlo 경로를 Rayon으로 병렬화해 반복량이 커질수록 처리량을 높입니다.</p><code>Rayon · deterministic seed</code></article>
+          <article class="reason panel"><span class="reason-index">03</span><h3>Node event-loop 격리</h3><p>HTTP, 인증과 MCP 응답이 CPU 계산에 막히지 않도록 별도 프로세스와 자원 경계로 분리합니다.</p><code>thin control plane</code></article>
+          <article class="reason panel"><span class="reason-index">04</span><h3>두 실행 경로</h3><p>대화형 요청은 persistent UDS, 내구성 작업은 PostgreSQL lease·heartbeat queue를 사용합니다.</p><code>UDS · durable queue</code></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="capture" data-capture="rust-performance">
+      <div class="shell">
+        <div class="topbar">
+          <div class="brand"><span class="brand-mark">PL</span>Portfolio Lens</div>
+          <div class="meta"><span>MEASURED · NOT ESTIMATED</span><span>P50</span></div>
+        </div>
+        <div class="performance-head">
+          <div><div class="eyebrow">Runtime comparison</div><h2 class="title">반복 탐색에서 선명해지는 차이</h2><p class="lede">같은 결정적 fixture를 warm-up 뒤 측정했습니다. 전체 앱이 아니라 계산과 UDS 왕복 경로의 비교입니다.</p></div>
+          <div class="fixture"><div><span>Period</span><strong>1,260 days</strong></div><div><span>Assets</span><strong>8 assets</strong></div><div><span>Budget</span><strong>1,000 candidates</strong></div></div>
+        </div>
+        <div class="performance-grid">
+          <article class="chart-panel panel">
+            <div class="chart-head"><div><span class="label">Optimization latency</span><h3>Node · Python · Rust</h3><p>낮을수록 빠름 · exact p50</p></div><span class="scale-badge">LOG SCALE</span></div>
+            <div class="bars" id="optimization-bars"></div>
+            <div class="benchmark-note"><strong>UDS end-to-end</strong>는 Node JSON encode → length-prefixed socket → Rust decode / compute / encode → Node parse를 모두 포함합니다.</div>
+          </article>
+          <aside class="performance-side">
+            <article class="speed-card panel light"><span class="label">Optimization compute</span><div class="value">64.589×<small>vs Node</small></div><p>Rust 90.999ms · Node 5,877.547ms. 병렬 후보 평가가 언어와 프로세스 경계 비용을 압도합니다.</p></article>
+            <article class="truth-card panel"><span class="label">Backtest reality check</span><h3>단일 백테스트는 동률 수준</h3><div class="truth-grid"><div><span>NODE</span><strong>41.372 ms</strong></div><div><span>RUST</span><strong>41.050 ms</strong></div><div><span>RUST UDS</span><strong>77.080 ms</strong></div></div><p>Rust compute는 약 0.8% 빠르지만 UDS까지 포함하면 Node 계산보다 느립니다. 이 경로의 가치는 기능 완전성, 재현성과 event-loop 격리입니다.</p></article>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="capture" data-capture="rust-architecture">
+      <div class="shell">
+        <div class="topbar">
+          <div class="brand"><span class="brand-mark">PL</span>Portfolio Lens</div>
+          <div class="meta"><span>THIN NODE</span><span>RUST DOMAIN CORE</span></div>
+        </div>
+        <div class="architecture-head">
+          <div><div class="eyebrow">Internal architecture</div><h2 class="title">Node는 조율하고,<br />Rust는 계산합니다.</h2><p class="lede">시세와 인증 secret은 control plane에 남고 Rust worker에는 정규화된 계산 payload만 전달됩니다.</p></div>
+          <aside class="architecture-summary panel"><div class="summary-row"><span>Interactive</span><strong>persistent UDS</strong></div><div class="summary-row"><span>Durable</span><strong>PostgreSQL queue</strong></div><div class="summary-row"><span>Frame</span><strong>4-byte length + JSON</strong></div><div class="summary-row"><span>Identity</span><strong>engine · run · revision · hash</strong></div></aside>
+        </div>
+        <article class="flow-panel panel">
+          <div class="flow-title"><h3>저지연 UDS 경로</h3><span>REQUEST → VERIFIED RESULT</span></div>
+          <div class="flow">
+            <div class="node"><span class="node-index">01</span><h4>Web UI · MCP</h4><p>사용자 요청과 OAuth scope</p><code>HTTP / JSON-RPC</code></div><i class="arrow"></i>
+            <div class="node"><span class="node-index">02</span><h4>Node control plane</h4><p>인증, Zod 검증, 가격·환율 준비, cache와 audit</p><code>Express · services</code></div><i class="arrow"></i>
+            <div class="node"><span class="node-index">03</span><h4>IPC frame</h4><p>길이와 요청 identity</p><code>UDS · JSON v2</code></div><i class="arrow"></i>
+            <div class="node rust"><span class="node-index">04</span><h4>Rust compute</h4><p>ledger, optimization, batch, Monte Carlo</p><code>Rayon · deterministic</code></div><i class="arrow"></i>
+            <div class="node"><span class="node-index">05</span><h4>Result envelope</h4><p>요약, 경고, artifact와 검증된 identity</p><code>parse · persist</code></div>
+          </div>
+        </article>
+        <div class="durable">
+          <div class="node"><span class="label">Long-running request</span><h4>Node enqueue</h4><p>immutable input artifact + checksum</p></div><i class="arrow"></i>
+          <div class="node"><span class="label">PostgreSQL</span><h4>Durable queue</h4><p>lease · heartbeat · fencing</p></div><i class="arrow"></i>
+          <div class="node rust"><span class="label">External compute</span><h4>Rust worker</h4><p>claim · compute · recovery</p></div><i class="arrow"></i>
+          <div class="node"><span class="label">Persistent state</span><h4>Run · artifact</h4><p>status · result · audit</p></div>
+        </div>
+        <div class="responsibility-grid">
+          <article class="responsibility"><strong>Secret boundary</strong><p>Rust worker에는 Toss OAuth와 보고서 자격증명을 전달하지 않습니다.</p><code>least privilege</code></article>
+          <article class="responsibility"><strong>Numeric contract</strong><p>Node/Rust parity fixture와 고정 seed로 결과 재현성을 검증합니다.</p><code>schema · engine version</code></article>
+          <article class="responsibility"><strong>Rollback path</strong><p>명시적 inline 모드를 남겨 worker 장애 시 계산 경로만 되돌릴 수 있습니다.</p><code>EXECUTION_MODE=inline</code></article>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      const optimization = [
+        { name: "Node.js compute", note: "legacy inline", value: 5877.547, ratio: "1.000×", rust: false },
+        { name: "Python compute", note: "worker compute", value: 210.928, ratio: "27.866×", rust: false },
+        { name: "Rust UDS", note: "end-to-end", value: 118.688, ratio: "49.521×", rust: true },
+        { name: "Rust compute", note: "Rayon", value: 90.999, ratio: "64.589×", rust: true },
+      ];
+      const minimum = Math.log10(Math.min(...optimization.map((item) => item.value)));
+      const maximum = Math.log10(Math.max(...optimization.map((item) => item.value)));
+      document.querySelector("#optimization-bars").innerHTML = optimization.map((item) => {
+        const width = 12 + ((Math.log10(item.value) - minimum) / (maximum - minimum)) * 88;
+        return `<div class="bar-row ${item.rust ? "rust" : ""}">
+          <div class="bar-name"><strong>${item.name}</strong><span>${item.note}</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
+          <div class="bar-value"><strong>${item.value.toLocaleString("en-US", { minimumFractionDigits: 3 })} ms</strong><span>${item.ratio} faster</span></div>
+        </div>`;
+      }).join("");
+      document.documentElement.dataset.ready = "true";
+    </script>
+  </body>
+</html>
