@@ -49,6 +49,7 @@ import { ArtifactRepository } from "./repositories/artifact-repository.js";
 import { OptimizationRepository } from "./repositories/optimization-repository.js";
 import { ReportRepository } from "./repositories/report-repository.js";
 import { RunRepository } from "./repositories/run-repository.js";
+import { PresetRepository } from "./repositories/preset-repository.js";
 import { RunJobRepository } from "./repositories/run-job-repository.js";
 import { McpAuditRepository } from "./repositories/mcp-audit-repository.js";
 import { AnalyticsService } from "./services/analytics-service.js";
@@ -60,6 +61,8 @@ import { PortfolioService } from "./services/portfolio-service.js";
 import { ReportService } from "./services/report-service.js";
 import { ReturnSeriesService } from "./services/return-series-service.js";
 import { RunService } from "./services/run-service.js";
+import { PresetService } from "./services/preset-service.js";
+import { ResearchReportService } from "./services/research-report-service.js";
 import { McpResourceRegistry } from "./mcp/resources.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
@@ -70,7 +73,12 @@ import {
   dashboardAnalysisError,
   parseDashboardRunId,
 } from "./dashboard-analysis.js";
-import type { ArtifactType } from "./repositories/artifact-repository.js";
+import { ARTIFACT_TYPES, type ArtifactType } from "./repositories/artifact-repository.js";
+import { buildInfo } from "./build-info.js";
+import { createToolHandlers } from "./mcp/tools/handlers.js";
+import { toolSchemas, type ToolName } from "./mcp/schemas.js";
+import { ServiceError } from "./services/service-envelope.js";
+import { enforceToolRequestLimits } from "./services/tool-request-limits.js";
 
 const config = loadConfig();
 const eventLoopLag = new EventLoopLagMonitor();
@@ -106,12 +114,15 @@ let mcpAuditCleanupTimer: NodeJS.Timeout | undefined;
 
 const database = historyStore.relationalDatabase;
 const runRepository = new RunRepository(database);
+const presetRepository = new PresetRepository(database);
 const artifactRepository = new ArtifactRepository(database);
 const optimizationRepository = new OptimizationRepository(database);
 const reportRepository = new ReportRepository(database);
 const runJobRepository = database.dialect === "postgres" ? new RunJobRepository(database) : undefined;
 const mcpAuditRepository = new McpAuditRepository(database);
 await runRepository.initialize();
+const presetService = new PresetService(presetRepository);
+await presetService.initialize();
 await artifactRepository.initialize();
 await optimizationRepository.initialize();
 await reportRepository.initialize();
@@ -160,6 +171,7 @@ const instrumentService = new InstrumentService(marketData);
 const returnSeries = new ReturnSeriesService(marketData);
 const analytics = new AnalyticsService(returnSeries, marketData);
 const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
+const researchReportService = new ResearchReportService();
 const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
 const computeToolDependencies = {
   instruments: instrumentService,
@@ -172,6 +184,9 @@ const computeToolDependencies = {
   artifacts: artifactService,
   portfolio: portfolioService,
   reports: reportService,
+  runRepository,
+  presets: presetService,
+  researchReports: researchReportService,
   optimizationRepository,
   resources,
   rustCompute,
@@ -241,6 +256,8 @@ app.disable("x-powered-by");
 const portfolioComputeJson = express.json({ limit: "1mb" });
 app.use("/api/portfolio/backtest", portfolioComputeJson);
 app.use("/api/portfolio/advanced", portfolioComputeJson);
+app.use("/api/portfolio/presets", portfolioComputeJson);
+app.use("/api/portfolio/tools", portfolioComputeJson);
 app.use("/api/reports/backtest", portfolioComputeJson);
 app.use(express.json({ limit: "16kb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
@@ -305,6 +322,7 @@ app.get("/api/health", (_request, response) => {
     mcpAuth: !config.mcp.enabled
       ? "disabled"
       : config.mcp.authMode === "oauth" ? "oauth" : "local-none",
+    build: buildInfo(),
     compute: {
       executionMode: config.compute.executionMode,
       rustSocket: config.compute.executionMode === "rust_socket" ? config.compute.rustSocketPath : undefined,
@@ -772,23 +790,23 @@ app.post("/api/portfolio/backtest", requireSession, async (request, response) =>
   setNoStore(response);
   const payload = parseBacktestPayload(request.body);
   try {
-    const completed = await backtests.runRawWithMetadata({ ownerSubject: "dashboard-http", request: payload });
+    const completed = await backtests.runRawWithMetadata({ ownerSubject: "owner", request: payload });
     response.json({ ...completed.result, runId: completed.runId, reused: completed.reused });
   } catch (error) {
     backtestError(response, error);
   }
 });
 
-const DASHBOARD_RUN_OWNER = "dashboard-http";
-const dashboardArtifactTypes = new Set<ArtifactType>([
-  "equity", "drawdown", "holdings", "trades", "rolling", "correlation", "risk-contribution",
-  "monthly-returns", "cash-ledger", "cash-flows", "candidates", "walk-forward", "worker-pareto-frontier",
-  "scenario-comparison", "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths",
-  "worker-metrics", "result",
-]);
+const DASHBOARD_RUN_OWNER = "owner";
+const dashboardManagementHandlers = createToolHandlers(computeToolDependencies);
+const dashboardArtifactTypes = new Set<ArtifactType>(ARTIFACT_TYPES);
 
 function sendDashboardAnalysisError(response: Response, error: unknown): void {
   const adapted = dashboardAnalysisError(error);
+  if (error instanceof ServiceError) {
+    if (["PRESET_NOT_FOUND", "CANDIDATE_NOT_FOUND"].includes(error.detail.code)) adapted.status = 404;
+    if (["PRESET_REVISION_CONFLICT", "RUN_NOT_TERMINAL", "RUN_ALREADY_ACTIVE"].includes(error.detail.code)) adapted.status = 409;
+  }
   if (adapted.status >= 500) {
     console.error("[dashboard-analysis]", error instanceof Error ? error.message : error);
   }
@@ -919,6 +937,235 @@ app.get("/api/portfolio/advanced/resources/market/:requestHash", requireSession,
   response.json({ descriptor: stored.descriptor, data: stored.content });
 });
 
+function queryValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(queryValues);
+  return typeof value === "string" ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function queryValue(value: unknown): string | undefined {
+  return queryValues(value)[0];
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+async function executeDashboardManagement(name: ToolName, input: unknown): Promise<unknown> {
+  const parsed = toolSchemas[name].parse(input);
+  enforceToolRequestLimits(parsed, computeToolDependencies);
+  return dashboardManagementHandlers[name](parsed, DASHBOARD_RUN_OWNER);
+}
+
+app.post("/api/portfolio/tools/:toolName", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const name = String(request.params.toolName ?? "");
+    if (!Object.hasOwn(toolSchemas, name)) {
+      response.status(404).json({ error: { code: "TOOL_NOT_FOUND", message: "지원하지 않는 portfolio 도구입니다." } });
+      return;
+    }
+    const result = await executeDashboardManagement(name as ToolName, request.body);
+    const status = objectValue(objectValue(result).result).status;
+    response.status(typeof status === "string" && ["queued", "running", "cancel_requested"].includes(status) ? 202 : 200).json(result);
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/runs", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const archivedQuery = queryValue(request.query.archived);
+    const archived = archivedQuery === "true" || archivedQuery === "archived"
+      ? "archived"
+      : archivedQuery === "all" ? "all" : "active";
+    response.json(await executeDashboardManagement("list_runs", {
+      ...(queryValue(request.query.query) ? { query: queryValue(request.query.query) } : {}),
+      kinds: [...queryValues(request.query.kind), ...queryValues(request.query.kinds)],
+      statuses: [...queryValues(request.query.status), ...queryValues(request.query.statuses)],
+      tags: [...queryValues(request.query.tag), ...queryValues(request.query.tags)],
+      archived,
+      ...(queryValue(request.query.cursor) ? { cursor: queryValue(request.query.cursor) } : {}),
+      limit: Number(queryValue(request.query.limit) ?? 25),
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.patch("/api/portfolio/runs/:runId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("update_run", {
+      ...objectValue(request.body),
+      runId: request.params.runId,
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.delete("/api/portfolio/runs/:runId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("delete_run", { runId: request.params.runId }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/runs/:runId/duplicate", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.status(201).json(await executeDashboardManagement("duplicate_run", {
+      ...objectValue(request.body),
+      runId: request.params.runId,
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/runs/:runId/rerun", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const result = await executeDashboardManagement("rerun_run", { runId: request.params.runId });
+    const run = objectValue(objectValue(result).result).run;
+    const status = objectValue(run).status;
+    response.status(typeof status === "string" && ["queued", "running", "cancel_requested"].includes(status) ? 202 : 200).json(result);
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/runs/:runId/events", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("get_run_events", {
+      runId: request.params.runId,
+      ...(queryValue(request.query.cursor) ? { cursor: queryValue(request.query.cursor) } : {}),
+      limit: Number(queryValue(request.query.limit) ?? 100),
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/runs/:runId/manifest", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("export_run_manifest", { runId: request.params.runId }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/presets", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("list_portfolio_presets", {
+      ...(queryValue(request.query.query) ? { query: queryValue(request.query.query) } : {}),
+      tags: [...queryValues(request.query.tag), ...queryValues(request.query.tags)],
+      ...(queryValue(request.query.cursor) ? { cursor: queryValue(request.query.cursor) } : {}),
+      limit: Number(queryValue(request.query.limit) ?? 25),
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/presets", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.status(201).json(await executeDashboardManagement("create_portfolio_preset", request.body));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/presets/import", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const body = objectValue(request.body);
+    response.status(201).json(await executeDashboardManagement("import_portfolio_presets", {
+      document: body.document,
+      conflictMode: body.conflictMode ?? "rename",
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/presets/:presetId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("get_portfolio_preset", {
+      presetId: request.params.presetId,
+      includeHistory: queryValue(request.query.includeHistory) === "true",
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/presets/:presetId/history", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("get_portfolio_preset", {
+      presetId: request.params.presetId,
+      includeHistory: true,
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.patch("/api/portfolio/presets/:presetId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const body = objectValue(request.body);
+    response.json(await executeDashboardManagement("update_portfolio_preset", {
+      ...body,
+      presetId: request.params.presetId,
+      revision: body.revision ?? body.version,
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.delete("/api/portfolio/presets/:presetId", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.json(await executeDashboardManagement("delete_portfolio_preset", { presetId: request.params.presetId }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.post("/api/portfolio/presets/:presetId/duplicate", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    response.status(201).json(await executeDashboardManagement("duplicate_portfolio_preset", {
+      ...objectValue(request.body),
+      presetId: request.params.presetId,
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
+app.get("/api/portfolio/presets/:presetId/export", requireSession, async (request, response) => {
+  setNoStore(response);
+  try {
+    const output = objectValue(await executeDashboardManagement("export_portfolio_preset", { presetId: request.params.presetId }));
+    const document = objectValue(output.result).document;
+    response.json(document);
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
+
 function parseBacktestPayload(value: unknown): BacktestRunRequest {
   const body = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const assets: BacktestAssetInput[] = Array.isArray(body.assets)
@@ -928,6 +1175,9 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
           symbol: typeof item.symbol === "string" ? item.symbol : "",
           weight: typeof item.weight === "number" ? item.weight : Number.NaN,
           ...(typeof item.lotSize === "number" ? { lotSize: item.lotSize } : {}),
+          ...(typeof item.delistDate === "string" ? { delistDate: item.delistDate } : {}),
+          ...(typeof item.universeMemberFrom === "string" ? { universeMemberFrom: item.universeMemberFrom } : {}),
+          ...(typeof item.universeMemberTo === "string" ? { universeMemberTo: item.universeMemberTo } : {}),
         };
       })
     : [];
@@ -959,6 +1209,22 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
         ...(typeof flow.memo === "string" ? { memo: flow.memo } : {}),
       };
     }) : [],
+    targetWeightSchedule: Array.isArray(body.targetWeightSchedule) ? body.targetWeightSchedule.map((value) => {
+      const entry = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      const rawWeights = entry.weights && typeof entry.weights === "object" && !Array.isArray(entry.weights)
+        ? entry.weights as Record<string, unknown>
+        : {};
+      return {
+        date: typeof entry.date === "string" ? entry.date : "",
+        weights: Object.fromEntries(Object.entries(rawWeights).map(([symbol, weight]) => [
+          symbol,
+          typeof weight === "number" ? weight : Number.NaN,
+        ])),
+        cashTargetPercent: typeof entry.cashTargetPercent === "number" ? entry.cashTargetPercent : 0,
+        ...(typeof entry.regime === "string" ? { regime: entry.regime } : {}),
+        ...(typeof entry.action === "string" ? { action: entry.action } : {}),
+      };
+    }) : [],
     execution: body.execution && typeof body.execution === "object" ? {
       cashTargetPercent: typeof (body.execution as Record<string, unknown>).cashTargetPercent === "number"
         ? Number((body.execution as Record<string, unknown>).cashTargetPercent) : 0,
@@ -969,6 +1235,9 @@ function parseBacktestPayload(value: unknown): BacktestRunRequest {
       cashAnnualYieldPercent: typeof (body.execution as Record<string, unknown>).cashAnnualYieldPercent === "number"
         ? Number((body.execution as Record<string, unknown>).cashAnnualYieldPercent) : 0,
     } : undefined,
+    ...(body.realism && typeof body.realism === "object" && !Array.isArray(body.realism)
+      ? { realism: body.realism as BacktestRunRequest["realism"] }
+      : {}),
     benchmark: typeof body.benchmark === "string" ? body.benchmark as BacktestBenchmarkKey : "NONE",
     ...(typeof body.benchmarkSymbol === "string" ? { benchmarkSymbol: body.benchmarkSymbol } : {}),
   };
@@ -1034,7 +1303,7 @@ app.post("/api/reports/portfolio-analysis", requireSession, async (request, resp
 app.post("/api/reports/backtest", requireSession, async (request, response) => {
   setNoStore(response);
   try {
-    const result = await backtests.runRaw({ ownerSubject: "dashboard-report", request: parseBacktestPayload(request.body) });
+    const result = await backtests.runRaw({ ownerSubject: "owner", request: parseBacktestPayload(request.body) });
     const report = await portfolioReports.createBacktest(result);
     response.status(201).json({
       id: report.id,

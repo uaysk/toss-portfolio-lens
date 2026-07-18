@@ -87,4 +87,83 @@ describe("portfolio optimization regressions", () => {
       expect(window.testCount).toBe(5);
     }
   });
+
+  it("rolling·anchored fold에 gap·embargo·fold cap을 동일하게 적용한다", () => {
+    const rolling = buildWalkForwardWindows(240, {
+      mode: "walk_forward",
+      windowMode: "rolling",
+      trainWindow: 60,
+      testWindow: 20,
+      step: 10,
+      foldCount: 4,
+      gap: 3,
+      embargo: 5,
+    });
+    expect(rolling).toHaveLength(4);
+    expect(rolling.map((fold) => fold.trainStartIndex)).toEqual([0, 25, 50, 75]);
+    for (const [index, fold] of rolling.entries()) {
+      expect(fold.testStartIndex).toBe(fold.trainEndIndex + 1 + 3);
+      if (index > 0) expect(fold.testStartIndex).toBeGreaterThanOrEqual(rolling[index - 1]!.testEndIndex + 1 + 5);
+    }
+
+    const anchored = buildWalkForwardWindows(240, {
+      mode: "walk_forward",
+      windowMode: "anchored",
+      trainWindow: 60,
+      testWindow: 20,
+      step: 10,
+      foldCount: 4,
+      gap: 3,
+      embargo: 5,
+    });
+    expect(anchored).toHaveLength(4);
+    expect(anchored.every((fold) => fold.trainStartIndex === 0)).toBe(true);
+    expect(anchored[1]!.trainCount).toBeGreaterThan(anchored[0]!.trainCount);
+  });
+
+  it("기존 fraction holdout을 유지하고 다중 OOS fold 구성요소·coverage를 공개한다", () => {
+    const holdout = buildWalkForwardWindows(100, {
+      mode: "holdout",
+      trainFraction: 0.75,
+      testFraction: 0.2,
+      gap: 3,
+      minimumTrainObservations: 20,
+      minimumTestObservations: 5,
+    });
+    expect(holdout).toHaveLength(1);
+    expect(holdout[0]).toMatchObject({ mode: "holdout", trainCount: 75, testCount: 20, gap: 3 });
+    expect(holdout[0]!.testStartIndex - holdout[0]!.trainEndIndex - 1).toBe(3);
+
+    const result = optimizePortfolio({
+      priceSeries: [series("A", 0.001, 0), series("B", 0.0005, 1), series("C", 0.0008, 2)],
+      constraints: { minWeight: 0, maxWeight: 0.8, maxAssets: 3 },
+      seed: 12345,
+      candidateBudget: 20,
+      minimumSamples: 5,
+      walkForwardConfig: {
+        mode: "walk_forward",
+        windowMode: "anchored",
+        trainWindow: 30,
+        testWindow: 10,
+        step: 10,
+        foldCount: 4,
+        gap: 2,
+        embargo: 3,
+      },
+    });
+    expect(result.candidates.length).toBeGreaterThan(0);
+    for (const candidate of result.candidates) {
+      expect(candidate.sampleCount).toBe(30);
+      expect(candidate.walkForwardSignal).toMatchObject({
+        mode: "walk_forward",
+        windowMode: "anchored",
+        foldCount: 4,
+        scoredFoldCount: 4,
+      });
+      expect(candidate.walkForwardTestCoverage).toBeCloseTo(40 / 89);
+      expect(candidate.robustScoreDetail).toMatchObject({
+        validation: { mode: "walk_forward", windowMode: "anchored", foldCount: 4, scoredFoldCount: 4 },
+      });
+    }
+  });
 });

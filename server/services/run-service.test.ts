@@ -47,6 +47,30 @@ describe("RunService persistence and cancellation", () => {
     expect(secondTask).not.toHaveBeenCalled();
   });
 
+  it("중첩된 outlook·Walk-forward·Monte Carlo seed를 manifest에 모두 고정한다", async () => {
+    const { service } = await setup();
+    const created = await service.create({
+      ownerSubject: "owner",
+      kind: "outlook",
+      config: {
+        optimization: { seed: 11 },
+        walkForward: { seeds: [12, 13] },
+        monteCarlo: { seed: 14 },
+      },
+      dataRevision: "revision-seeds",
+    });
+    expect(created.manifest).toMatchObject({
+      reproducibility: {
+        seed: null,
+        seed_configuration: {
+          "optimization.seed": 11,
+          "walkForward.seeds": [12, 13],
+          "monteCarlo.seed": 14,
+        },
+      },
+    });
+  });
+
   it("실행 중 취소 요청을 확인하고 이미 저장된 상태를 cancelled로 보존한다", async () => {
     const { service } = await setup();
     let release!: () => void;
@@ -97,6 +121,114 @@ describe("RunService persistence and cancellation", () => {
     expect(stored).toMatchObject({ status: "completed", summary: { retried: true }, result: { ok: true } });
     expect(stored?.error).toBeUndefined();
     expect(retryTask).toHaveBeenCalledOnce();
+  });
+
+  it("실행 중 취소 요청을 task AbortSignal에 즉시 전달한다", async () => {
+    const { service } = await setup();
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    let observedSignal: AbortSignal | undefined;
+    const queued = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 2 },
+      dataRevision: "revision-2",
+      totalCandidates: 100_000,
+      task: async (context) => {
+        observedSignal = context.signal;
+        started();
+        await new Promise<never>((_resolve, reject) => {
+          const rejectFromSignal = () => reject(context.signal.reason);
+          if (context.signal.aborted) rejectFromSignal();
+          else context.signal.addEventListener("abort", rejectFromSignal, { once: true });
+        });
+      },
+    });
+    await startedPromise;
+
+    expect(await service.cancel(queued.run.id, "owner")).toBe(true);
+    expect(observedSignal?.aborted).toBe(true);
+
+    let stored = await service.get(queued.run.id, "owner");
+    for (let attempt = 0; attempt < 50 && stored?.status !== "cancelled"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      stored = await service.get(queued.run.id, "owner");
+    }
+    expect(stored).toMatchObject({ status: "cancelled", summary: { cancelled: true } });
+  });
+
+  it("queue에서 꺼낸 직후 markRunning 전 취소해도 task를 시작하지 않고 cancelled로 끝낸다", async () => {
+    const { runs, service } = await setup();
+    let enteredMarkRunning!: () => void;
+    let releaseMarkRunning!: () => void;
+    const markRunningEntered = new Promise<void>((resolve) => { enteredMarkRunning = resolve; });
+    const markRunningReleased = new Promise<void>((resolve) => { releaseMarkRunning = resolve; });
+    const originalMarkRunning = runs.markRunning.bind(runs);
+    vi.spyOn(runs, "markRunning").mockImplementation(async (id, now) => {
+      enteredMarkRunning();
+      await markRunningReleased;
+      return originalMarkRunning(id, now);
+    });
+    const task = vi.fn().mockResolvedValue({ summary: {}, result: {} });
+    const queued = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 3 },
+      dataRevision: "revision-3",
+      task,
+    });
+
+    await markRunningEntered;
+    expect(await service.cancel(queued.run.id, "owner")).toBe(true);
+    releaseMarkRunning();
+
+    let stored = await service.get(queued.run.id, "owner");
+    for (let attempt = 0; attempt < 50 && stored?.status !== "cancelled"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      stored = await service.get(queued.run.id, "owner");
+    }
+    expect(stored).toMatchObject({ status: "cancelled", summary: { cancelled: true } });
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it("artifact 저장 후 complete 직전 취소해도 completed로 덮어쓰지 않는다", async () => {
+    const { runs, artifacts, service } = await setup();
+    let enteredComplete!: () => void;
+    let releaseComplete!: () => void;
+    const completeEntered = new Promise<void>((resolve) => { enteredComplete = resolve; });
+    const completeReleased = new Promise<void>((resolve) => { releaseComplete = resolve; });
+    const originalComplete = runs.complete.bind(runs);
+    vi.spyOn(runs, "complete").mockImplementation(async (...args) => {
+      enteredComplete();
+      await completeReleased;
+      return originalComplete(...args);
+    });
+    const queued = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 4 },
+      dataRevision: "revision-4",
+      task: async () => ({
+        summary: { candidateCount: 1 },
+        result: { ok: true },
+        artifacts: [{ type: "result", content: { ok: true } }],
+      }),
+    });
+
+    await completeEntered;
+    expect(await artifacts.get(queued.run.id, "result")).toMatchObject({ content: { ok: true } });
+    expect(await service.cancel(queued.run.id, "owner")).toBe(true);
+    releaseComplete();
+
+    let stored = await service.get(queued.run.id, "owner");
+    for (let attempt = 0; attempt < 50 && stored?.status !== "cancelled"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      stored = await service.get(queued.run.id, "owner");
+    }
+    expect(stored).toMatchObject({ status: "cancelled", summary: { cancelled: true } });
+    const events = await runs.getEvents(queued.run.id, "owner");
+    expect(events.map((event) => event.type)).toContain("cancelled");
+    expect(events.map((event) => event.type)).not.toContain("completed");
   });
 
   it("실패한 동일 execute 요청을 같은 run id로 다시 실행한다", async () => {

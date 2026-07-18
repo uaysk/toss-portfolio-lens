@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { openMySqlDatabase } from "../server/database.js";
 import { PortfolioHistoryStore } from "../server/history.js";
 import { openConfiguredHistoryStore } from "../server/storage.js";
+import { RunRepository } from "../server/repositories/run-repository.js";
 import type { Holding, Portfolio } from "../server/toss.js";
 
 const databasePath = "/tmp/toss-portfolio-lens-mysql-integration.sqlite";
@@ -200,6 +201,24 @@ try {
   await configured.close();
 
   const mysqlDatabase = await openMySqlDatabase(mysqlConfig);
+  await new RunRepository(mysqlDatabase).initialize();
+  const migrationRows = await mysqlDatabase.query<{ migration_id: string }>(
+    "SELECT migration_id FROM portfolio_schema_migrations ORDER BY migration_id",
+  );
+  assert.deepEqual(migrationRows.map((row) => row.migration_id), [
+    "20260718_001_run_management",
+    "20260718_002_portfolio_presets",
+    "20260718_003_canonical_local_owner",
+    "20260718_004_canonical_local_owner_reconciliation",
+  ]);
+  const managementTables = await mysqlDatabase.query<{ table_name: string }>(`
+    SELECT TABLE_NAME AS table_name FROM information_schema.tables
+    WHERE table_schema = DATABASE()
+      AND table_name IN ('portfolio_schema_migrations', 'portfolio_presets', 'portfolio_preset_versions')
+  `);
+  assert.deepEqual(new Set(managementTables.map((row) => row.table_name)), new Set([
+    "portfolio_schema_migrations", "portfolio_presets", "portfolio_preset_versions",
+  ]));
   mysql = await PortfolioHistoryStore.open(mysqlDatabase);
   const first = await PortfolioHistoryStore.migrateSqliteData(sqlite, mysql, "integration-v1");
   assert.equal(first.skipped, false);
@@ -259,6 +278,7 @@ try {
     backend: mysql.backend,
     firstMigrationRows: Object.values(first.rows).reduce((sum, count) => sum + count, 0),
     repeatedMigrationSkipped: repeated.skipped,
+    managementMigrations: migrationRows.length,
     snapshotsAfterRemigrationAndDirectWrites: 5,
   }));
 } finally {

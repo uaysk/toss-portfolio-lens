@@ -208,7 +208,7 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
       body = { runId: backtestRunId };
     } else if (mode === "pareto") {
       operation = "pareto-frontier";
-      body = { runId: optimizationRunId, limit: paretoLimit };
+      body = { runId: optimizationRunId, limit: paretoLimit, executionMode: "async" };
     } else if (mode === "redundant") {
       operation = "redundant-assets";
       body = { symbols: baseConfig.assets.map((asset) => asset.symbol), ...common, correlationThreshold, betaTolerance, drawdownCorrelationThreshold };

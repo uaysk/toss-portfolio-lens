@@ -210,9 +210,29 @@ export class AnalyticsService {
       assumptions: [
         "가격 수익률 계산에는 carry-forward를 사용하지 않고 실제 공통 관측일만 사용합니다.",
         "환율 carry-forward는 가격 시계열의 직전 유효 USD/KRW 관측을 사용한 횟수입니다.",
+        "공급자가 제공하지 않는 배당·거래량·상장폐지 이력·과거 universe·ETF 구성종목·factor는 추정하지 않습니다.",
       ],
-      warnings: [...loaded.warnings, ...(!availability.commonPeriod ? ["모든 종목에 공통된 cache 기간을 확인할 수 없습니다."] : [])],
-      dataQuality: { confidence, common_return_observations: aligned.dates.length },
+      warnings: [
+        ...loaded.warnings,
+        ...(!availability.commonPeriod ? ["모든 종목에 공통된 cache 기간을 확인할 수 없습니다."] : []),
+        "현재 시장 데이터 공급자는 일별 거래량·현금배당·상장폐지/과거 universe·ETF 구성종목·sector/country/factor 이력을 제공하지 않습니다.",
+        "자동 FX 변환은 현재 USD/KRW만 지원합니다. 다른 통화는 환율을 추정하지 않으며 별도 노출 분석 입력이 필요합니다.",
+      ],
+      dataQuality: {
+        confidence,
+        common_return_observations: aligned.dates.length,
+        provider_fields: {
+          adjusted_prices: "available",
+          usd_krw_fx: "available_when_requested",
+          dividends: "unavailable",
+          daily_volume: "unavailable",
+          delisting_history: "unavailable",
+          point_in_time_universe: "unavailable",
+          etf_constituents: "unavailable",
+          sector_country_factor: "unavailable",
+          non_usd_fx: "unavailable",
+        },
+      },
       result: {
         price_availability: availability,
         common_trading_days: {
@@ -232,6 +252,13 @@ export class AnalyticsService {
         carry_forward: { price_returns: 0, fx: carriedFx },
         cache_revision: loaded.dataRevision,
         confidence,
+        provider_field_quality: {
+          dividends: { status: "unavailable", estimated: false },
+          liquidity: { status: "unavailable", estimated: false },
+          point_in_time_universe: { status: "unavailable", estimated: false },
+          look_through_exposure: { status: "unavailable", estimated: false },
+          multi_currency_fx: { status: "partial", supported: ["KRW", "USD"], estimated: false },
+        },
       },
     });
   }

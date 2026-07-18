@@ -1,10 +1,11 @@
-export type DashboardView = "overview" | "analysis" | "backtest" | "optimization";
+export type DashboardView = "overview" | "analysis" | "backtest" | "optimization" | "library";
 
 const hashes: Record<DashboardView, string> = {
   overview: "#overview",
   analysis: "#analysis",
   backtest: "#backtest",
   optimization: "#optimization",
+  library: "#library",
 };
 
 export function dashboardViewFromHash(hash: string): DashboardView {

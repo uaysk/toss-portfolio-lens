@@ -311,6 +311,29 @@ export type BacktestCustomCashFlow = {
   memo?: string;
 };
 
+export type BacktestRealismPolicy = {
+  costs: {
+    commissionBps?: number;
+    sellTaxBps: number;
+    fixedSlippageBps: number;
+    marketImpactCoefficient: number;
+    marketImpactExponent: number;
+    maxParticipationRatePercent?: number;
+    minimumFee: number;
+    dividendTaxBps: number;
+  };
+  dividendMode: "adjusted_price_only" | "cash";
+  enforcePointInTimeUniverse: boolean;
+};
+
+export type BacktestTargetWeightScheduleEntry = {
+  date: string;
+  weights: Record<string, number>;
+  cashTargetPercent: number;
+  regime?: string;
+  action?: string;
+};
+
 export type BacktestExecutionPolicy = {
   cashTargetPercent: number;
   quantityMode: BacktestQuantityMode;
@@ -320,7 +343,14 @@ export type BacktestExecutionPolicy = {
 };
 
 export type BacktestRunConfiguration = {
-  assets: Array<{ symbol: string; weight: number; lotSize?: number }>;
+  assets: Array<{
+    symbol: string;
+    weight: number;
+    lotSize?: number;
+    delistDate?: string;
+    universeMemberFrom?: string;
+    universeMemberTo?: string;
+  }>;
   startDate: string;
   endDate: string;
   initialAmount: number;
@@ -334,7 +364,9 @@ export type BacktestRunConfiguration = {
   currencyMode: "local" | "KRW";
   baseCurrency: "KRW";
   cashFlows: BacktestCustomCashFlow[];
+  targetWeightSchedule?: BacktestTargetWeightScheduleEntry[];
   execution: BacktestExecutionPolicy;
+  realism?: BacktestRealismPolicy;
   benchmark: BacktestBenchmarkKey;
   benchmarkSymbol?: string;
 };
@@ -369,6 +401,9 @@ export type BacktestInstrument = {
 export type BacktestAsset = BacktestInstrument & {
   weight: number;
   lotSize?: number;
+  delistDate?: string;
+  universeMemberFrom?: string;
+  universeMemberTo?: string;
   currentValueKrw?: number;
 };
 

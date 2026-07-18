@@ -1,0 +1,757 @@
+{
+  "formatVersion": 2,
+  "toolCount": 50,
+  "schemaHash": "cfd4200eba8476c9e8d79b6cfd10636c6d9f2cba7644dfeaedd2b2dac3ca8d2b",
+  "tools": [
+    {
+      "name": "search_instruments",
+      "inputSchemaHash": "41ad11490347b242f6df7a21704d127af2dfc9f1e0eba2053621ec689c5606ab",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "종목 검색",
+      "description": "코드·이름·시장·자산유형으로 국내·미국 주식과 ETF를 검색합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_data_availability",
+      "inputSchemaHash": "bb1e695f08f49946b0426c3bc141c7c38b24a2fbfc9084c9473bf26c0707f663",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "데이터 가용성 조회",
+      "description": "종목별 수정주가 cache 기간·관측수와 공통 계산 기간을 확인합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_price_series",
+      "inputSchemaHash": "eca94f964ebbec4129b62c51988c92c27feb805fd8f3065f5267d109993e0f5c",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "가격 시계열 조회",
+      "description": "수정 여부와 기준통화를 지정해 일·주·월 OHLC 시계열을 조회합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_instrument",
+      "inputSchemaHash": "60c8f57c8b20fabb20d7e0f7ea235105c95610a36c0130812c71f1492436b1f0",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "개별 종목 분석",
+      "description": "수정주가 수익률의 성과·위험·낙폭·tail risk와 벤치마크 상대성과를 분석합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_asset_relationship",
+      "inputSchemaHash": "46f89e0577f432b58568a835bd7c3e77c3e6dbd9deb8940d24b8dce8a0e7c38f",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "자산 관계 분석",
+      "description": "기준 종목과 비교 종목의 공통 관측일 수익률 상관·Beta·상대성과를 분석합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_correlation_matrix",
+      "inputSchemaHash": "da33839a2e30d16ccd375fc623d24ea6e10ffc51a87cc73077c33823333245a0",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "상관행렬 조회",
+      "description": "여러 자산의 수정주가 수익률을 전체 공통 거래일로 inner join해 상관행렬을 계산합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "validate_backtest_config",
+      "inputSchemaHash": "d38cfea450b42747b0cd4a4a5ad1443abe73bad26e79c38d033c275572f5c630",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "백테스트 설정 검증",
+      "description": "백테스트 입력·비중·기간·데이터 가용성을 계산 실행 없이 검증합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "run_portfolio_backtest",
+      "inputSchemaHash": "13cf8c51a4c363f9ae232049a4979ec70213c031296409b3602674315374ed9c",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 백테스트",
+      "description": "현금·정수 수량·목표비중 정책·배당·세금·유동성 비용과 point-in-time universe를 ledger에 반영합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "compare_backtests",
+      "inputSchemaHash": "a75f1424ea19cb29ef5bda06c6c438fc0f997b1dedb2230560229776c0c00011",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "백테스트 비교",
+      "description": "저장된 여러 백테스트 run의 지표·안정성·비용·데이터 품질을 비교합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_backtest_artifact",
+      "inputSchemaHash": "b27ce484fe1018bb5b2a3357b499299475158d12ffd21b1850e4f017ef2fbe1a",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "백테스트 산출물 조회",
+      "description": "equity·drawdown·trades·rolling 등 저장된 run 산출물을 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_run_artifact",
+      "inputSchemaHash": "20d8ec7c7d52240710e9a56078178d8b52e7735c478e53ec6c57402c10cd349c",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 산출물 조회",
+      "description": "백테스트·최적화·검증·전망·노출·Pareto·연구 보고서 run의 저장 artifact를 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_current_portfolio",
+      "inputSchemaHash": "9d300753c5ae702a94ad1136c41fcec374ad3d4fd72cee9d6432688ffcac9969",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "현재 포트폴리오 조회",
+      "description": "계좌 번호를 숨긴 opaque selector 기준으로 현재 종목과 원화 환산 비중을 조회합니다.",
+      "scopes": [
+        "portfolio:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "find_diversifying_assets",
+      "inputSchemaHash": "7fea7652566d218a5b2c84a195cbd702fd86dd90f77b25d5bc7a25f303b435db",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "분산 후보 탐색",
+      "description": "명시한 후보 또는 현재 cache universe에서 낮은 상관과 하락장 분산효과를 가진 자산을 찾습니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_market_regimes",
+      "inputSchemaHash": "aed68a76dea79e227614158d30d7fb1b3ac008fdec411764b2c8b6bc80240dbe",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "시장 국면 분석",
+      "description": "벤치마크 수익률과 rolling 변동성으로 상승·하락·고변동·저변동 국면을 통계적으로 분류합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_return_contribution",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "수익 기여 분석",
+      "description": "저장된 백테스트 run의 시간연결·현지가격·환율·위험 기여를 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "optimize_portfolio",
+      "inputSchemaHash": "7a20b19a29e50ffe847cda8e2ea99cd7a7fafb77370145f631106915f43645a8",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 최적화",
+      "description": "기준·Pareto 후보를 탐색하고 표본 내/OOS robust score와 실제 ledger 재검증 순위·지표 차이를 제공합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "walk_forward_optimize",
+      "inputSchemaHash": "510d3b2cdf3e31c5f900e276c29839d738e15a093ed08eb41a9fd956a4e2f2b0",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "Walk-forward 최적화",
+      "description": "rolling·anchored 학습과 gap·embargo, fold 예산·seed를 적용해 stitched OOS 성과와 안정성을 검증합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "stress_test_portfolio",
+      "inputSchemaHash": "033a5a10c05a24f0c7029f8d4bc5aaf617e9016bb3cbc4815012e9889e955722",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 스트레스 테스트",
+      "description": "비용·환율·현금흐름·리밸런싱·종목 제외 가정을 바꾼 복수 시나리오를 실행합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "build_pareto_frontier",
+      "inputSchemaHash": "943860e2bcde3e74f8c122f0267f952b28fc17bd90d0f2bb801d471083c406ca",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "Pareto 전선 생성",
+      "description": "수익·변동성·MDD·CVaR·회전율·비용 기준 비지배 최적화 후보를 조회하며 async 모드에서는 취소 가능한 run과 artifact를 생성합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "find_redundant_assets",
+      "inputSchemaHash": "ec37349ca819fd2b3dfd319dc2821e7875b2fd934f067a07a53a617fb38bd35c",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "중복 자산 탐지",
+      "description": "높은 상관·유사 Beta·낙폭 경로를 기준으로 중복 가능 자산 쌍을 찾습니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_rebalance_plan",
+      "inputSchemaHash": "edc393faf1c2cc43c1683a76fd657dd22cd2c5bb12b34e902517b048c7df3b89",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "리밸런싱 계획 분석",
+      "description": "현재·목표 비중의 차이와 회전율·추정 비용을 계산하며 주문은 생성하지 않습니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_weight_sensitivity",
+      "inputSchemaHash": "d57ca2f2cb1c68cf21520c6c2e1d50eff824b562d4a1aaf46a06b0c3451630c1",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "비중 민감도 분석",
+      "description": "특정 종목의 명시적 비중 범위에서 성과·위험 지표 변화를 실행합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_start_date_sensitivity",
+      "inputSchemaHash": "d3793d7f364b6a81c4cbc7b0d0a853f57fbb931abbbc06aff0638375a58cf826",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "시작일 민감도 분석",
+      "description": "시작일 이동에 따른 백테스트 성과와 위험 분포를 실행합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_rebalance_sensitivity",
+      "inputSchemaHash": "ebc364ca7698224dd316c88b53d7e4be37794c4a28a9799ea372a4e952eda30b",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "리밸런싱 민감도 분석",
+      "description": "없음·월·분기·연·threshold 리밸런싱 가정을 비교합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_cash_flow_sensitivity",
+      "inputSchemaHash": "921b2e00be6b817591c1c05815d0ebefd7e25ee2409d0bb4c58dfa41b9d033db",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "현금흐름 민감도 분석",
+      "description": "정기 납입·인출 금액·주기·기간 내 시점 변화가 백테스트에 미치는 영향을 실행합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "simulate_portfolio_monte_carlo",
+      "inputSchemaHash": "4264e9e34f21490bdbdb5e7359e82230df9c1030138460e02e4da96bfd0920a0",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 Monte Carlo",
+      "description": "moving-block·stationary·regime bootstrap 또는 Student-t로 현금·비용·수량을 반영한 미래 분포와 calibration을 계산합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_portfolio_outlook",
+      "inputSchemaHash": "22bfaede6d4d2b9c2ac10d4bbac2c7b414bc66c23c1377fa564a40d90de8ffda",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 미래 전망",
+      "description": "Walk-forward OOS·Monte Carlo calibration·stress·시장 국면·ledger 민감도를 하나의 취소 가능한 역사적 전망 run으로 결합합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_portfolio_exposures",
+      "inputSchemaHash": "e256b5edf27b1f60a477220c1448ed87a32b4fe0b5d75282a2db066016d512fd",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 노출 분석",
+      "description": "sector·industry·국가·통화·자산유형·factor와 제공된 ETF 구성종목 look-through 노출을 집계하며 async 모드에서는 취소 가능한 run과 artifact를 생성합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "explain_data_quality",
+      "inputSchemaHash": "31105024217ac8adec6ee425d4f33e2b63d49a3a58553a0e5f11b308b52b4c3a",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "데이터 품질 설명",
+      "description": "가격·환율·벤치마크 관측률과 공통 거래일·carry-forward·cache revision을 설명합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_run_status",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 상태 조회",
+      "description": "비동기 run의 상태·진행률·완료 후보·검증 구간과 경고를 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "cancel_run",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 취소",
+      "description": "대기·실행 중인 분석·검증·전망·노출·Pareto·연구 보고서 run을 취소하고 기존 완료 결과는 보존합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_run_result",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 결과 조회",
+      "description": "완료된 비동기 run의 요약·상위 후보·설정·artifact index를 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "list_runs",
+      "inputSchemaHash": "2dc6bf5b444af7b62ebbeadae2c2f082d2e7512225b5adb98bc21b81710ef9d2",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 기록 검색",
+      "description": "영구 run을 이름·종류·상태·태그·보관 여부로 검색하고 cursor 페이지로 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_run_events",
+      "inputSchemaHash": "ab0df6368dd33992c43867d5f591153799d2917b25979b66b6ea1e724c3485f7",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 이벤트 조회",
+      "description": "run의 생성·시작·진행·취소·완료·재실행 이벤트를 시간순으로 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "export_run_manifest",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "재현성 manifest 내보내기",
+      "description": "입력·seed·data revision·Git/엔진/worker/MCP 버전과 artifact checksum을 고정한 manifest를 내보냅니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "update_run",
+      "inputSchemaHash": "7f4bd0b5b19818d91486b68a79bc4fc9b09340baef86d1cf16725138e118d858",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 기록 수정",
+      "description": "run의 표시 이름·태그·보관 상태만 수정하며 계산 결과와 manifest는 바꾸지 않습니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "duplicate_run",
+      "inputSchemaHash": "aa320865ad2bc756bd50775088d111fa0aae3dfd985599b91acfecf26d142fc6",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 복제",
+      "description": "기존 run 입력과 manifest 출처를 보존한 독립 실행 사본을 만듭니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "delete_run",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 삭제",
+      "description": "run을 soft delete해 기본 목록과 결과 조회에서 숨기며 감사 가능한 복구 여지를 남깁니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      }
+    },
+    {
+      "name": "rerun_run",
+      "inputSchemaHash": "4ad0e5ecb81b8e8cc4dd0e8f39bcdf73672171f9d2747eca50c258a936b47056",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "실행 재실행",
+      "description": "저장된 입력을 현재 data revision과 엔진에서 새 run으로 다시 실행합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "list_portfolio_presets",
+      "inputSchemaHash": "fd2cb4d7cf797e16ac2b4c14a41b6674460771aeb4fdc5cedebd1306c7837b1c",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 검색",
+      "description": "백테스트·최적화 공통 프리셋을 이름·태그로 검색하고 마지막 사용 시각을 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_portfolio_preset",
+      "inputSchemaHash": "059fc2740cb0a779d231d731a1aeb801b9a0ba38a92ad53965a330e53853fb30",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 조회",
+      "description": "프리셋 snapshot과 선택적 변경 이력을 조회합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "create_portfolio_preset",
+      "inputSchemaHash": "9eedecef5da79034c0f2d0f44523c54aa7a409ef4ad241d7b49492b8da0c14b5",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 생성",
+      "description": "수동 설정·현재 포트폴리오·run·최적화/Pareto 후보 snapshot으로 프리셋을 생성합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "update_portfolio_preset",
+      "inputSchemaHash": "140f48d1d0d2bc3bcf03d130b3a9043180021294391e8ac565892df1bfe7a5c0",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 수정",
+      "description": "낙관적 revision 검증과 변경 이력을 남기며 프리셋을 수정합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "duplicate_portfolio_preset",
+      "inputSchemaHash": "d331a5bc052aa1bf0721b3879b46a6a585d59a6e08f1dc83ef7c645f941ef5bf",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 복제",
+      "description": "프리셋의 독립 snapshot 사본을 생성합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "delete_portfolio_preset",
+      "inputSchemaHash": "c32ecc150545dd301941a2b0ffbb28e8f89a6289aea7cdc767b6081663076725",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 삭제",
+      "description": "프리셋을 soft delete하고 기본 조회에서 숨깁니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      }
+    },
+    {
+      "name": "import_portfolio_presets",
+      "inputSchemaHash": "77d90b25343d17621d54b77569dcd3b8316666fcb2c063130cd4bdca9b70a7c8",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 가져오기",
+      "description": "versioned JSON 문서를 검증해 프리셋을 가져오고 충돌 정책을 적용합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "export_portfolio_preset",
+      "inputSchemaHash": "c32ecc150545dd301941a2b0ffbb28e8f89a6289aea7cdc767b6081663076725",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "포트폴리오 프리셋 내보내기",
+      "description": "프리셋을 schema version이 있는 이식 가능한 JSON 문서로 내보냅니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "generate_backtest_report",
+      "inputSchemaHash": "91b5a94907cca409b8bad3b77af78bbe7165d864fd22c870ca9d18f28dcc30ec",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "백테스트 보고서 생성",
+      "description": "완료된 run에 기존 AI writer와 보고서 저장소를 사용해 공개 보고서 페이지를 생성합니다.",
+      "scopes": [
+        "report:generate"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "generate_research_report",
+      "inputSchemaHash": "30e223e33da08bca546f2073b5d065c1ee59fa317212b8f64b4b2417cc668350",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "연구 보고서 생성",
+      "description": "최적화·Walk-forward·Monte Carlo·stress·outlook run에서 재현 가능한 JSON 또는 Markdown 보고서를 생성하며 async 모드에서는 취소 가능한 파생 run과 artifact를 제공합니다.",
+      "scopes": [
+        "report:generate"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "get_report",
+      "inputSchemaHash": "69898a89f4ae7071753523670d535d9b8e76af15d49ed4e16a8bd31e7e6e6c1e",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "보고서 메타데이터 조회",
+      "description": "보고서 ID·유형·생성시각·run·모델·페이지 URL·data revision을 조회합니다.",
+      "scopes": [
+        "report:generate"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

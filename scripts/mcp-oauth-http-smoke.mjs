@@ -11,6 +11,24 @@ const clientSecret = (await readFile(
   process.env.MCP_OAUTH_CLIENT_SECRET_FILE || "/run/secrets/mcp-oauth-client-secret",
   "utf8",
 )).trim();
+const expectedContract = JSON.parse(await readFile(
+  new URL("../server/mcp/generated-contract.json", import.meta.url),
+  "utf8",
+));
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonical(item)]));
+  }
+  return value;
+}
+
+function schemaHash(value) {
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -179,9 +197,30 @@ let rpc = await mcp(issued.access_token, {
 });
 assert(rpc.response.status === 200 && rpc.payload?.result?.serverInfo?.name === "Toss Portfolio Lens", "MCP initialize failed");
 assert(rpc.sessionId, "stateful MCP initialize omitted a session ID");
+const initializeBuild = JSON.parse(rpc.payload.result.serverInfo.description);
+assert(initializeBuild.mcpToolCount === expectedContract.toolCount, "initialize build tool count mismatch");
+assert(initializeBuild.mcpSchemaHash === expectedContract.schemaHash, "initialize build schema hash mismatch");
+assert(typeof initializeBuild.gitSha === "string" && initializeBuild.gitSha.length > 0, "initialize omitted Git SHA");
+assert(initializeBuild.appVersion && initializeBuild.engineVersion && initializeBuild.workerSchemaVersion,
+  "initialize omitted app/engine/worker versions");
 
 rpc = await mcp(issued.access_token, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, rpc.sessionId);
-assert(rpc.payload?.result?.tools?.length === 31, "tools/list did not return exactly 31 tools");
+const listedTools = rpc.payload?.result?.tools;
+assert(Array.isArray(listedTools) && listedTools.length === expectedContract.toolCount,
+  `tools/list count mismatch: expected ${expectedContract.toolCount}, got ${listedTools?.length}`);
+for (let index = 0; index < expectedContract.tools.length; index += 1) {
+  const expected = expectedContract.tools[index];
+  const actual = listedTools[index];
+  assert(actual?.name === expected.name, `tool order/name mismatch at ${index}: expected ${expected.name}`);
+  assert(schemaHash(actual.inputSchema) === expected.inputSchemaHash, `${expected.name} input schema exact-match failed`);
+  assert(schemaHash(actual.outputSchema) === expected.outputSchemaHash, `${expected.name} output schema exact-match failed`);
+  assert(actual.title === expected.title, `${expected.name} title exact-match failed`);
+  assert(actual.description === expected.description, `${expected.name} description exact-match failed`);
+  assert(JSON.stringify(canonical(actual.annotations)) === JSON.stringify(canonical(expected.annotations)),
+    `${expected.name} annotations exact-match failed`);
+  assert(JSON.stringify(actual._meta?.securitySchemes?.[0]?.scopes) === JSON.stringify(expected.scopes),
+    `${expected.name} OAuth scopes exact-match failed`);
+}
 
 rpc = await mcp(issued.access_token, {
   jsonrpc: "2.0",

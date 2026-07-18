@@ -9,6 +9,8 @@ export type AdvancedAnalysisOperation =
   | "sensitivity-rebalance"
   | "sensitivity-cash-flow"
   | "monte-carlo"
+  | "outlook"
+  | "exposures"
   | "compare-backtests"
   | "diversifying-assets"
   | "market-regimes"
@@ -73,12 +75,45 @@ async function externalizedResult(
   }
   if (types.has("scenario-comparison")) return readArtifact(run.runId, "scenario-comparison", signal, onUnauthorized);
   const summary = run.summary && typeof run.summary === "object" ? run.summary as Record<string, unknown> : {};
+  if (run.kind === "outlook") {
+    const probabilities = summary.probabilities && typeof summary.probabilities === "object"
+      ? summary.probabilities as Record<string, unknown>
+      : {};
+    const oos = summary.oos && typeof summary.oos === "object"
+      ? summary.oos as Record<string, unknown>
+      : {};
+    return {
+      confidence: summary.confidence,
+      probabilities,
+      future: {
+        terminalLossProbabilityPercent: probabilities.loss,
+        goalProbabilityPercent: probabilities.goal,
+        depletionProbabilityPercent: probabilities.depletion,
+        percentilePaths: [],
+        percentilePathsExternalized: types.has("outlook-quantile-paths"),
+      },
+      oos: { ...oos, stitchedEquity: [] },
+      stress: { worstScenario: summary.worst_scenario, worstScenarios: [] },
+      sensitivity: { scenarios: [] },
+      marketRegime: summary.market_regime,
+      outlookSummaryExternalized: types.has("outlook-summary"),
+      oosEquityExternalized: types.has("outlook-oos-equity"),
+      calibrationExternalized: types.has("outlook-calibration"),
+      worstScenariosExternalized: types.has("outlook-worst-scenarios"),
+      sensitivityExternalized: types.has("outlook-sensitivity"),
+      marketRegimeExternalized: types.has("outlook-market-regimes"),
+      walkForwardExternalized: types.has("walk-forward"),
+      monteCarloDistributionExternalized: types.has("monte-carlo-distribution"),
+    };
+  }
   if (run.kind === "optimization") {
     return {
       best: summary.best,
       candidateCount: summary.candidate_count ?? 0,
       paretoCount: summary.pareto_count ?? 0,
       candidatesExternalized: types.has("candidates"),
+      screeningCandidatesExternalized: types.has("screening-candidates"),
+      ledgerValidatedCandidatesExternalized: types.has("ledger-validated-candidates"),
       paretoFrontierExternalized: types.has("worker-pareto-frontier"),
     };
   }
@@ -105,7 +140,20 @@ async function externalizedResult(
       samplePathsArtifact: (run.artifacts ?? []).find((artifact) => artifact.type === "monte-carlo-sample-paths"),
     };
   }
-  throw new Error("대용량 분석 결과 artifact를 찾지 못했습니다.");
+  if (run.kind === "exposure_analysis" && types.has("portfolio-exposures")) {
+    return readArtifact(run.runId, "portfolio-exposures", signal, onUnauthorized);
+  }
+  if (run.kind === "pareto_frontier" && types.has("pareto-frontier")) {
+    return readArtifact(run.runId, "pareto-frontier", signal, onUnauthorized);
+  }
+  if (run.kind === "research_report" && types.has("research-report")) {
+    return readArtifact(run.runId, "research-report", signal, onUnauthorized);
+  }
+  return {
+    summary,
+    resultExternalized: true,
+    artifacts: run.artifacts ?? [],
+  };
 }
 
 async function readJson(response: Response): Promise<Record<string, unknown> & ApiFailure> {
@@ -141,6 +189,22 @@ export async function loadAdvancedMarketResource(
     signal,
   }, onUnauthorized);
   return payload.data;
+}
+
+/** Load a persisted dashboard run and preserve the same artifact contract used by live execution. */
+export async function loadAdvancedRunSnapshot(
+  runId: string,
+  onUnauthorized?: () => void,
+  signal?: AbortSignal,
+): Promise<AdvancedRunSnapshot> {
+  const completed = await checkedFetch(`/api/portfolio/advanced/runs/${encodeURIComponent(runId)}/result`, {
+    headers: { Accept: "application/json" },
+    signal,
+  }, onUnauthorized) as unknown as AdvancedRunSnapshot;
+  if (completed.result === undefined && completed.resultExternalized) {
+    completed.result = await externalizedResult(completed, signal, onUnauthorized);
+  }
+  return completed;
 }
 
 function initialRun(payload: StartEnvelope): AdvancedRunSnapshot | undefined {

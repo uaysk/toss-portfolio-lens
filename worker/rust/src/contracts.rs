@@ -24,6 +24,7 @@ pub enum JobKind {
     RebalanceSensitivity,
     CashFlowSensitivity,
     MonteCarlo,
+    Outlook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +311,7 @@ pub fn job_kind(value: &str) -> Result<JobKind> {
         "rebalance_sensitivity" => Ok(JobKind::RebalanceSensitivity),
         "cash_flow_sensitivity" => Ok(JobKind::CashFlowSensitivity),
         "monte_carlo" => Ok(JobKind::MonteCarlo),
+        "outlook" => Ok(JobKind::Outlook),
         _ => bail!("unsupported job kind: {value}"),
     }
 }
@@ -331,5 +333,11 @@ mod tests {
         let decoded = decode_input(&first, &checksum, uncompressed_size).unwrap();
         assert_eq!(decoded.request_hash, input.request_hash);
         assert!(decode_input(&first, &checksum, uncompressed_size + 1).is_err());
+    }
+
+    #[test]
+    fn outlook_job_kind_round_trips_as_snake_case() {
+        assert_eq!(job_kind("outlook").unwrap(), JobKind::Outlook);
+        assert_eq!(serde_json::to_value(JobKind::Outlook).unwrap(), "outlook");
     }
 }

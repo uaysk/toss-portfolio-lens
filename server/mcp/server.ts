@@ -5,12 +5,13 @@ import { MCP_SCOPE_IDS, hasScopes, type McpScopeId } from "../auth/mcp-scope.js"
 import { MCP_SERVER_INSTRUCTIONS } from "./instructions.js";
 import { outputEnvelopeSchema, toolSchemas, type ToolName } from "./schemas.js";
 import { toolMetadata, securitySchemes } from "./tools/metadata.js";
-import { createToolHandlers, type McpToolDependencies } from "./tools/handlers.js";
+import { createToolHandlers, resolvePresetExecution, type McpToolDependencies } from "./tools/handlers.js";
 import { toolError } from "./errors.js";
 import { ServiceError } from "../services/service-envelope.js";
 import { enforceToolRequestLimits } from "../services/tool-request-limits.js";
 import type { McpAuditRepository, McpAuditStatus } from "../repositories/mcp-audit-repository.js";
 import { anonymizedAuditValue, persistMcpAudit, protocolRequestId } from "./audit.js";
+import { APP_VERSION, buildInfo } from "../build-info.js";
 
 function insufficientScope(scopes: McpScopeId[], resourceMetadataUrl: string): CallToolResult {
   const challenge = `Bearer error="insufficient_scope", scope="${scopes.join(" ")}", resource_metadata="${resourceMetadataUrl}"`;
@@ -43,6 +44,13 @@ function asStructured(value: unknown): Record<string, unknown> {
     : { result: value };
 }
 
+function requestsBacktestReport(argumentsValue: unknown): boolean {
+  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return false;
+  const report = (argumentsValue as { report?: unknown }).report;
+  return Boolean(report && typeof report === "object" && !Array.isArray(report)
+    && (report as { enabled?: unknown }).enabled === true);
+}
+
 export function createMcpServer(input: {
   dependencies: McpToolDependencies;
   authMode: "oauth" | "none";
@@ -50,8 +58,14 @@ export function createMcpServer(input: {
   audit?: McpAuditRepository;
   auditSubjectSalt?: string;
 }): McpServer {
+  const identity = buildInfo();
   const server = new McpServer(
-    { name: "Toss Portfolio Lens", version: "1.0.0", title: "Toss Portfolio Lens" },
+    {
+      name: "Toss Portfolio Lens",
+      version: identity.gitSha === "unknown" ? APP_VERSION : `${APP_VERSION}+${identity.gitSha.slice(0, 12)}`,
+      title: "Toss Portfolio Lens",
+      description: JSON.stringify(identity),
+    },
     { instructions: MCP_SERVER_INSTRUCTIONS },
   );
   const handlers = createToolHandlers(input.dependencies);
@@ -66,16 +80,40 @@ export function createMcpServer(input: {
       const started = Date.now();
       const requestId = randomUUID();
       const scopes = input.authMode === "none" ? [...MCP_SCOPE_IDS] : extra.authInfo?.scopes ?? [];
-      const required = [...metadata.scopes];
-      if (name === "run_portfolio_backtest") {
-        const report = argumentsValue && typeof argumentsValue === "object"
-          ? (argumentsValue as { report?: { enabled?: boolean } }).report
-          : undefined;
-        if (report?.enabled) required.push("report:generate");
-      }
       const subject = input.authMode === "none"
         ? "local-owner"
         : typeof extra.authInfo?.extra?.sub === "string" ? extra.authInfo.extra.sub : "owner";
+      let handlerArguments = argumentsValue;
+      let resolvedPresetId: string | undefined;
+      let presetResolutionError: unknown;
+      if (name === "run_portfolio_backtest"
+        && hasScopes(scopes, metadata.scopes)
+        && argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
+        const presetId = (argumentsValue as { presetId?: unknown }).presetId;
+        if (typeof presetId === "string") {
+          try {
+            handlerArguments = await resolvePresetExecution(
+              input.dependencies,
+              subject,
+              argumentsValue as Record<string, unknown>,
+              "run_portfolio_backtest",
+              { markUsed: false },
+            );
+            resolvedPresetId = presetId;
+          } catch (error) {
+            presetResolutionError = error;
+          }
+        }
+      }
+      const required = [...metadata.scopes];
+      if (!presetResolutionError && name === "run_portfolio_backtest" && requestsBacktestReport(handlerArguments)) {
+        required.push("report:generate");
+      }
+      if (["analyze_portfolio_exposures", "build_pareto_frontier", "generate_research_report"].includes(name)
+        && handlerArguments && typeof handlerArguments === "object" && !Array.isArray(handlerArguments)
+        && (handlerArguments as { executionMode?: unknown }).executionMode === "async") {
+        required.push("backtest:run");
+      }
       const subjectHash = anonymizedAuditValue(subject, input.auditSubjectSalt);
       const actualRequestId = protocolRequestId(extra.requestId);
       const sessionHash = extra.sessionId
@@ -109,8 +147,20 @@ export function createMcpServer(input: {
       let errorCode: string | undefined;
       let associatedRunId: string | undefined;
       try {
-        enforceToolRequestLimits(argumentsValue, input.dependencies);
-        const result = await handlers[name](argumentsValue, subject);
+        if (presetResolutionError) throw presetResolutionError;
+        if (resolvedPresetId) {
+          const used = await input.dependencies.presets.markUsed(resolvedPresetId, subject);
+          if (!used) {
+            throw new ServiceError({
+              code: "PRESET_NOT_FOUND",
+              message: "preset을 찾을 수 없습니다.",
+              retryable: false,
+              details: { preset_id: resolvedPresetId },
+            });
+          }
+        }
+        enforceToolRequestLimits(handlerArguments, input.dependencies);
+        const result = await handlers[name](handlerArguments, subject);
         associatedRunId = runId(result);
         const structuredContent = outputEnvelopeSchema.parse(asStructured(result));
         const text = JSON.stringify(structuredContent);

@@ -8,6 +8,8 @@ import {
   type BacktestCashFlowTiming,
   type BacktestSimulationInput,
   type BacktestSimulationResult,
+  type BacktestRealismPolicy,
+  type BacktestTargetWeightScheduleEntry,
 } from "./backtest-engine.js";
 import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "./history.js";
 import type { InstrumentInfo, TossClient } from "./toss.js";
@@ -32,6 +34,9 @@ export type BacktestAssetInput = {
   symbol: string;
   weight: number;
   lotSize?: number;
+  delistDate?: string;
+  universeMemberFrom?: string;
+  universeMemberTo?: string;
 };
 
 export type BacktestRunRequest = {
@@ -49,6 +54,7 @@ export type BacktestRunRequest = {
   baseCurrency?: "KRW";
   rebalanceThresholdPercent?: number;
   cashFlows?: Array<{ date: string; amount: number; memo?: string }>;
+  targetWeightSchedule?: BacktestTargetWeightScheduleEntry[];
   execution?: {
     cashTargetPercent?: number;
     quantityMode?: "fractional" | "whole";
@@ -56,6 +62,7 @@ export type BacktestRunRequest = {
     tradeDatePolicy?: "next_common_observation";
     cashAnnualYieldPercent?: number;
   };
+  realism?: BacktestRealismPolicy;
   benchmark: BacktestBenchmarkKey;
   benchmarkSymbol?: string;
 };
@@ -300,6 +307,22 @@ export class PortfolioBacktestService {
     if (!Number.isFinite(transactionCostBps) || transactionCostBps < 0 || transactionCostBps > 500) {
       throw new BacktestValidationError("거래비용은 0bp 이상 500bp 이하로 입력해 주세요.");
     }
+    const realismCosts = request.realism?.costs;
+    const boundedRealismValues: Array<[number | undefined, number, number]> = [
+      [realismCosts?.commissionBps, 0, 5_000],
+      [realismCosts?.sellTaxBps, 0, 5_000],
+      [realismCosts?.fixedSlippageBps, 0, 5_000],
+      [realismCosts?.marketImpactCoefficient, 0, 1],
+      [realismCosts?.marketImpactExponent, 0.1, 2],
+      [realismCosts?.maxParticipationRatePercent, 0, 100],
+      [realismCosts?.minimumFee, 0, 1_000_000_000],
+      [realismCosts?.dividendTaxBps, 0, 10_000],
+    ];
+    if (boundedRealismValues.some(([value, minimum, maximum]) => (
+      value !== undefined && (!Number.isFinite(value) || value < minimum || value > maximum)
+    ))) {
+      throw new BacktestValidationError("수수료·세금·슬리피지·시장충격 비용 모형의 입력 범위를 확인해 주세요.");
+    }
     if (!Number.isFinite(execution.cashTargetPercent) || execution.cashTargetPercent < 0 || execution.cashTargetPercent > 100) {
       throw new BacktestValidationError("현금 목표 비중은 0% 이상 100% 이하여야 합니다.");
     }
@@ -309,14 +332,50 @@ export class PortfolioBacktestService {
     const weightTotal = request.assets.reduce((sum, asset) => sum + Number(asset.weight), 0);
     if (!request.assets.length || request.assets.length > 20
       || request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0
-        || (asset.lotSize !== undefined && (!Number.isFinite(asset.lotSize) || asset.lotSize <= 0)))
+        || (asset.lotSize !== undefined && (!Number.isFinite(asset.lotSize) || asset.lotSize <= 0))
+        || (asset.delistDate !== undefined && !isHistoryDate(asset.delistDate))
+        || (asset.universeMemberFrom !== undefined && !isHistoryDate(asset.universeMemberFrom))
+        || (asset.universeMemberTo !== undefined && !isHistoryDate(asset.universeMemberTo))
+        || (asset.universeMemberFrom !== undefined && asset.universeMemberTo !== undefined
+          && asset.universeMemberFrom > asset.universeMemberTo))
       || Math.abs(weightTotal + execution.cashTargetPercent - 100) > 0.01) {
-      throw new BacktestValidationError("종목 비중·lot size와 현금 목표 비중의 합계를 확인해 주세요.");
+      throw new BacktestValidationError("종목 비중·lot size·PIT 기간과 현금 목표 비중의 합계를 확인해 주세요.");
+    }
+    if (request.realism?.enforcePointInTimeUniverse && request.assets.some((asset) => (
+      !asset.universeMemberFrom || !asset.universeMemberTo
+      || asset.universeMemberFrom >= asset.universeMemberTo
+      || asset.universeMemberFrom > request.endDate
+      || asset.universeMemberTo <= request.startDate
+      || (asset.delistDate !== undefined && asset.delistDate <= asset.universeMemberFrom)
+    ))) {
+      throw new BacktestValidationError("PIT universe를 강제하려면 모든 종목에 분석 기간과 겹치는 [편입일, 제외일) 구간이 필요합니다.");
     }
     if ((request.cashFlows?.length ?? 0) > 1_000 || request.cashFlows?.some((flow) => (
       !isHistoryDate(flow.date) || !Number.isFinite(flow.amount) || Math.abs(flow.amount) > 1_000_000_000_000
     ))) {
       throw new BacktestValidationError("사용자 지정 현금흐름의 날짜·금액·개수를 확인해 주세요.");
+    }
+    const assetSymbols = new Set(request.assets.map((asset) => normalizeSymbol(asset.symbol)));
+    const targetSchedule = request.targetWeightSchedule ?? [];
+    if (targetSchedule.length > 10_000) {
+      throw new BacktestValidationError("목표비중 정책은 최대 10,000개까지 지정할 수 있습니다.");
+    }
+    const scheduledDates = new Set<string>();
+    for (const entry of targetSchedule) {
+      const scheduleSymbols = Object.keys(entry.weights).map(normalizeSymbol);
+      const cashTarget = entry.cashTargetPercent ?? 0;
+      const total = Object.values(entry.weights).reduce((sum, value) => sum + value, 0) + cashTarget;
+      if (!isHistoryDate(entry.date) || entry.date < request.startDate || entry.date > request.endDate
+        || scheduledDates.has(entry.date)
+        || scheduleSymbols.length !== assetSymbols.size
+        || scheduleSymbols.some((symbol) => !assetSymbols.has(symbol))
+        || new Set(scheduleSymbols).size !== scheduleSymbols.length
+        || Object.values(entry.weights).some((value) => !Number.isFinite(value) || value < 0 || value > 100)
+        || !Number.isFinite(cashTarget) || cashTarget < 0 || cashTarget > 100
+        || Math.abs(total - 100) > 0.01) {
+        throw new BacktestValidationError("시점별 목표비중 정책의 날짜·종목·비중 합계를 확인해 주세요.");
+      }
+      scheduledDates.add(entry.date);
     }
     if (!["none", "monthly", "quarterly", "annually", "threshold"].includes(request.rebalanceFrequency)) {
       throw new BacktestValidationError("리밸런싱 주기를 확인해 주세요.");
@@ -336,20 +395,32 @@ export class PortfolioBacktestService {
     }
     const instruments = await this.resolveInstruments(request.assets.map((asset) => asset.symbol));
     const weightBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), Number(asset.weight)]));
+    const assetBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), asset]));
     const latestListDate = instruments.map((instrument) => instrument.listDate).sort().at(-1)!;
-    const effectiveRequestedStart = request.startDate < latestListDate ? latestListDate : request.startDate;
+    const effectiveRequestedStart = request.realism?.enforcePointInTimeUniverse
+      ? request.startDate
+      : request.startDate < latestListDate ? latestListDate : request.startDate;
     if (request.cashFlows?.some((flow) => flow.date < effectiveRequestedStart || flow.date > request.endDate)) {
       throw new BacktestValidationError(`사용자 지정 현금흐름은 ${effectiveRequestedStart}부터 ${request.endDate} 사이여야 합니다.`);
     }
-    const definitions: BacktestAssetDefinition[] = instruments.map((instrument) => ({
-      symbol: instrument.symbol,
-      name: instrument.name,
-      market: instrument.market,
-      currency: instrument.currency,
-      listDate: instrument.listDate,
-      weight: weightBySymbol.get(instrument.symbol) ?? 0,
-      lotSize: request.assets.find((asset) => normalizeSymbol(asset.symbol) === instrument.symbol)?.lotSize ?? 1,
-    }));
+    if (targetSchedule.some((entry) => entry.date < effectiveRequestedStart || entry.date > request.endDate)) {
+      throw new BacktestValidationError(`목표비중 정책은 ${effectiveRequestedStart}부터 ${request.endDate} 사이여야 합니다.`);
+    }
+    const definitions: BacktestAssetDefinition[] = instruments.map((instrument) => {
+      const configured = assetBySymbol.get(instrument.symbol);
+      return {
+        symbol: instrument.symbol,
+        name: instrument.name,
+        market: instrument.market,
+        currency: instrument.currency,
+        listDate: instrument.listDate,
+        weight: weightBySymbol.get(instrument.symbol) ?? 0,
+        lotSize: configured?.lotSize ?? 1,
+        ...(configured?.delistDate ? { delistDate: configured.delistDate } : {}),
+        ...(configured?.universeMemberFrom ? { universeMemberFrom: configured.universeMemberFrom } : {}),
+        ...(configured?.universeMemberTo ? { universeMemberTo: configured.universeMemberTo } : {}),
+      };
+    });
     const customBenchmark = request.benchmark === "CUSTOM"
       ? (await this.resolveInstruments([request.benchmarkSymbol || ""]))[0]
       : undefined;
@@ -471,7 +542,12 @@ export class PortfolioBacktestService {
       transactionCostBps,
       rebalanceThresholdPercent,
       cashFlows: request.cashFlows ?? [],
+      targetWeightSchedule: targetSchedule.map((entry) => ({
+        ...entry,
+        weights: Object.fromEntries(Object.entries(entry.weights).map(([symbol, weight]) => [normalizeSymbol(symbol), weight])),
+      })),
       execution,
+      realism: request.realism,
       benchmark,
     };
     const warnings = [
@@ -484,11 +560,27 @@ export class PortfolioBacktestService {
       execution.quantityMode === "whole"
         ? "정수 수량은 수정주가 기준 단위이며 기업행동 원시 split 이력이 없으면 실제 과거 주문 수량과 다를 수 있습니다."
         : "소수 수량 체결을 허용합니다.",
-      "수정주가에 반영되지 않은 현금배당·세금·실제 체결 슬리피지는 별도로 반영하지 않습니다.",
+      request.realism?.dividendMode === "cash"
+        ? "현금배당 모드를 요청했습니다. 공급자 배당 관측이 없으면 엔진은 배당을 추정하지 않고 unavailable 품질 상태를 반환합니다."
+        : "배당은 공급자 수정주가 정책을 따릅니다. 현금배당을 중복 계상하지 않습니다.",
+      request.realism?.costs?.marketImpactCoefficient
+        ? "시장충격은 공급자 거래량이 있는 체결에만 적용하며, 거래량이 없으면 추정하지 않고 품질 경고를 반환합니다."
+        : "시장충격 모형은 요청되지 않았습니다.",
+      request.realism?.enforcePointInTimeUniverse
+        ? "요청에 명시된 point-in-time universe membership 범위를 강제합니다. 누락되었거나 기간을 포함하지 않으면 실행을 거부하며 공급자 값으로 가장하지 않습니다."
+        : "공급자가 과거 universe 편입·상장폐지 이력을 제공하지 않아 생존편향 보정은 보장되지 않습니다.",
+      ...(request.assets.some((asset) => asset.delistDate || asset.universeMemberFrom || asset.universeMemberTo)
+        ? ["상장폐지·universe 이력은 사용자 제공 입력이며 시장데이터 공급자가 검증한 값이 아닙니다."]
+        : []),
+      ...(targetSchedule.length
+        ? [`시점별 목표비중 정책 ${targetSchedule.length}개를 공통 관측일의 실제 ledger 리밸런싱으로 검증합니다.`]
+        : []),
       ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 이용 가능 값을 사용했습니다.`] : []),
       ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 계산에서 제외했습니다.`] : []),
     ];
-    if (request.startDate < latestListDate) warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
+    if (!request.realism?.enforcePointInTimeUniverse && request.startDate < latestListDate) {
+      warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
+    }
     return {
       simulation,
       responseContext: {

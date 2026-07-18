@@ -16,6 +16,8 @@ struct AlignedPoint {
     closes: Vec<f64>,
     local_closes: Vec<f64>,
     fx_rates: Vec<f64>,
+    volumes: Vec<Option<f64>>,
+    cash_dividends: Vec<f64>,
     observed: Vec<bool>,
     benchmark_close: Option<f64>,
 }
@@ -31,18 +33,31 @@ type Alignment = (
 );
 
 impl AlignedPoint {
-    fn common_observation(&self) -> bool {
-        self.observed.iter().all(|value| *value)
+    fn common_observation(&self, input: &BacktestSimulationInput) -> bool {
+        self.observed
+            .iter()
+            .enumerate()
+            .all(|(index, observed)| !asset_active(input, index, &self.date) || *observed)
     }
 }
 
 #[derive(Default)]
 struct Ledger {
     quantities: Vec<f64>,
+    volumes: Vec<Option<f64>>,
+    policy_target_weights: Vec<f64>,
+    policy_cash_target_percent: f64,
+    target_weights: Vec<f64>,
+    cash_target_percent: f64,
     cash: f64,
     units: f64,
     total_costs: f64,
+    total_dividend_income: f64,
+    total_dividend_taxes: f64,
+    liquidity_observations: usize,
+    missing_liquidity_observations: usize,
     trades: Vec<TradeEvent>,
+    dividends: Vec<DividendEvent>,
 }
 
 impl Ledger {
@@ -188,15 +203,23 @@ fn align(input: &BacktestSimulationInput) -> Result<Alignment> {
             }
             benchmark_cursor += 1;
         }
-        if current.iter().all(Option::is_some)
+        if current
+            .iter()
+            .enumerate()
+            .all(|(index, point)| point.is_some() || !asset_active(input, index, &date))
             && (input.benchmark.is_none() || benchmark_current.is_some())
         {
+            let valuation_points = current
+                .iter()
+                .enumerate()
+                .map(|(index, point)| point.as_ref().unwrap_or(&series_by_asset[index][0]))
+                .collect::<Vec<_>>();
             let observed = last_observed
                 .iter()
                 .map(|value| value == &date)
                 .collect::<Vec<_>>();
             for (index, is_observed) in observed.iter().enumerate() {
-                if !is_observed {
+                if asset_active(input, index, &date) && !is_observed {
                     carry_forward[index] += 1;
                 }
             }
@@ -204,24 +227,29 @@ fn align(input: &BacktestSimulationInput) -> Result<Alignment> {
                 benchmark_carry_forward += 1;
             }
             aligned.push(AlignedPoint {
-                date,
-                closes: current
+                date: date.clone(),
+                closes: valuation_points.iter().map(|point| point.close).collect(),
+                local_closes: valuation_points
                     .iter()
-                    .map(|point| point.as_ref().unwrap().close)
+                    .map(|point| point.local_close.unwrap_or(point.close))
                     .collect(),
-                local_closes: current
+                fx_rates: valuation_points
+                    .iter()
+                    .map(|point| point.fx_rate.unwrap_or(1.0))
+                    .collect(),
+                volumes: valuation_points
+                    .iter()
+                    .map(|point| (point.date == date).then_some(point.volume).flatten())
+                    .collect(),
+                cash_dividends: valuation_points
                     .iter()
                     .map(|point| {
-                        point
-                            .as_ref()
-                            .unwrap()
-                            .local_close
-                            .unwrap_or(point.as_ref().unwrap().close)
+                        if point.date == date {
+                            point.cash_dividend.unwrap_or(0.0)
+                        } else {
+                            0.0
+                        }
                     })
-                    .collect(),
-                fx_rates: current
-                    .iter()
-                    .map(|point| point.as_ref().unwrap().fx_rate.unwrap_or(1.0))
                     .collect(),
                 observed,
                 benchmark_close: benchmark_current.as_ref().map(|point| point.close),
@@ -230,8 +258,8 @@ fn align(input: &BacktestSimulationInput) -> Result<Alignment> {
     }
     let safe_start = aligned
         .iter()
-        .position(AlignedPoint::common_observation)
-        .ok_or_else(|| anyhow::anyhow!("모든 거래 대상 종목의 공통 실제 관측일이 필요합니다."))?;
+        .position(|point| point.common_observation(input))
+        .ok_or_else(|| anyhow::anyhow!("활성 거래 대상 종목의 공통 실제 관측일이 필요합니다."))?;
     aligned.drain(..safe_start);
     ensure!(
         aligned.len() >= 2,
@@ -298,11 +326,76 @@ fn scheduled_rebalance(
     previous_year != current_year || previous_month != current_month
 }
 
-fn target_weights(input: &BacktestSimulationInput) -> Vec<f64> {
+fn configured_target_weights(input: &BacktestSimulationInput) -> Vec<f64> {
     input
         .assets
         .iter()
         .map(|asset| asset.weight / 100.0)
+        .collect()
+}
+
+fn asset_active(input: &BacktestSimulationInput, index: usize, date: &str) -> bool {
+    if !input.realism.enforce_point_in_time_universe {
+        return true;
+    }
+    let asset = &input.assets[index];
+    asset
+        .universe_member_from
+        .as_ref()
+        .is_some_and(|from| from.as_str() <= date)
+        && asset
+            .universe_member_to
+            .as_ref()
+            .is_some_and(|to| date < to.as_str())
+        && asset
+            .delist_date
+            .as_ref()
+            .is_none_or(|delist| date < delist.as_str())
+}
+
+fn effective_target_weights(
+    input: &BacktestSimulationInput,
+    policy_weights: &[f64],
+    policy_cash_target_percent: f64,
+    date: &str,
+) -> (Vec<f64>, f64) {
+    if !input.realism.enforce_point_in_time_universe {
+        return (policy_weights.to_vec(), policy_cash_target_percent);
+    }
+    let active_total = policy_weights
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| asset_active(input, *index, date))
+        .map(|(_, weight)| *weight)
+        .sum::<f64>();
+    if active_total <= EPSILON {
+        return (vec![0.0; policy_weights.len()], 100.0);
+    }
+    let invested_target = (1.0 - policy_cash_target_percent / 100.0).max(0.0);
+    (
+        policy_weights
+            .iter()
+            .enumerate()
+            .map(|(index, weight)| {
+                if asset_active(input, index, date) {
+                    weight / active_total * invested_target
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+        policy_cash_target_percent,
+    )
+}
+
+fn scheduled_target_weights(
+    input: &BacktestSimulationInput,
+    entry: &TargetWeightScheduleEntry,
+) -> Vec<f64> {
+    input
+        .assets
+        .iter()
+        .map(|asset| entry.weights.get(&asset.symbol).copied().unwrap_or(0.0) / 100.0)
         .collect()
 }
 
@@ -319,6 +412,28 @@ fn validate(input: &BacktestSimulationInput) -> Result<()> {
         input.transaction_cost_bps.is_finite()
             && (0.0..=500.0).contains(&input.transaction_cost_bps),
         "거래비용은 0bp 이상 500bp 이하로 입력해 주세요."
+    );
+    let costs = &input.realism.costs;
+    ensure!(
+        costs
+            .commission_bps
+            .is_none_or(|value| value.is_finite() && (0.0..=5_000.0).contains(&value))
+            && costs.sell_tax_bps.is_finite()
+            && (0.0..=5_000.0).contains(&costs.sell_tax_bps)
+            && costs.fixed_slippage_bps.is_finite()
+            && (0.0..=5_000.0).contains(&costs.fixed_slippage_bps)
+            && costs.dividend_tax_bps.is_finite()
+            && (0.0..=10_000.0).contains(&costs.dividend_tax_bps)
+            && costs.market_impact_coefficient.is_finite()
+            && (0.0..=1.0).contains(&costs.market_impact_coefficient)
+            && costs.market_impact_exponent.is_finite()
+            && (0.1..=2.0).contains(&costs.market_impact_exponent)
+            && costs.minimum_fee.is_finite()
+            && costs.minimum_fee >= 0.0
+            && costs
+                .max_participation_rate_percent
+                .is_none_or(|value| { value.is_finite() && (0.0..=100.0).contains(&value) }),
+        "수수료·세금·슬리피지·시장충격 비용 모형의 입력 범위를 확인해 주세요."
     );
     ensure!(
         input.execution.cash_target_percent.is_finite()
@@ -338,6 +453,24 @@ fn validate(input: &BacktestSimulationInput) -> Result<()> {
             && asset.lot_size > 0.0),
         "종목 비중과 lot size를 확인해 주세요."
     );
+    if input.realism.enforce_point_in_time_universe {
+        ensure!(
+            input.assets.iter().all(|asset| {
+                asset.universe_member_from.as_ref().is_some_and(|from| {
+                    asset.universe_member_to.as_ref().is_some_and(|to| {
+                        from < to
+                            && from <= &input.end_date
+                            && to > &input.requested_start_date
+                            && asset
+                                .delist_date
+                                .as_ref()
+                                .is_none_or(|delist| delist > from)
+                    })
+                })
+            }),
+            "point-in-time universe를 강제하려면 모든 종목에 분석 기간과 겹치는 유효한 [membershipFrom, membershipTo) 구간이 필요합니다."
+        );
+    }
     ensure!(
         (asset_total + input.execution.cash_target_percent - 100.0).abs() <= 0.01,
         "종목과 현금 목표 비중 합계는 100%여야 합니다."
@@ -352,6 +485,35 @@ fn validate(input: &BacktestSimulationInput) -> Result<()> {
         input.cash_flows.len() <= 1_000,
         "사용자 지정 현금흐름은 최대 1,000개입니다."
     );
+    ensure!(
+        input.target_weight_schedule.len() <= 10_000,
+        "target weight schedule은 최대 10,000개입니다."
+    );
+    for entry in &input.target_weight_schedule {
+        ensure!(
+            entry.date >= input.requested_start_date && entry.date <= input.end_date,
+            "target weight schedule 날짜는 백테스트 기간 안이어야 합니다."
+        );
+        ensure!(
+            entry.weights.len() == input.assets.len()
+                && input
+                    .assets
+                    .iter()
+                    .all(|asset| entry.weights.contains_key(&asset.symbol)),
+            "target weight schedule은 모든 종목의 명시적 비중을 포함해야 합니다."
+        );
+        let total = entry.weights.values().sum::<f64>() + entry.cash_target_percent;
+        ensure!(
+            entry
+                .weights
+                .values()
+                .all(|weight| weight.is_finite() && *weight >= 0.0)
+                && entry.cash_target_percent.is_finite()
+                && entry.cash_target_percent >= 0.0
+                && (total - 100.0).abs() <= 0.01,
+            "target weight schedule의 종목·현금 비중 합계는 100%여야 합니다."
+        );
+    }
     ensure!(
         input
             .cash_flows
@@ -385,6 +547,91 @@ fn rounded_quantity(raw: f64, mode: QuantityMode, lot_size: f64, round_up: bool)
     (count.max(0.0) * lot_size * 1e10).round() / 1e10
 }
 
+#[derive(Default)]
+struct TradeFriction {
+    quantity: f64,
+    commission: f64,
+    tax: f64,
+    slippage: f64,
+    market_impact: f64,
+    participation_rate_percent: Option<f64>,
+}
+
+impl TradeFriction {
+    fn total(&self) -> f64 {
+        self.commission + self.tax + self.slippage + self.market_impact
+    }
+}
+
+fn trade_friction(
+    ledger: &Ledger,
+    input: &BacktestSimulationInput,
+    prices: &[f64],
+    asset_index: usize,
+    requested_quantity: f64,
+    is_sell: bool,
+) -> TradeFriction {
+    let model = &input.realism.costs;
+    let volume = ledger.volumes.get(asset_index).copied().flatten();
+    let mut quantity = requested_quantity.max(0.0);
+    if let (Some(daily_volume), Some(maximum)) = (volume, model.max_participation_rate_percent)
+        && daily_volume.is_finite()
+        && daily_volume > 0.0
+    {
+        quantity = quantity.min(daily_volume * maximum / 100.0);
+    }
+    let amount = quantity * prices[asset_index];
+    if amount <= EPSILON {
+        return TradeFriction::default();
+    }
+    let participation = volume
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| quantity / value)
+        .filter(|value| value.is_finite() && *value >= 0.0);
+    let commission_bps = model.commission_bps.unwrap_or(input.transaction_cost_bps);
+    let commission = (amount * commission_bps / 10_000.0).max(model.minimum_fee);
+    let tax = if is_sell {
+        amount * model.sell_tax_bps / 10_000.0
+    } else {
+        0.0
+    };
+    let slippage = amount * model.fixed_slippage_bps / 10_000.0;
+    let market_impact = participation
+        .map(|rate| {
+            amount * model.market_impact_coefficient * rate.powf(model.market_impact_exponent)
+        })
+        .unwrap_or(0.0);
+    TradeFriction {
+        quantity,
+        commission,
+        tax,
+        slippage,
+        market_impact,
+        participation_rate_percent: participation.map(|value| value * 100.0),
+    }
+}
+
+fn record_liquidity_quality(
+    ledger: &mut Ledger,
+    input: &BacktestSimulationInput,
+    asset_index: usize,
+) {
+    if input.realism.costs.market_impact_coefficient > 0.0
+        || input.realism.costs.max_participation_rate_percent.is_some()
+    {
+        ledger.liquidity_observations += 1;
+        if ledger
+            .volumes
+            .get(asset_index)
+            .copied()
+            .flatten()
+            .is_none_or(|value| !value.is_finite() || value <= 0.0)
+        {
+            ledger.missing_liquidity_observations += 1;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sell(
     ledger: &mut Ledger,
@@ -396,14 +643,20 @@ fn sell(
     reason: &str,
     trigger: &str,
 ) -> f64 {
-    let quantity = requested_quantity
+    let requested_quantity = requested_quantity
         .min(ledger.quantities[asset_index])
         .max(0.0);
-    if quantity <= EPSILON {
+    if requested_quantity <= EPSILON {
         return 0.0;
     }
+    let friction = trade_friction(ledger, input, prices, asset_index, requested_quantity, true);
+    let quantity = friction.quantity.min(ledger.quantities[asset_index]);
     let amount = quantity * prices[asset_index];
-    let cost = amount * input.transaction_cost_bps / 10_000.0;
+    let cost = friction.total();
+    if quantity <= EPSILON || cost >= amount {
+        return 0.0;
+    }
+    record_liquidity_quality(ledger, input, asset_index);
     ledger.quantities[asset_index] -= quantity;
     ledger.cash += amount - cost;
     ledger.total_costs += cost;
@@ -417,6 +670,13 @@ fn sell(
         price: prices[asset_index],
         reason: reason.into(),
         transaction_cost: round(cost, 2),
+        commission: round(friction.commission, 2),
+        tax: round(friction.tax, 2),
+        slippage_cost: round(friction.slippage, 2),
+        market_impact_cost: round(friction.market_impact, 2),
+        participation_rate_percent: friction
+            .participation_rate_percent
+            .map(|value| round(value, 6)),
         net_cash_impact: round(amount - cost, 2),
         trigger: trigger.into(),
         lot_size: input.assets[asset_index].lot_size,
@@ -435,24 +695,39 @@ fn buy(
     reason: &str,
     trigger: &str,
 ) -> f64 {
-    let cost_rate = input.transaction_cost_bps / 10_000.0;
-    let affordable = ledger.cash / (prices[asset_index] * (1.0 + cost_rate));
+    let affordable = ledger.cash / prices[asset_index];
     let raw = requested_quantity.min(affordable).max(0.0);
-    let quantity = rounded_quantity(
+    let mut quantity = rounded_quantity(
         raw,
         input.execution.quantity_mode,
         input.assets[asset_index].lot_size,
         false,
     );
-    if quantity <= EPSILON {
+    let mut friction = trade_friction(ledger, input, prices, asset_index, quantity, false);
+    quantity = rounded_quantity(
+        friction.quantity,
+        input.execution.quantity_mode,
+        input.assets[asset_index].lot_size,
+        false,
+    );
+    friction = trade_friction(ledger, input, prices, asset_index, quantity, false);
+    let mut impact = quantity * prices[asset_index] + friction.total();
+    if impact > ledger.cash + 0.0001 {
+        quantity = rounded_quantity(
+            quantity * ledger.cash / impact,
+            input.execution.quantity_mode,
+            input.assets[asset_index].lot_size,
+            false,
+        );
+        friction = trade_friction(ledger, input, prices, asset_index, quantity, false);
+        impact = quantity * prices[asset_index] + friction.total();
+    }
+    if quantity <= EPSILON || impact > ledger.cash + 0.0001 {
         return 0.0;
     }
     let amount = quantity * prices[asset_index];
-    let cost = amount * cost_rate;
-    let impact = amount + cost;
-    if impact > ledger.cash + 0.0001 {
-        return 0.0;
-    }
+    let cost = friction.total();
+    record_liquidity_quality(ledger, input, asset_index);
     ledger.quantities[asset_index] += quantity;
     ledger.cash = (ledger.cash - impact).max(0.0);
     ledger.total_costs += cost;
@@ -466,6 +741,13 @@ fn buy(
         price: prices[asset_index],
         reason: reason.into(),
         transaction_cost: round(cost, 2),
+        commission: round(friction.commission, 2),
+        tax: 0.0,
+        slippage_cost: round(friction.slippage, 2),
+        market_impact_cost: round(friction.market_impact, 2),
+        participation_rate_percent: friction
+            .participation_rate_percent
+            .map(|value| round(value, 6)),
         net_cash_impact: round(-impact, 2),
         trigger: trigger.into(),
         lot_size: input.assets[asset_index].lot_size,
@@ -538,7 +820,7 @@ fn full_rebalance(
     reason: &str,
     trigger: &str,
 ) {
-    let weights = target_weights(input);
+    let weights = ledger.target_weights.clone();
     let starting_equity = ledger.balance(prices);
     for index in 0..input.assets.len() {
         let current = ledger.quantities[index] * prices[index];
@@ -556,7 +838,7 @@ fn full_rebalance(
         }
     }
     let equity = ledger.balance(prices);
-    let target_cash = equity * input.execution.cash_target_percent / 100.0;
+    let target_cash = equity * ledger.cash_target_percent / 100.0;
     let desired = (0..input.assets.len())
         .filter_map(|index| {
             let deficit = equity * weights[index] - ledger.quantities[index] * prices[index];
@@ -582,13 +864,11 @@ fn contribution_buys(
             full_rebalance(ledger, input, prices, date, "cash-flow", trigger)
         }
         CashFlowRebalanceMode::TargetWeights => {
-            let desired = input
-                .assets
+            let desired = ledger
+                .target_weights
                 .iter()
                 .enumerate()
-                .filter_map(|(index, asset)| {
-                    (asset.weight > 0.0).then_some((index, amount * asset.weight / 100.0))
-                })
+                .filter_map(|(index, weight)| (*weight > 0.0).then_some((index, amount * weight)))
                 .collect::<Vec<_>>();
             buy_desired(
                 ledger,
@@ -603,7 +883,7 @@ fn contribution_buys(
         }
         CashFlowRebalanceMode::DriftReduction => {
             let equity = ledger.balance(prices);
-            let weights = target_weights(input);
+            let weights = ledger.target_weights.clone();
             let desired = (0..input.assets.len())
                 .filter_map(|index| {
                     let deficit =
@@ -611,7 +891,7 @@ fn contribution_buys(
                     (deficit > EPSILON).then_some((index, deficit))
                 })
                 .collect::<Vec<_>>();
-            let target_cash = equity * input.execution.cash_target_percent / 100.0;
+            let target_cash = equity * ledger.cash_target_percent / 100.0;
             let available = (ledger.cash - target_cash).max(0.0);
             buy_desired(
                 ledger,
@@ -640,7 +920,7 @@ fn raise_cash(
     }
     let cost_rate = input.transaction_cost_bps / 10_000.0;
     let equity = ledger.balance(prices);
-    let weights = target_weights(input);
+    let weights = ledger.target_weights.clone();
     let mut indices = (0..input.assets.len()).collect::<Vec<_>>();
     indices.sort_by(|left, right| {
         let left_excess = ledger.quantities[*left] * prices[*left] - equity * weights[*left];
@@ -689,9 +969,8 @@ fn drift_exceeds_threshold(
     if equity <= EPSILON {
         return false;
     }
-    let target = target_weights(input);
-    let mut maximum: f64 =
-        (ledger.cash / equity - input.execution.cash_target_percent / 100.0).abs();
+    let target = &ledger.target_weights;
+    let mut maximum: f64 = (ledger.cash / equity - ledger.cash_target_percent / 100.0).abs();
     for (index, target_weight) in target.iter().enumerate() {
         maximum =
             maximum.max((ledger.quantities[index] * prices[index] / equity - target_weight).abs());
@@ -903,8 +1182,34 @@ pub fn simulate_with_control(
     ) = align(input)?;
     checkpoint(control)?;
     let first = &aligned[0];
+    let mut target_schedule = input.target_weight_schedule.clone();
+    target_schedule.sort_by(|left, right| left.date.cmp(&right.date));
+    let initial_schedule_count = target_schedule
+        .iter()
+        .take_while(|entry| entry.date <= first.date)
+        .count();
+    let initial_schedule = initial_schedule_count
+        .checked_sub(1)
+        .and_then(|index| target_schedule.get(index));
+    let initial_policy_weights = initial_schedule
+        .map(|entry| scheduled_target_weights(input, entry))
+        .unwrap_or_else(|| configured_target_weights(input));
+    let initial_policy_cash = initial_schedule
+        .map(|entry| entry.cash_target_percent)
+        .unwrap_or(input.execution.cash_target_percent);
+    let (initial_target_weights, initial_cash_target) = effective_target_weights(
+        input,
+        &initial_policy_weights,
+        initial_policy_cash,
+        &first.date,
+    );
     let mut ledger = Ledger {
         quantities: vec![0.0; input.assets.len()],
+        volumes: first.volumes.clone(),
+        policy_target_weights: initial_policy_weights,
+        policy_cash_target_percent: initial_policy_cash,
+        target_weights: initial_target_weights,
+        cash_target_percent: initial_cash_target,
         cash: input.initial_amount,
         units: input.initial_amount,
         ..Ledger::default()
@@ -922,7 +1227,7 @@ pub fn simulate_with_control(
     for flow in &input.cash_flows {
         let index = aligned
             .iter()
-            .position(|point| point.date >= flow.date && point.common_observation())
+            .position(|point| point.date >= flow.date && point.common_observation(input))
             .ok_or_else(|| {
                 anyhow::anyhow!("{} 현금흐름을 적용할 공통 거래일이 없습니다.", flow.date)
             })?;
@@ -932,6 +1237,19 @@ pub fn simulate_with_control(
     let mut total_contributions = input.initial_amount;
     let mut total_withdrawals = 0.0;
     let mut applied_flows = Vec::<AppliedCashFlow>::new();
+    let mut applied_target_schedule = initial_schedule
+        .map(|entry| {
+            vec![AppliedTargetWeightSchedule {
+                scheduled_date: entry.date.clone(),
+                effective_date: first.date.clone(),
+                weights: entry.weights.clone(),
+                cash_target_percent: entry.cash_target_percent,
+                regime: entry.regime.clone(),
+                action: entry.action.clone(),
+            }]
+        })
+        .unwrap_or_default();
+    let mut target_schedule_cursor = initial_schedule_count;
     let mut xirr_flows = vec![(first.date.clone(), -input.initial_amount)];
     let mut pending_periodic = Vec::<(String, f64)>::new();
     let mut pending_rebalance = false;
@@ -956,6 +1274,7 @@ pub fn simulate_with_control(
     for index in 0..aligned.len() {
         checkpoint(control)?;
         let current = &aligned[index];
+        ledger.volumes.clone_from(&current.volumes);
         if index > 0 {
             let previous = &aligned[index - 1];
             let elapsed_days = days_between(&previous.date, &current.date) as f64;
@@ -964,6 +1283,7 @@ pub fn simulate_with_control(
                     .powf(elapsed_days / 365.25);
             }
             let before_market = ledger.balance(&previous.closes);
+            let dividend_tax_rate = input.realism.costs.dividend_tax_bps / 10_000.0;
             let mut daily_contributions = vec![0.0; input.assets.len()];
             let mut daily_local_contributions = vec![0.0; input.assets.len()];
             let mut daily_fx_contributions = vec![0.0; input.assets.len()];
@@ -975,14 +1295,45 @@ pub fn simulate_with_control(
                     0.0
                 };
                 weight_sums[asset_index] += previous_weight;
-                let asset_return = current.closes[asset_index] / previous.closes[asset_index] - 1.0;
+                let cash_dividend = if input.realism.dividend_mode == DividendMode::Cash {
+                    current.cash_dividends[asset_index].max(0.0)
+                } else {
+                    0.0
+                };
+                let net_dividend_per_share = cash_dividend * (1.0 - dividend_tax_rate);
+                let dividend_return = if previous.closes[asset_index] > 0.0 {
+                    net_dividend_per_share / previous.closes[asset_index]
+                } else {
+                    0.0
+                };
+                let asset_return = current.closes[asset_index] / previous.closes[asset_index] - 1.0
+                    + dividend_return;
                 let local_return =
-                    current.local_closes[asset_index] / previous.local_closes[asset_index] - 1.0;
+                    current.local_closes[asset_index] / previous.local_closes[asset_index] - 1.0
+                        + dividend_return;
                 let fx_return =
                     current.fx_rates[asset_index] / previous.fx_rates[asset_index] - 1.0;
                 asset_returns[asset_index].push(asset_return);
                 market_profit[asset_index] += ledger.quantities[asset_index]
                     * (current.closes[asset_index] - previous.closes[asset_index]);
+                if cash_dividend > 0.0 && ledger.quantities[asset_index] > EPSILON {
+                    let gross = ledger.quantities[asset_index] * cash_dividend;
+                    let tax = gross * dividend_tax_rate;
+                    let net = gross - tax;
+                    ledger.cash += net;
+                    ledger.total_dividend_income += gross;
+                    ledger.total_dividend_taxes += tax;
+                    ledger.dividends.push(DividendEvent {
+                        date: current.date.clone(),
+                        symbol: input.assets[asset_index].symbol.clone(),
+                        quantity: ledger.quantities[asset_index],
+                        amount_per_share: round(cash_dividend, 8),
+                        gross_amount: round(gross, 2),
+                        tax: round(tax, 2),
+                        net_amount: round(net, 2),
+                    });
+                    market_profit[asset_index] += net;
+                }
                 daily_contributions[asset_index] = previous_weight * asset_return;
                 daily_local_contributions[asset_index] = previous_weight * local_return;
                 daily_fx_contributions[asset_index] =
@@ -1031,7 +1382,61 @@ pub fn simulate_with_control(
             }
         }
 
-        if current.common_observation() {
+        if current.common_observation(input) {
+            let (universe_weights, universe_cash) = effective_target_weights(
+                input,
+                &ledger.policy_target_weights,
+                ledger.policy_cash_target_percent,
+                &current.date,
+            );
+            let universe_changed = universe_weights
+                .iter()
+                .zip(&ledger.target_weights)
+                .any(|(left, right)| (left - right).abs() > EPSILON)
+                || (universe_cash - ledger.cash_target_percent).abs() > EPSILON;
+            let mut scheduled_policy_applied = false;
+            while let Some(entry) = target_schedule.get(target_schedule_cursor)
+                && entry.date <= current.date
+            {
+                ledger.policy_target_weights = scheduled_target_weights(input, entry);
+                ledger.policy_cash_target_percent = entry.cash_target_percent;
+                (ledger.target_weights, ledger.cash_target_percent) = effective_target_weights(
+                    input,
+                    &ledger.policy_target_weights,
+                    ledger.policy_cash_target_percent,
+                    &current.date,
+                );
+                full_rebalance(
+                    &mut ledger,
+                    input,
+                    &current.closes,
+                    &current.date,
+                    "policy-schedule",
+                    "regime_policy",
+                );
+                applied_target_schedule.push(AppliedTargetWeightSchedule {
+                    scheduled_date: entry.date.clone(),
+                    effective_date: current.date.clone(),
+                    weights: entry.weights.clone(),
+                    cash_target_percent: entry.cash_target_percent,
+                    regime: entry.regime.clone(),
+                    action: entry.action.clone(),
+                });
+                target_schedule_cursor += 1;
+                scheduled_policy_applied = true;
+            }
+            if universe_changed && !scheduled_policy_applied {
+                ledger.target_weights = universe_weights;
+                ledger.cash_target_percent = universe_cash;
+                full_rebalance(
+                    &mut ledger,
+                    input,
+                    &current.closes,
+                    &current.date,
+                    "point-in-time-universe",
+                    "point_in_time_universe",
+                );
+            }
             let mut events = custom_by_index
                 .remove(&index)
                 .unwrap_or_default()
@@ -1219,7 +1624,7 @@ pub fn simulate_with_control(
             .map(|value| value / weight_observations as f64)
             .collect::<Vec<_>>()
     } else {
-        target_weights(input)
+        configured_target_weights(input)
     };
     let mut contributions = input
         .assets
@@ -1356,6 +1761,8 @@ pub fn simulate_with_control(
             },
             invested_balance: round(final_invested, 2),
             total_transaction_costs: round(ledger.total_costs, 2),
+            total_dividend_income: round(ledger.total_dividend_income, 2),
+            total_dividend_taxes: round(ledger.total_dividend_taxes, 2),
             net_profit_loss: round(final_balance + total_withdrawals - total_contributions, 2),
             money_weighted_return_percent: money_weighted,
         },
@@ -1375,6 +1782,8 @@ pub fn simulate_with_control(
         },
         trades: ledger.trades,
         cash_flows: applied_flows,
+        target_weight_schedule: applied_target_schedule,
+        dividends: ledger.dividends,
         execution: input.execution.clone(),
         data_quality: DataQuality {
             alignment_policy: "carry_forward_for_valuation".into(),
@@ -1391,6 +1800,64 @@ pub fn simulate_with_control(
                 })
                 .collect(),
             benchmark_carry_forward_count: benchmark_carry_forward,
+            dividend_status: match input.realism.dividend_mode {
+                DividendMode::AdjustedPriceOnly => "adjusted_price_policy".into(),
+                DividendMode::Cash
+                    if series_by_asset
+                        .iter()
+                        .any(|series| series.iter().any(|point| point.cash_dividend.is_some())) =>
+                {
+                    "provider_supplied".into()
+                }
+                DividendMode::Cash => "unavailable".into(),
+            },
+            liquidity_status: if input.realism.costs.market_impact_coefficient == 0.0
+                && input.realism.costs.max_participation_rate_percent.is_none()
+            {
+                "not_requested".into()
+            } else if ledger.missing_liquidity_observations == 0 {
+                "provider_supplied".into()
+            } else {
+                "partial_or_unavailable".into()
+            },
+            liquidity_trade_observations: ledger.liquidity_observations,
+            missing_liquidity_observations: ledger.missing_liquidity_observations,
+            point_in_time_universe_status: if input.realism.enforce_point_in_time_universe {
+                "explicit_input_enforced".into()
+            } else {
+                "not_enforced".into()
+            },
+            warnings: {
+                let mut warnings = Vec::new();
+                if input.realism.dividend_mode == DividendMode::Cash
+                    && !series_by_asset
+                        .iter()
+                        .any(|series| series.iter().any(|point| point.cash_dividend.is_some()))
+                {
+                    warnings.push(
+                        "현금 배당 모드가 요청됐지만 공급자 배당 데이터가 없어 배당을 0으로 추정하지 않고 unavailable로 표시했습니다."
+                            .into(),
+                    );
+                }
+                if ledger.missing_liquidity_observations > 0 {
+                    warnings.push(format!(
+                        "{}회의 거래 비용 계산에서 공급자 거래량이 없어 시장충격을 적용하지 않았습니다.",
+                        ledger.missing_liquidity_observations
+                    ));
+                }
+                if !input.realism.enforce_point_in_time_universe {
+                    warnings.push(
+                        "point-in-time universe가 강제되지 않아 상장폐지·편입 이력 기반 생존편향 보정은 보장되지 않습니다."
+                            .into(),
+                    );
+                } else {
+                    warnings.push(
+                        "point-in-time universe는 요청에 명시된 [편입일, 제외일)과 상장폐지일을 사용했으며 공급자 원천 이력으로 추정하거나 검증하지 않았습니다."
+                            .into(),
+                    );
+                }
+                warnings
+            },
         },
         advanced,
     };
@@ -1451,6 +1918,9 @@ mod tests {
             list_date: "2020-01-01".into(),
             weight: 100.0 - cash_target,
             lot_size: 1.0,
+            delist_date: None,
+            universe_member_from: None,
+            universe_member_to: None,
         };
         BacktestSimulationInput {
             assets: vec![asset],
@@ -1462,12 +1932,16 @@ mod tests {
                         close: 300.0,
                         local_close: Some(300.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                     PricePoint {
                         date: "2024-01-03".into(),
                         close: 300.0,
                         local_close: Some(300.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                 ],
             )]),
@@ -1488,6 +1962,8 @@ mod tests {
                 quantity_mode,
                 ..ExecutionPolicy::default()
             },
+            realism: RealismPolicy::default(),
+            target_weight_schedule: vec![],
             benchmark: None,
         }
     }
@@ -1530,6 +2006,131 @@ mod tests {
     }
 
     #[test]
+    fn dated_target_schedule_rebalances_through_the_real_ledger() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.assets[0].weight = 50.0;
+        input.assets.push(AssetDefinition {
+            symbol: "BBB".into(),
+            name: "BBB".into(),
+            market: "KR".into(),
+            currency: "KRW".into(),
+            list_date: "2020-01-01".into(),
+            weight: 50.0,
+            lot_size: 1.0,
+            delist_date: None,
+            universe_member_from: None,
+            universe_member_to: None,
+        });
+        input.prices.insert(
+            "KRW:BBB".into(),
+            vec![
+                PricePoint {
+                    date: "2024-01-02".into(),
+                    close: 100.0,
+                    local_close: Some(100.0),
+                    fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
+                },
+                PricePoint {
+                    date: "2024-01-03".into(),
+                    close: 100.0,
+                    local_close: Some(100.0),
+                    fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
+                },
+            ],
+        );
+        input
+            .target_weight_schedule
+            .push(TargetWeightScheduleEntry {
+                date: "2024-01-03".into(),
+                weights: BTreeMap::from([("AAA".into(), 0.0), ("BBB".into(), 100.0)]),
+                cash_target_percent: 0.0,
+                regime: Some("risk_off".into()),
+                action: Some("minimum_variance".into()),
+            });
+
+        let result = simulate(&input).unwrap();
+        assert_eq!(result.target_weight_schedule.len(), 1);
+        assert_eq!(
+            result.target_weight_schedule[0].effective_date,
+            "2024-01-03"
+        );
+        assert_eq!(
+            result.target_weight_schedule[0].regime.as_deref(),
+            Some("risk_off")
+        );
+        assert!(
+            result
+                .trades
+                .iter()
+                .any(|trade| trade.trigger == "regime_policy" && trade.symbol == "AAA")
+        );
+        assert!(
+            result
+                .trades
+                .iter()
+                .any(|trade| trade.trigger == "regime_policy" && trade.symbol == "BBB")
+        );
+        assert!((result.metrics.final_balance - 1_000.0).abs() < 1e-8);
+        assert!(result.metrics.ending_cash_balance.abs() < 1e-8);
+    }
+
+    #[test]
+    fn explicit_point_in_time_membership_changes_the_investable_ledger() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.assets[0].weight = 50.0;
+        input.assets[0].universe_member_from = Some("2020-01-01".into());
+        input.assets[0].universe_member_to = Some("2025-01-01".into());
+        input.assets.push(AssetDefinition {
+            symbol: "BBB".into(),
+            name: "BBB".into(),
+            market: "KR".into(),
+            currency: "KRW".into(),
+            list_date: "2024-01-03".into(),
+            weight: 50.0,
+            lot_size: 1.0,
+            delist_date: None,
+            universe_member_from: Some("2024-01-03".into()),
+            universe_member_to: Some("2025-01-01".into()),
+        });
+        input.prices.insert(
+            "KRW:BBB".into(),
+            vec![PricePoint {
+                date: "2024-01-03".into(),
+                close: 100.0,
+                local_close: Some(100.0),
+                fx_rate: Some(1.0),
+                volume: None,
+                cash_dividend: None,
+            }],
+        );
+        input.realism.enforce_point_in_time_universe = true;
+
+        let result = simulate(&input).unwrap();
+        assert_eq!(result.effective_start_date, "2024-01-02");
+        assert_eq!(
+            result.data_quality.point_in_time_universe_status,
+            "explicit_input_enforced"
+        );
+        assert!(result.trades.iter().any(|trade| {
+            trade.trigger == "point_in_time_universe"
+                && trade.symbol == "BBB"
+                && trade.side == "BUY"
+        }));
+        let ending = result
+            .contributions
+            .iter()
+            .map(|item| (item.symbol.as_str(), item.ending_value))
+            .collect::<BTreeMap<_, _>>();
+        assert!((ending["AAA"] - 500.0).abs() < 1e-8);
+        assert!((ending["BBB"] - 500.0).abs() < 1e-8);
+        assert!((result.metrics.final_balance - 1_000.0).abs() < 1e-8);
+    }
+
+    #[test]
     fn custom_flow_is_xirr_input_and_does_not_change_flat_nav() {
         let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
         input.cash_flows.push(CustomCashFlow {
@@ -1554,12 +2155,16 @@ mod tests {
                     close: 1_000.0,
                     local_close: Some(10.0),
                     fx_rate: Some(100.0),
+                    volume: None,
+                    cash_dividend: None,
                 },
                 PricePoint {
                     date: "2024-01-03".into(),
                     close: 1_200.0,
                     local_close: Some(10.0),
                     fx_rate: Some(120.0),
+                    volume: None,
+                    cash_dividend: None,
                 },
             ],
         );
@@ -1643,6 +2248,9 @@ mod tests {
                 list_date: "2020-01-01".into(),
                 weight: 50.0,
                 lot_size: 1.0,
+                delist_date: None,
+                universe_member_from: None,
+                universe_member_to: None,
             },
             AssetDefinition {
                 symbol: "BBB".into(),
@@ -1652,6 +2260,9 @@ mod tests {
                 list_date: "2020-01-01".into(),
                 weight: 50.0,
                 lot_size: 1.0,
+                delist_date: None,
+                universe_member_from: None,
+                universe_member_to: None,
             },
         ];
         input.prices = BTreeMap::from([
@@ -1663,18 +2274,24 @@ mod tests {
                         close: 100.0,
                         local_close: Some(100.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                     PricePoint {
                         date: "2024-01-03".into(),
                         close: 200.0,
                         local_close: Some(200.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                     PricePoint {
                         date: "2024-01-04".into(),
                         close: 200.0,
                         local_close: Some(200.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                 ],
             ),
@@ -1686,18 +2303,24 @@ mod tests {
                         close: 100.0,
                         local_close: Some(100.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                     PricePoint {
                         date: "2024-01-03".into(),
                         close: 100.0,
                         local_close: Some(100.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                     PricePoint {
                         date: "2024-01-04".into(),
                         close: 100.0,
                         local_close: Some(100.0),
                         fx_rate: Some(1.0),
+                        volume: None,
+                        cash_dividend: None,
                     },
                 ],
             ),
@@ -1749,18 +2372,24 @@ mod tests {
                     close: 100.0,
                     local_close: Some(100.0),
                     fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
                 },
                 PricePoint {
                     date: "2024-01-03".into(),
                     close: 120.0,
                     local_close: Some(100.0),
                     fx_rate: Some(1.2),
+                    volume: None,
+                    cash_dividend: None,
                 },
                 PricePoint {
                     date: "2024-01-04".into(),
                     close: 132.0,
                     local_close: Some(110.0),
                     fx_rate: Some(1.2),
+                    volume: None,
+                    cash_dividend: None,
                 },
             ],
         );
@@ -1790,12 +2419,16 @@ mod tests {
                     close: 300.0,
                     local_close: Some(300.0),
                     fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
                 },
                 PricePoint {
                     date: "2025-01-02".into(),
                     close: 300.0,
                     local_close: Some(300.0),
                     fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
                 },
             ],
         );
@@ -1805,5 +2438,70 @@ mod tests {
         assert!(result.metrics.final_balance > 1_099.0);
         assert_eq!(result.metrics.invested_balance, 0.0);
         assert_eq!(result.metrics.ending_cash_weight_percent, 100.0);
+    }
+
+    #[test]
+    fn explicit_dividend_is_taxed_once_and_preserves_flat_price_ledger() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.realism.dividend_mode = DividendMode::Cash;
+        input.realism.costs.dividend_tax_bps = 1_500.0;
+        input.prices.get_mut("KRW:AAA").unwrap()[1].cash_dividend = Some(30.0);
+
+        let result = simulate(&input).unwrap();
+
+        assert_eq!(result.dividends.len(), 1);
+        assert_eq!(result.metrics.total_dividend_income, 100.0);
+        assert_eq!(result.metrics.total_dividend_taxes, 15.0);
+        assert_eq!(result.metrics.final_balance, 1_085.0);
+        assert_eq!(result.data_quality.dividend_status, "provider_supplied");
+    }
+
+    #[test]
+    fn volume_cap_and_market_impact_use_only_provider_observations() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.realism.costs.market_impact_coefficient = 0.01;
+        input.realism.costs.max_participation_rate_percent = Some(10.0);
+        input.prices.get_mut("KRW:AAA").unwrap()[0].volume = Some(10.0);
+
+        let result = simulate(&input).unwrap();
+
+        assert_eq!(result.trades[0].quantity, 1.0);
+        assert_eq!(result.trades[0].participation_rate_percent, Some(10.0));
+        assert!(result.trades[0].market_impact_cost > 0.0);
+        assert_eq!(result.data_quality.missing_liquidity_observations, 0);
+    }
+
+    #[test]
+    fn absent_volume_is_reported_and_market_impact_is_not_fabricated() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.realism.costs.market_impact_coefficient = 0.01;
+
+        let result = simulate(&input).unwrap();
+
+        assert_eq!(result.trades[0].market_impact_cost, 0.0);
+        assert_eq!(
+            result.data_quality.liquidity_status,
+            "partial_or_unavailable"
+        );
+        assert!(
+            result
+                .data_quality
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("거래량"))
+        );
+    }
+
+    #[test]
+    fn point_in_time_enforcement_rejects_missing_membership_instead_of_guessing() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        input.realism.enforce_point_in_time_universe = true;
+
+        assert!(
+            simulate(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("point-in-time universe")
+        );
     }
 }

@@ -13,7 +13,8 @@
         "start_date_sensitivity",
         "rebalance_sensitivity",
         "cash_flow_sensitivity",
-        "monte_carlo"
+        "monte_carlo",
+        "outlook"
       ]
     }
   },

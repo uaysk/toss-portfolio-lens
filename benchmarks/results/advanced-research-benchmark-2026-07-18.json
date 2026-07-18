@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "portfolio-lens-advanced-research-benchmark/v1",
+  "measuredDate": "2026-07-18",
+  "environment": {
+    "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "logicalCores": 12,
+    "rust": "1.97.0",
+    "profile": "release",
+    "rayonThreads": 12,
+    "transport": "persistent-unix-domain-socket-length-prefixed-json"
+  },
+  "fixture": {
+    "assetCount": 8,
+    "dayCount": 1260
+  },
+  "optimizer": {
+    "command": "BENCH_DAYS=1260 BENCH_CANDIDATES={1000|10000} BENCH_BACKTEST_ITERATIONS=3 BENCH_OPTIMIZATION_ITERATIONS=2 npm run benchmark:rust-ipc",
+    "candidate1000": {
+      "rustComputeP50Ms": 161.614,
+      "rustComputeP95Ms": 191.343,
+      "rustUdsP50Ms": 256.361,
+      "rustUdsP95Ms": 277.227,
+      "nodeComputeP50Ms": 6056.417,
+      "pythonComputeP50Ms": 201.823,
+      "vmHwmKb": 107880
+    },
+    "candidate10000": {
+      "rustComputeP50Ms": 1605.039,
+      "rustComputeP95Ms": 2226.451,
+      "rustUdsP50Ms": 2758.205,
+      "rustUdsP95Ms": 3227.578,
+      "nodeComputeP50Ms": 60245.284,
+      "pythonComputeP50Ms": 9682.945,
+      "candidatesPerSecond": 6230,
+      "rustVsNodeCompute": 37.535,
+      "rustVsPythonCompute": 6.033,
+      "vmHwmKb": 799640
+    },
+    "scaling": {
+      "candidateMultiplier": 10,
+      "computeTimeMultiplier": 9.93,
+      "knownBottleneck": "전체 후보 결과와 artifact의 JSON 직렬화 및 복제 메모리"
+    }
+  },
+  "monteCarlo": {
+    "method": "moving_block",
+    "pathCount": 10000,
+    "horizonDays": 252,
+    "pathSteps": 2520000,
+    "iterations": 3,
+    "rustComputeMedianMs": 162.911,
+    "rustUdsMedianMs": 183.051,
+    "pathStepsPerSecond": 15470000,
+    "vmHwmKb": 25404,
+    "realism": {
+      "settings": "monthly rebalance, cash 10%, cash yield 2%, cost 12bps, whole lots, -500000/21d withdrawal, inflation 3%",
+      "rustComputeMedianMs": 156.46,
+      "rustUdsMedianMs": 175.94,
+      "vmHwmKb": 26084,
+      "maximumLedgerConservationError": 5.96e-8
+    }
+  },
+  "walkForward": {
+    "mode": "rolling",
+    "trainWindow": 504,
+    "testWindow": 63,
+    "step": 63,
+    "gap": 5,
+    "embargo": 5,
+    "foldCandidateBudget": 40,
+    "seeds": [101, 202],
+    "foldCount": 11,
+    "totalFoldCandidates": 440,
+    "iterations": 3,
+    "rustComputeMedianMs": 837.035,
+    "rustUdsMedianMs": 861.431,
+    "vmHwmKb": 46072,
+    "stitchedOosObservations": 693,
+    "coverage": 0.550437
+  },
+  "notes": [
+    "compute 시간은 worker-metrics, 메모리는 /proc/<pid>/status VmHWM에서 측정했습니다.",
+    "Monte Carlo와 Walk-forward는 production UDS worker 경로를 사용했습니다.",
+    "초기 direct CLI pipe harness timeout 측정은 폐기하고 이 문서에 포함하지 않았습니다."
+  ]
+}

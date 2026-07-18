@@ -39,6 +39,16 @@ pub struct AssetDefinition {
     pub weight: f64,
     #[serde(default = "default_lot_size")]
     pub lot_size: f64,
+    /// Optional provider supplied delisting date. It is deliberately not inferred
+    /// from the final price observation.
+    #[serde(default)]
+    pub delist_date: Option<String>,
+    /// Point-in-time universe membership bounds. When point-in-time enforcement
+    /// is requested both values must be supplied by the caller/provider.
+    #[serde(default)]
+    pub universe_member_from: Option<String>,
+    #[serde(default)]
+    pub universe_member_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +60,79 @@ pub struct PricePoint {
     pub local_close: Option<f64>,
     #[serde(default)]
     pub fx_rate: Option<f64>,
+    /// Provider supplied daily volume. None means unavailable; the engine never
+    /// fabricates volume for market-impact calculations.
+    #[serde(default)]
+    pub volume: Option<f64>,
+    /// Cash dividend per share in the portfolio base currency. Applied only when
+    /// `realism.dividendMode` is `cash` so adjusted prices are not double-counted.
+    #[serde(default)]
+    pub cash_dividend: Option<f64>,
+}
+
+fn default_impact_exponent() -> f64 {
+    0.5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionCostModel {
+    /// None preserves the legacy `transactionCostBps` behavior.
+    #[serde(default)]
+    pub commission_bps: Option<f64>,
+    #[serde(default)]
+    pub sell_tax_bps: f64,
+    #[serde(default)]
+    pub fixed_slippage_bps: f64,
+    /// Square-root style market impact coefficient as a fraction of price at
+    /// 100% participation (0.01 = 1%).
+    #[serde(default)]
+    pub market_impact_coefficient: f64,
+    #[serde(default = "default_impact_exponent")]
+    pub market_impact_exponent: f64,
+    #[serde(default)]
+    pub max_participation_rate_percent: Option<f64>,
+    #[serde(default)]
+    pub minimum_fee: f64,
+    #[serde(default)]
+    pub dividend_tax_bps: f64,
+}
+
+impl Default for TransactionCostModel {
+    fn default() -> Self {
+        Self {
+            commission_bps: None,
+            sell_tax_bps: 0.0,
+            fixed_slippage_bps: 0.0,
+            market_impact_coefficient: 0.0,
+            market_impact_exponent: default_impact_exponent(),
+            max_participation_rate_percent: None,
+            minimum_fee: 0.0,
+            dividend_tax_bps: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DividendMode {
+    /// Default for backward compatibility: assume supplied closes already
+    /// represent the provider's total-return/adjustment policy.
+    #[default]
+    AdjustedPriceOnly,
+    /// Apply explicit `cashDividend` observations to the ledger.
+    Cash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RealismPolicy {
+    #[serde(default)]
+    pub costs: TransactionCostModel,
+    #[serde(default)]
+    pub dividend_mode: DividendMode,
+    #[serde(default)]
+    pub enforce_point_in_time_universe: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +200,34 @@ pub struct CustomCashFlow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TargetWeightScheduleEntry {
+    pub date: String,
+    /// Percent weights keyed by asset symbol. Every configured asset must be
+    /// present so a policy cannot silently inherit a stale target.
+    pub weights: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub cash_target_percent: f64,
+    #[serde(default)]
+    pub regime: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedTargetWeightSchedule {
+    pub scheduled_date: String,
+    pub effective_date: String,
+    pub weights: BTreeMap<String, f64>,
+    pub cash_target_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExecutionPolicy {
     #[serde(default)]
     pub cash_target_percent: f64,
@@ -169,7 +280,11 @@ pub struct BacktestSimulationInput {
     #[serde(default)]
     pub cash_flows: Vec<CustomCashFlow>,
     #[serde(default)]
+    pub target_weight_schedule: Vec<TargetWeightScheduleEntry>,
+    #[serde(default)]
     pub execution: ExecutionPolicy,
+    #[serde(default)]
+    pub realism: RealismPolicy,
     #[serde(default)]
     pub benchmark: Option<BenchmarkDefinition>,
 }
@@ -219,6 +334,8 @@ pub struct BacktestMetrics {
     pub ending_cash_weight_percent: f64,
     pub invested_balance: f64,
     pub total_transaction_costs: f64,
+    pub total_dividend_income: f64,
+    pub total_dividend_taxes: f64,
     pub net_profit_loss: f64,
     pub money_weighted_return_percent: Option<f64>,
 }
@@ -243,9 +360,27 @@ pub struct TradeEvent {
     pub price: f64,
     pub reason: String,
     pub transaction_cost: f64,
+    pub commission: f64,
+    pub tax: f64,
+    pub slippage_cost: f64,
+    pub market_impact_cost: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participation_rate_percent: Option<f64>,
     pub net_cash_impact: f64,
     pub trigger: String,
     pub lot_size: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DividendEvent {
+    pub date: String,
+    pub symbol: String,
+    pub quantity: f64,
+    pub amount_per_share: f64,
+    pub gross_amount: f64,
+    pub tax: f64,
+    pub net_amount: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +441,12 @@ pub struct DataQuality {
     pub common_return_observations: usize,
     pub carry_forward_by_asset: Vec<CarryForward>,
     pub benchmark_carry_forward_count: usize,
+    pub dividend_status: String,
+    pub liquidity_status: String,
+    pub liquidity_trade_observations: usize,
+    pub missing_liquidity_observations: usize,
+    pub point_in_time_universe_status: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,6 +464,8 @@ pub struct BacktestSimulationResult {
     pub correlations: Correlations,
     pub trades: Vec<TradeEvent>,
     pub cash_flows: Vec<AppliedCashFlow>,
+    pub target_weight_schedule: Vec<AppliedTargetWeightSchedule>,
+    pub dividends: Vec<DividendEvent>,
     pub execution: ExecutionPolicy,
     pub data_quality: DataQuality,
     pub advanced: Value,

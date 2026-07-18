@@ -7,6 +7,7 @@ describe("dashboard navigation", () => {
     ["analysis", "#analysis"],
     ["backtest", "#backtest"],
     ["optimization", "#optimization"],
+    ["library", "#library"],
   ] as const)("%s 화면과 hash를 왕복한다", (view, hash) => {
     expect(dashboardHash(view)).toBe(hash);
     expect(dashboardViewFromHash(hash)).toBe(view);

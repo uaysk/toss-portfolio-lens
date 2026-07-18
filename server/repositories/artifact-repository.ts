@@ -2,26 +2,23 @@ import { createHash, randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
 import { canonicalJson } from "../worker/contracts.js";
 
-export type ArtifactType =
-  | "equity"
-  | "drawdown"
-  | "holdings"
-  | "trades"
-  | "rolling"
-  | "correlation"
-  | "risk-contribution"
-  | "monthly-returns"
-  | "cash-ledger"
-  | "cash-flows"
-  | "candidates"
-  | "walk-forward"
-  | "worker-pareto-frontier"
-  | "scenario-comparison"
-  | "monte-carlo-distribution"
-  | "monte-carlo-percentile-paths"
-  | "monte-carlo-sample-paths"
-  | "worker-metrics"
-  | "result";
+export const ARTIFACT_TYPES = [
+  "equity", "drawdown", "holdings", "trades", "rolling", "correlation",
+  "risk-contribution", "monthly-returns", "cash-ledger", "cash-flows", "dividends",
+  "target-weight-schedule", "data-quality", "regime-policy",
+  "candidates", "walk-forward", "worker-pareto-frontier", "scenario-comparison",
+  "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths",
+  "screening-candidates", "ledger-validated-candidates", "outlook-summary",
+  "outlook-oos-equity", "outlook-quantile-paths", "outlook-calibration",
+  "outlook-worst-scenarios", "outlook-sensitivity", "outlook-market-regimes",
+  "portfolio-exposures", "pareto-frontier", "research-report", "worker-metrics", "result",
+] as const;
+
+export type ArtifactType = typeof ARTIFACT_TYPES[number];
+
+export function isArtifactType(value: string): value is ArtifactType {
+  return (ARTIFACT_TYPES as readonly string[]).includes(value);
+}
 
 export type ArtifactDescriptor = {
   id: string;
@@ -51,10 +48,13 @@ type ArtifactRow = {
 };
 
 function uriFor(runId: string, type: ArtifactType): string {
-  if (["candidates", "walk-forward", "worker-pareto-frontier", "scenario-comparison", "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths"].includes(type)) {
+  if (["candidates", "walk-forward", "worker-pareto-frontier", "pareto-frontier", "scenario-comparison", "monte-carlo-distribution", "monte-carlo-percentile-paths", "monte-carlo-sample-paths"].includes(type)) {
     return `optimization://runs/${runId}/${type}`;
   }
-  return `backtest://runs/${runId}/${type}`;
+  if (["equity", "drawdown", "holdings", "trades", "rolling", "correlation", "risk-contribution", "monthly-returns", "cash-ledger", "cash-flows"].includes(type)) {
+    return `backtest://runs/${runId}/${type}`;
+  }
+  return `portfolio://runs/${runId}/artifacts/${type}`;
 }
 
 function descriptor(row: ArtifactRow): ArtifactDescriptor {

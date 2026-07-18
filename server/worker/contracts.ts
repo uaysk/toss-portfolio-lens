@@ -18,6 +18,7 @@ const jobKinds = [
   "rebalance_sensitivity",
   "cash_flow_sensitivity",
   "monte_carlo",
+  "outlook",
 ] as const satisfies readonly PortfolioRunKind[];
 
 export const WorkerJobKindSchema = z.enum(jobKinds);

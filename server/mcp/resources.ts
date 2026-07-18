@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ArtifactType } from "../repositories/artifact-repository.js";
+import { isArtifactType, type ArtifactType } from "../repositories/artifact-repository.js";
 import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
 import { MCP_SCHEMA_VERSION } from "../services/service-envelope.js";
@@ -95,6 +95,60 @@ export class McpResourceRegistry {
         };
       },
     );
+
+    server.registerResource(
+      "run-artifact",
+      new ResourceTemplate("portfolio://runs/{runId}/artifacts/{artifactType}", { list: undefined }),
+      {
+        title: "실행 artifact",
+        description: "run artifact index에 노출된 모든 JSON artifact의 공통 조회 경로",
+        mimeType: "application/json",
+      },
+      async (_uri, variables, extra) => {
+        const owner = authorizeResource(extra, "backtest:run", this.authMode);
+        const runId = String(variables.runId ?? "");
+        const artifactType = String(variables.artifactType ?? "");
+        if (!isArtifactType(artifactType)) throw new Error("지원하지 않는 artifact type입니다.");
+        if (!await this.runs.get(runId, owner)) throw new Error("실행을 찾을 수 없습니다.");
+        const artifact = await this.artifacts.get(runId, artifactType);
+        if (!artifact) throw new Error("artifact를 찾을 수 없습니다.");
+        return {
+          contents: [{
+            uri: `portfolio://runs/${runId}/artifacts/${artifactType}`,
+            mimeType: artifact.descriptor.format,
+            text: JSON.stringify({ descriptor: artifact.descriptor, data: artifact.content }),
+          }],
+        };
+      },
+    );
+
+    for (const scheme of ["backtest", "optimization"] as const) {
+      server.registerResource(
+        `${scheme}-artifact`,
+        new ResourceTemplate(`${scheme}://runs/{runId}/{artifactType}`, { list: undefined }),
+        {
+          title: `${scheme} artifact`,
+          description: "기존 artifact descriptor URI와 호환되는 공통 JSON 조회 경로",
+          mimeType: "application/json",
+        },
+        async (_uri, variables, extra) => {
+          const owner = authorizeResource(extra, "backtest:run", this.authMode);
+          const runId = String(variables.runId ?? "");
+          const artifactType = String(variables.artifactType ?? "");
+          if (!isArtifactType(artifactType)) throw new Error("지원하지 않는 artifact type입니다.");
+          if (!await this.runs.get(runId, owner)) throw new Error("실행을 찾을 수 없습니다.");
+          const artifact = await this.artifacts.get(runId, artifactType);
+          if (!artifact) throw new Error("artifact를 찾을 수 없습니다.");
+          return {
+            contents: [{
+              uri: artifact.descriptor.uri,
+              mimeType: artifact.descriptor.format,
+              text: JSON.stringify({ descriptor: artifact.descriptor, data: artifact.content }),
+            }],
+          };
+        },
+      );
+    }
 
     const templates: Array<{ name: string; template: string; type: ArtifactType }> = [
       { name: "backtest-equity", template: "backtest://runs/{runId}/equity", type: "equity" },

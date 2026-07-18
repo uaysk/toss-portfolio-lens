@@ -12,7 +12,14 @@ type Pending = {
   kind: PortfolioRunKind;
   dataRevision: string;
   requestHash: string;
+  cleanupAbort?: () => void;
 };
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Rust compute 요청이 취소되었습니다.");
+}
 
 class RustSocketChannel {
   private socket?: net.Socket;
@@ -29,8 +36,19 @@ class RustSocketChannel {
     private readonly maxResponseBytes = 128 * 1024 * 1024,
   ) {}
 
-  async request(kind: PortfolioRunKind, payload: Record<string, unknown>, includeArtifacts: boolean): Promise<WorkerOutput> {
-    await this.connect();
+  async request(
+    kind: PortfolioRunKind,
+    payload: Record<string, unknown>,
+    includeArtifacts: boolean,
+    signal?: AbortSignal,
+  ): Promise<WorkerOutput> {
+    if (signal?.aborted) throw abortReason(signal);
+    await this.connect(signal);
+    if (signal?.aborted) {
+      const error = abortReason(signal);
+      this.reset(error);
+      throw error;
+    }
     const safePayload = jsonSafe(payload) as Record<string, unknown>;
     const runId = randomUUID();
     const dataRevision = "ipc";
@@ -62,14 +80,16 @@ class RustSocketChannel {
     frame.writeUInt32BE(source.byteLength, 0);
     source.copy(frame, 4);
     return new Promise<WorkerOutput>((resolve, reject) => {
+      let pending!: Pending;
       const timer = setTimeout(() => {
-        const index = this.pending.findIndex((item) => item.timer === timer);
+        const index = this.pending.indexOf(pending);
         if (index >= 0) this.pending.splice(index, 1);
+        pending.cleanupAbort?.();
         reject(new Error(`Rust compute 응답 제한 시간 ${this.timeoutMs}ms를 초과했습니다.`));
         this.reset(new Error("Rust compute socket timeout"));
       }, this.timeoutMs);
       timer.unref();
-      this.pending.push({
+      pending = {
         resolve,
         reject,
         timer,
@@ -77,7 +97,17 @@ class RustSocketChannel {
         kind,
         dataRevision,
         requestHash,
-      });
+      };
+      if (signal) {
+        const onAbort = () => this.reset(abortReason(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        pending.cleanupAbort = () => signal.removeEventListener("abort", onAbort);
+      }
+      this.pending.push(pending);
+      if (signal?.aborted) {
+        this.reset(abortReason(signal));
+        return;
+      }
       this.socket!.write(frame, (error) => {
         if (error) this.reset(error);
       });
@@ -88,18 +118,33 @@ class RustSocketChannel {
     this.reset(new Error("Rust compute client closed"));
   }
 
-  private async connect(): Promise<void> {
+  private async connect(signal?: AbortSignal): Promise<void> {
     if (this.socket && !this.socket.destroyed) return;
     if (this.connecting) return this.connecting;
     this.connecting = new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({ path: this.socketPath });
-      const timer = setTimeout(() => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         socket.destroy();
-        reject(new Error(`Rust compute socket 연결 제한 시간 ${this.timeoutMs}ms를 초과했습니다.`));
+        reject(error);
+      };
+      const onAbort = () => fail(abortReason(signal!));
+      const timer = setTimeout(() => {
+        fail(new Error(`Rust compute socket 연결 제한 시간 ${this.timeoutMs}ms를 초과했습니다.`));
       }, this.timeoutMs);
       timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
       socket.once("connect", () => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.socket = socket;
         socket.on("data", (chunk) => this.onData(chunk));
         socket.on("error", (error) => this.reset(error));
@@ -107,9 +152,9 @@ class RustSocketChannel {
         resolve();
       });
       socket.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
+        fail(error);
       });
+      if (signal?.aborted) onAbort();
     }).finally(() => {
       this.connecting = undefined;
     });
@@ -141,6 +186,7 @@ class RustSocketChannel {
         return;
       }
       clearTimeout(pending.timer);
+      pending.cleanupAbort?.();
       try {
         const raw = JSON.parse(frame.toString("utf8")) as unknown;
         if (typeof raw === "object" && raw && "status" in raw && (raw as { status?: string }).status === "failed"
@@ -209,6 +255,7 @@ class RustSocketChannel {
     socket?.destroy();
     for (const pending of this.pending.splice(0)) {
       clearTimeout(pending.timer);
+      pending.cleanupAbort?.();
       pending.reject(error);
     }
   }
@@ -225,32 +272,55 @@ function jsonSafe(value: unknown): unknown {
 
 export class RustComputeClient {
   private readonly channels: RustSocketChannel[];
+  private readonly transientChannels = new Set<RustSocketChannel>();
+  private readonly socketPath: string;
+  private readonly timeoutMs: number;
   private next = 0;
 
   constructor(input: { socketPath: string; poolSize?: number; timeoutMs?: number }) {
     const poolSize = Math.max(1, Math.min(32, Math.trunc(input.poolSize ?? 2)));
     const timeoutMs = Math.max(1_000, Math.min(3_600_000, Math.trunc(input.timeoutMs ?? 300_000)));
+    this.socketPath = input.socketPath;
+    this.timeoutMs = timeoutMs;
     this.channels = Array.from({ length: poolSize }, () => new RustSocketChannel(input.socketPath, timeoutMs));
   }
 
-  async compute<T>(kind: PortfolioRunKind, payload: Record<string, unknown>, options: { includeArtifacts?: boolean } = {}): Promise<{
+  async compute<T>(kind: PortfolioRunKind, payload: Record<string, unknown>, options: {
+    includeArtifacts?: boolean;
+    signal?: AbortSignal;
+  } = {}): Promise<{
     result: T;
     summary: unknown;
     warnings: string[];
     artifacts: NonNullable<WorkerOutput["artifacts"]>;
   }> {
-    const channel = this.channels[this.next++ % this.channels.length];
-    const output = await channel.request(kind, payload, options.includeArtifacts ?? true);
-    if (output.result === undefined) throw new Error("Rust compute 결과가 비어 있습니다.");
-    return {
-      result: output.result as T,
-      summary: output.summary,
-      warnings: output.warnings,
-      artifacts: output.artifacts ?? [],
-    };
+    if (options.signal?.aborted) throw abortReason(options.signal);
+    // A cancellable request owns its connection. Closing a shared FIFO channel would
+    // otherwise abort unrelated requests that happen to be queued on the same pool slot.
+    const channel = options.signal
+      ? new RustSocketChannel(this.socketPath, this.timeoutMs)
+      : this.channels[this.next++ % this.channels.length];
+    if (options.signal) this.transientChannels.add(channel);
+    try {
+      const output = await channel.request(kind, payload, options.includeArtifacts ?? true, options.signal);
+      if (output.result === undefined) throw new Error("Rust compute 결과가 비어 있습니다.");
+      return {
+        result: output.result as T,
+        summary: output.summary,
+        warnings: output.warnings,
+        artifacts: output.artifacts ?? [],
+      };
+    } finally {
+      if (options.signal) {
+        this.transientChannels.delete(channel);
+        channel.close();
+      }
+    }
   }
 
   close(): void {
     for (const channel of this.channels) channel.close();
+    for (const channel of this.transientChannels) channel.close();
+    this.transientChannels.clear();
   }
 }

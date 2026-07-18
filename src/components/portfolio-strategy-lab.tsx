@@ -7,15 +7,40 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LazyJsonDetails } from "@/components/lazy-json-details";
 import { PortfolioResearchTools, type AnalysisRunChoice } from "@/components/portfolio-research-tools";
+import { ExposureResearchResults, OptimizationResearchResults, OutlookResearchResults } from "@/components/portfolio-research-results";
 import { StockSwatch } from "@/components/stock-swatch";
 import { cancelAdvancedAnalysis, loadAdvancedArtifact, runAdvancedAnalysis, type AdvancedAnalysisOperation } from "@/lib/advanced-analysis";
 import { normalizedBacktestWeights, parseNumberList, parseSymbolList } from "@/lib/backtest-config";
 import { formatMoney, formatPercent } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
+import { parseFactorDraft } from "@/lib/research-visualization";
+import {
+  buildExposureAnalysisRequest,
+  buildMonteCarloRequest,
+  buildOptimizationRequest,
+  buildOutlookMonteCarloPayload,
+  buildOutlookOptimizationPayload,
+  buildWalkForwardPayload,
+  buildWalkForwardRequest,
+  optimizerBaselines,
+  parseExposureConstituentsDraft,
+  parseRobustScoreWeightsDraft,
+  walkForwardSeeds,
+  withQuantityMode,
+  type AssetGroupDimension,
+  type AssetGroupMetadata,
+  type CovarianceEstimator,
+  type MonteCarloMethod,
+  type OptimizationAlgorithm,
+  type OptimizerBaseline,
+  type RegimePolicyMethod,
+  type RobustValidationMode,
+  type WalkForwardMode,
+} from "@/lib/strategy-lab-request";
 import { cn } from "@/lib/utils";
-import type { AdvancedRunSnapshot, BacktestRebalanceFrequency, BacktestRunConfiguration, Theme } from "@/types";
+import type { AdvancedRunSnapshot, BacktestInstrument, BacktestQuantityMode, BacktestRebalanceFrequency, BacktestRunConfiguration, Theme } from "@/types";
 
-type LabMode = "compare" | "sensitivity" | "stress" | "optimization" | "walk-forward" | "monte-carlo" | "research";
+type LabMode = "compare" | "sensitivity" | "stress" | "optimization" | "walk-forward" | "monte-carlo" | "outlook" | "exposures" | "research";
 type SensitivityMode = "weight" | "start-date" | "rebalance" | "cash-flow";
 type BacktestRunChoice = AnalysisRunChoice;
 type StressDraft = {
@@ -33,6 +58,25 @@ type StressDraft = {
   excludeSymbols: string;
 };
 
+type ExposureDraft = {
+  currency: string;
+  sector: string;
+  industry: string;
+  country: string;
+  assetType: string;
+  hedge: "unknown" | "hedged" | "unhedged";
+  factors: string;
+  constituents: string;
+};
+
+type GroupConstraintDraft = {
+  id: number;
+  dimension: AssetGroupDimension;
+  group: string;
+  minWeightPercent: string;
+  maxWeightPercent: string;
+};
+
 const modeOptions: Array<{ value: LabMode; label: string }> = [
   { value: "compare", label: "실행 비교" },
   { value: "sensitivity", label: "민감도" },
@@ -40,6 +84,8 @@ const modeOptions: Array<{ value: LabMode; label: string }> = [
   { value: "optimization", label: "최적화" },
   { value: "walk-forward", label: "Walk-forward" },
   { value: "monte-carlo", label: "Monte Carlo" },
+  { value: "outlook", label: "미래 전망" },
+  { value: "exposures", label: "노출 분석" },
   { value: "research", label: "연구 도구" },
 ];
 
@@ -48,6 +94,32 @@ const objectiveOptions = [
   ["max_calmar", "최대 Calmar"], ["min_volatility", "최소 변동성"], ["min_cvar", "최소 CVaR"],
   ["max_information_ratio", "최대 Information Ratio"],
 ] as const;
+
+const algorithmOptions: Array<[OptimizationAlgorithm, string]> = [
+  ["random_search", "Random search"],
+  ["differential_evolution", "Differential Evolution"],
+  ["cma_es", "CMA-ES"],
+  ["nsga_ii", "NSGA-II"],
+  ["direct_cvar", "직접 CVaR"],
+];
+
+const baselineLabels: Record<OptimizerBaseline, string> = {
+  equal_weight: "동일비중",
+  current_weight: "현재 비중",
+  inverse_volatility: "역변동성",
+  minimum_variance: "최소분산",
+  risk_parity: "Risk Parity / ERC",
+  hrp: "HRP",
+  herc: "HERC",
+};
+
+const groupDimensionOptions: Array<[AssetGroupDimension, string]> = [
+  ["sector", "Sector"],
+  ["industry", "Industry"],
+  ["country", "Country"],
+  ["currency", "Currency"],
+  ["assetType", "Asset type"],
+];
 
 const rebalanceModes: BacktestRebalanceFrequency[] = ["none", "monthly", "quarterly", "annually", "threshold"];
 
@@ -247,6 +319,7 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
   const probabilities = record(data.probabilities);
   const distributions = record(data.distributions);
   const terminal = record(distributions.terminalBalance);
+  const adjustedReturn = record(distributions.cashFlowAdjustedTerminalReturnPercent);
   const [loadedPercentiles, setLoadedPercentiles] = useState<unknown[]>();
   const [loadingPercentiles, setLoadingPercentiles] = useState(false);
   const [percentileError, setPercentileError] = useState("");
@@ -311,9 +384,11 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
   };
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-6">
         <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">평균 최종 잔액</p><p className="mt-2 text-sm font-black">{formatMoney(numeric(terminal.mean) ?? 0, "KRW")}</p></div>
-        <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">손실 종료 확률</p><p className="mt-2 text-sm font-black">{percentValue(probabilities.terminalLossProbabilityPercent)}</p></div>
+        <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">현금흐름 조정 평균 수익률</p><p className="mt-2 text-sm font-black">{percentValue(adjustedReturn.mean)}</p><p className="mt-1 text-[9px] text-muted-foreground">(종료잔액 + 인출) / (초기자본 + 납입) − 1</p></div>
+        <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">현금흐름 조정 손실 확률</p><p className="mt-2 text-sm font-black">{percentValue(probabilities.terminalLossProbabilityPercent)}</p><p className="mt-1 text-[9px] text-muted-foreground">종료잔액 + 인출 &lt; 초기자본 + 납입</p></div>
+        <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">원시 잔액 하락 확률</p><p className="mt-2 text-sm font-black">{percentValue(probabilities.terminalBalanceBelowInitialProbabilityPercent)}</p><p className="mt-1 text-[9px] text-muted-foreground">현금흐름 미조정 비교</p></div>
         <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">중간 고갈 확률</p><p className="mt-2 text-sm font-black">{percentValue(probabilities.everDepletedProbabilityPercent)}</p></div>
         <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">목표 달성 확률</p><p className="mt-2 text-sm font-black">{probabilities.terminalGoalProbabilityPercent === undefined ? "목표 없음" : percentValue(probabilities.terminalGoalProbabilityPercent)}</p></div>
       </div>
@@ -337,12 +412,14 @@ function CompareResults({ result }: { result: unknown }) {
 
 export function PortfolioStrategyLab({
   baseConfig,
+  instruments,
   canAnalyze,
   backtestRuns,
   theme,
   onUnauthorized,
 }: {
   baseConfig: BacktestRunConfiguration;
+  instruments?: BacktestInstrument[];
   canAnalyze: boolean;
   backtestRuns: BacktestRunChoice[];
   theme: Theme;
@@ -367,6 +444,25 @@ export function PortfolioStrategyLab({
   const [optimizationBenchmark, setOptimizationBenchmark] = useState("");
   const [candidateBudget, setCandidateBudget] = useState(500);
   const [seed, setSeed] = useState(12345);
+  const [optimizationAlgorithm, setOptimizationAlgorithm] = useState<OptimizationAlgorithm>("random_search");
+  const [covarianceEstimator, setCovarianceEstimator] = useState<CovarianceEstimator>("ledoit_wolf");
+  const [selectedBaselines, setSelectedBaselines] = useState<OptimizerBaseline[]>([...optimizerBaselines]);
+  const [ledgerValidationBudget, setLedgerValidationBudget] = useState(32);
+  const [ledgerQuantityMode, setLedgerQuantityMode] = useState<BacktestQuantityMode>(baseConfig.execution.quantityMode);
+  const [regimePolicyEnabled, setRegimePolicyEnabled] = useState(false);
+  const [regimePolicyMethod, setRegimePolicyMethod] = useState<RegimePolicyMethod>("auto");
+  const [groupConstraints, setGroupConstraints] = useState<GroupConstraintDraft[]>([]);
+  const [robustScoreWeightsDraft, setRobustScoreWeightsDraft] = useState("{}");
+  const [robustValidationEnabled, setRobustValidationEnabled] = useState(true);
+  const [robustValidationMode, setRobustValidationMode] = useState<RobustValidationMode>("walk_forward");
+  const [robustValidationWindowMode, setRobustValidationWindowMode] = useState<WalkForwardMode>("rolling");
+  const [robustValidationTestPercent, setRobustValidationTestPercent] = useState(20);
+  const [robustValidationTrainWindow, setRobustValidationTrainWindow] = useState(126);
+  const [robustValidationTestWindow, setRobustValidationTestWindow] = useState(21);
+  const [robustValidationStep, setRobustValidationStep] = useState(21);
+  const [robustValidationFoldCount, setRobustValidationFoldCount] = useState(5);
+  const [robustValidationGap, setRobustValidationGap] = useState(0);
+  const [robustValidationEmbargo, setRobustValidationEmbargo] = useState(0);
   const [minWeightPercent, setMinWeightPercent] = useState(0);
   const [maxWeightPercent, setMaxWeightPercent] = useState(100);
   const [maxAssets, setMaxAssets] = useState(baseConfig.assets.length);
@@ -386,6 +482,42 @@ export function PortfolioStrategyLab({
   const [goalAmount, setGoalAmount] = useState<string>("");
   const [quantiles, setQuantiles] = useState("5, 25, 50, 75, 95");
   const [samplePathCount, setSamplePathCount] = useState(10);
+  const [outlookOptimizationEnabled, setOutlookOptimizationEnabled] = useState(true);
+  const [outlookSensitivityEnabled, setOutlookSensitivityEnabled] = useState(true);
+  const [outlookCostShockBps, setOutlookCostShockBps] = useState(25);
+  const [outlookZeroCashFlow, setOutlookZeroCashFlow] = useState(true);
+  const [outlookRebalanceModes, setOutlookRebalanceModes] = useState<Array<"none" | "monthly" | "quarterly" | "annually">>(["none", "quarterly"]);
+  const [outlookRegimeLookback, setOutlookRegimeLookback] = useState(20);
+  const [walkForwardMode, setWalkForwardMode] = useState<WalkForwardMode>("rolling");
+  const [walkForwardGap, setWalkForwardGap] = useState(0);
+  const [walkForwardEmbargo, setWalkForwardEmbargo] = useState(0);
+  const [foldCandidateBudget, setFoldCandidateBudget] = useState(100);
+  const [additionalWalkForwardSeeds, setAdditionalWalkForwardSeeds] = useState("");
+  const [monteCarloMethod, setMonteCarloMethod] = useState<MonteCarloMethod>("moving_block");
+  const [monteCarloRebalance, setMonteCarloRebalance] = useState<BacktestRebalanceFrequency>(baseConfig.rebalanceFrequency);
+  const [monteCarloThreshold, setMonteCarloThreshold] = useState(baseConfig.rebalanceThresholdPercent ?? 5);
+  const [monteCarloCashWeightPercent, setMonteCarloCashWeightPercent] = useState(baseConfig.execution.cashTargetPercent);
+  const [monteCarloCashYieldPercent, setMonteCarloCashYieldPercent] = useState(baseConfig.execution.cashAnnualYieldPercent);
+  const [monteCarloTransactionCostBps, setMonteCarloTransactionCostBps] = useState(baseConfig.transactionCostBps);
+  const [monteCarloPeriodicCashFlow, setMonteCarloPeriodicCashFlow] = useState(baseConfig.monthlyCashFlow);
+  const [monteCarloCashFlowFrequencyDays, setMonteCarloCashFlowFrequencyDays] = useState(baseConfig.cashFlowFrequency === "monthly" ? 21 : baseConfig.cashFlowFrequency === "quarterly" ? 63 : 252);
+  const [monteCarloLotSizes, setMonteCarloLotSizes] = useState<Record<string, number>>(() => Object.fromEntries(baseConfig.assets.map((asset) => [asset.symbol, asset.lotSize ?? 1])));
+  const [inflationAnnualPercent, setInflationAnnualPercent] = useState(0);
+  const [calibrationOrigins, setCalibrationOrigins] = useState(12);
+  const [exposureLookThrough, setExposureLookThrough] = useState(true);
+  const [exposureMetadata, setExposureMetadata] = useState<Record<string, ExposureDraft>>(() => Object.fromEntries(baseConfig.assets.map((asset) => {
+    const instrument = instruments?.find((item) => item.symbol === asset.symbol);
+    return [asset.symbol, {
+      currency: instrument?.currency ?? "",
+      sector: "",
+      industry: "",
+      country: "",
+      assetType: instrument?.securityType ?? "",
+      hedge: "unknown" as const,
+      factors: "",
+      constituents: "",
+    }];
+  })));
   const [running, setRunning] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [run, setRun] = useState<AdvancedRunSnapshot>();
@@ -416,6 +548,25 @@ export function PortfolioStrategyLab({
     optimizationBenchmark,
     candidateBudget,
     seed,
+    optimizationAlgorithm,
+    covarianceEstimator,
+    selectedBaselines,
+    ledgerValidationBudget,
+    ledgerQuantityMode,
+    regimePolicyEnabled,
+    regimePolicyMethod,
+    groupConstraints,
+    robustScoreWeightsDraft,
+    robustValidationEnabled,
+    robustValidationMode,
+    robustValidationWindowMode,
+    robustValidationTestPercent,
+    robustValidationTrainWindow,
+    robustValidationTestWindow,
+    robustValidationStep,
+    robustValidationFoldCount,
+    robustValidationGap,
+    robustValidationEmbargo,
     minWeightPercent,
     maxWeightPercent,
     maxAssets,
@@ -435,6 +586,30 @@ export function PortfolioStrategyLab({
     goalAmount,
     quantiles,
     samplePathCount,
+    outlookOptimizationEnabled,
+    outlookSensitivityEnabled,
+    outlookCostShockBps,
+    outlookZeroCashFlow,
+    outlookRebalanceModes,
+    outlookRegimeLookback,
+    walkForwardMode,
+    walkForwardGap,
+    walkForwardEmbargo,
+    foldCandidateBudget,
+    additionalWalkForwardSeeds,
+    monteCarloMethod,
+    monteCarloRebalance,
+    monteCarloThreshold,
+    monteCarloCashWeightPercent,
+    monteCarloCashYieldPercent,
+    monteCarloTransactionCostBps,
+    monteCarloPeriodicCashFlow,
+    monteCarloCashFlowFrequencyDays,
+    monteCarloLotSizes,
+    inflationAnnualPercent,
+    calibrationOrigins,
+    exposureLookThrough,
+    exposureMetadata,
   });
 
   useEffect(() => () => controller.current?.abort(), []);
@@ -448,31 +623,135 @@ export function PortfolioStrategyLab({
     setExcludedAssets((current) => current.filter((symbol) => symbols.has(symbol)));
     setPerAssetMinimums((current) => Object.fromEntries(Object.entries(current).filter(([symbol]) => symbols.has(symbol))));
     setPerAssetMaximums((current) => Object.fromEntries(Object.entries(current).filter(([symbol]) => symbols.has(symbol))));
+    setMonteCarloLotSizes((current) => Object.fromEntries(baseConfig.assets.map((asset) => [
+      asset.symbol,
+      current[asset.symbol] ?? asset.lotSize ?? 1,
+    ])));
   }, [baseConfig.assets]);
+  useEffect(() => setLedgerQuantityMode(baseConfig.execution.quantityMode), [baseConfig.execution.quantityMode]);
+  useEffect(() => {
+    setExposureMetadata((current) => Object.fromEntries(baseConfig.assets.map((asset) => {
+      const instrument = instruments?.find((item) => item.symbol === asset.symbol);
+      const existing = current[asset.symbol];
+      return [asset.symbol, existing ?? {
+        currency: instrument?.currency ?? "",
+        sector: "",
+        industry: "",
+        country: "",
+        assetType: instrument?.securityType ?? "",
+        hedge: "unknown" as const,
+        factors: "",
+        constituents: "",
+      }];
+    })));
+  }, [baseConfig.assets, instruments]);
 
-  const optimizationBody = useMemo(() => ({
-    symbols: baseConfig.assets.map((asset) => asset.symbol),
-    fromDate: baseConfig.startDate,
-    toDate: baseConfig.endDate,
-    currencyMode: baseConfig.currencyMode,
-    ...(optimizationBenchmark.trim() ? { benchmark: optimizationBenchmark.trim().toUpperCase() } : {}),
+  const robustScoreWeights = parseRobustScoreWeightsDraft(robustScoreWeightsDraft);
+  const optimizationAssetGroups: Record<string, AssetGroupMetadata> = Object.fromEntries(baseConfig.assets.flatMap((asset) => {
+    const metadata = exposureMetadata[asset.symbol];
+    if (!metadata) return [];
+    const group: AssetGroupMetadata = {};
+    if (metadata.sector.trim()) group.sector = metadata.sector.trim();
+    if (metadata.industry.trim()) group.industry = metadata.industry.trim();
+    if (metadata.country.trim()) group.country = metadata.country.trim();
+    if (metadata.currency.trim()) group.currency = metadata.currency.trim().toUpperCase();
+    if (metadata.assetType.trim()) group.assetType = metadata.assetType.trim();
+    return Object.keys(group).length ? [[asset.symbol, group]] : [];
+  }));
+  const optimizationGroupConstraints = groupConstraints.map((item) => ({
+    dimension: item.dimension,
+    group: item.group,
+    minWeightPercent: Number(item.minWeightPercent || 0),
+    maxWeightPercent: Number(item.maxWeightPercent || 100),
+  }));
+  const assetGroupMetadataReady = baseConfig.assets.every((asset) => {
+    const metadata = exposureMetadata[asset.symbol];
+    if (!metadata) return true;
+    return (!metadata.currency.trim() || /^[A-Z]{3}$/.test(metadata.currency.trim().toUpperCase()))
+      && (!metadata.country.trim() || metadata.country.trim().length >= 2)
+      && [metadata.sector, metadata.industry, metadata.country, metadata.assetType].every((item) => item.trim().length <= 80);
+  });
+  const groupConstraintsReady = groupConstraints.every((item) => {
+    const minimum = Number(item.minWeightPercent || 0);
+    const maximum = Number(item.maxWeightPercent || 100);
+    return item.group.trim().length > 0 && item.group.trim().length <= 80
+      && Number.isFinite(minimum) && Number.isFinite(maximum)
+      && minimum >= 0 && maximum <= 100 && minimum <= maximum;
+  });
+  const parsedConstituents = Object.fromEntries(baseConfig.assets.map((asset) => [
+    asset.symbol,
+    parseExposureConstituentsDraft(exposureMetadata[asset.symbol]?.constituents ?? ""),
+  ]));
+
+  const optimizationBody = useMemo(() => buildOptimizationRequest(baseConfig, {
     objective,
-    minWeight: minWeightPercent / 100,
-    maxWeight: maxWeightPercent / 100,
-    minWeights: Object.fromEntries(Object.entries(perAssetMinimums).filter(([, value]) => value >= 0).map(([symbol, value]) => [symbol, value / 100])),
-    maxWeights: Object.fromEntries(Object.entries(perAssetMaximums).filter(([, value]) => value >= 0).map(([symbol, value]) => [symbol, value / 100])),
+    benchmark: optimizationBenchmark,
+    candidateBudget,
+    seed,
+    minWeightPercent,
+    maxWeightPercent,
+    minWeightsPercent: perAssetMinimums,
+    maxWeightsPercent: perAssetMaximums,
     maxAssets,
     requiredAssets,
     excludedAssets,
-    ...(maxDrawdownPercent !== "" ? { maxDrawdown: Number(maxDrawdownPercent) / 100 } : {}),
-    ...(targetReturnPercent !== "" ? { targetReturn: Number(targetReturnPercent) / 100 } : {}),
-    ...(maxTurnoverPercent !== "" ? { maxTurnover: Number(maxTurnoverPercent) / 100 } : {}),
-    currentWeights: normalizedBacktestWeights(baseConfig),
-    transactionCostBps: baseConfig.transactionCostBps,
-    riskFreeRatePercent: baseConfig.riskFreeRatePercent,
+    ...(maxDrawdownPercent !== "" ? { maxDrawdownPercent: Number(maxDrawdownPercent) } : {}),
+    ...(targetReturnPercent !== "" ? { targetReturnPercent: Number(targetReturnPercent) } : {}),
+    ...(maxTurnoverPercent !== "" ? { maxTurnoverPercent: Number(maxTurnoverPercent) } : {}),
+    algorithm: optimizationAlgorithm,
+    covarianceEstimator,
+    baselines: selectedBaselines,
+    ledgerValidationBudget,
+    ledgerQuantityMode,
+    regimePolicyEnabled,
+    regimePolicyMethod,
+    assetGroups: optimizationAssetGroups,
+    groupConstraints: optimizationGroupConstraints,
+    robustScoreWeights: robustScoreWeights.value,
+    robustValidationEnabled,
+    robustValidationMode,
+    robustValidationWindowMode,
+    robustValidationTestPercent,
+    robustValidationTrainWindow,
+    robustValidationTestWindow,
+    robustValidationStep,
+    robustValidationFoldCount,
+    robustValidationGap,
+    robustValidationEmbargo,
+  }), [baseConfig, candidateBudget, covarianceEstimator, excludedAssets, groupConstraints, ledgerQuantityMode, ledgerValidationBudget, maxAssets, maxDrawdownPercent, maxTurnoverPercent, maxWeightPercent, minWeightPercent, objective, optimizationAlgorithm, optimizationBenchmark, perAssetMaximums, perAssetMinimums, regimePolicyEnabled, regimePolicyMethod, requiredAssets, robustScoreWeightsDraft, robustValidationEnabled, robustValidationEmbargo, robustValidationFoldCount, robustValidationGap, robustValidationMode, robustValidationStep, robustValidationTestPercent, robustValidationTestWindow, robustValidationTrainWindow, robustValidationWindowMode, seed, selectedBaselines, targetReturnPercent, exposureMetadata]);
+
+  const walkForwardControls = {
+    mode: walkForwardMode,
+    trainWindow,
+    testWindow,
+    step,
+    gap: walkForwardGap,
+    embargo: walkForwardEmbargo,
+    foldCandidateBudget,
     seed,
-    candidateBudget,
-  }), [baseConfig, candidateBudget, excludedAssets, maxAssets, maxDrawdownPercent, maxTurnoverPercent, maxWeightPercent, minWeightPercent, objective, optimizationBenchmark, perAssetMaximums, perAssetMinimums, requiredAssets, seed, targetReturnPercent]);
+    additionalSeeds: additionalWalkForwardSeeds,
+  };
+  const monteCarloControls = {
+    method: monteCarloMethod,
+    horizonDays,
+    pathCount,
+    blockLength,
+    seed,
+    ...(goalAmount !== "" ? { goalAmount: Number(goalAmount) } : {}),
+    quantiles: parseNumberList(quantiles).map((value) => value / 100),
+    samplePathCount,
+    rebalanceFrequency: monteCarloRebalance,
+    ...(monteCarloRebalance === "threshold" ? { rebalanceThresholdPercent: monteCarloThreshold } : {}),
+    cashWeightPercent: monteCarloCashWeightPercent,
+    cashAnnualYieldPercent: monteCarloCashYieldPercent,
+    transactionCostBps: monteCarloTransactionCostBps,
+    periodicCashFlow: monteCarloPeriodicCashFlow,
+    cashFlowFrequencyDays: monteCarloCashFlowFrequencyDays,
+    inflationAnnualPercent,
+    quantityMode: ledgerQuantityMode,
+    lotSizes: monteCarloLotSizes,
+    calibrationOrigins,
+  };
 
   const submit = async () => {
     if (mode === "research") return;
@@ -518,24 +797,86 @@ export function PortfolioStrategyLab({
       body = optimizationBody;
     } else if (mode === "walk-forward") {
       operation = "walk-forward";
-      body = { ...optimizationBody, trainWindow, testWindow, step };
-    } else {
+      body = buildWalkForwardRequest(optimizationBody, walkForwardControls);
+    } else if (mode === "monte-carlo") {
       operation = "monte-carlo";
+      body = buildMonteCarloRequest(baseConfig, monteCarloControls);
+    } else if (mode === "outlook") {
+      operation = "outlook";
       body = {
-        symbols: baseConfig.assets.map((asset) => asset.symbol),
-        weights: normalizedBacktestWeights(baseConfig),
-        fromDate: baseConfig.startDate,
-        toDate: baseConfig.endDate,
-        currencyMode: baseConfig.currencyMode,
-        initialAmount: baseConfig.initialAmount,
-        horizonDays,
-        pathCount,
-        blockLength,
-        seed,
-        ...(goalAmount !== "" ? { goalAmount: Number(goalAmount) } : {}),
-        quantiles: parseNumberList(quantiles).map((value) => value / 100),
-        samplePathCount,
+        baseConfig: withQuantityMode(baseConfig, ledgerQuantityMode),
+        optimization: buildOutlookOptimizationPayload({
+          enabled: outlookOptimizationEnabled,
+          objective,
+          benchmark: optimizationBenchmark,
+          candidateBudget,
+          minWeightPercent,
+          maxWeightPercent,
+          algorithm: optimizationAlgorithm,
+          covarianceEstimator,
+          baselines: selectedBaselines,
+          ledgerValidationBudget,
+          regimePolicyEnabled,
+          regimePolicyMethod,
+          assetGroups: optimizationAssetGroups,
+          groupConstraints: optimizationGroupConstraints,
+          robustScoreWeights: robustScoreWeights.value,
+          robustValidationEnabled,
+          robustValidationMode,
+          robustValidationWindowMode,
+          robustValidationTestPercent,
+          robustValidationTrainWindow,
+          robustValidationTestWindow,
+          robustValidationStep,
+          robustValidationFoldCount,
+          robustValidationGap,
+          robustValidationEmbargo,
+        }),
+        walkForward: buildWalkForwardPayload(walkForwardControls),
+        monteCarlo: buildOutlookMonteCarloPayload(monteCarloControls),
+        stressScenarios: stressScenarios.map((scenario) => ({
+          name: scenario.name,
+          ...(scenario.startDate ? { startDate: scenario.startDate } : {}),
+          ...(scenario.endDate ? { endDate: scenario.endDate } : {}),
+          ...(scenario.transactionCostBps !== "" ? { transactionCostBps: Number(scenario.transactionCostBps) } : {}),
+          ...(scenario.monthlyCashFlow !== "" ? { monthlyCashFlow: Number(scenario.monthlyCashFlow) } : {}),
+          ...(scenario.cashFlowFrequency !== "inherit" ? { cashFlowFrequency: scenario.cashFlowFrequency } : {}),
+          ...(scenario.cashFlowTiming !== "inherit" ? { cashFlowTiming: scenario.cashFlowTiming } : {}),
+          ...(scenario.currencyMode !== "inherit" ? { currencyMode: scenario.currencyMode } : {}),
+          ...(scenario.rebalanceFrequency !== "inherit" ? { rebalanceFrequency: scenario.rebalanceFrequency } : {}),
+          ...(scenario.rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent: Number(scenario.thresholdPercent || 5) } : {}),
+          ...(parseSymbolList(scenario.excludeSymbols).length ? { excludeSymbols: parseSymbolList(scenario.excludeSymbols) } : {}),
+        })),
+        sensitivity: {
+          enabled: outlookSensitivityEnabled,
+          transactionCostShockBps: outlookCostShockBps,
+          includeZeroCashFlow: outlookZeroCashFlow,
+          rebalanceModes: outlookRebalanceModes,
+        },
+        marketRegime: { enabled: true, lookback: outlookRegimeLookback },
+        confidenceWeights: { oos: 0.45, monteCarloCalibration: 0.35, dataQuality: 0.2 },
       };
+    } else {
+      operation = "exposures";
+      const weights = normalizedBacktestWeights(baseConfig);
+      body = buildExposureAnalysisRequest(
+        baseConfig.assets.map((asset) => {
+          const metadata = exposureMetadata[asset.symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown", factors: "", constituents: "" };
+          return {
+            symbol: asset.symbol,
+            weight: weights[asset.symbol],
+            currency: metadata.currency,
+            sector: metadata.sector,
+            industry: metadata.industry,
+            country: metadata.country,
+            assetType: metadata.assetType,
+            ...(metadata.hedge !== "unknown" ? { hedged: metadata.hedge === "hedged" } : {}),
+            factors: parseFactorDraft(metadata.factors),
+            constituents: parsedConstituents[asset.symbol]?.value ?? [],
+          };
+        }),
+        exposureLookThrough,
+      );
     }
     controller.current?.abort();
     controller.current = new AbortController();
@@ -553,7 +894,7 @@ export function PortfolioStrategyLab({
       setResultObjective(submittedObjective);
       setResultConfigFingerprint(submittedFingerprint);
       setResultConfigLabel(submittedLabel);
-      if (mode === "optimization" && completed.run?.runId) {
+      if ((mode === "optimization" || mode === "outlook") && completed.run?.runId) {
         setOptimizationRuns((current) => [{ runId: completed.run!.runId, label: `${new Date().toLocaleTimeString("ko-KR")} · ${submittedObjective}` }, ...current.filter((item) => item.runId !== completed.run!.runId)].slice(0, 20));
       }
     } catch (caught) {
@@ -571,11 +912,126 @@ export function PortfolioStrategyLab({
     finally { setCancelling(false); }
   };
 
+  const updateExposure = (symbol: string, patch: Partial<ExposureDraft>) => {
+    setExposureMetadata((current) => ({
+      ...current,
+      [symbol]: {
+        ...(current[symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown", factors: "", constituents: "" }),
+        ...patch,
+      },
+    }));
+  };
+
+  const exposureReady = baseConfig.assets.every((asset) => /^[A-Z]{3}$/.test(exposureMetadata[asset.symbol]?.currency.trim().toUpperCase() ?? "")
+    && !parsedConstituents[asset.symbol]?.error);
+  const currentWalkForwardSeeds = walkForwardSeeds(seed, additionalWalkForwardSeeds);
+  const lotSizesReady = baseConfig.assets.every((asset) => Number.isFinite(monteCarloLotSizes[asset.symbol]) && monteCarloLotSizes[asset.symbol] > 0);
+  const robustValidationReady = !robustValidationEnabled || (
+    Number.isInteger(robustValidationGap) && robustValidationGap >= 0 && robustValidationGap <= 1_000
+    && (robustValidationMode === "holdout"
+      ? Number.isFinite(robustValidationTestPercent) && robustValidationTestPercent >= 5 && robustValidationTestPercent <= 50
+      : Number.isInteger(robustValidationTrainWindow) && robustValidationTrainWindow >= 20 && robustValidationTrainWindow <= 5_000
+        && Number.isInteger(robustValidationTestWindow) && robustValidationTestWindow >= 5 && robustValidationTestWindow <= 2_000
+        && Number.isInteger(robustValidationStep) && robustValidationStep >= 1 && robustValidationStep <= 2_000
+        && Number.isInteger(robustValidationFoldCount) && robustValidationFoldCount >= 2 && robustValidationFoldCount <= 100
+        && Number.isInteger(robustValidationEmbargo) && robustValidationEmbargo >= 0 && robustValidationEmbargo <= 1_000)
+  );
   const canSubmit = canAnalyze && !running && (mode !== "compare" || selectedRuns.length >= 2)
-    && (mode !== "optimization" && mode !== "walk-forward" || baseConfig.assets.length >= 2)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || baseConfig.assets.length >= 2)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || selectedBaselines.length > 0)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || assetGroupMetadataReady)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || groupConstraintsReady)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || !robustScoreWeights.error)
+    && (!["optimization", "walk-forward", "outlook"].includes(mode) || robustValidationReady)
     && (mode !== "optimization" && mode !== "walk-forward" || objective !== "max_information_ratio" || Boolean(optimizationBenchmark.trim()))
-    && (mode !== "stress" || stressScenarios.length > 0);
+    && (mode !== "outlook" || objective !== "max_information_ratio"
+      || Boolean(optimizationBenchmark.trim()) || baseConfig.benchmark !== "NONE")
+    && (mode !== "walk-forward" && mode !== "outlook" || foldCandidateBudget >= currentWalkForwardSeeds.length)
+    && (mode !== "monte-carlo" && mode !== "outlook" || monteCarloCashWeightPercent < 100)
+    && (mode !== "monte-carlo" && mode !== "outlook" || lotSizesReady)
+    && (mode !== "outlook" || outlookRebalanceModes.length > 0)
+    && (mode !== "outlook" || Number.isInteger(outlookRegimeLookback) && outlookRegimeLookback >= 5 && outlookRegimeLookback <= 252)
+    && (mode !== "stress" && mode !== "outlook" || stressScenarios.length > 0)
+    && (mode !== "exposures" || exposureReady);
   const staleResult = Boolean(resultConfigFingerprint && resultConfigFingerprint !== analysisInputFingerprint);
+
+  const optimizationEngineControls = <div className="space-y-3">
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <Field label="탐색 알고리즘"><Select value={optimizationAlgorithm} onValueChange={(value) => setOptimizationAlgorithm(value as OptimizationAlgorithm)}><SelectTrigger aria-label="최적화 탐색 알고리즘" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{algorithmOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
+      <Field label="공분산 추정"><Select value={covarianceEstimator} onValueChange={(value) => setCovarianceEstimator(value as CovarianceEstimator)}><SelectTrigger aria-label="공분산 추정 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="sample">표본 공분산</SelectItem><SelectItem value="ledoit_wolf">Ledoit–Wolf shrinkage</SelectItem></SelectContent></Select></Field>
+      <Field label="Ledger 재검증 후보" help="Screening 상위·Pareto 후보를 실제 거래 ledger로 다시 계산합니다."><Input aria-label="Ledger 재검증 후보 예산" type="number" min={1} max={128} value={ledgerValidationBudget} onChange={(event) => setLedgerValidationBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+      <Field label="Ledger 수량 방식" help="Outlook 기준 ledger와 Monte Carlo에도 같은 수량 계약을 적용합니다."><Select value={ledgerQuantityMode} onValueChange={(value) => setLedgerQuantityMode(value as BacktestQuantityMode)}><SelectTrigger aria-label="Ledger 수량 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fractional">소수 수량</SelectItem><SelectItem value="whole">정수·lot 수량</SelectItem></SelectContent></Select></Field>
+    </div>
+    <Field label="강건 점수 가중치 · JSON" help={'빈 객체는 엔진 기본값을 사용합니다. 예: {"sharpe":0.4,"oosAverageSharpe":0.6}'}><Input aria-label="강건 점수 가중치 JSON" value={robustScoreWeightsDraft} onChange={(event) => setRobustScoreWeightsDraft(event.target.value)} className="bg-secondary font-mono text-[11px]" />{robustScoreWeights.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-500">{robustScoreWeights.error}</span> : null}</Field>
+    <div className="rounded-[18px] bg-card p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div><p className="text-[11px] font-bold text-muted-foreground">후보별 IS/OOS 강건 검증</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">후보·공분산은 최초 학습 구간에서만 적합하고 이후 시간순 OOS fold의 점수·coverage를 합산합니다. fold마다 재최적화하려면 Walk-forward 실행을 사용하세요. 기존 단일 holdout도 선택할 수 있습니다.</p></div>
+        <ToggleChoice active={robustValidationEnabled} onClick={() => setRobustValidationEnabled((current) => !current)}>{robustValidationEnabled ? "활성" : "비활성"}</ToggleChoice>
+      </div>
+      {robustValidationEnabled ? <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <Field label="검증 방식"><Select value={robustValidationMode} onValueChange={(value) => setRobustValidationMode(value as RobustValidationMode)}><SelectTrigger aria-label="강건 검증 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="walk_forward">Walk-forward OOS</SelectItem><SelectItem value="holdout">단일 holdout · 호환</SelectItem></SelectContent></Select></Field>
+        {robustValidationMode === "holdout" ? <>
+          <Field label="Inner OOS 비율 %"><Input aria-label="Inner OOS 비율" type="number" min={5} max={50} value={robustValidationTestPercent} onChange={(event) => setRobustValidationTestPercent(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="Inner gap · 관측일"><Input aria-label="Inner 검증 gap" type="number" min={0} max={1000} value={robustValidationGap} onChange={(event) => setRobustValidationGap(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+        </> : <>
+          <Field label="Window 방식"><Select value={robustValidationWindowMode} onValueChange={(value) => setRobustValidationWindowMode(value as WalkForwardMode)}><SelectTrigger aria-label="강건 검증 window 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="rolling">Rolling</SelectItem><SelectItem value="anchored">Anchored</SelectItem></SelectContent></Select></Field>
+          <Field label="학습 관측일"><Input aria-label="강건 검증 학습 관측일" type="number" min={20} max={5000} value={robustValidationTrainWindow} onChange={(event) => setRobustValidationTrainWindow(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="OOS 관측일"><Input aria-label="강건 검증 OOS 관측일" type="number" min={5} max={2000} value={robustValidationTestWindow} onChange={(event) => setRobustValidationTestWindow(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="Step"><Input aria-label="강건 검증 step" type="number" min={1} max={2000} value={robustValidationStep} onChange={(event) => setRobustValidationStep(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="최대 fold"><Input aria-label="강건 검증 최대 fold" type="number" min={2} max={100} value={robustValidationFoldCount} onChange={(event) => setRobustValidationFoldCount(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="Gap"><Input aria-label="강건 검증 gap" type="number" min={0} max={1000} value={robustValidationGap} onChange={(event) => setRobustValidationGap(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="Embargo"><Input aria-label="강건 검증 embargo" type="number" min={0} max={1000} value={robustValidationEmbargo} onChange={(event) => setRobustValidationEmbargo(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+        </>}
+      </div> : null}
+      {!robustValidationReady ? <p role="alert" className="mt-3 text-[10px] text-rose-500">강건 검증의 기간·fold·gap·embargo 범위를 확인하세요.</p> : null}
+    </div>
+    <div className="grid gap-3 lg:grid-cols-[1.4fr_0.8fr]">
+      <div className="rounded-[18px] bg-card p-4" role="group" aria-label="기준 후보 선택">
+        <p className="text-[11px] font-bold text-muted-foreground">기준 후보 · 최소 1개</p>
+        <div className="mt-3 flex flex-wrap gap-2">{optimizerBaselines.map((baseline) => <ToggleChoice key={baseline} active={selectedBaselines.includes(baseline)} onClick={() => setSelectedBaselines((current) => current.includes(baseline) ? current.filter((item) => item !== baseline) : [...current, baseline])}>{baselineLabels[baseline]}</ToggleChoice>)}</div>
+        {!selectedBaselines.length ? <p role="alert" className="mt-3 text-[10px] text-rose-500">Screening 기준 후보를 하나 이상 선택하세요.</p> : null}
+      </div>
+      <div className="rounded-[18px] bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-[11px] font-bold text-muted-foreground">시장 국면 순차 정책</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">과거 정보만으로 상태별 기준 비중을 선택하고 ledger로 재검증합니다.</p></div><ToggleChoice active={regimePolicyEnabled} onClick={() => setRegimePolicyEnabled((current) => !current)}>{regimePolicyEnabled ? "활성" : "비활성"}</ToggleChoice></div>
+        {regimePolicyEnabled ? <Select value={regimePolicyMethod} onValueChange={(value) => setRegimePolicyMethod(value as RegimePolicyMethod)}><SelectTrigger aria-label="시장 국면 정책 탐색 방식" className="mt-3 w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="auto">Auto</SelectItem><SelectItem value="dynamic_programming">Dynamic Programming</SelectItem><SelectItem value="mcts">MCTS</SelectItem></SelectContent></Select> : null}
+      </div>
+    </div>
+    <div className="rounded-[18px] bg-card p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-[11px] font-bold text-muted-foreground">그룹 비중 제약</p><p className="mt-1 text-[10px] text-muted-foreground">아래 종목별 metadata의 그룹 합산 비중에 최소·최대 제약을 적용합니다.</p></div><Button type="button" variant="secondary" size="sm" onClick={() => setGroupConstraints((current) => [...current, { id: Math.max(0, ...current.map((item) => item.id)) + 1, dimension: "sector", group: "", minWeightPercent: "0", maxWeightPercent: "100" }])} disabled={groupConstraints.length >= 100}><Plus />제약 추가</Button></div>
+      {groupConstraints.length ? <div className="mt-3 space-y-2">{groupConstraints.map((constraint) => <div key={constraint.id} className="grid gap-2 rounded-2xl bg-secondary p-3 sm:grid-cols-[1fr_1.2fr_0.7fr_0.7fr_auto]"><Select value={constraint.dimension} onValueChange={(value) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, dimension: value as AssetGroupDimension } : item))}><SelectTrigger aria-label={`그룹 제약 ${constraint.id} 차원`} className="w-full bg-card"><SelectValue /></SelectTrigger><SelectContent>{groupDimensionOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select><Input aria-label={`그룹 제약 ${constraint.id} 이름`} value={constraint.group} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, group: event.target.value } : item))} placeholder="그룹 이름" maxLength={80} className="bg-card" /><Input aria-label={`그룹 제약 ${constraint.id} 최소 비중`} type="number" min={0} max={100} value={constraint.minWeightPercent} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, minWeightPercent: event.target.value } : item))} placeholder="최소 %" className="bg-card text-right" /><Input aria-label={`그룹 제약 ${constraint.id} 최대 비중`} type="number" min={0} max={100} value={constraint.maxWeightPercent} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, maxWeightPercent: event.target.value } : item))} placeholder="최대 %" className="bg-card text-right" /><Button type="button" variant="ghost" size="icon" aria-label={`그룹 제약 ${constraint.id} 삭제`} onClick={() => setGroupConstraints((current) => current.filter((item) => item.id !== constraint.id))}><Trash2 /></Button></div>)}</div> : <p className="mt-3 text-[10px] text-muted-foreground">제약 없음</p>}
+      {!groupConstraintsReady ? <p role="alert" className="mt-3 text-[10px] text-rose-500">그룹 이름과 0~100% 범위의 최소·최대 비중을 확인하세요.</p> : null}
+    </div>
+  </div>;
+
+  const assetGroupControlsPanel = <div className="overflow-x-auto rounded-[18px] bg-card p-3">
+    <p className="p-3 text-[11px] font-bold text-muted-foreground">종목별 그룹 metadata · 빈 값은 제약 계산에서 미지정</p>
+    <table className="w-full min-w-[980px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">Sector</th><th className="p-3">Industry</th><th className="p-3">Country</th><th className="p-3">Currency</th><th className="p-3">Asset type</th></tr></thead><tbody>{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown" as const, factors: "", constituents: "" }; return <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black">{asset.symbol}</td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 sector`} maxLength={80} value={metadata.sector} onChange={(event) => updateExposure(asset.symbol, { sector: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 industry`} maxLength={80} value={metadata.industry} onChange={(event) => updateExposure(asset.symbol, { industry: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 country`} maxLength={80} value={metadata.country} onChange={(event) => updateExposure(asset.symbol, { country: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 currency`} maxLength={3} value={metadata.currency} onChange={(event) => updateExposure(asset.symbol, { currency: event.target.value.toUpperCase() })} placeholder="USD" className="h-10 bg-secondary uppercase" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 asset type`} maxLength={80} value={metadata.assetType} onChange={(event) => updateExposure(asset.symbol, { assetType: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td></tr>; })}</tbody></table>
+    {!assetGroupMetadataReady ? <p role="alert" className="p-3 text-[10px] text-rose-500">입력한 통화는 3자리 코드, 국가는 2자 이상이어야 하며 metadata는 80자 이하여야 합니다.</p> : null}
+  </div>;
+
+  const walkForwardControlsPanel = <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <Field label="Walk-forward 방식"><Select value={walkForwardMode} onValueChange={(value) => setWalkForwardMode(value as WalkForwardMode)}><SelectTrigger aria-label="Walk-forward 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="rolling">rolling</SelectItem><SelectItem value="anchored">anchored</SelectItem></SelectContent></Select></Field>
+    <Field label="학습 · OOS 관측일"><div className="grid grid-cols-2 gap-2"><Input aria-label="Walk-forward 학습 관측일" type="number" min={20} max={5000} value={trainWindow} onChange={(event) => setTrainWindow(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Walk-forward OOS 관측일" type="number" min={5} max={2000} value={testWindow} onChange={(event) => setTestWindow(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+    <Field label="이동 · Gap · Embargo"><div className="grid grid-cols-3 gap-2"><Input aria-label="Walk-forward 이동 간격" type="number" min={1} max={2000} value={step} onChange={(event) => setStep(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Walk-forward gap" type="number" min={0} max={1000} value={walkForwardGap} onChange={(event) => setWalkForwardGap(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Walk-forward embargo" type="number" min={0} max={1000} value={walkForwardEmbargo} onChange={(event) => setWalkForwardEmbargo(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+    <Field label="Fold 후보 예산"><Input aria-label="Walk-forward fold 후보 예산" type="number" min={1} max={10000} value={foldCandidateBudget} onChange={(event) => setFoldCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+    <Field label="추가 seed" help={`현재 seed ${seed}는 항상 포함합니다. 실제 배열: ${currentWalkForwardSeeds.join(", ")}`}><Input aria-label="Walk-forward 추가 seed" value={additionalWalkForwardSeeds} onChange={(event) => setAdditionalWalkForwardSeeds(event.target.value)} placeholder="예: 2026, 777" className="bg-secondary" /></Field>
+  </div>;
+
+  const monteCarloControlsPanel = <div className="space-y-3">
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <Field label="Bootstrap / 분포 방식"><Select value={monteCarloMethod} onValueChange={(value) => setMonteCarloMethod(value as MonteCarloMethod)}><SelectTrigger aria-label="Monte Carlo 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="moving_block">moving-block</SelectItem><SelectItem value="stationary">stationary</SelectItem><SelectItem value="regime_conditioned">regime-conditioned</SelectItem><SelectItem value="student_t">Student-t</SelectItem></SelectContent></Select></Field>
+      <Field label="미래 거래일 · 경로 수"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 미래 거래일" type="number" min={1} max={25200} value={horizonDays} onChange={(event) => setHorizonDays(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo 경로 수" type="number" min={100} max={100000} value={pathCount} onChange={(event) => setPathCount(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="블록 길이 · Calibration"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 블록 길이" type="number" min={1} max={252} value={blockLength} onChange={(event) => setBlockLength(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo calibration origins" type="number" min={0} max={100} value={calibrationOrigins} onChange={(event) => setCalibrationOrigins(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="목표 금액 · 분위수 %"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 목표 금액" type="number" min={1} value={goalAmount} onChange={(event) => setGoalAmount(event.target.value)} placeholder="목표 없음" className="bg-secondary text-right" /><Input aria-label="Monte Carlo 분위수" value={quantiles} onChange={(event) => setQuantiles(event.target.value)} className="bg-secondary" /></div></Field>
+      <Field label="표본 경로 · seed"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 표본 경로 수" type="number" min={0} max={100} value={samplePathCount} onChange={(event) => setSamplePathCount(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo seed" type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="리밸런싱"><Select value={monteCarloRebalance} onValueChange={(value) => setMonteCarloRebalance(value as BacktestRebalanceFrequency)}><SelectTrigger aria-label="Monte Carlo 리밸런싱" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{rebalanceModes.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent></Select>{monteCarloRebalance === "threshold" ? <Input aria-label="Monte Carlo 리밸런싱 threshold" type="number" min={0.1} max={50} value={monteCarloThreshold} onChange={(event) => setMonteCarloThreshold(Number(event.target.value))} className="mt-2 bg-secondary text-right" /> : null}</Field>
+      <Field label="현금 비중 % · 연 수익률 %"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 현금 비중" type="number" min={0} max={99} value={monteCarloCashWeightPercent} onChange={(event) => setMonteCarloCashWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo 현금 연 수익률" type="number" min={-100} max={100} value={monteCarloCashYieldPercent} onChange={(event) => setMonteCarloCashYieldPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="거래비용 bp · 물가상승률 %"><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 거래비용" type="number" min={0} max={500} value={monteCarloTransactionCostBps} onChange={(event) => setMonteCarloTransactionCostBps(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo 물가상승률" type="number" min={-20} max={100} value={inflationAnnualPercent} onChange={(event) => setInflationAnnualPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="주기 현금흐름 · 주기(거래일)" help="음수는 인출이며 중간 고갈 확률에 반영합니다."><div className="grid grid-cols-2 gap-2"><Input aria-label="Monte Carlo 주기 현금흐름" type="number" value={monteCarloPeriodicCashFlow} onChange={(event) => setMonteCarloPeriodicCashFlow(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Monte Carlo 현금흐름 주기" type="number" min={1} max={25200} value={monteCarloCashFlowFrequencyDays} onChange={(event) => setMonteCarloCashFlowFrequencyDays(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+      <Field label="수량 방식"><Select value={ledgerQuantityMode} onValueChange={(value) => setLedgerQuantityMode(value as BacktestQuantityMode)}><SelectTrigger aria-label="Monte Carlo 수량 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fractional">소수 수량</SelectItem><SelectItem value="whole">정수·lot 수량</SelectItem></SelectContent></Select></Field>
+    </div>
+    <div className="overflow-x-auto rounded-[18px] bg-card p-3"><table className="w-full min-w-[520px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">Monte Carlo lot size</th></tr></thead><tbody>{baseConfig.assets.map((asset) => <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black">{asset.symbol}</td><td className="p-2"><Input aria-label={`${asset.symbol} Monte Carlo lot size`} type="number" min={0.000001} max={1000000} value={monteCarloLotSizes[asset.symbol] ?? 1} onChange={(event) => setMonteCarloLotSizes((current) => ({ ...current, [asset.symbol]: Number(event.target.value) }))} className="h-10 bg-secondary text-right" /></td></tr>)}</tbody></table></div>
+  </div>;
 
   return (
     <Card className="bg-secondary p-5 sm:p-7">
@@ -597,11 +1053,42 @@ export function PortfolioStrategyLab({
       {mode === "stress" ? <div className="mt-5 space-y-3">{stressScenarios.map((scenario, index) => <div key={scenario.id} className="rounded-[20px] bg-card p-4"><div className="flex items-center justify-between"><p className="text-xs font-black">시나리오 {index + 1}</p><Button type="button" variant="ghost" size="icon" disabled={stressScenarios.length <= 1} onClick={() => setStressScenarios((current) => current.filter((item) => item.id !== scenario.id))}><Trash2 /></Button></div><div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4"><Input aria-label="시나리오 이름" value={scenario.name} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, name: event.target.value } : item))} placeholder="시나리오 이름" className="bg-secondary" /><Input type="date" aria-label="스트레스 시작일" value={scenario.startDate} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, startDate: event.target.value } : item))} className="bg-secondary" /><Input type="date" aria-label="스트레스 종료일" value={scenario.endDate} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, endDate: event.target.value } : item))} className="bg-secondary" /><Input type="number" aria-label="시나리오 거래비용" value={scenario.transactionCostBps} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, transactionCostBps: event.target.value } : item))} placeholder="거래비용 bp · 상속" className="bg-secondary" /><Input type="number" aria-label="시나리오 현금흐름" value={scenario.monthlyCashFlow} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, monthlyCashFlow: event.target.value } : item))} placeholder="월 현금흐름 · 상속" className="bg-secondary" /><Select value={scenario.cashFlowFrequency} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowFrequency: value as StressDraft['cashFlowFrequency'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">현금흐름 주기 상속</SelectItem><SelectItem value="monthly">monthly</SelectItem><SelectItem value="quarterly">quarterly</SelectItem><SelectItem value="annually">annually</SelectItem></SelectContent></Select><Select value={scenario.cashFlowTiming} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowTiming: value as StressDraft['cashFlowTiming'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">현금흐름 시점 상속</SelectItem><SelectItem value="period_start">period_start</SelectItem><SelectItem value="period_end">period_end</SelectItem></SelectContent></Select><Select value={scenario.currencyMode} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, currencyMode: value as StressDraft['currencyMode'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">통화 모드 상속</SelectItem><SelectItem value="KRW">KRW FX</SelectItem><SelectItem value="local">local</SelectItem></SelectContent></Select><Select value={scenario.rebalanceFrequency} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, rebalanceFrequency: value as StressDraft['rebalanceFrequency'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">리밸런싱 상속</SelectItem>{rebalanceModes.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent></Select>{scenario.rebalanceFrequency === "threshold" ? <Input type="number" value={scenario.thresholdPercent} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, thresholdPercent: event.target.value } : item))} placeholder="Threshold %" className="bg-secondary" /> : null}<Input value={scenario.excludeSymbols} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, excludeSymbols: event.target.value } : item))} placeholder="제외 심볼 · 쉼표" className="bg-secondary" /></div></div>)}<Button type="button" variant="secondary" onClick={() => setStressScenarios((current) => [...current, { id: Math.max(0, ...current.map((item) => item.id)) + 1, name: `사용자 시나리오 ${current.length + 1}`, startDate: "", endDate: "", transactionCostBps: "", monthlyCashFlow: "", cashFlowFrequency: "inherit", cashFlowTiming: "inherit", currencyMode: "inherit", rebalanceFrequency: "inherit", thresholdPercent: "", excludeSymbols: "" }])} disabled={stressScenarios.length >= 50}><Plus />시나리오 추가</Button></div> : null}
 
       {mode === "optimization" || mode === "walk-forward" ? <div className="mt-5 space-y-3"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Field label="목적 함수"><Select value={objective} onValueChange={setObjective}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{objectiveOptions.map(([value,label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field label="벤치마크 심볼 · 선택" help="Information Ratio 목적에는 필수"><Input value={optimizationBenchmark} onChange={(event) => setOptimizationBenchmark(event.target.value.toUpperCase())} placeholder="SPY, QQQ" className="bg-secondary" /></Field><Field label="후보 예산"><Input type="number" min={1} max={10000} value={candidateBudget} onChange={(event) => setCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field><Field label="최대 보유 종목"><Input type="number" min={1} max={baseConfig.assets.length} value={maxAssets} onChange={(event) => setMaxAssets(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최대 낙폭 % · 선택"><Input type="number" min={0} max={100} value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="목표 CAGR % · 선택"><Input type="number" min={-100} max={1000} value={targetReturnPercent} onChange={(event) => setTargetReturnPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="최대 회전율 % · 선택"><Input type="number" min={0} max={200} value={maxTurnoverPercent} onChange={(event) => setMaxTurnoverPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field></div>
+        {optimizationEngineControls}
         <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[680px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">개별 최소 %</th><th className="p-3">개별 최대 %</th><th className="p-3">필수</th><th className="p-3">제외</th></tr></thead><tbody>{baseConfig.assets.map((asset) => <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black"><span className="flex items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} />{asset.symbol}</span></td><td className="p-3"><Input aria-label={`${asset.symbol} 개별 최소 비중`} type="number" min={0} max={100} value={perAssetMinimums[asset.symbol] ?? ""} onChange={(event) => updateOptionalWeight(setPerAssetMinimums, asset.symbol, event.target.value)} placeholder="전역" className="h-10 bg-secondary" /></td><td className="p-3"><Input aria-label={`${asset.symbol} 개별 최대 비중`} type="number" min={0} max={100} value={perAssetMaximums[asset.symbol] ?? ""} onChange={(event) => updateOptionalWeight(setPerAssetMaximums, asset.symbol, event.target.value)} placeholder="전역" className="h-10 bg-secondary" /></td><td className="p-3"><input aria-label={`${asset.symbol} 필수 종목`} type="checkbox" checked={requiredAssets.includes(asset.symbol)} onChange={() => { setRequiredAssets((current) => current.includes(asset.symbol) ? current.filter((value) => value !== asset.symbol) : [...current, asset.symbol]); setExcludedAssets((current) => current.filter((value) => value !== asset.symbol)); }} /></td><td className="p-3"><input aria-label={`${asset.symbol} 제외 종목`} type="checkbox" checked={excludedAssets.includes(asset.symbol)} onChange={() => { setExcludedAssets((current) => current.includes(asset.symbol) ? current.filter((value) => value !== asset.symbol) : [...current, asset.symbol]); setRequiredAssets((current) => current.filter((value) => value !== asset.symbol)); }} /></td></tr>)}</tbody></table></div>
-        {mode === "walk-forward" ? <div className="grid gap-3 md:grid-cols-3"><Field label="학습 관측일"><Input type="number" min={20} max={5000} value={trainWindow} onChange={(event) => setTrainWindow(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="검증 관측일"><Input type="number" min={5} max={2000} value={testWindow} onChange={(event) => setTestWindow(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="이동 간격"><Input type="number" min={1} max={2000} value={step} onChange={(event) => setStep(Number(event.target.value))} className="bg-secondary text-right" /></Field></div> : null}
+        {assetGroupControlsPanel}
+        {mode === "walk-forward" ? walkForwardControlsPanel : null}
       </div> : null}
 
-      {mode === "monte-carlo" ? <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3"><Field label="미래 거래일"><Input type="number" min={1} max={25200} value={horizonDays} onChange={(event) => setHorizonDays(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="경로 수"><Input type="number" min={100} max={100000} value={pathCount} onChange={(event) => setPathCount(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="블록 길이"><Input type="number" min={1} max={252} value={blockLength} onChange={(event) => setBlockLength(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="목표 금액 · 선택"><Input type="number" min={1} value={goalAmount} onChange={(event) => setGoalAmount(event.target.value)} placeholder="목표 없음" className="bg-secondary text-right" /></Field><Field label="분위수 · %" help="0보다 크고 100보다 작은 값을 쉼표로 구분"><Input value={quantiles} onChange={(event) => setQuantiles(event.target.value)} className="bg-secondary" /></Field><Field label="표본 경로 표시"><Input type="number" min={0} max={100} value={samplePathCount} onChange={(event) => setSamplePathCount(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field></div> : null}
+      {mode === "monte-carlo" ? <div className="mt-5">{monteCarloControlsPanel}</div> : null}
+
+      {mode === "outlook" ? <div className="mt-5 space-y-3">
+        <div className="rounded-[20px] bg-card p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black">통합 전망</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">2단계 최적화 → Walk-forward OOS → Monte Carlo calibration → 시장 국면 → stress·민감도를 동일 입력·seed로 실행합니다.</p></div><ToggleChoice active={outlookOptimizationEnabled} onClick={() => setOutlookOptimizationEnabled((current) => !current)}>최적화 {outlookOptimizationEnabled ? "포함" : "제외"}</ToggleChoice></div></div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="최적화 목적"><Select value={objective} onValueChange={setObjective}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{objectiveOptions.map(([value,label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="전망 벤치마크 · 선택" help="비우면 백테스트 기본 벤치마크를 사용"><Input value={optimizationBenchmark} onChange={(event) => setOptimizationBenchmark(event.target.value.toUpperCase())} placeholder={baseConfig.benchmark === "NONE" ? "SPY, QQQ" : `${baseConfig.benchmark} 사용`} className="bg-secondary" /></Field>
+          <Field label="Screening 후보 예산"><Input type="number" min={10} max={10000} value={candidateBudget} onChange={(event) => setCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+          <Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+          <Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field>
+        </div>
+        {optimizationEngineControls}
+        {assetGroupControlsPanel}
+        {walkForwardControlsPanel}
+        {monteCarloControlsPanel}
+        <div className="rounded-[18px] bg-card p-4"><div className="grid gap-3 md:grid-cols-[1fr_200px]"><div><p className="text-xs font-black">과거정보 전용 시장 국면</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">벤치마크가 있으면 벤치마크, 없으면 현재 비중 포트폴리오의 직전 관측만 사용해 risk-on·neutral·risk-off를 분류합니다.</p></div><Field label="국면 lookback · 거래일"><Input aria-label="Outlook 시장 국면 lookback" type="number" min={5} max={252} value={outlookRegimeLookback} onChange={(event) => setOutlookRegimeLookback(Number(event.target.value))} className="bg-secondary text-right" /></Field></div></div>
+        <div className="rounded-[18px] bg-card p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black">Outlook 민감도 ledger</p><p className="mt-1 text-[10px] text-muted-foreground">비용 충격·무현금흐름·리밸런싱 정책을 동일 데이터와 실제 ledger로 비교합니다.</p></div><ToggleChoice active={outlookSensitivityEnabled} onClick={() => setOutlookSensitivityEnabled((current) => !current)}>{outlookSensitivityEnabled ? "포함" : "제외"}</ToggleChoice></div>
+          {outlookSensitivityEnabled ? <div className="mt-3 grid gap-3 md:grid-cols-[200px_1fr]"><Field label="추가 거래비용 충격 · bp"><Input aria-label="Outlook 추가 거래비용 충격" type="number" min={0} max={500} value={outlookCostShockBps} onChange={(event) => setOutlookCostShockBps(Number(event.target.value))} className="bg-secondary text-right" /></Field><div className="rounded-[18px] bg-secondary p-4"><p className="text-[11px] font-bold text-muted-foreground">민감도 시나리오</p><div className="mt-3 flex flex-wrap gap-2"><ToggleChoice active={outlookZeroCashFlow} onClick={() => setOutlookZeroCashFlow((current) => !current)}>현금흐름 0</ToggleChoice>{(["none", "monthly", "quarterly", "annually"] as const).map((item) => <ToggleChoice key={item} active={outlookRebalanceModes.includes(item)} onClick={() => setOutlookRebalanceModes((current) => current.includes(item) ? (current.length > 1 ? current.filter((value) => value !== item) : current) : [...current, item])}>{item}</ToggleChoice>)}</div></div></div> : null}
+        </div>
+        <div className="rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground"><p className="font-black text-foreground">Stress {stressScenarios.length}개 포함</p><p>{stressScenarios.map((scenario) => scenario.name).join(" · ")}</p><p>스트레스 탭에서 기간·비용·현금흐름·통화·리밸런싱 조건을 수정한 뒤 다시 미래 전망 탭으로 돌아오면 그대로 사용합니다.</p></div>
+      </div> : null}
+
+      {mode === "exposures" ? <div className="mt-5 space-y-3">
+        <div className="rounded-[20px] bg-card p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black">공급자 metadata 기반 노출 분석</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">통화는 현재 종목 metadata로 채웁니다. 공급되지 않은 sector·industry·국가·factor를 추정하지 않으며 빈 값은 UNKNOWN으로 반환합니다.</p></div><ToggleChoice active={exposureLookThrough} onClick={() => setExposureLookThrough((current) => !current)}>ETF look-through {exposureLookThrough ? "ON" : "OFF"}</ToggleChoice></div></div>
+        <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[1260px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-3">종목·비중</th><th className="p-3">통화 *</th><th className="p-3">Sector</th><th className="p-3">Industry</th><th className="p-3">Country</th><th className="p-3">Asset type</th><th className="p-3">환헤지</th><th className="p-3">Factor</th></tr></thead><tbody>{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown" as const, factors: "", constituents: "" }; return <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black">{asset.symbol}<br /><span className="font-normal text-muted-foreground">{formatPercent(asset.weight)}</span></td><td className="p-2"><Input aria-label={`${asset.symbol} 통화`} maxLength={3} value={metadata.currency} onChange={(event) => updateExposure(asset.symbol, { currency: event.target.value.toUpperCase() })} placeholder="USD" className="h-10 bg-secondary uppercase" /></td><td className="p-2"><Input aria-label={`${asset.symbol} sector`} value={metadata.sector} onChange={(event) => updateExposure(asset.symbol, { sector: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} industry`} value={metadata.industry} onChange={(event) => updateExposure(asset.symbol, { industry: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} country`} value={metadata.country} onChange={(event) => updateExposure(asset.symbol, { country: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} asset type`} value={metadata.assetType} onChange={(event) => updateExposure(asset.symbol, { assetType: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Select value={metadata.hedge} onValueChange={(value) => updateExposure(asset.symbol, { hedge: value as ExposureDraft["hedge"] })}><SelectTrigger aria-label={`${asset.symbol} 환헤지`} className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unknown">미확인</SelectItem><SelectItem value="hedged">헤지</SelectItem><SelectItem value="unhedged">비헤지</SelectItem></SelectContent></Select></td><td className="p-2"><Input aria-label={`${asset.symbol} factor`} value={metadata.factors} onChange={(event) => updateExposure(asset.symbol, { factors: event.target.value })} placeholder="value=0.3, momentum=-0.1" className="h-10 bg-secondary" /></td></tr>; })}</tbody></table></div>
+        {exposureLookThrough ? <div className="grid gap-3 lg:grid-cols-2">{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol]; const parsed = parsedConstituents[asset.symbol]; return <label key={asset.symbol} className="rounded-[18px] bg-card p-4"><span className="text-[11px] font-black">{asset.symbol} ETF 구성종목 JSON</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">배열 항목: symbol, 0~1 weight, 선택 sector·industry·country·currency. 빈 값은 구성 snapshot 미제공입니다.</span><textarea aria-label={`${asset.symbol} ETF 구성종목 JSON`} value={metadata?.constituents ?? ""} onChange={(event) => updateExposure(asset.symbol, { constituents: event.target.value })} placeholder={'[{"symbol":"AAPL","weight":0.07,"sector":"Technology","country":"US","currency":"USD"}]'} rows={4} className="mt-3 w-full resize-y rounded-xl border border-border bg-secondary px-3 py-2 font-mono text-[11px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring" />{parsed?.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-500">{parsed.error}</span> : parsed?.value.length ? <span className="mt-2 block text-[10px] text-muted-foreground">검증된 구성종목 {parsed.value.length.toLocaleString("ko-KR")}개</span> : null}</label>; })}</div> : null}
+        {!exposureReady ? <p role="alert" className="rounded-[18px] bg-card p-4 text-xs text-rose-500">모든 종목에 ISO 4217 형식의 3자리 통화 코드가 필요합니다. 통화를 추정해서 채우지 않습니다.</p> : null}
+        {exposureLookThrough ? <p className="rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">입력한 공급자 snapshot만 look-through에 사용합니다. 빈 구성종목은 추정하지 않으며 coverage 0과 명시적 경고를 반환합니다.</p> : null}
+      </div> : null}
 
       {mode === "research" ? <PortfolioResearchTools baseConfig={baseConfig} backtestRuns={backtestRuns} optimizationRuns={optimizationRuns} theme={theme} onUnauthorized={onUnauthorized} /> : null}
 
@@ -610,7 +1097,7 @@ export function PortfolioStrategyLab({
       {mode !== "research" ? <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void submit()} disabled={!canSubmit}>{running ? <LoaderCircle className="animate-spin" /> : <Play />}{running ? "Rust worker 계산 중" : "고급 분석 실행"}</Button> : null}
 
       <div className={mode === "research" ? "hidden" : undefined}>
-      {result !== undefined ? <div className="mt-6 border-t border-border pt-6"><div className="mb-4 flex flex-wrap items-center gap-2"><Activity className="size-4" /><p className="text-xs font-black tracking-[0.12em]">ANALYSIS RESULT</p>{staleResult ? <span className="rounded-full bg-foreground px-2 py-1 text-[9px] font-black text-background">현재 입력과 다른 실행</span> : null}<p className="w-full text-[10px] leading-4 text-muted-foreground">실행 설정 · {resultConfigLabel}</p></div>{resultMode === "compare" ? <CompareResults result={result} /> : resultMode === "optimization" ? <OptimizationResults result={result} objective={resultObjective} theme={theme} /> : resultMode === "walk-forward" ? <WalkForwardResults result={result} run={run} onUnauthorized={onUnauthorized} /> : resultMode === "monte-carlo" ? <MonteCarloResults result={result} run={run} onUnauthorized={onUnauthorized} /> : <ScenarioResults result={result} />}{warnings.length ? <div className="mt-4 rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}<LazyJsonDetails value={result} className="mt-4 rounded-[18px] bg-card p-4" /></div> : null}
+      {result !== undefined ? <div className="mt-6 border-t border-border pt-6"><div className="mb-4 flex flex-wrap items-center gap-2"><Activity className="size-4" /><p className="text-xs font-black tracking-[0.12em]">ANALYSIS RESULT</p>{staleResult ? <span className="rounded-full bg-foreground px-2 py-1 text-[9px] font-black text-background">현재 입력과 다른 실행</span> : null}<p className="w-full text-[10px] leading-4 text-muted-foreground">실행 설정 · {resultConfigLabel}</p></div>{resultMode === "compare" ? <CompareResults result={result} /> : resultMode === "optimization" ? <OptimizationResearchResults result={result} run={run} onUnauthorized={onUnauthorized} objective={resultObjective} theme={theme} /> : resultMode === "walk-forward" ? <WalkForwardResults result={result} run={run} onUnauthorized={onUnauthorized} /> : resultMode === "monte-carlo" ? <MonteCarloResults result={result} run={run} onUnauthorized={onUnauthorized} /> : resultMode === "outlook" ? <OutlookResearchResults result={result} run={run} onUnauthorized={onUnauthorized} objective={resultObjective} theme={theme} /> : resultMode === "exposures" ? <ExposureResearchResults result={result} /> : <ScenarioResults result={result} />}{warnings.length ? <div className="mt-4 rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}<LazyJsonDetails value={result} className="mt-4 rounded-[18px] bg-card p-4" /></div> : null}
       </div>
     </Card>
   );

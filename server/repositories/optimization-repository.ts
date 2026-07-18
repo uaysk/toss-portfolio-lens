@@ -225,7 +225,7 @@ export class OptimizationRepository {
   }
 
   async listCandidates(runId: string, limit = 100): Promise<OptimizationCandidateRecord[]> {
-    const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const safeLimit = Math.max(1, Math.min(100_000, Math.floor(limit)));
     const rows = await this.database.query<CandidateRow>(`
       SELECT candidate_id, run_id, candidate_rank, weights_json, metrics_json,
              score, pareto, created_at
@@ -246,7 +246,7 @@ export class OptimizationRepository {
   }
 
   async listParetoCandidates(runId: string, limit = 100): Promise<OptimizationCandidateRecord[]> {
-    const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const safeLimit = Math.max(1, Math.min(100_000, Math.floor(limit)));
     const rows = await this.database.query<CandidateRow>(`
       SELECT candidate_id, run_id, candidate_rank, weights_json, metrics_json,
              score, pareto, created_at
@@ -257,5 +257,19 @@ export class OptimizationRepository {
       LIMIT ${safeLimit}
     `, [runId]);
     return rows.map(parseCandidate);
+  }
+
+  async getCandidateAt(runId: string, index: number, paretoOnly = false): Promise<OptimizationCandidateRecord | undefined> {
+    if (!Number.isSafeInteger(index) || index < 0 || index > 100_000) return undefined;
+    const [row] = await this.database.query<CandidateRow>(`
+      SELECT candidate_id, run_id, candidate_rank, weights_json, metrics_json,
+             score, pareto, created_at
+      FROM portfolio_optimization_candidates
+      WHERE run_id = ?${paretoOnly ? " AND pareto = 1" : ""}
+      ORDER BY CASE WHEN candidate_rank IS NULL THEN 1 ELSE 0 END,
+               candidate_rank ASC, score DESC
+      LIMIT 1 OFFSET ${index}
+    `, [runId]);
+    return row ? parseCandidate(row) : undefined;
   }
 }

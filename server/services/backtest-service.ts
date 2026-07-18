@@ -52,6 +52,9 @@ function artifacts(result: BacktestRunResult): Array<{ type: ArtifactType; conte
       rowCount: result.points.length,
     },
     { type: "cash-flows", content: result.cashFlows ?? [], rowCount: result.cashFlows?.length ?? 0 },
+    { type: "dividends", content: result.dividends ?? [], rowCount: result.dividends?.length ?? 0 },
+    { type: "target-weight-schedule", content: result.targetWeightSchedule ?? [], rowCount: result.targetWeightSchedule?.length ?? 0 },
+    { type: "data-quality", content: result.dataQuality, rowCount: 1 },
     { type: "rolling", content: result.advanced.rolling, rowCount: result.advanced.rolling.length },
     { type: "correlation", content: result.correlations, rowCount: result.correlations.assets.length },
     { type: "risk-contribution", content: result.advanced.riskContributions, rowCount: result.advanced.riskContributions.length },
@@ -188,7 +191,12 @@ export class BacktestService {
       effectivePeriod: { from: result.effectiveStartDate, to: result.endDate },
       assumptions: [
         `currency_mode=${backtestRequest.currencyMode ?? "KRW"}`,
-        "수정주가를 사용하며 별도 현금배당·세금·슬리피지는 포함하지 않습니다.",
+        backtestRequest.realism?.dividendMode === "cash"
+          ? "공급자가 제공한 현금배당만 반영하며, 없는 배당은 추정하지 않습니다."
+          : "배당은 수정주가 정책을 따르며 현금배당을 중복 계상하지 않습니다.",
+        backtestRequest.realism?.costs
+          ? "요청한 수수료·세금·슬리피지 모형을 ledger 체결에 적용했습니다. 거래량이 없으면 시장충격은 추정하지 않습니다."
+          : "legacy transactionCostBps 체결비용 모형을 사용했습니다.",
       ],
       warnings,
       dataQuality: result.dataQuality,
@@ -273,11 +281,12 @@ export class BacktestService {
         kind: "backtest",
         config: backtestRequest,
         dataRevision: calculatedRevision,
-        task: async () => {
+        task: async (context) => {
+          await context.throwIfCancelled();
           const output = await this.rustCompute!.compute<BacktestRunResult>("backtest", {
             simulation: prepared.simulation,
             response_context: prepared.responseContext,
-          }, { includeArtifacts: false });
+          }, { includeArtifacts: false, signal: context.signal });
           return {
             summary: output.summary,
             result: output.result,

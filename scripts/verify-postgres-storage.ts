@@ -148,6 +148,7 @@ try {
     "portfolio_backtest_runs", "portfolio_backtest_artifacts", "portfolio_optimization_runs",
     "portfolio_optimization_candidates", "portfolio_run_events", "portfolio_report_links",
     "mcp_oauth_authorization_codes", "mcp_oauth_refresh_tokens", "mcp_oauth_revocations", "mcp_oauth_consents",
+    "portfolio_schema_migrations", "portfolio_presets", "portfolio_preset_versions",
   ];
   const rows = await database.query<{ table_name: string }>(
     "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY(?)",
@@ -176,7 +177,7 @@ try {
   });
   assert.equal((await repeated.getHistory("synthetic-integration-account", "KRW", "all")).points.length, 2);
   postgres = repeated;
-  console.info(JSON.stringify({ backend: postgres.backend, migrationRepeatedWithoutDuplicates: true, mcpOAuthTables: expectedTables.length }));
+  console.info(JSON.stringify({ backend: postgres.backend, migrationRepeatedWithoutDuplicates: true, expectedTables: expectedTables.length }));
 } finally {
   await postgres?.close().catch(() => undefined);
   await sqlite.close().catch(() => undefined);

@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import { readFileSync } from "node:fs";
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMcpServer } from "./server.js";
@@ -6,6 +7,11 @@ import { createMcpHttpRuntime, type McpHttpRuntime } from "./transport.js";
 import type { McpToolDependencies } from "./tools/handlers.js";
 import { SqliteDatabase } from "../database.js";
 import { McpAuditRepository } from "../repositories/mcp-audit-repository.js";
+
+const generatedContract = JSON.parse(readFileSync(
+  new URL("./generated-contract.json", import.meta.url),
+  "utf8",
+)) as { toolCount: number; tools: Array<{ name: string }> };
 
 function parseResponse(text: string, contentType: string | null): unknown {
   if (!text) return undefined;
@@ -92,7 +98,9 @@ describe("MCP Streamable HTTP transport", () => {
     });
     expect(listed.status).toBe(200);
     const listedBody = parseResponse(await listed.text(), listed.headers.get("content-type")) as { result: { tools: unknown[] } };
-    expect(listedBody.result.tools).toHaveLength(31);
+    expect(listedBody.result.tools).toHaveLength(generatedContract.toolCount);
+    expect((listedBody.result.tools as Array<{ name: string }>).map((tool) => tool.name))
+      .toEqual(generatedContract.tools.map((tool) => tool.name));
 
     const validTool = await fetch(url, {
       method: "POST",

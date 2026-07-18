@@ -8,6 +8,7 @@ import {
   FlaskConical,
   Layers3,
   LayoutDashboard,
+  LibraryBig,
   ListFilter,
   LoaderCircle,
   LockKeyhole,
@@ -23,6 +24,7 @@ import { AllocationHistoryChart } from "@/components/allocation-history-chart";
 import { Logo } from "@/components/logo";
 import { PortfolioAnalysisView } from "@/components/portfolio-analysis";
 import { PortfolioBacktestView } from "@/components/portfolio-backtest";
+import { ResearchLibrary } from "@/components/research-library";
 import { StockVisibilitySettings } from "@/components/stock-visibility-settings";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -106,6 +108,7 @@ function Sidebar({
           { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
           { value: "backtest" as const, label: "백테스트", icon: FlaskConical },
           { value: "optimization" as const, label: "최적화", icon: Sparkles },
+          { value: "library" as const, label: "실행·프리셋", icon: LibraryBig },
         ]).map((item) => (
           <button
             key={item.value}
@@ -182,10 +185,10 @@ function DashboardHeader({
     <header className="dashboard-header">
       <div>
         <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION" }[view]}
+          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION", library: "RUNS & PRESETS" }[view]}
         </p>
         <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
-          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", backtest: "백테스트", optimization: "포트폴리오 최적화" }[view]}
+          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", backtest: "백테스트", optimization: "포트폴리오 최적화", library: "실행·프리셋" }[view]}
         </h1>
       </div>
 
@@ -234,12 +237,13 @@ function DashboardHeader({
 
 function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (view: DashboardView) => void }) {
   return (
-    <div className="mb-3 grid grid-cols-4 rounded-[20px] bg-secondary p-1 lg:hidden" aria-label="화면 선택">
+    <div className="mb-3 flex max-w-full gap-1 overflow-x-auto rounded-[20px] bg-secondary p-1 lg:hidden" aria-label="화면 선택">
       {([
         { value: "overview" as const, label: "포트폴리오" },
         { value: "analysis" as const, label: "분석" },
         { value: "backtest" as const, label: "백테스트" },
         { value: "optimization" as const, label: "최적화" },
+        { value: "library" as const, label: "실행·프리셋" },
       ]).map((item) => (
         <button
           key={item.value}
@@ -247,7 +251,7 @@ function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (vi
           aria-pressed={view === item.value}
           onClick={() => onChange(item.value)}
           className={cn(
-            "rounded-full px-4 py-2.5 text-xs font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "min-w-fit flex-1 rounded-full px-4 py-2.5 text-xs font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             view === item.value ? "bg-primary text-primary-foreground" : "text-muted-foreground",
           )}
         >{item.label}</button>
@@ -877,8 +881,10 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} />
         ) : view === "backtest" ? (
           <PortfolioBacktestView key={`${portfolio.selectedAccountId}:backtest`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="backtest" />
-        ) : (
+        ) : view === "optimization" ? (
           <PortfolioBacktestView key={`${portfolio.selectedAccountId}:optimization`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="optimization" />
+        ) : (
+          <ResearchLibrary key={`${portfolio.selectedAccountId}:library`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} />
         )}
 
         <footer className="mt-10 flex flex-col gap-2 pb-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">

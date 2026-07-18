@@ -311,6 +311,7 @@ try {
     REPORTS_PATH: reportsDirectory,
     MCP_ENABLED: "true",
     MCP_AUTH_MODE: "oauth",
+    MCP_SMOKE_BASE_URL: baseUrl,
     MCP_RESOURCE_URL: `${baseUrl}/mcp`,
     MCP_OAUTH_ISSUER: baseUrl,
     MCP_OAUTH_CLIENT_ID: clientId,
@@ -322,6 +323,7 @@ try {
   });
   await import(pathToFileURL(path.join(projectRoot, "dist/server/index.js")).href);
   await waitForServer(baseUrl);
+  await import("./mcp-oauth-http-smoke.mjs");
   const browserPath = await executablePath();
   browser = await chromium.launch({
     headless: true,

@@ -33,6 +33,8 @@ export type PortfolioConstraint = {
 
 export type OptimizationInput = {
   priceSeries: PriceSeriesInput[];
+  /** Raw prices used by rolling OOS evaluation. `benchmark` remains return observations. */
+  benchmarkPriceSeries?: PriceSeriesInput;
   benchmark?: ReturnSeriesInput;
   constraints: Partial<PortfolioConstraint>;
   seed?: number;
@@ -43,6 +45,35 @@ export type OptimizationInput = {
   annualization?: number;
   walkForwardConfig?: WalkForwardConfig;
   transactionCostBps?: number;
+  algorithm?: "random_search" | "differential_evolution" | "cma_es" | "nsga_ii" | "direct_cvar";
+  covarianceEstimator?: "sample" | "ledoit_wolf";
+  baselines?: Array<"equal_weight" | "current_weight" | "inverse_volatility" | "minimum_variance" | "risk_parity" | "hrp" | "herc">;
+  assetGroups?: Record<string, Partial<Record<"sector" | "industry" | "country" | "currency" | "assetType", string>>>;
+  groupConstraints?: Array<{
+    dimension: "sector" | "industry" | "country" | "currency" | "assetType";
+    group: string;
+    minWeight: number;
+    maxWeight: number;
+  }>;
+  robustScoreWeights?: Record<string, number>;
+  ledgerTemplate?: unknown;
+  ledgerValidationBudget?: number;
+  regimePolicySearch?: {
+    enabled: boolean;
+    method: "auto" | "dynamic_programming" | "mcts";
+    states: number | string[];
+    baselineActions?: NonNullable<OptimizationInput["baselines"]>;
+    lookback: number;
+    rebalanceEvery: number;
+    trainFraction: number;
+    minimumTrainingDecisions?: number;
+    maxDepth: number;
+    rollouts: number;
+    explorationConstant: number;
+    discount: number;
+    switchingCostBps?: number;
+    ledgerValidationBudget: number;
+  };
 };
 
 export type CandidateMetricSet = {
@@ -65,10 +96,26 @@ export type PortfolioCandidate = {
   metrics: CandidateMetricSet;
   walkForwardTestCoverage?: number;
   walkForwardSignal?: {
+    mode?: "holdout" | "walk_forward";
+    windowMode?: "rolling" | "anchored";
+    foldCount?: number;
+    scoredFoldCount?: number;
+    scoredSharpeFoldCount?: number;
+    scoredCvarFoldCount?: number;
     averageSharpe: number | null;
     worstSharpe: number | null;
     averageCvar: number | null;
   };
+  robustScoreDetail?: unknown;
+  baseline?: string;
+  algorithm?: string;
+  validationStatus?: string;
+  screeningRank?: number;
+  ledgerRank?: number;
+  rankChange?: number;
+  screeningMetrics?: CandidateMetricSet;
+  ledgerMetrics?: Record<string, unknown>;
+  metricDelta?: Record<string, number | null>;
 };
 
 export type OptimizationOutput = {
@@ -99,12 +146,25 @@ export type WalkForwardWindow = {
   testEnd: string;
   trainCount: number;
   testCount: number;
+  gap?: number;
+  embargo?: number;
+  mode?: "holdout" | "walk_forward";
+  windowMode?: "rolling" | "anchored";
+  foldIndex?: number;
 };
 
 export type WalkForwardConfig = {
+  enabled?: boolean;
+  mode?: "holdout" | "walk_forward";
+  windowMode?: "rolling" | "anchored";
+  trainFraction?: number;
+  testFraction?: number;
+  gap?: number;
+  embargo?: number;
   trainWindow?: number;
   testWindow?: number;
   step?: number;
+  foldCount?: number;
   minimumTrainObservations?: number;
   minimumTestObservations?: number;
 };
@@ -133,15 +193,29 @@ function normalizeDecimal(value: unknown, fallback: number, minimum = 0, maximum
 }
 
 function normalizeWalkForwardConfig(config: WalkForwardConfig = {}): {
+  mode: "holdout" | "walk_forward";
+  windowMode: "rolling" | "anchored";
+  trainFraction: number;
+  testFraction: number;
   trainWindow: number;
   testWindow: number;
   step: number;
+  foldCount: number;
+  gap: number;
+  embargo: number;
   minimumTrainObservations: number;
   minimumTestObservations: number;
 } {
+  const mode = config.mode ?? "walk_forward";
+  const windowMode = config.windowMode ?? "rolling";
+  const trainFraction = normalizeDecimal(config.trainFraction, 0.8, 0.1, 0.95);
+  const testFraction = normalizeDecimal(config.testFraction, 0.2, 0.05, 0.5);
   const trainWindow = normalizePositiveInt(config.trainWindow, 126, 2, 10_000);
-  const testWindow = normalizePositiveInt(config.testWindow, 42, 1, 10_000);
+  const testWindow = normalizePositiveInt(config.testWindow, 21, 1, 10_000);
   const step = Math.max(1, normalizePositiveInt(config.step, Math.max(1, testWindow), 1, 10_000));
+  const foldCount = normalizePositiveInt(config.foldCount, 5, 2, 100);
+  const gap = normalizePositiveInt(config.gap, 0, 0, 10_000);
+  const embargo = normalizePositiveInt(config.embargo, 0, 0, 10_000);
   const minimumTrainObservations = normalizePositiveInt(
     config.minimumTrainObservations,
     Math.max(2, Math.floor(trainWindow * 0.5)),
@@ -155,9 +229,16 @@ function normalizeWalkForwardConfig(config: WalkForwardConfig = {}): {
     testWindow,
   );
   return {
+    mode,
+    windowMode,
+    trainFraction,
+    testFraction,
     trainWindow,
     testWindow,
     step,
+    foldCount,
+    gap,
+    embargo,
     minimumTrainObservations,
     minimumTestObservations,
   };
@@ -218,6 +299,16 @@ function buildAlignedFrame(series: PriceSeriesInput[]): WeightedAlignedFrame {
     ids: aligned.keys,
     dates: aligned.dates,
     byId: aligned.byKey,
+  };
+}
+
+function sliceAlignedFrame(frame: WeightedAlignedFrame, start: number, end: number): WeightedAlignedFrame {
+  const safeStart = Math.max(0, Math.min(frame.dates.length, start));
+  const safeEnd = Math.max(safeStart, Math.min(frame.dates.length, end + 1));
+  return {
+    ids: [...frame.ids],
+    dates: frame.dates.slice(safeStart, safeEnd),
+    byId: Object.fromEntries(frame.ids.map((id) => [id, frame.byId[id]!.slice(safeStart, safeEnd)])),
   };
 }
 
@@ -335,12 +426,34 @@ function evaluateWalkForwardCandidate(
   portfolio: ReturnSeriesInput,
   benchmark: ReturnSeriesInput | undefined,
   windows: WalkForwardWindow[],
-  options: { annualization?: number; confidence?: number; minimumSamples: number; riskFreeRatePercent: number },
-): { coverageRatio: number; signal: { averageSharpe: number | null; worstSharpe: number | null; averageCvar: number | null } } {
+  options: { annualization?: number; confidence?: number; minimumSamples: number; riskFreeRatePercent: number; transactionCost: number },
+): { coverageRatio: number; signal: {
+  mode: "holdout" | "walk_forward";
+  windowMode: "rolling" | "anchored";
+  foldCount: number;
+  scoredFoldCount: number;
+  scoredSharpeFoldCount: number;
+  scoredCvarFoldCount: number;
+  averageSharpe: number | null;
+  worstSharpe: number | null;
+  averageCvar: number | null;
+} } {
+  const mode = windows[0]?.mode ?? (windows.length > 1 ? "walk_forward" : "holdout");
+  const windowMode = windows[0]?.windowMode ?? "rolling";
   if (!windows.length) {
     return {
       coverageRatio: 0,
-      signal: { averageSharpe: null, worstSharpe: null, averageCvar: null },
+      signal: {
+        mode,
+        windowMode,
+        foldCount: 0,
+        scoredFoldCount: 0,
+        scoredSharpeFoldCount: 0,
+        scoredCvarFoldCount: 0,
+        averageSharpe: null,
+        worstSharpe: null,
+        averageCvar: null,
+      },
     };
   }
 
@@ -349,10 +462,14 @@ function evaluateWalkForwardCandidate(
   const minimum = options.minimumSamples;
   const sharpeValues: number[] = [];
   const cvarValues: number[] = [];
-  let totalTest = 0;
+  const uniqueTestObservations = new Set<number>();
 
   for (const window of windows) {
-    const testPoints = portfolio.points.slice(window.testStartIndex, window.testEndIndex + 1);
+    const testPoints = portfolio.points
+      .slice(window.testStartIndex, window.testEndIndex + 1)
+      .map((point, index) => index === 0
+        ? { ...point, value: (1 - options.transactionCost) * (1 + point.value) - 1 }
+        : point);
     if (!testPoints.length) continue;
     const testSeries: ReturnSeriesInput = {
       key: portfolio.key,
@@ -373,7 +490,9 @@ function evaluateWalkForwardCandidate(
       cvarValues.push(testStats.conditionalValueAtRisk95);
     }
 
-    totalTest += Math.max(0, window.testCount);
+    for (let index = window.testStartIndex; index <= window.testEndIndex; index += 1) {
+      uniqueTestObservations.add(index);
+    }
 
     if (benchmark) {
       const testBenchPoints = benchmark.points.slice(window.testStartIndex, window.testEndIndex + 1);
@@ -383,7 +502,7 @@ function evaluateWalkForwardCandidate(
           label: benchmark.label,
           points: testBenchPoints,
         };
-        analyzePairedReturnSeries(portfolio, testBench, {
+        analyzePairedReturnSeries(testSeries, testBench, {
           annualization,
           confidence,
           minimumObservations: minimum,
@@ -403,8 +522,14 @@ function evaluateWalkForwardCandidate(
   const worstSharpe = sharpeValues.length ? Math.min(...sharpeValues) : null;
 
   return {
-    coverageRatio: totalTest / Math.max(1, portfolio.points.length),
+    coverageRatio: Math.min(1, uniqueTestObservations.size / Math.max(1, portfolio.points.length)),
     signal: {
+      mode,
+      windowMode,
+      foldCount: windows.length,
+      scoredFoldCount: Math.max(sharpeValues.length, cvarValues.length),
+      scoredSharpeFoldCount: sharpeValues.length,
+      scoredCvarFoldCount: cvarValues.length,
       averageSharpe,
       worstSharpe,
       averageCvar,
@@ -422,6 +547,7 @@ function evaluatePortfolioCandidate(
     minimumSamples: number;
     riskFreeRatePercent: number;
     walkForwardWindows: WalkForwardWindow[];
+    oosFrame?: WeightedAlignedFrame;
     constraints: PortfolioConstraint;
     transactionCostBps: number;
   },
@@ -458,11 +584,13 @@ function evaluatePortfolioCandidate(
     })
     : null;
 
-  const walkForward = evaluateWalkForwardCandidate(portfolio, benchmark, options.walkForwardWindows, {
+  const oosPortfolio = buildPortfolioReturnSeries(options.oosFrame ?? frame, weights);
+  const walkForward = evaluateWalkForwardCandidate(oosPortfolio, benchmark, options.walkForwardWindows, {
     annualization: options.annualization,
     confidence: options.confidence,
     minimumSamples: options.minimumSamples,
     riskFreeRatePercent: options.riskFreeRatePercent,
+    transactionCost,
   });
 
   const metrics: CandidateMetricSet = {
@@ -490,6 +618,7 @@ function evaluatePortfolioCandidate(
     walkForward.signal.worstSharpe,
     walkForward.signal.averageCvar,
   ];
+  let robustScoreDetail: Record<string, unknown> | undefined;
 
   if (robustValues.some((value): value is number => Number.isFinite(value))) {
     const sharpeScore = metrics.sharpe === null ? 0 : safeTanH(metrics.sharpe / 2);
@@ -516,6 +645,52 @@ function evaluatePortfolioCandidate(
     if (!Number.isFinite(metrics.robustScore)) {
       metrics.robustScore = null;
     }
+    const components = [
+      { name: "sharpe", source: "in_sample", raw: metrics.sharpe, normalized: metrics.sharpe === null ? null : sharpeScore, weight: 0.16 },
+      { name: "sortino", source: "in_sample", raw: metrics.sortino, normalized: metrics.sortino === null ? null : sortinoScore, weight: 0.14 },
+      { name: "calmar", source: "in_sample", raw: metrics.calmar, normalized: metrics.calmar === null ? null : calmarScore, weight: 0.12 },
+      { name: "volatility", source: "in_sample", raw: metrics.volatility, normalized: metrics.volatility === null ? null : volatilityScore, weight: 0.12 },
+      { name: "cvar", source: "in_sample", raw: metrics.cvar, normalized: metrics.cvar === null ? null : cvarScore, weight: 0.12 },
+      { name: "informationRatio", source: "in_sample", raw: metrics.informationRatio, normalized: metrics.informationRatio === null ? null : informationScore, weight: 0.08 },
+      { name: "oosAverageSharpe", source: "oos", raw: walkForward.signal.averageSharpe, normalized: walkForward.signal.averageSharpe === null ? null : wfAverageSharpe, weight: 0.10 },
+      { name: "oosWorstSharpe", source: "oos", raw: walkForward.signal.worstSharpe, normalized: walkForward.signal.worstSharpe === null ? null : wfWorstSharpe, weight: 0.10 },
+      { name: "oosAverageCvar", source: "oos", raw: walkForward.signal.averageCvar, normalized: walkForward.signal.averageCvar === null ? null : wfCvarScore, weight: 0.06 },
+    ].map((component) => ({
+      ...component,
+      available: component.normalized !== null,
+      contribution: (component.normalized ?? 0) * component.weight,
+    }));
+    const componentScore = (source: "in_sample" | "oos") => {
+      const available = components.filter((component) => component.source === source && component.available);
+      const availableWeight = available.reduce((sum, component) => sum + component.weight, 0);
+      return availableWeight > 0
+        ? available.reduce((sum, component) => sum + component.contribution, 0) / availableWeight
+        : null;
+    };
+    robustScoreDetail = {
+      score: metrics.robustScore,
+      inSampleScore: componentScore("in_sample"),
+      outOfSampleScore: componentScore("oos"),
+      configuredWeight: 1,
+      availableWeight: components.filter((component) => component.available).reduce((sum, component) => sum + component.weight, 0),
+      coverage: walkForward.coverageRatio,
+      components,
+      validation: {
+        mode: walkForward.signal.mode,
+        windowMode: walkForward.signal.windowMode,
+        foldCount: walkForward.signal.foldCount,
+        scoredFoldCount: walkForward.signal.scoredFoldCount,
+        scoredSharpeFoldCount: walkForward.signal.scoredSharpeFoldCount,
+        scoredCvarFoldCount: walkForward.signal.scoredCvarFoldCount,
+        coverage: walkForward.coverageRatio,
+        componentCoverage: {
+          oosAverageSharpe: walkForward.signal.foldCount > 0 ? walkForward.signal.scoredSharpeFoldCount / walkForward.signal.foldCount : 0,
+          oosWorstSharpe: walkForward.signal.foldCount > 0 ? walkForward.signal.scoredSharpeFoldCount / walkForward.signal.foldCount : 0,
+          oosAverageCvar: walkForward.signal.foldCount > 0 ? walkForward.signal.scoredCvarFoldCount / walkForward.signal.foldCount : 0,
+        },
+        leakageControl: "candidate_weights_fit_on_first_fold_train_only",
+      },
+    };
   }
 
   return {
@@ -524,10 +699,17 @@ function evaluatePortfolioCandidate(
     metrics,
     walkForwardTestCoverage: walkForward.coverageRatio,
     walkForwardSignal: {
+      mode: walkForward.signal.mode,
+      windowMode: walkForward.signal.windowMode,
+      foldCount: walkForward.signal.foldCount,
+      scoredFoldCount: walkForward.signal.scoredFoldCount,
+      scoredSharpeFoldCount: walkForward.signal.scoredSharpeFoldCount,
+      scoredCvarFoldCount: walkForward.signal.scoredCvarFoldCount,
       averageSharpe: walkForward.signal.averageSharpe,
       worstSharpe: walkForward.signal.worstSharpe,
       averageCvar: walkForward.signal.averageCvar,
     },
+    robustScoreDetail,
   };
 }
 
@@ -630,6 +812,10 @@ export function optimizePortfolio(input: OptimizationInput): OptimizationOutput 
   if (input.walkForwardConfig) {
     walkForwardWindows.push(...buildWalkForwardWindows(aligned.dates.length, input.walkForwardConfig));
   }
+  const firstValidationWindow = walkForwardWindows[0];
+  const trainingAligned = firstValidationWindow
+    ? sliceAlignedFrame(aligned, firstValidationWindow.trainStartIndex, firstValidationWindow.trainEndIndex)
+    : aligned;
 
   if (!aligned.dates.length) {
     warnings.push("공통 기간 교집합 데이터가 없습니다.");
@@ -687,12 +873,13 @@ export function optimizePortfolio(input: OptimizationInput): OptimizationOutput 
     if (seenSignatures.has(sig)) continue;
     seenSignatures.add(sig);
 
-    const candidate = evaluatePortfolioCandidate(aligned, weights, benchmark, {
+    const candidate = evaluatePortfolioCandidate(trainingAligned, weights, benchmark, {
       annualization,
       confidence,
       minimumSamples: minSamples,
       riskFreeRatePercent,
       walkForwardWindows,
+      oosFrame: walkForwardWindows.length ? aligned : undefined,
       constraints,
       transactionCostBps: Math.max(0, Math.min(500, input.transactionCostBps ?? 0)),
     });
@@ -761,13 +948,46 @@ export function buildWalkForwardWindows(totalLength: number, config: WalkForward
   const windows: WalkForwardWindow[] = [];
 
   if (safeLength === 0) return windows;
-  for (
-    let trainStart = 0;
-    trainStart + normalized.trainWindow + normalized.testWindow <= safeLength;
-    trainStart += normalized.step
-  ) {
-    const trainEnd = trainStart + normalized.trainWindow - 1;
-    const testStart = trainEnd + 1;
+  if (config.enabled === false) return windows;
+  if (normalized.mode === "holdout") {
+    if (safeLength < normalized.minimumTrainObservations + normalized.minimumTestObservations + normalized.gap) return windows;
+    const available = safeLength - normalized.gap;
+    const requestedTest = Math.max(
+      normalized.minimumTestObservations,
+      Math.min(available - normalized.minimumTrainObservations, Math.round(safeLength * normalized.testFraction)),
+    );
+    const testStart = safeLength - requestedTest;
+    const testEnd = safeLength - 1;
+    const trainEnd = testStart - normalized.gap - 1;
+    const maximumTrain = trainEnd + 1;
+    const requestedTrain = Math.max(
+      normalized.minimumTrainObservations,
+      Math.min(maximumTrain, Math.round(safeLength * normalized.trainFraction)),
+    );
+    const trainStart = maximumTrain - requestedTrain;
+    return [{
+      foldIndex: 0,
+      trainStartIndex: trainStart,
+      trainEndIndex: trainEnd,
+      testStartIndex: testStart,
+      testEndIndex: testEnd,
+      trainStart: `index-${trainStart}`,
+      trainEnd: `index-${trainEnd}`,
+      testStart: `index-${testStart}`,
+      testEnd: `index-${testEnd}`,
+      trainCount: requestedTrain,
+      testCount: requestedTest,
+      gap: normalized.gap,
+      embargo: 0,
+      mode: "holdout",
+    }];
+  }
+
+  const advance = Math.max(normalized.step, normalized.testWindow + normalized.embargo);
+  for (let offset = 0; windows.length < normalized.foldCount; offset += advance) {
+    const trainStart = normalized.windowMode === "anchored" ? 0 : offset;
+    const trainEnd = offset + normalized.trainWindow - 1;
+    const testStart = trainEnd + 1 + normalized.gap;
     const testEnd = testStart + normalized.testWindow - 1;
     if (testEnd >= safeLength) break;
 
@@ -776,6 +996,7 @@ export function buildWalkForwardWindows(totalLength: number, config: WalkForward
     if (trainCount < normalized.minimumTrainObservations || testCount < normalized.minimumTestObservations) continue;
 
     windows.push({
+      foldIndex: windows.length,
       trainStartIndex: trainStart,
       trainEndIndex: trainEnd,
       testStartIndex: testStart,
@@ -786,6 +1007,10 @@ export function buildWalkForwardWindows(totalLength: number, config: WalkForward
       testEnd: `index-${testEnd}`,
       trainCount,
       testCount,
+      gap: normalized.gap,
+      embargo: normalized.embargo,
+      mode: "walk_forward",
+      windowMode: normalized.windowMode,
     });
   }
 

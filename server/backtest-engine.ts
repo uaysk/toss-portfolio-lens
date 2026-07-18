@@ -16,6 +16,9 @@ export type BacktestAssetDefinition = {
   listDate: string;
   weight: number;
   lotSize?: number;
+  delistDate?: string;
+  universeMemberFrom?: string;
+  universeMemberTo?: string;
 };
 
 export type BacktestPricePoint = {
@@ -23,6 +26,31 @@ export type BacktestPricePoint = {
   close: number;
   localClose?: number;
   fxRate?: number;
+  volume?: number;
+  cashDividend?: number;
+};
+
+export type BacktestRealismPolicy = {
+  costs?: {
+    commissionBps?: number;
+    sellTaxBps?: number;
+    fixedSlippageBps?: number;
+    marketImpactCoefficient?: number;
+    marketImpactExponent?: number;
+    maxParticipationRatePercent?: number;
+    minimumFee?: number;
+    dividendTaxBps?: number;
+  };
+  dividendMode?: "adjusted_price_only" | "cash";
+  enforcePointInTimeUniverse?: boolean;
+};
+
+export type BacktestTargetWeightScheduleEntry = {
+  date: string;
+  weights: Record<string, number>;
+  cashTargetPercent?: number;
+  regime?: string;
+  action?: string;
 };
 
 export type BacktestBenchmarkDefinition = {
@@ -63,6 +91,7 @@ export type BacktestSimulationInput = {
   transactionCostBps?: number;
   rebalanceThresholdPercent?: number;
   cashFlows?: Array<{ date: string; amount: number; memo?: string }>;
+  targetWeightSchedule?: BacktestTargetWeightScheduleEntry[];
   execution?: {
     cashTargetPercent?: number;
     quantityMode?: "fractional" | "whole";
@@ -70,6 +99,7 @@ export type BacktestSimulationInput = {
     tradeDatePolicy?: "next_common_observation";
     cashAnnualYieldPercent?: number;
   };
+  realism?: BacktestRealismPolicy;
   benchmark?: BacktestBenchmarkDefinition;
 };
 
@@ -95,6 +125,8 @@ export type BacktestSimulationResult = {
     endingCashWeightPercent?: number;
     investedBalance?: number;
     totalTransactionCosts?: number;
+    totalDividendIncome?: number;
+    totalDividendTaxes?: number;
     netProfitLoss?: number;
     moneyWeightedReturnPercent?: number | null;
   };
@@ -129,11 +161,33 @@ export type BacktestSimulationResult = {
     price: number;
     reason: string;
     transactionCost?: number;
+    commission?: number;
+    tax?: number;
+    slippageCost?: number;
+    marketImpactCost?: number;
+    participationRatePercent?: number;
     netCashImpact?: number;
     trigger?: string;
     lotSize?: number;
   }>;
   cashFlows?: Array<{ scheduledDate: string; effectiveDate: string; amount: number; source: string; memo?: string }>;
+  targetWeightSchedule?: Array<{
+    scheduledDate: string;
+    effectiveDate: string;
+    weights: Record<string, number>;
+    cashTargetPercent: number;
+    regime?: string;
+    action?: string;
+  }>;
+  dividends?: Array<{
+    date: string;
+    symbol: string;
+    quantity: number;
+    amountPerShare: number;
+    grossAmount: number;
+    tax: number;
+    netAmount: number;
+  }>;
   execution?: NonNullable<BacktestSimulationInput["execution"]>;
   dataQuality: {
     alignmentPolicy: "carry_forward_for_valuation";
@@ -142,6 +196,12 @@ export type BacktestSimulationResult = {
     commonReturnObservations: number;
     carryForwardByAsset: Array<{ symbol: string; count: number }>;
     benchmarkCarryForwardCount: number;
+    dividendStatus?: "adjusted_price_policy" | "provider_supplied" | "unavailable";
+    liquidityStatus?: "not_requested" | "provider_supplied" | "partial_or_unavailable";
+    liquidityTradeObservations?: number;
+    missingLiquidityObservations?: number;
+    pointInTimeUniverseStatus?: "explicit_input_enforced" | "provider_supplied_enforced" | "not_enforced";
+    warnings?: string[];
   };
   advanced: BacktestAdvancedAnalytics;
 };
@@ -346,6 +406,28 @@ function summarizeGrowthSeries(
 }
 
 export function simulateBacktest(input: BacktestSimulationInput): BacktestSimulationResult {
+  if (input.targetWeightSchedule?.length) {
+    throw new BacktestValidationError("시점별 목표비중 정책은 Rust worker 실행 모드가 필요합니다.");
+  }
+  const execution = input.execution;
+  if (execution && ((execution.cashTargetPercent ?? 0) !== 0
+    || execution.quantityMode === "whole"
+    || (execution.cashFlowRebalanceMode !== undefined && execution.cashFlowRebalanceMode !== "target_weights")
+    || (execution.cashAnnualYieldPercent ?? 0) !== 0)) {
+    throw new BacktestValidationError("현금 목표·정수 수량·현금수익률 실행 정책은 Rust worker 실행 모드가 필요합니다.");
+  }
+  const realism = input.realism;
+  const realismCosts = realism?.costs;
+  if (realism && (realism.dividendMode === "cash" || realism.enforcePointInTimeUniverse
+    || (realismCosts?.commissionBps ?? 0) > 0
+    || (realismCosts?.sellTaxBps ?? 0) > 0
+    || (realismCosts?.fixedSlippageBps ?? 0) > 0
+    || (realismCosts?.marketImpactCoefficient ?? 0) > 0
+    || realismCosts?.maxParticipationRatePercent !== undefined
+    || (realismCosts?.minimumFee ?? 0) > 0
+    || (realismCosts?.dividendTaxBps ?? 0) > 0)) {
+    throw new BacktestValidationError("고급 배당·세금·유동성·point-in-time 현실성 모형은 Rust worker 실행 모드가 필요합니다.");
+  }
   if (input.assets.length < 1 || input.assets.length > 20) {
     throw new BacktestValidationError("백테스트 종목은 1~20개까지 구성할 수 있습니다.");
   }

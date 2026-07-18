@@ -15,6 +15,8 @@ export const dashboardAnalysisOperations = {
   "sensitivity-rebalance": "analyze_rebalance_sensitivity",
   "sensitivity-cash-flow": "analyze_cash_flow_sensitivity",
   "monte-carlo": "simulate_portfolio_monte_carlo",
+  outlook: "analyze_portfolio_outlook",
+  exposures: "analyze_portfolio_exposures",
   "compare-backtests": "compare_backtests",
   "diversifying-assets": "find_diversifying_assets",
   "market-regimes": "analyze_market_regimes",

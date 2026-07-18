@@ -39,6 +39,7 @@ import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-l
 import { MONOCHROME_DASHES, MONOCHROME_SERIES, monochromeHeatmapStyle } from "@/lib/chart-theme";
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
+import { parseTargetWeightScheduleJson } from "@/lib/backtest-realism";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
@@ -53,6 +54,7 @@ import type {
   BacktestCustomCashFlow,
   BacktestInstrument,
   BacktestQuantityMode,
+  BacktestRealismPolicy,
   BacktestRebalanceFrequency,
   BacktestResult,
   BacktestRunConfiguration,
@@ -150,6 +152,18 @@ export function PortfolioBacktestView({
   const [rebalanceThresholdPercent, setRebalanceThresholdPercent] = useState(5);
   const [riskFreeRatePercent, setRiskFreeRatePercent] = useState(0);
   const [transactionCostBps, setTransactionCostBps] = useState(0);
+  const [commissionBps, setCommissionBps] = useState<number>();
+  const [sellTaxBps, setSellTaxBps] = useState(0);
+  const [fixedSlippageBps, setFixedSlippageBps] = useState(0);
+  const [marketImpactCoefficient, setMarketImpactCoefficient] = useState(0);
+  const [marketImpactExponent, setMarketImpactExponent] = useState(0.5);
+  const [maxParticipationRatePercent, setMaxParticipationRatePercent] = useState<number>();
+  const [minimumFee, setMinimumFee] = useState(0);
+  const [dividendTaxBps, setDividendTaxBps] = useState(0);
+  const [dividendMode, setDividendMode] = useState<BacktestRealismPolicy["dividendMode"]>("adjusted_price_only");
+  const [enforcePointInTimeUniverse, setEnforcePointInTimeUniverse] = useState(false);
+  const [showRealismControls, setShowRealismControls] = useState(false);
+  const [targetWeightScheduleJson, setTargetWeightScheduleJson] = useState("");
   const [currencyMode, setCurrencyMode] = useState<"local" | "KRW">("KRW");
   const [cashTargetPercent, setCashTargetPercent] = useState(0);
   const [quantityMode, setQuantityMode] = useState<BacktestQuantityMode>("fractional");
@@ -232,7 +246,53 @@ export function PortfolioBacktestView({
     setResult(undefined);
   };
 
+  const updateAssetHistoryDate = (assetSymbol: string, field: "delistDate" | "universeMemberFrom" | "universeMemberTo", value: string) => {
+    setAssets((current) => current.map((asset) => {
+      if (asset.symbol !== assetSymbol) return asset;
+      const next = { ...asset };
+      if (value) next[field] = value;
+      else delete next[field];
+      return next;
+    }));
+    setResult(undefined);
+  };
+
+  const insertTargetWeightScheduleExample = () => {
+    setTargetWeightScheduleJson(JSON.stringify([{
+      date: startDate || today,
+      weights: Object.fromEntries(assets.map((asset) => [asset.symbol, asset.weight])),
+      cashTargetPercent,
+      action: "current-target",
+    }], null, 2));
+    setResult(undefined);
+  };
+
   const weightTotal = assets.reduce((sum, asset) => sum + asset.weight, 0);
+  const targetWeightSchedule = useMemo(() => parseTargetWeightScheduleJson(targetWeightScheduleJson, {
+    assetSymbols: assets.map((asset) => asset.symbol),
+    startDate,
+    endDate,
+  }), [assets, endDate, startDate, targetWeightScheduleJson]);
+  const pointInTimeMetadataValid = assets.every((asset) => (
+    (!asset.delistDate || asset.delistDate >= startDate)
+    && (!asset.universeMemberFrom || !asset.universeMemberTo || asset.universeMemberFrom <= asset.universeMemberTo)
+    && (!enforcePointInTimeUniverse || (
+      Boolean(asset.universeMemberFrom)
+      && Boolean(asset.universeMemberTo)
+      && asset.universeMemberFrom! < asset.universeMemberTo!
+      && asset.universeMemberFrom! <= endDate
+      && asset.universeMemberTo! > startDate
+      && (!asset.delistDate || asset.delistDate > asset.universeMemberFrom!)
+    ))
+  ));
+  const realismCostsValid = (commissionBps === undefined || (Number.isFinite(commissionBps) && commissionBps >= 0 && commissionBps <= 5_000))
+    && Number.isFinite(sellTaxBps) && sellTaxBps >= 0 && sellTaxBps <= 5_000
+    && Number.isFinite(fixedSlippageBps) && fixedSlippageBps >= 0 && fixedSlippageBps <= 5_000
+    && Number.isFinite(marketImpactCoefficient) && marketImpactCoefficient >= 0 && marketImpactCoefficient <= 1
+    && Number.isFinite(marketImpactExponent) && marketImpactExponent >= 0.1 && marketImpactExponent <= 2
+    && (maxParticipationRatePercent === undefined || (Number.isFinite(maxParticipationRatePercent) && maxParticipationRatePercent > 0 && maxParticipationRatePercent <= 100))
+    && Number.isFinite(minimumFee) && minimumFee >= 0 && minimumFee <= 1_000_000_000
+    && Number.isFinite(dividendTaxBps) && dividendTaxBps >= 0 && dividendTaxBps <= 10_000;
   const canRun = assets.length > 0
     && Math.abs(weightTotal + cashTargetPercent - 100) <= 0.01
     && Boolean(startDate)
@@ -252,10 +312,20 @@ export function PortfolioBacktestView({
     && (quantityMode !== "whole" || assets.every((asset) => Number.isFinite(asset.lotSize ?? 1) && (asset.lotSize ?? 1) > 0))
     && (rebalanceFrequency !== "threshold" || (rebalanceThresholdPercent >= 0.1 && rebalanceThresholdPercent <= 50))
     && customCashFlows.every((flow) => Boolean(flow.date) && flow.date >= startDate && flow.date <= endDate && Number.isFinite(flow.amount))
+    && realismCostsValid
+    && pointInTimeMetadataValid
+    && !targetWeightSchedule.error
     && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
 
   const baseConfig = useMemo<BacktestRunConfiguration>(() => ({
-    assets: assets.map((asset) => ({ symbol: asset.symbol, weight: asset.weight, lotSize: asset.lotSize ?? 1 })),
+    assets: assets.map((asset) => ({
+      symbol: asset.symbol,
+      weight: asset.weight,
+      lotSize: asset.lotSize ?? 1,
+      ...(asset.delistDate ? { delistDate: asset.delistDate } : {}),
+      ...(asset.universeMemberFrom ? { universeMemberFrom: asset.universeMemberFrom } : {}),
+      ...(asset.universeMemberTo ? { universeMemberTo: asset.universeMemberTo } : {}),
+    })),
     startDate,
     endDate,
     initialAmount,
@@ -269,6 +339,7 @@ export function PortfolioBacktestView({
     currencyMode,
     baseCurrency: "KRW",
     cashFlows: customCashFlows.map((flow) => ({ ...flow, ...(flow.memo?.trim() ? { memo: flow.memo.trim() } : {}) })),
+    targetWeightSchedule: targetWeightSchedule.value ?? [],
     execution: {
       cashTargetPercent,
       quantityMode,
@@ -276,9 +347,23 @@ export function PortfolioBacktestView({
       tradeDatePolicy: "next_common_observation",
       cashAnnualYieldPercent,
     },
+    realism: {
+      costs: {
+        ...(commissionBps !== undefined ? { commissionBps } : {}),
+        sellTaxBps,
+        fixedSlippageBps,
+        marketImpactCoefficient,
+        marketImpactExponent,
+        ...(maxParticipationRatePercent !== undefined ? { maxParticipationRatePercent } : {}),
+        minimumFee,
+        dividendTaxBps,
+      },
+      dividendMode,
+      enforcePointInTimeUniverse,
+    },
     benchmark,
     ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
-  }), [assets, benchmark, benchmarkSymbol, cashAnnualYieldPercent, cashFlowFrequency, cashFlowRebalanceMode, cashFlowTiming, cashTargetPercent, currencyMode, customCashFlows, endDate, initialAmount, monthlyCashFlow, quantityMode, rebalanceFrequency, rebalanceThresholdPercent, riskFreeRatePercent, startDate, transactionCostBps]);
+  }), [assets, benchmark, benchmarkSymbol, cashAnnualYieldPercent, cashFlowFrequency, cashFlowRebalanceMode, cashFlowTiming, cashTargetPercent, commissionBps, currencyMode, customCashFlows, dividendMode, dividendTaxBps, endDate, enforcePointInTimeUniverse, fixedSlippageBps, initialAmount, marketImpactCoefficient, marketImpactExponent, maxParticipationRatePercent, minimumFee, monthlyCashFlow, quantityMode, rebalanceFrequency, rebalanceThresholdPercent, riskFreeRatePercent, sellTaxBps, startDate, targetWeightSchedule.value, transactionCostBps]);
 
   const runBacktest = async () => {
     if (!canRun) return;
@@ -450,7 +535,7 @@ export function PortfolioBacktestView({
             <Input
               type="date"
               value={startDate}
-              min={latestListDate(assets)}
+              min={enforcePointInTimeUniverse ? undefined : latestListDate(assets)}
               max={endDate}
               onChange={(event) => {
                 manuallyEditedStart.current = true;
@@ -459,7 +544,7 @@ export function PortfolioBacktestView({
               }}
               className="bg-secondary"
             />
-            <span className="mt-2 block text-[10px] text-muted-foreground">기본값: 가장 늦은 상장일 {latestListDate(assets) || "-"}</span>
+            <span className="mt-2 block text-[10px] text-muted-foreground">{enforcePointInTimeUniverse ? "PIT 구간을 적용하므로 종목별 편입 전 기간도 선택 가능" : `기본값: 가장 늦은 상장일 ${latestListDate(assets) || "-"}`}</span>
           </label>
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">종료일</span>
@@ -577,6 +662,142 @@ export function PortfolioBacktestView({
         </div>
 
         <div className="mt-6 border-t border-border pt-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">REALISM & POINT-IN-TIME</p>
+              <h4 className="mt-2 text-lg font-black tracking-[-0.03em]">세금·슬리피지·시장 현실성</h4>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">기본값은 기존 백테스트와 같습니다. 수수료 override를 비우면 위의 거래비용 가정을 commission으로 사용합니다.</p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              aria-expanded={showRealismControls}
+              aria-controls="backtest-realism-controls"
+              onClick={() => setShowRealismControls((current) => !current)}
+            >
+              {showRealismControls ? "현실성 옵션 닫기" : "현실성 옵션 열기"}
+            </Button>
+          </div>
+          <div className="mt-4 flex gap-3 rounded-[18px] bg-card px-4 py-3 text-xs leading-5 text-muted-foreground" role="note">
+            <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <p><strong className="text-foreground">데이터 공급자 한계:</strong> 현재 공급자는 현금배당 이벤트, 과거 거래량, 상장폐지 및 지수·universe 편입 이력을 제공하지 않습니다. 엔진은 이를 추정하지 않으며, 현금배당·시장충격은 관측이 없으면 unavailable/품질 경고로 반환합니다. PIT 날짜는 아래에서 명시한 값만 강제하며 공급자 검증값으로 표시하지 않습니다.</p>
+          </div>
+          {!realismCostsValid || !pointInTimeMetadataValid || targetWeightSchedule.error ? (
+            <p role="alert" className="mt-3 rounded-[18px] bg-card px-4 py-3 text-xs font-semibold text-rose-500">현실성 옵션의 비용 범위, PIT 날짜 또는 목표비중 JSON을 확인해 주세요. 상세 오류는 옵션을 열면 표시됩니다.</p>
+          ) : null}
+
+          {showRealismControls ? (
+            <div id="backtest-realism-controls" className="mt-4 space-y-4">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">수수료 override · bp</span>
+                  <Input
+                    type="number" min={0} max={5_000} step={0.1} value={commissionBps ?? ""}
+                    placeholder={`${transactionCostBps} (기존 가정)`}
+                    onChange={(event) => { setCommissionBps(event.target.value === "" ? undefined : Number(event.target.value)); setResult(undefined); }}
+                    className="bg-secondary text-right font-black"
+                  />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">비우면 거래비용 가정 {transactionCostBps}bp 사용</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">매도세 · bp</span>
+                  <Input type="number" min={0} max={5_000} step={0.1} value={sellTaxBps} onChange={(event) => { setSellTaxBps(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">매도 체결금액에만 적용</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">고정 슬리피지 · bp</span>
+                  <Input type="number" min={0} max={5_000} step={0.1} value={fixedSlippageBps} onChange={(event) => { setFixedSlippageBps(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">모든 체결 가격에 방향별 적용</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">최소 수수료 · KRW</span>
+                  <Input type="number" min={0} max={1_000_000_000} step={100} value={minimumFee} onChange={(event) => { setMinimumFee(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">체결 건별 commission 하한</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">시장충격 계수</span>
+                  <Input type="number" min={0} max={1} step={0.001} value={marketImpactCoefficient} onChange={(event) => { setMarketImpactCoefficient(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">0~1 · 거래량 관측이 있을 때만 계산</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">시장충격 지수</span>
+                  <Input type="number" min={0.1} max={2} step={0.1} value={marketImpactExponent} onChange={(event) => { setMarketImpactExponent(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">참여율 비선형성 · 기본 0.5</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">최대 거래 참여율 · %</span>
+                  <Input
+                    type="number" min={0.000001} max={100} step={0.1} value={maxParticipationRatePercent ?? ""}
+                    placeholder="제한 없음"
+                    onChange={(event) => { setMaxParticipationRatePercent(event.target.value === "" ? undefined : Number(event.target.value)); setResult(undefined); }}
+                    className="bg-secondary text-right font-black"
+                  />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">비우면 참여율 상한을 두지 않음</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">배당소득세 · bp</span>
+                  <Input type="number" min={0} max={10_000} step={0.1} value={dividendTaxBps} onChange={(event) => { setDividendTaxBps(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
+                  <span className="mt-2 block text-[10px] text-muted-foreground">현금배당 관측액에만 적용</span>
+                </label>
+                <label className="rounded-[20px] bg-card p-4 md:col-span-2">
+                  <span className="mb-2 block text-[11px] font-bold text-muted-foreground">배당 처리</span>
+                  <Select value={dividendMode} onValueChange={(value) => { setDividendMode(value as BacktestRealismPolicy["dividendMode"]); setResult(undefined); }}>
+                    <SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="adjusted_price_only">수정주가에만 반영 · 기본</SelectItem><SelectItem value="cash">현금배당 ledger</SelectItem></SelectContent>
+                  </Select>
+                  <span className="mt-2 block text-[10px] text-muted-foreground">cash는 공급자 현금배당 관측이 없으면 임의 추정하지 않음</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-[20px] bg-card p-4 md:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={enforcePointInTimeUniverse}
+                    onChange={(event) => { setEnforcePointInTimeUniverse(event.target.checked); setResult(undefined); }}
+                    className="mt-0.5 size-4 shrink-0 accent-foreground"
+                  />
+                  <span><span className="block text-[11px] font-bold">Point-in-time universe 강제</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">모든 종목의 [편입일, 제외일) 구간 밖에서는 비중을 0으로 하고 실제 ledger 리밸런싱을 발생시킵니다.</span></span>
+                </label>
+              </div>
+
+              <div className="rounded-[22px] bg-card p-4 sm:p-5">
+                <p className="text-[11px] font-black">종목별 상장폐지·universe 이력</p>
+                <p className="mt-1 text-[10px] leading-4 text-muted-foreground">PIT 강제 시 세 날짜 중 편입일과 제외일은 필수입니다. 상장폐지일은 선택이며, 입력값은 사용자 제공 메타데이터로 기록됩니다.</p>
+                <div className="mt-3 space-y-2">
+                  {assets.map((asset) => (
+                    <fieldset key={`pit:${asset.symbol}`} className="grid gap-2 rounded-[18px] bg-secondary p-3 md:grid-cols-[minmax(120px,1fr)_repeat(3,minmax(140px,0.8fr))]">
+                      <legend className="sr-only">{asset.name} 역사 메타데이터</legend>
+                      <div className="min-w-0 self-center"><p className="truncate text-xs font-black">{asset.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{asset.symbol}</p></div>
+                      <label><span className="mb-1 block text-[10px] font-bold text-muted-foreground">편입일 · 포함</span><Input type="date" value={asset.universeMemberFrom ?? ""} aria-label={`${asset.name} universe 편입일`} onChange={(event) => updateAssetHistoryDate(asset.symbol, "universeMemberFrom", event.target.value)} className="bg-card" /></label>
+                      <label><span className="mb-1 block text-[10px] font-bold text-muted-foreground">제외일 · 미포함</span><Input type="date" min={startDate} value={asset.universeMemberTo ?? ""} aria-label={`${asset.name} universe 제외일`} onChange={(event) => updateAssetHistoryDate(asset.symbol, "universeMemberTo", event.target.value)} className="bg-card" /></label>
+                      <label><span className="mb-1 block text-[10px] font-bold text-muted-foreground">상장폐지일 · 선택</span><Input type="date" min={startDate} value={asset.delistDate ?? ""} aria-label={`${asset.name} 상장폐지일`} onChange={(event) => updateAssetHistoryDate(asset.symbol, "delistDate", event.target.value)} className="bg-card" /></label>
+                    </fieldset>
+                  ))}
+                </div>
+                {enforcePointInTimeUniverse && !pointInTimeMetadataValid ? <p role="alert" className="mt-3 text-xs font-semibold text-rose-500">PIT 강제 시 모든 종목에 분석 기간과 겹치는 [편입일, 제외일) 구간이 필요합니다. 상장폐지일은 편입일보다 늦어야 합니다.</p> : null}
+              </div>
+
+              <div className="rounded-[22px] bg-card p-4 sm:p-5">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div><p className="text-[11px] font-black">시점별 목표비중 일정 · JSON</p><p id="target-weight-schedule-help" className="mt-1 text-[10px] leading-4 text-muted-foreground">날짜별로 현재 모든 종목과 현금의 합이 100%가 되도록 입력합니다. 같은 날짜는 한 번만 허용됩니다.</p></div>
+                  <Button type="button" variant="secondary" onClick={insertTargetWeightScheduleExample} disabled={!assets.length || !startDate}>현재 비중 예시</Button>
+                </div>
+                <textarea
+                  value={targetWeightScheduleJson}
+                  onChange={(event) => { setTargetWeightScheduleJson(event.target.value); setResult(undefined); }}
+                  rows={10}
+                  spellCheck={false}
+                  aria-label="시점별 목표비중 일정 JSON"
+                  aria-describedby="target-weight-schedule-help"
+                  aria-invalid={Boolean(targetWeightSchedule.error)}
+                  placeholder={'[{\n  "date": "2024-01-02",\n  "weights": { "005930": 60, "AAPL": 35 },\n  "cashTargetPercent": 5,\n  "regime": "optional",\n  "action": "optional"\n}]'}
+                  className="mt-3 w-full resize-y rounded-2xl border border-input bg-secondary px-4 py-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
+                />
+                {targetWeightSchedule.error ? <p role="alert" className="mt-2 text-xs font-semibold text-rose-500">{targetWeightSchedule.error}</p> : <p className="mt-2 text-[10px] text-muted-foreground">검증된 일정 {targetWeightSchedule.value?.length ?? 0}개 · 빈 입력은 기존 단일 목표비중 경로를 유지합니다.</p>}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-6 border-t border-border pt-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div><p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">CUSTOM CASH FLOWS</p><h4 className="mt-2 text-lg font-black tracking-[-0.03em]">사용자 지정 입출금</h4></div>
             <Button type="button" variant="secondary" onClick={() => setCustomCashFlows((current) => [...current, { date: startDate || today, amount: 0, memo: "" }])} disabled={customCashFlows.length >= 1000}><Plus />현금흐름 추가</Button>
@@ -605,6 +826,7 @@ export function PortfolioBacktestView({
         <div className="order-1">
           <PortfolioStrategyLab
             baseConfig={baseConfig}
+            instruments={assets}
             canAnalyze={canRun}
             backtestRuns={backtestRuns}
             theme={theme}
@@ -640,7 +862,9 @@ export function PortfolioBacktestView({
                   currencyMode: result.config.currencyMode,
                   baseCurrency: "KRW",
                   cashFlows: result.config.cashFlows,
+                  targetWeightSchedule: result.config.targetWeightSchedule ?? [],
                   execution: result.config.execution,
+                  ...(result.config.realism ? { realism: result.config.realism } : {}),
                   benchmark: result.config.benchmark,
                   ...(result.config.benchmarkSymbol ? { benchmarkSymbol: result.config.benchmarkSymbol } : {}),
                 }}

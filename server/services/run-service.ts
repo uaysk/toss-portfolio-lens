@@ -1,4 +1,4 @@
-import type { ArtifactType } from "../repositories/artifact-repository.js";
+import { ARTIFACT_TYPES as SUPPORTED_ARTIFACT_TYPES, type ArtifactType } from "../repositories/artifact-repository.js";
 import type { RunRepository, PortfolioRunKind, PortfolioRunRecord } from "../repositories/run-repository.js";
 import { requestHash, PORTFOLIO_ENGINE_VERSION, ServiceError } from "./service-envelope.js";
 import type { ArtifactService } from "./artifact-service.js";
@@ -9,6 +9,7 @@ import {
   WorkerInputSchema,
   type WorkerInput,
 } from "../worker/contracts.js";
+import { buildInfo } from "../build-info.js";
 
 type RunTaskResult = {
   summary: unknown;
@@ -17,30 +18,27 @@ type RunTaskResult = {
   artifacts?: Array<{ type: ArtifactType; content: unknown; rowCount?: number }>;
 };
 
-const ARTIFACT_TYPES = new Set<ArtifactType>([
-  "equity",
-  "drawdown",
-  "holdings",
-  "trades",
-  "rolling",
-  "correlation",
-  "risk-contribution",
-  "monthly-returns",
-  "cash-ledger",
-  "cash-flows",
-  "candidates",
-  "walk-forward",
-  "worker-pareto-frontier",
-  "scenario-comparison",
-  "monte-carlo-distribution",
-  "monte-carlo-percentile-paths",
-  "monte-carlo-sample-paths",
-  "worker-metrics",
-  "result",
-]);
+function manifestSeeds(value: unknown, prefix = "", depth = 0, found: Record<string, number | number[]> = {}): Record<string, number | number[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 6) return found;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (key === "seed" && Number.isSafeInteger(item) && Number(item) >= 0) {
+      found[path] = Number(item);
+    } else if (key === "seeds" && Array.isArray(item)
+      && item.length > 0 && item.every((seed) => Number.isSafeInteger(seed) && Number(seed) >= 0)) {
+      found[path] = item.map(Number);
+    } else if (item && typeof item === "object" && !Array.isArray(item)) {
+      manifestSeeds(item, path, depth + 1, found);
+    }
+  }
+  return found;
+}
+
+const ARTIFACT_TYPES = new Set<ArtifactType>(SUPPORTED_ARTIFACT_TYPES);
 
 export type RunTaskContext = {
   runId: string;
+  signal: AbortSignal;
   updateProgress: (progress: number, detail?: {
     completedCandidates?: number;
     totalCandidates?: number;
@@ -63,6 +61,10 @@ class RunDeadlineExceededError extends Error {}
 
 export class RunService {
   private readonly queue: QueuedTask[] = [];
+  private readonly activeExecutions = new Map<string, {
+    controller: AbortController;
+    deadlineTimer?: NodeJS.Timeout;
+  }>();
   private running = 0;
 
   constructor(
@@ -107,14 +109,35 @@ export class RunService {
     dataRevision: string;
     totalCandidates?: number;
   }): Promise<PortfolioRunRecord> {
+    const hash = requestHash({ config: input.config, engineVersion: PORTFOLIO_ENGINE_VERSION });
+    const seeds = manifestSeeds(input.config);
     return this.repository.create({
       kind: input.kind,
       ownerSubject: input.ownerSubject,
-      requestHash: requestHash({ config: input.config, engineVersion: PORTFOLIO_ENGINE_VERSION }),
+      requestHash: hash,
       dataRevision: input.dataRevision,
       engineVersion: PORTFOLIO_ENGINE_VERSION,
       config: input.config,
       totalCandidates: input.totalCandidates,
+      manifest: {
+        schema_version: "portfolio-lens-run-manifest/v1",
+        finalized: false,
+        captured_at: new Date().toISOString(),
+        run: {
+          kind: input.kind,
+          request_hash: hash,
+          data_revision: input.dataRevision,
+          engine_version: PORTFOLIO_ENGINE_VERSION,
+          input: input.config,
+        },
+        build: buildInfo(),
+        reproducibility: {
+          deterministic_when: "동일 seed, 정규화 입력, data revision, 엔진·worker schema 버전이 동일할 때",
+          seed: seeds.seed ?? null,
+          seed_configuration: seeds,
+          artifact_checksums: [],
+        },
+      },
     });
   }
 
@@ -156,17 +179,23 @@ export class RunService {
       });
     }
     await this.repository.addEvent(run.id, "started", { kind: input.kind });
+    const context = this.activateContext(run.id, Date.now() + (this.options.runDeadlineMs ?? 120_000));
     try {
-      const completed = await input.task(this.context(run.id, Date.now() + (this.options.runDeadlineMs ?? 120_000)));
-      await this.persistArtifacts(run.id, input.dataRevision, completed.artifacts ?? []);
-      await this.repository.complete(
+      const completed = await input.task(context);
+      await context.throwIfCancelled();
+      await this.persistArtifacts(run.id, input.dataRevision, completed.artifacts ?? [], context);
+      await context.throwIfCancelled();
+      const stored = await this.repository.complete(
         run.id,
         completed.summary,
         completed.result,
         completed.warnings ?? [],
       );
+      if (!stored && await this.repository.isCancellationRequested(run.id)) {
+        throw new RunCancelledError("실행이 취소되었습니다.");
+      }
     } catch (error) {
-      if (error instanceof RunCancelledError) {
+      if (error instanceof RunCancelledError || await this.repository.isCancellationRequested(run.id)) {
         await this.repository.cancel(run.id, { cancelled: true }, ["사용자 요청으로 실행을 취소했습니다."]);
       } else if (error instanceof RunDeadlineExceededError) {
         await this.repository.fail(run.id, {
@@ -182,6 +211,8 @@ export class RunService {
         });
       }
       throw error;
+    } finally {
+      this.deactivateContext(run.id, context.signal);
     }
     const stored = await this.repository.get(run.id, input.ownerSubject);
     if (!stored) throw new Error("완료된 실행을 찾을 수 없습니다.");
@@ -449,6 +480,7 @@ export class RunService {
     }
     const requested = await this.repository.requestCancellation(runId, ownerSubject);
     if (!requested) return false;
+    this.activeExecutions.get(runId)?.controller.abort(new RunCancelledError("실행이 취소되었습니다."));
     const index = this.queue.findIndex((item) => item.run.id === runId);
     if (index >= 0) {
       this.queue.splice(index, 1);
@@ -457,26 +489,61 @@ export class RunService {
     return true;
   }
 
-  private context(runId: string, deadlineAt = Number.POSITIVE_INFINITY): RunTaskContext {
-    const isCancelled = () => this.repository.isCancellationRequested(runId);
-    return {
+  private activateContext(runId: string, deadlineAt = Number.POSITIVE_INFINITY): RunTaskContext {
+    const controller = new AbortController();
+    const active: { controller: AbortController; deadlineTimer?: NodeJS.Timeout } = { controller };
+    if (Number.isFinite(deadlineAt)) {
+      active.deadlineTimer = setTimeout(() => {
+        controller.abort(new RunDeadlineExceededError("실행 제한 시간을 초과했습니다."));
+      }, Math.max(0, deadlineAt - Date.now()));
+      active.deadlineTimer.unref();
+    }
+    this.activeExecutions.set(runId, active);
+    const isCancelled = async () => (
+      controller.signal.aborted && controller.signal.reason instanceof RunCancelledError
+    ) || this.repository.isCancellationRequested(runId);
+    const context: RunTaskContext = {
       runId,
+      signal: controller.signal,
       isCancelled,
       updateProgress: (progress, detail = {}) => this.repository.updateProgress(runId, { progress, ...detail }),
       throwIfCancelled: async () => {
-        if (Date.now() >= deadlineAt) throw new RunDeadlineExceededError("실행 제한 시간을 초과했습니다.");
-        if (await isCancelled()) throw new RunCancelledError("실행이 취소되었습니다.");
+        if (controller.signal.aborted) {
+          if (controller.signal.reason instanceof Error) throw controller.signal.reason;
+          throw new RunCancelledError("실행이 취소되었습니다.");
+        }
+        if (Date.now() >= deadlineAt) {
+          const error = new RunDeadlineExceededError("실행 제한 시간을 초과했습니다.");
+          controller.abort(error);
+          throw error;
+        }
+        if (await isCancelled()) {
+          const error = new RunCancelledError("실행이 취소되었습니다.");
+          controller.abort(error);
+          throw error;
+        }
       },
     };
+    return context;
+  }
+
+  private deactivateContext(runId: string, signal: AbortSignal): void {
+    const active = this.activeExecutions.get(runId);
+    if (!active || active.controller.signal !== signal) return;
+    if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+    this.activeExecutions.delete(runId);
   }
 
   private async persistArtifacts(
     runId: string,
     dataRevision: string,
     artifacts: NonNullable<RunTaskResult["artifacts"]>,
+    context?: RunTaskContext,
   ): Promise<void> {
     for (const artifact of artifacts) {
+      await context?.throwIfCancelled();
       await this.artifacts.put({ runId, dataRevision, ...artifact });
+      await context?.throwIfCancelled();
     }
   }
 
@@ -555,13 +622,24 @@ export class RunService {
   }
 
   private async runQueued(queued: QueuedTask): Promise<void> {
-    if (!await this.repository.markRunning(queued.run.id)) return;
-    await this.repository.addEvent(queued.run.id, "started", { kind: queued.run.kind });
+    const context = this.activateContext(queued.run.id, queued.deadlineAt);
     try {
-      const result = await queued.task(this.context(queued.run.id, queued.deadlineAt));
-      await this.context(queued.run.id, queued.deadlineAt).throwIfCancelled();
-      await this.persistArtifacts(queued.run.id, queued.run.dataRevision, result.artifacts ?? []);
-      await this.repository.complete(queued.run.id, result.summary, result.result, result.warnings ?? []);
+      if (!await this.repository.markRunning(queued.run.id)) {
+        if (await this.repository.isCancellationRequested(queued.run.id)) {
+          await this.repository.cancel(queued.run.id, { cancelled: true }, ["대기 중 사용자 요청으로 취소했습니다."]);
+        }
+        return;
+      }
+      await this.repository.addEvent(queued.run.id, "started", { kind: queued.run.kind });
+      await context.throwIfCancelled();
+      const result = await queued.task(context);
+      await context.throwIfCancelled();
+      await this.persistArtifacts(queued.run.id, queued.run.dataRevision, result.artifacts ?? [], context);
+      await context.throwIfCancelled();
+      const stored = await this.repository.complete(queued.run.id, result.summary, result.result, result.warnings ?? []);
+      if (!stored && await this.repository.isCancellationRequested(queued.run.id)) {
+        throw new RunCancelledError("실행이 취소되었습니다.");
+      }
     } catch (error) {
       if (error instanceof RunCancelledError || await this.repository.isCancellationRequested(queued.run.id)) {
         await this.repository.cancel(queued.run.id, { cancelled: true }, ["사용자 요청으로 실행을 취소했습니다."]);
@@ -578,6 +656,8 @@ export class RunService {
           retryable: true,
         });
       }
+    } finally {
+      this.deactivateContext(queued.run.id, context.signal);
     }
   }
 }

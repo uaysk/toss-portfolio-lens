@@ -938,6 +938,9 @@ mod tests {
             list_date: "2020-01-01".to_owned(),
             weight,
             lot_size: 1.0,
+            delist_date: None,
+            universe_member_from: None,
+            universe_member_to: None,
         }
     }
 
@@ -960,6 +963,11 @@ mod tests {
             price: amount / quantity,
             reason: reason.to_owned(),
             transaction_cost: cost,
+            commission: cost,
+            tax: 0.0,
+            slippage_cost: 0.0,
+            market_impact_cost: 0.0,
+            participation_rate_percent: None,
             net_cash_impact: if side == "BUY" {
                 -(amount + cost)
             } else {
