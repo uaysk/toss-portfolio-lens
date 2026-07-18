@@ -6,7 +6,9 @@
 
 ![Portfolio Lens 포트폴리오 화면](docs/readme/overview.png)
 
-> 화면은 문서용 예시 데이터로 재현한 제품 UI입니다. 실제 계좌나 실제 운용 성과를 나타내지 않습니다.
+> 스크린샷은 실제 애플리케이션 컴포넌트와 API 계약에 결정적 문서용 데이터를 연결해 촬영했습니다. 실제 계좌나 실제 운용 성과를 나타내지 않습니다.
+
+웹 애플리케이션은 `포트폴리오`, `포트폴리오 분석`, `백테스트`, `최적화`의 네 화면으로 구분됩니다. 모든 차트는 무채색 밝기와 선 패턴으로 계열을 구분하며 다크·라이트 테마를 지원합니다.
 
 ## 주요 기능
 
@@ -37,7 +39,7 @@
 
 ### 전략 연구와 최적화
 
-![Portfolio Lens 전략 연구 화면](docs/readme/optimization.png)
+![Portfolio Lens 최적화 화면](docs/readme/optimization.png)
 
 - 최소·최대 비중, 필수·제외 종목, 최대 종목 수 제약 최적화
 - 최대 Sharpe·Sortino·Calmar, 최소 변동성·CVaR 등 목적함수
@@ -238,9 +240,9 @@ npm run test:worker-queue
 npm run test:rust-worker-postgres
 ```
 
-README 화면은 실제 shadcn/ui 컴포넌트와 다크 테마를 사용하는 `/readme-showcase` 경로에서 Playwright로 캡처합니다.
+README 제품 화면은 실제 애플리케이션에 결정적 fixture API를 연결한 뒤 Playwright로 캡처합니다. 1680×1050 viewport를 2배 device scale로 촬영해 3360×2100 PNG를 생성하며 실제 인증정보나 계좌 데이터를 사용하지 않습니다.
 
-Rust 설명 화면은 shadcn/ui의 다크 토큰과 무테두리 컴포넌트 구성을 적용한 정적 [HTML+JS 원본](docs/readme/rust-engine.html)에서 함께 생성합니다.
+Rust 설명 화면은 shadcn/ui의 다크 토큰과 무테두리 컴포넌트 구성을 적용한 정적 [HTML+JS 원본](docs/readme/rust-engine.html)에서 2배 해상도인 2880×1800 PNG로 함께 생성합니다.
 
 ```bash
 npm run docs:capture-readme

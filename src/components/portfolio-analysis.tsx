@@ -15,6 +15,12 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import {
+  chartTooltipStyle,
+  MONOCHROME_DASHES,
+  MONOCHROME_SERIES,
+  monochromeHeatmapStyle,
+} from "@/lib/chart-theme";
+import {
   analysisComparisonDomain,
   analysisPeriodChange,
   buildAnalysisChartData,
@@ -45,18 +51,11 @@ const ranges: Array<{ value: AnalysisRange; label: string }> = [
 ];
 
 const benchmarks: Array<{ key: BenchmarkKey; label: string; detail: string; color: string }> = [
-  { key: "KOSPI", label: "KOSPI", detail: "국내 지수", color: "#38bdf8" },
-  { key: "KOSDAQ", label: "KOSDAQ", detail: "국내 지수", color: "#a78bfa" },
-  { key: "NASDAQ100", label: "나스닥 100", detail: "QQQ 프록시", color: "#f59e0b" },
-  { key: "SP500", label: "S&P 500", detail: "SPY 프록시", color: "#f472b6" },
+  { key: "KOSPI", label: "KOSPI", detail: "국내 지수", color: MONOCHROME_SERIES[0] },
+  { key: "KOSDAQ", label: "KOSDAQ", detail: "국내 지수", color: MONOCHROME_SERIES[1] },
+  { key: "NASDAQ100", label: "나스닥 100", detail: "QQQ 프록시", color: MONOCHROME_SERIES[2] },
+  { key: "SP500", label: "S&P 500", detail: "SPY 프록시", color: MONOCHROME_SERIES[3] },
 ];
-
-const chartTooltipStyle = {
-  border: 0,
-  borderRadius: 16,
-  background: "hsl(var(--card))",
-  color: "hsl(var(--foreground))",
-};
 const monthLabels = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
 
 function displayDate(value: string, withYear = false): string {
@@ -88,7 +87,7 @@ function CandleShape(input: unknown) {
   const { x = 0, y = 0, width = 0, height = 0, payload } = input as CandleShapeProps;
   if (!payload) return <g />;
   const rising = payload.normalizedClose >= payload.normalizedOpen;
-  const color = rising ? "#22c55e" : "#ef4444";
+  const color = "hsl(var(--foreground))";
   const spread = payload.normalizedHigh - payload.normalizedLow;
   const pixelsPerUnit = spread > 0 ? height / spread : 0;
   const bodyTop = spread > 0
@@ -467,6 +466,7 @@ export function PortfolioAnalysisView({
                     dataKey={(point: AnalysisChartPoint) => point.benchmarkValues[item.key]}
                     name={item.label}
                     stroke={item.color}
+                    strokeDasharray={MONOCHROME_DASHES[benchmarks.findIndex((benchmark) => benchmark.key === item.key)]}
                     strokeWidth={2}
                     dot={false}
                     connectNulls
@@ -587,10 +587,10 @@ export function PortfolioAnalysisView({
                         <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={chartTooltipStyle} />
-                        <Line type="monotone" dataKey="return20d" name="20일" stroke="#5eead4" strokeWidth={2} dot={false} connectNulls />
-                        <Line type="monotone" dataKey="return60d" name="60일" stroke="#60a5fa" strokeWidth={2} dot={false} connectNulls />
-                        <Line type="monotone" dataKey="return120d" name="120일" stroke="#c084fc" strokeWidth={2} dot={false} connectNulls />
-                        <Line type="monotone" dataKey="return252d" name="252일" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls />
+                        <Line type="monotone" dataKey="return20d" name="20일" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                        <Line type="monotone" dataKey="return60d" name="60일" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                        <Line type="monotone" dataKey="return120d" name="120일" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                        <Line type="monotone" dataKey="return252d" name="252일" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
                       </ComposedChart>
                     </ResponsiveContainer> : <div className="grid h-full place-items-center rounded-[18px] bg-secondary px-5 text-center text-xs leading-5 text-muted-foreground">60거래일 이상 선택하면 변동성·샤프·베타·상관관계의 변화를 표시합니다.</div>}
                   </div>
@@ -608,10 +608,10 @@ export function PortfolioAnalysisView({
                         <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis yAxisId="ratio" orientation="right" width={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={chartTooltipStyle} />
-                        <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke="#fb7185" strokeWidth={2} dot={false} connectNulls />
-                        <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke="#e5e7eb" strokeWidth={2} dot={false} connectNulls />
-                        <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkBeta60d.${primaryBenchmark.key}`} name="베타" stroke={primaryBenchmark.color} strokeWidth={2} dot={false} connectNulls />
-                        <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkCorrelation60d.${primaryBenchmark.key}`} name="상관" stroke="#a3e635" strokeWidth={2} dot={false} connectNulls />
+                        <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                        <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                        <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkBeta60d.${primaryBenchmark.key}`} name="베타" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                        <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkCorrelation60d.${primaryBenchmark.key}`} name="상관" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
@@ -631,7 +631,7 @@ export function PortfolioAnalysisView({
                     <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
-                    <Line type="monotone" dataKey="drawdownPercent" name="낙폭" stroke="#fb7185" strokeWidth={2.4} dot={false} />
+                    <Line type="monotone" dataKey="drawdownPercent" name="낙폭" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
@@ -662,7 +662,6 @@ export function PortfolioAnalysisView({
               <div className="mt-6 space-y-4">
                 {analysis.contributions.map((item) => {
                   const maximum = Math.max(...analysis.contributions.map((candidate) => Math.abs(candidate.estimatedProfitLoss)), 1);
-                  const positive = item.estimatedProfitLoss >= 0;
                   return (
                     <div key={`${item.currency}:${item.key}`} className="grid gap-2 sm:grid-cols-[minmax(130px,0.8fr)_minmax(180px,2fr)_auto] sm:items-center">
                       <div className="min-w-0">
@@ -671,7 +670,7 @@ export function PortfolioAnalysisView({
                         <p className="mt-1 text-[10px] font-bold text-muted-foreground">시간연결 {formatPercent(item.timeLinkedContributionPercent, true)} · 가격 {formatPercent(item.localPriceContributionPercent, true)} · 환율 {formatPercent(item.fxContributionPercent, true)}</p>
                       </div>
                       <div className="h-2.5 overflow-hidden rounded-full bg-card">
-                        <div className={cn("h-full rounded-full", positive ? "bg-emerald-300 dark:bg-emerald-300" : "bg-rose-300 dark:bg-rose-300")} style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%` }} />
+                        <div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%`, opacity: item.estimatedProfitLoss >= 0 ? 0.9 : 0.45 }} />
                       </div>
                       <div className="text-left sm:text-right">
                         <p className="text-sm font-black">{formatSignedMoney(item.estimatedProfitLoss, "KRW")}</p>
@@ -710,14 +709,11 @@ export function PortfolioAnalysisView({
                         <th className="p-2 text-left text-xs font-black">{row.year}</th>
                         {monthLabels.map((_, index) => {
                           const value = row.months[index + 1];
-                          const intensity = value === undefined ? 0 : Math.min(0.5, 0.1 + Math.abs(value) / 40);
                           return (
                             <td
                               key={index}
                               className="rounded-xl p-2.5 font-black"
-                              style={value === undefined ? undefined : {
-                                backgroundColor: value >= 0 ? `rgba(94, 234, 212, ${intensity})` : `rgba(251, 113, 133, ${intensity})`,
-                              }}
+                              style={value === undefined ? undefined : monochromeHeatmapStyle(value)}
                             >{value === undefined ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(1)}`}</td>
                           );
                         })}
@@ -785,8 +781,8 @@ export function PortfolioAnalysisView({
                     <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={56} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={chartTooltipStyle} />
-                    <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill="#60a5fa" radius={[6, 6, 0, 0]} />
-                    <Line yAxisId="cost" type="monotone" dataKey="cost" name="비용" stroke="#fbbf24" strokeWidth={2} dot={false} />
+                    <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={MONOCHROME_SERIES[1]} radius={[6, 6, 0, 0]} />
+                    <Line yAxisId="cost" type="monotone" dataKey="cost" name="비용" stroke={MONOCHROME_SERIES[0]} strokeWidth={2} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>

@@ -576,7 +576,7 @@ export function PortfolioStrategyLab({
   return (
     <Card className="bg-secondary p-5 sm:p-7">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div className="max-w-2xl"><p className="flex items-center gap-2 text-xs font-bold tracking-[0.14em] text-muted-foreground"><FlaskConical className="size-4" /> RUST STRATEGY LAB</p><h3 className="mt-2 text-xl font-black tracking-[-0.035em]">비교·검증·최적화 연구실</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">위 백테스트 설정과 동일한 시장 데이터 계약으로 Rust worker가 병렬 계산합니다. 결과는 주문을 만들지 않습니다.</p></div>
+        <div className="max-w-2xl"><p className="flex items-center gap-2 text-xs font-bold tracking-[0.14em] text-muted-foreground"><FlaskConical className="size-4" /> RUST STRATEGY LAB</p><h3 className="mt-2 text-xl font-black tracking-[-0.035em]">비교·검증·최적화 연구실</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">아래 기준 포트폴리오와 동일한 시장 데이터 계약으로 Rust worker가 병렬 계산합니다. 결과는 주문을 만들지 않습니다.</p></div>
         <span className="w-fit rounded-full bg-card px-3 py-2 text-[10px] font-black">{baseConfig.assets.length} ASSETS · {baseConfig.currencyMode === "KRW" ? "KRW FX" : "LOCAL"}</span>
       </div>
       <div className="mt-5 flex flex-wrap gap-2" aria-label="전략 분석 유형">{modeOptions.map((item) => <ToggleChoice key={item.value} active={mode === item.value} onClick={() => { setMode(item.value); setError(""); }}>{item.label}</ToggleChoice>)}</div>

@@ -16,7 +16,7 @@ import {
   Search,
   Settings2,
   ShieldCheck,
-  WalletCards,
+  Sparkles,
 } from "lucide-react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { AllocationHistoryChart } from "@/components/allocation-history-chart";
@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { buildAllocation } from "@/lib/allocation";
+import { dashboardHash, dashboardViewFromHash, type DashboardView } from "@/lib/dashboard-navigation";
 import { formatMoney, formatPercent, formatQuantity, formatSignedMoney, formatSyncTime } from "@/lib/format";
 import { PORTFOLIO_REFRESH_INTERVAL_MS, portfolioRequestUrl } from "@/lib/portfolio-refresh";
 import { holdingKey, stockColor, stockForeground } from "@/lib/stock-appearance";
@@ -49,8 +50,6 @@ type DashboardProps = {
   theme: Theme;
   onToggleTheme: () => void;
 };
-
-type DashboardView = "overview" | "analysis" | "backtest";
 
 function formatAmountPair(amounts: { KRW: number; USD: number }, signed = false): string {
   const format = signed ? formatSignedMoney : formatMoney;
@@ -105,7 +104,8 @@ function Sidebar({
         {([
           { value: "overview" as const, label: "포트폴리오", icon: LayoutDashboard },
           { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
-          { value: "backtest" as const, label: "포트폴리오 백테스트", icon: FlaskConical },
+          { value: "backtest" as const, label: "백테스트", icon: FlaskConical },
+          { value: "optimization" as const, label: "최적화", icon: Sparkles },
         ]).map((item) => (
           <button
             key={item.value}
@@ -182,10 +182,10 @@ function DashboardHeader({
     <header className="dashboard-header">
       <div>
         <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-          {view === "overview" ? "PORTFOLIO OVERVIEW" : view === "analysis" ? "PORTFOLIO ANALYSIS" : "PORTFOLIO BACKTEST"}
+          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION" }[view]}
         </p>
         <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
-          {view === "overview" ? "안녕하세요." : view === "analysis" ? "포트폴리오 분석" : "포트폴리오 백테스트"}
+          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", backtest: "백테스트", optimization: "포트폴리오 최적화" }[view]}
         </h1>
       </div>
 
@@ -234,11 +234,12 @@ function DashboardHeader({
 
 function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (view: DashboardView) => void }) {
   return (
-    <div className="mb-3 grid grid-cols-3 rounded-full bg-secondary p-1 lg:hidden" aria-label="화면 선택">
+    <div className="mb-3 grid grid-cols-4 rounded-[20px] bg-secondary p-1 lg:hidden" aria-label="화면 선택">
       {([
         { value: "overview" as const, label: "포트폴리오" },
         { value: "analysis" as const, label: "분석" },
         { value: "backtest" as const, label: "백테스트" },
+        { value: "optimization" as const, label: "최적화" },
       ]).map((item) => (
         <button
           key={item.value}
@@ -299,65 +300,6 @@ function PortfolioHero({ portfolio }: { portfolio: Portfolio }) {
           </div>
         </div>
       </div>
-    </section>
-  );
-}
-
-function SummaryCards({ portfolio, hiddenCount }: { portfolio: Portfolio; hiddenCount: number }) {
-  const { summary } = portfolio;
-  const items = [
-    {
-      label: "투자 원금",
-      values: [
-        formatMoney(summary.purchaseAmount.KRW, "KRW"),
-        ...(summary.purchaseAmount.USD !== 0 ? [formatMoney(summary.purchaseAmount.USD, "USD")] : []),
-      ],
-      detail: "현재 보유분 기준",
-      icon: WalletCards,
-    },
-    {
-      label: "평가 손익",
-      values: [
-        formatSignedMoney(summary.profitLoss.KRW, "KRW"),
-        ...(summary.profitLoss.USD !== 0 ? [formatSignedMoney(summary.profitLoss.USD, "USD")] : []),
-      ],
-      detail: formatPercent(summary.profitRate, true),
-      icon: ChartNoAxesCombined,
-    },
-    {
-      label: "보유 종목",
-      values: [summary.positionCount + "개"],
-      detail: hiddenCount ? `${hiddenCount}개 숨김` : portfolio.account.type || "토스증권",
-      icon: Layers3,
-    },
-  ];
-
-  return (
-    <section className="grid gap-3 md:grid-cols-3" aria-label="포트폴리오 핵심 지표">
-      {items.map((item, index) => (
-        <Card key={item.label} className="animate-fade-up bg-secondary p-5 sm:p-6" style={{ animationDelay: (index + 1) * 70 + "ms" }}>
-          <div className="mb-6 flex items-center justify-between">
-            <p className="text-sm font-semibold text-muted-foreground">{item.label}</p>
-            <span className="grid size-10 place-items-center rounded-full bg-card">
-              <item.icon className="size-[18px]" aria-hidden="true" />
-            </span>
-          </div>
-          <div className="space-y-0.5">
-            {item.values.map((value, valueIndex) => (
-              <p
-                key={value}
-                className={cn(
-                  "whitespace-nowrap text-[clamp(1.2rem,1.8vw,1.7rem)] font-black leading-tight tracking-[-0.04em]",
-                  valueIndex > 0 && "text-foreground/60",
-                )}
-              >
-                {value}
-              </p>
-            ))}
-          </div>
-          <p className="mt-2 text-xs font-medium text-muted-foreground">{item.detail}</p>
-        </Card>
-      ))}
     </section>
   );
 }
@@ -464,6 +406,8 @@ function AllocationCard({ portfolio, theme }: { portfolio: Portfolio; theme: The
                       background: "hsl(var(--card))",
                       color: "hsl(var(--card-foreground))",
                     }}
+                    labelStyle={{ color: "hsl(var(--card-foreground))", fontWeight: 800 }}
+                    itemStyle={{ color: "hsl(var(--card-foreground))", fontWeight: 700 }}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -699,9 +643,7 @@ function InitialError({
 }
 
 export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: DashboardProps) {
-  const [view, setView] = useState<DashboardView>(() => (
-    window.location.hash === "#analysis" ? "analysis" : window.location.hash === "#backtest" ? "backtest" : "overview"
-  ));
+  const [view, setView] = useState<DashboardView>(() => dashboardViewFromHash(window.location.hash));
   const [portfolio, setPortfolio] = useState<Portfolio>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -717,9 +659,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   );
 
   useEffect(() => {
-    const updateFromHash = () => setView(
-      window.location.hash === "#analysis" ? "analysis" : window.location.hash === "#backtest" ? "backtest" : "overview",
-    );
+    const updateFromHash = () => setView(dashboardViewFromHash(window.location.hash));
     window.addEventListener("hashchange", updateFromHash);
     return () => window.removeEventListener("hashchange", updateFromHash);
   }, []);
@@ -727,7 +667,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   const changeView = useCallback((nextView: DashboardView) => {
     setView(nextView);
     setSettingsOpen(false);
-    window.history.replaceState(null, "", nextView === "analysis" ? "#analysis" : nextView === "backtest" ? "#backtest" : "#overview");
+    window.history.replaceState(null, "", dashboardHash(nextView));
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
@@ -924,7 +864,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
         {view === "overview" ? (
           <div className="space-y-3">
             <PortfolioHero portfolio={visiblePortfolio} />
-            <SummaryCards portfolio={visiblePortfolio} hiddenCount={hiddenCurrentCount} />
+            <AllocationCard portfolio={visiblePortfolio} theme={theme} />
             <AllocationHistoryChart
               key={portfolio.selectedAccountId}
               portfolio={portfolio}
@@ -933,13 +873,14 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
               onUnauthorized={onUnauthorized}
               onSeriesChange={handleHistorySeriesChange}
             />
-            <AllocationCard portfolio={visiblePortfolio} theme={theme} />
             <HoldingsCard portfolio={visiblePortfolio} theme={theme} hiddenCount={hiddenCurrentCount} />
           </div>
         ) : view === "analysis" ? (
           <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
+        ) : view === "backtest" ? (
+          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:backtest`} portfolio={portfolio} onUnauthorized={onUnauthorized} mode="backtest" />
         ) : (
-          <PortfolioBacktestView key={portfolio.selectedAccountId} portfolio={portfolio} onUnauthorized={onUnauthorized} />
+          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:optimization`} portfolio={portfolio} onUnauthorized={onUnauthorized} mode="optimization" />
         )}
 
         <footer className="mt-10 flex flex-col gap-2 pb-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">

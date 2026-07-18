@@ -30,6 +30,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { analysisComparisonDomain, buildAnalysisChartData } from "@/lib/analysis-chart";
+import { MONOCHROME_DASHES, MONOCHROME_SERIES } from "@/lib/chart-theme";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -43,11 +44,11 @@ import type {
   Theme,
 } from "@/types";
 
-const benchmarkStyle: Record<BenchmarkKey, { label: string; color: string }> = {
-  KOSPI: { label: "KOSPI", color: "#38bdf8" },
-  KOSDAQ: { label: "KOSDAQ", color: "#a78bfa" },
-  NASDAQ100: { label: "나스닥 100", color: "#f59e0b" },
-  SP500: { label: "S&P 500", color: "#f472b6" },
+const benchmarkStyle: Record<BenchmarkKey, { label: string; color: string; dash?: string }> = {
+  KOSPI: { label: "KOSPI", color: MONOCHROME_SERIES[0], dash: MONOCHROME_DASHES[0] },
+  KOSDAQ: { label: "KOSDAQ", color: MONOCHROME_SERIES[1], dash: MONOCHROME_DASHES[1] },
+  NASDAQ100: { label: "나스닥 100", color: MONOCHROME_SERIES[2], dash: MONOCHROME_DASHES[2] },
+  SP500: { label: "S&P 500", color: MONOCHROME_SERIES[3], dash: MONOCHROME_DASHES[3] },
 };
 
 function displayDate(value: string): string {
@@ -206,6 +207,7 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
                   dataKey={`benchmarkValues.${benchmark.key}`}
                   name={benchmarkStyle[benchmark.key].label}
                   stroke={benchmarkStyle[benchmark.key].color}
+                  strokeDasharray={benchmarkStyle[benchmark.key].dash}
                   strokeWidth={1.8}
                   dot={false}
                   activeDot={{ r: 3, strokeWidth: 0 }}
@@ -273,8 +275,8 @@ function AnalysisReportContent({ report }: { report: AnalysisReport }) {
                 </div>
                 <div className="h-2 overflow-hidden rounded-full bg-secondary">
                   <div
-                    className={cn("h-full rounded-full", item.estimatedProfitLoss >= 0 ? "bg-emerald-400" : "bg-rose-400")}
-                    style={{ width: `${Math.max(3, Math.abs(item.estimatedProfitLoss) / maximumContribution * 100)}%` }}
+                    className="h-full rounded-full bg-foreground"
+                    style={{ width: `${Math.max(3, Math.abs(item.estimatedProfitLoss) / maximumContribution * 100)}%`, opacity: item.estimatedProfitLoss >= 0 ? 0.9 : 0.45 }}
                   />
                 </div>
                 <div className="sm:text-right">
@@ -326,7 +328,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
                 <YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={64} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오" : result.benchmark?.name || "비교 지수"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
                 <Line type="monotone" dataKey="growth" name="growth" stroke="hsl(var(--foreground))" strokeWidth={2.8} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-                {result.benchmark ? <Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke="#f59e0b" strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0 }} /> : null}
+                {result.benchmark ? <Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0 }} /> : null}
               </LineChart>
             ) : (
               <AreaChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
@@ -334,7 +336,7 @@ function BacktestReportContent({ report }: { report: BacktestReport }) {
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={46} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                <Area type="monotone" dataKey="drawdownPercent" stroke="none" fill="#fb7185" fillOpacity={0.58} activeDot={{ r: 3, strokeWidth: 0 }} />
+                <Area type="monotone" dataKey="drawdownPercent" stroke="none" fill={MONOCHROME_SERIES[1]} fillOpacity={0.58} activeDot={{ r: 3, strokeWidth: 0 }} />
               </AreaChart>
             )}
           </ResponsiveContainer>

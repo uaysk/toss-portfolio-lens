@@ -615,7 +615,7 @@ async function launchBrowser() {
   });
 }
 
-async function routeApplicationApi(page) {
+export async function routeApplicationApi(page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -709,7 +709,7 @@ async function captureApplication(browser) {
     await page.evaluate(() => window.scrollTo(0, 0));
     await screenshotViewport(page, "app-analysis.png");
 
-    await page.getByRole("button", { name: "포트폴리오 백테스트" }).click();
+    await page.getByRole("button", { name: "백테스트", exact: true }).click();
     await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor();
     await page.getByText("총 6종목 · 주식", { exact: false }).waitFor();
     await Promise.all(portfolioAssets.map((asset) => (
@@ -729,6 +729,10 @@ async function captureApplication(browser) {
     // Recharts의 선 그리기 애니메이션이 끝난 뒤 전체 경로를 캡처한다.
     await page.waitForTimeout(1_200);
     await screenshotViewport(page, "app-backtest-result.png");
+
+    await page.getByRole("button", { name: "최적화", exact: true }).click();
+    await page.getByRole("heading", { name: "최적화 기준 포트폴리오" }).waitFor();
+    await page.getByRole("heading", { name: "비교·검증·최적화 연구실" }).waitFor();
 
     await page.getByRole("button", { name: "Monte Carlo", exact: true }).click();
     await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
@@ -792,9 +796,9 @@ async function verifyMobileApplication(browser) {
   const page = await context.newPage();
   await routeApplicationApi(page);
   try {
-    await page.goto(`${appUrl}/#backtest`, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "백테스트", exact: true }).click();
-    await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor();
+    await page.goto(`${appUrl}/#optimization`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "최적화", exact: true }).click();
+    await page.getByRole("heading", { name: "최적화 기준 포트폴리오" }).waitFor();
     await page.getByRole("button", { name: "Monte Carlo", exact: true }).click();
     await page.getByRole("button", { name: "고급 분석 실행", exact: true }).click();
     await page.getByText("평균 최종 잔액", { exact: true }).waitFor();
@@ -822,21 +826,27 @@ async function captureArchitectureSlides(browser) {
   }
 }
 
-await mkdir(outputDirectory, { recursive: true });
-const browser = await launchBrowser();
-try {
-  if (captureApp) {
-    await captureApplication(browser);
-    await verifyMobileApplication(browser);
+async function main() {
+  await mkdir(outputDirectory, { recursive: true });
+  const browser = await launchBrowser();
+  try {
+    if (captureApp) {
+      await captureApplication(browser);
+      await verifyMobileApplication(browser);
+    }
+    if (captureArchitecture) await captureArchitectureSlides(browser);
+  } finally {
+    await browser.close();
   }
-  if (captureArchitecture) await captureArchitectureSlides(browser);
-} finally {
-  await browser.close();
+
+  const generated = [
+    ...(captureApp ? ["app-overview.png", "app-account-composition.png", "app-analysis.png", "app-backtest.png", "app-backtest-result.png"] : []),
+    ...(captureArchitecture ? ["aws-runtime-architecture.png", "api-report-flow.png"] : []),
+  ];
+  console.log(`README presentation assets generated (${generated.length}):`);
+  for (const filename of generated) console.log(`- docs/presentation/generated/${filename}`);
 }
 
-const generated = [
-  ...(captureApp ? ["app-overview.png", "app-account-composition.png", "app-analysis.png", "app-backtest.png", "app-backtest-result.png"] : []),
-  ...(captureArchitecture ? ["aws-runtime-architecture.png", "api-report-flow.png"] : []),
-];
-console.log(`README presentation assets generated (${generated.length}):`);
-for (const filename of generated) console.log(`- docs/presentation/generated/${filename}`);
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  await main();
+}

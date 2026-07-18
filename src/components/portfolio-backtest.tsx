@@ -22,6 +22,7 @@ import {
   Plus,
   RefreshCw,
   Scale,
+  Sparkles,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -34,6 +35,7 @@ import { ReportGenerateButton } from "@/components/report-generate-button";
 import { PortfolioStrategyLab } from "@/components/portfolio-strategy-lab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
+import { MONOCHROME_DASHES, MONOCHROME_SERIES, monochromeHeatmapStyle } from "@/lib/chart-theme";
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { seoulDateString } from "@/lib/date-range";
@@ -124,9 +126,11 @@ function ResultMetric({ icon: Icon, label, value, detail, benchmark }: {
 export function PortfolioBacktestView({
   portfolio,
   onUnauthorized,
+  mode = "backtest",
 }: {
   portfolio: Portfolio;
   onUnauthorized: () => void;
+  mode?: "backtest" | "optimization";
 }) {
   const today = useMemo(() => seoulDateString(), []);
   const [assets, setAssets] = useState<BacktestAsset[]>([]);
@@ -316,16 +320,19 @@ export function PortfolioBacktestView({
   }, [advanced?.monthlyReturns]);
 
   return (
-    <section aria-labelledby="backtest-title" className="space-y-3">
-      <Card className="bg-secondary p-5 sm:p-7">
+    <section aria-label={mode === "backtest" ? "포트폴리오 백테스트" : "포트폴리오 최적화"} className="flex flex-col gap-3">
+      <Card className={cn("bg-secondary p-5 sm:p-7", mode === "optimization" && "order-2")}>
         <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
           <div className="max-w-2xl">
             <div className="mb-2 flex items-center gap-2 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-              <BarChart3 className="size-4" aria-hidden="true" /> PORTFOLIO BACKTEST
+              {mode === "backtest" ? <BarChart3 className="size-4" aria-hidden="true" /> : <Sparkles className="size-4" aria-hidden="true" />}
+              {mode === "backtest" ? "PORTFOLIO BACKTEST" : "OPTIMIZATION UNIVERSE"}
             </div>
-            <h2 id="backtest-title" className="text-2xl font-black tracking-[-0.04em]">포트폴리오 전략 백테스트</h2>
+            <h2 id="backtest-title" className="text-2xl font-black tracking-[-0.04em]">{mode === "backtest" ? "포트폴리오 전략 백테스트" : "최적화 기준 포트폴리오"}</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              국내·미국 종목의 수정주가로 과거 성장, 위험, 낙폭, 기여도와 상관관계를 비교합니다.
+              {mode === "backtest"
+                ? "국내·미국 종목의 수정주가로 과거 성장, 위험, 낙폭, 기여도와 상관관계를 비교합니다."
+                : "탐색할 종목과 기준 비중을 먼저 정한 뒤 Rust worker에서 후보 평가, Walk-forward와 Monte Carlo를 실행합니다."}
             </p>
           </div>
           <Button type="button" variant="secondary" onClick={() => void loadCurrentPortfolio()} disabled={loadingCurrent}>
@@ -428,9 +435,9 @@ export function PortfolioBacktestView({
         </div>
       </Card>
 
-      <Card className="bg-secondary p-5 sm:p-7">
-        <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">ASSUMPTIONS</p>
-        <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">기간과 운용 조건</h3>
+      <Card className={cn("bg-secondary p-5 sm:p-7", mode === "optimization" && "order-3")}>
+        <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">{mode === "backtest" ? "ASSUMPTIONS" : "OPTIMIZATION BASELINE"}</p>
+        <h3 className="mt-2 text-xl font-black tracking-[-0.035em]">{mode === "backtest" ? "기간과 운용 조건" : "탐색 기준과 비용 조건"}</h3>
         <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">시작일</span>
@@ -584,18 +591,22 @@ export function PortfolioBacktestView({
         {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
         <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void runBacktest()} disabled={!canRun || running}>
           {running ? <LoaderCircle className="animate-spin" /> : <TrendingUp />}
-          {running ? "수정주가를 수집하고 계산하는 중" : "백테스트 실행"}
+          {running ? "수정주가를 수집하고 계산하는 중" : mode === "backtest" ? "백테스트 실행" : "비교 기준 백테스트 저장"}
         </Button>
       </Card>
 
-      <PortfolioStrategyLab
-        baseConfig={baseConfig}
-        canAnalyze={canRun}
-        backtestRuns={backtestRuns}
-        onUnauthorized={onUnauthorized}
-      />
+      {mode === "optimization" ? (
+        <div className="order-1">
+          <PortfolioStrategyLab
+            baseConfig={baseConfig}
+            canAnalyze={canRun}
+            backtestRuns={backtestRuns}
+            onUnauthorized={onUnauthorized}
+          />
+        </div>
+      ) : null}
 
-      {result ? (
+      {mode === "backtest" && result ? (
         <>
           <Card className="bg-secondary p-5 sm:p-7">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -753,10 +764,10 @@ export function PortfolioBacktestView({
                           <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                          <Line type="monotone" dataKey="return20d" name="20일" stroke="#5eead4" strokeWidth={2} dot={false} connectNulls />
-                          <Line type="monotone" dataKey="return60d" name="60일" stroke="#60a5fa" strokeWidth={2} dot={false} connectNulls />
-                          <Line type="monotone" dataKey="return120d" name="120일" stroke="#c084fc" strokeWidth={2} dot={false} connectNulls />
-                          <Line type="monotone" dataKey="return252d" name="252일" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return20d" name="20일" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return60d" name="60일" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return120d" name="120일" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                          <Line type="monotone" dataKey="return252d" name="252일" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
@@ -768,10 +779,10 @@ export function PortfolioBacktestView({
                           <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <YAxis yAxisId="ratio" orientation="right" width={34} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                          <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke="#fb7185" strokeWidth={2} dot={false} connectNulls />
-                          <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke="#e5e7eb" strokeWidth={2} dot={false} connectNulls />
-                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls /> : null}
-                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkCorrelation60d" name="상관" stroke="#a3e635" strokeWidth={2} dot={false} connectNulls /> : null}
+                          <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                          <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls /> : null}
+                          {advanced.benchmarkComparison ? <Line yAxisId="ratio" type="monotone" dataKey="benchmarkCorrelation60d" name="상관" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls /> : null}
                         </ComposedChart>
                       </ResponsiveContainer> : <div className="grid h-full place-items-center px-4 text-center text-xs leading-5 text-muted-foreground">60개 이상의 수익률 관측이 쌓이면 롤링 위험을 표시합니다.</div>}
                     </div>
@@ -811,7 +822,7 @@ export function PortfolioBacktestView({
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                  <Area type="monotone" dataKey="drawdownPercent" stroke="none" fill="#fb7185" fillOpacity={0.58} activeDot={{ r: 3, strokeWidth: 0 }} />
+                  <Area type="monotone" dataKey="drawdownPercent" stroke="none" fill={MONOCHROME_SERIES[1]} fillOpacity={0.58} activeDot={{ r: 3, strokeWidth: 0 }} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -825,7 +836,7 @@ export function PortfolioBacktestView({
                 {[...result.annualReturns].reverse().map((item) => (
                   <div key={item.year} className="flex items-center justify-between rounded-[16px] bg-card px-4 py-3 text-sm">
                     <span className="font-black">{item.year}</span>
-                    <span className={cn("font-black", item.returnPercent < 0 ? "text-rose-400" : "text-emerald-400")}>{formatPercent(item.returnPercent, true)}</span>
+                    <span className={cn("font-black", item.returnPercent < 0 && "text-muted-foreground")}>{formatPercent(item.returnPercent, true)}</span>
                   </div>
                 ))}
               </div>
@@ -879,8 +890,7 @@ export function PortfolioBacktestView({
                           <th className="p-2 text-left text-xs font-black">{row.year}</th>
                           {Array.from({ length: 12 }, (_, index) => {
                             const value = row.months[index + 1];
-                            const opacity = value === undefined ? 0 : Math.min(0.5, 0.1 + Math.abs(value) / 40);
-                            return <td key={index} className="rounded-xl p-2.5 font-black" style={value === undefined ? undefined : { backgroundColor: value >= 0 ? `rgba(94, 234, 212, ${opacity})` : `rgba(251, 113, 133, ${opacity})` }}>{value === undefined ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(1)}`}</td>;
+                            return <td key={index} className="rounded-xl p-2.5 font-black" style={value === undefined ? undefined : monochromeHeatmapStyle(value)}>{value === undefined ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(1)}`}</td>;
                           })}
                         </tr>
                       ))}</tbody>
@@ -943,8 +953,8 @@ export function PortfolioBacktestView({
                         <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                        <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill="#60a5fa" radius={[6, 6, 0, 0]} />
-                        <Line yAxisId="cost" type="monotone" dataKey="estimatedCost" name="추정비용" stroke="#fbbf24" strokeWidth={2} dot={false} />
+                        <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={MONOCHROME_SERIES[1]} radius={[6, 6, 0, 0]} />
+                        <Line yAxisId="cost" type="monotone" dataKey="estimatedCost" name="추정비용" stroke={MONOCHROME_SERIES[0]} strokeWidth={2} dot={false} />
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>

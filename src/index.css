@@ -189,6 +189,19 @@
     grid-template-columns: minmax(210px, 1.45fr) minmax(140px, 0.9fr) minmax(110px, 0.75fr) minmax(130px, 0.9fr) minmax(130px, 0.85fr);
     gap: 18px;
   }
+
+  .recharts-default-tooltip {
+    border: 0 !important;
+    border-radius: 16px !important;
+    background: hsl(var(--card)) !important;
+    color: hsl(var(--card-foreground)) !important;
+    box-shadow: 0 18px 50px hsl(var(--background) / 0.38) !important;
+  }
+
+  .recharts-tooltip-label,
+  .recharts-tooltip-item {
+    color: hsl(var(--card-foreground)) !important;
+  }
 }
 
 @media (max-width: 1023px) {
