@@ -4,10 +4,12 @@ import { Dashboard } from "@/components/dashboard";
 import { LoginPage } from "@/components/login-page";
 import { Logo } from "@/components/logo";
 import { ReportPage } from "@/components/report-page";
+import { ReadmeShowcase } from "@/components/readme-showcase";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { Theme } from "@/types";
 
 export default function App() {
+  const readmeShowcaseRoute = window.location.pathname === "/readme-showcase";
   const reportRoute = window.location.pathname.match(/^\/reports(?:\/([^/]+))?\/?$/);
   const reportId = reportRoute?.[1];
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -29,7 +31,7 @@ export default function App() {
   const markUnauthenticated = useCallback(() => setAuthenticated(false), []);
 
   useEffect(() => {
-    if (reportRoute) return;
+    if (reportRoute || readmeShowcaseRoute) return;
     let active = true;
     fetch("/api/auth/session", { headers: { Accept: "application/json" } })
       .then((response) => response.json())
@@ -42,7 +44,11 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [Boolean(reportRoute)]);
+  }, [Boolean(reportRoute), readmeShowcaseRoute]);
+
+  if (readmeShowcaseRoute) {
+    return <ReadmeShowcase />;
+  }
 
   if (reportRoute) {
     return <ReportPage reportId={reportId} theme={theme} onToggleTheme={toggleTheme} />;

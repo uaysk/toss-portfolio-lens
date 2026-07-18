@@ -20,6 +20,7 @@
     "test:python-worker": "tsx scripts/verify-python-worker-postgres.ts",
     "benchmark:python-worker": "tsx scripts/benchmark-python-worker.ts",
     "benchmark:rust-ipc": "tsx scripts/benchmark-rust-ipc.ts",
+    "docs:capture-readme": "node scripts/capture-readme-showcase.mjs",
     "mcp:oauth:bootstrap": "node scripts/generate-mcp-oauth-secrets.mjs",
     "mcp:oauth:smoke": "node scripts/mcp-oauth-http-smoke.mjs",
     "mcp:browser:smoke": "node scripts/mcp-browser-smoke.mjs"
