@@ -340,6 +340,7 @@ EXECUTION_MODE=inline docker compose up -d --no-deps web
 | --- | --- |
 | `DASHBOARD_PASSWORD` | 웹 로그인 비밀번호와 앱의 읽기 전용 API Bearer token |
 | `SESSION_SECRET` | 로그인 세션 HMAC 서명 값, 32자 이상 |
+| `APP_GIT_SHA` | `.git`이 없는 배포 이미지의 health/MCP build identity에 주입할 commit SHA |
 | `TOSS_API_AUTH_MODE` | `oauth_client_credentials` 또는 `static_bearer` |
 | `TOSS_API_BASE_URL` | 토스증권 또는 호환 API 주소 |
 | `DB_PROVIDER` | `sqlite`, `postgresql`, `mysql` |

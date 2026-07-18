@@ -10,6 +10,7 @@ services:
       HOST: 0.0.0.0
       PORT: "3200"
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-https://tpl.uaysk.com}
+      APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
       DATABASE_PATH: /app/data/portfolio-history.sqlite
       REPORTS_PATH: /app/data/reports
       SNAPSHOT_REFRESH_HOURS: "6"
