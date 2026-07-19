@@ -96,6 +96,53 @@ describe("management MCP handlers", () => {
     expect(await runs.get(clone.id, "owner-a")).toBeUndefined();
   });
 
+  it("서로 다른 data revision의 백테스트 ranking은 명시적 허용 없이는 거부한다", async () => {
+    const { runs, handlers } = await setup();
+    const first = await runs.create({
+      kind: "backtest",
+      ownerSubject: "owner-a",
+      requestHash: "1".repeat(64),
+      dataRevision: "revision-a",
+      engineVersion: "engine-a",
+      config: { assets: [{ symbol: "AAA", weight: 1 }] },
+    });
+    const second = await runs.create({
+      kind: "backtest",
+      ownerSubject: "owner-a",
+      requestHash: "2".repeat(64),
+      dataRevision: "revision-b",
+      engineVersion: "engine-a",
+      config: { assets: [{ symbol: "BBB", weight: 1 }] },
+    });
+    await runs.complete(first.id, { cagrPercent: 8 }, { effectiveStartDate: "2024-01-01", endDate: "2024-12-31" }, []);
+    await runs.complete(second.id, { cagrPercent: 9 }, { effectiveStartDate: "2024-01-01", endDate: "2024-12-31" }, []);
+
+    await expect(handlers.compare_backtests({
+      runIds: [first.id, second.id],
+      allowMixedDataRevisions: false,
+    }, "owner-a")).rejects.toMatchObject({
+      detail: {
+        code: "DATA_REVISION_MISMATCH",
+        details: {
+          distinct_data_revisions: 2,
+          revision_groups: {
+            "revision-a": [first.id],
+            "revision-b": [second.id],
+          },
+        },
+      },
+    });
+
+    const allowed = result(await handlers.compare_backtests({
+      runIds: [first.id, second.id],
+      allowMixedDataRevisions: true,
+    }, "owner-a"));
+    expect(allowed.revision_groups).toEqual({
+      "revision-a": [first.id],
+      "revision-b": [second.id],
+    });
+  });
+
   it("preset revision/history/export/import/duplicate를 동일 owner 계약으로 관리한다", async () => {
     const { handlers } = await setup();
     const created = result(await handlers.create_portfolio_preset({

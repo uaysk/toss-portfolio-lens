@@ -76,9 +76,15 @@ export type BacktestWorkerResponseContext = {
     currencyMode: CurrencyMode;
     baseCurrency: "KRW";
     requestedStartDate: string;
-    latestListDate: string;
+    latestMetadataListDate: string;
   };
   assets: BacktestAssetDefinition[];
+  instrument_date_consistency: Array<{
+    symbol: string;
+    firstObservationDate?: string;
+    metadataListDate: string;
+    status: "consistent" | "price_precedes_metadata" | "unavailable";
+  }>;
   benchmark?: { key: BacktestBenchmarkKey; name: string; symbol: string };
   warnings: string[];
 };
@@ -198,7 +204,11 @@ export class PortfolioBacktestService {
     return {
       accountId,
       assets,
-      defaultStartDate: assets.map((asset) => asset.listDate).sort().at(-1)!,
+      defaultStartDate: (() => {
+        const value = new Date(`${today}T00:00:00Z`);
+        value.setUTCFullYear(value.getUTCFullYear() - 5);
+        return value.toISOString().slice(0, 10);
+      })(),
       defaultEndDate: today,
       initialAmount: Math.round(values.reduce((sum, value) => sum + value, 0)),
     };
@@ -396,10 +406,12 @@ export class PortfolioBacktestService {
     const instruments = await this.resolveInstruments(request.assets.map((asset) => asset.symbol));
     const weightBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), Number(asset.weight)]));
     const assetBySymbol = new Map(request.assets.map((asset) => [normalizeSymbol(asset.symbol), asset]));
-    const latestListDate = instruments.map((instrument) => instrument.listDate).sort().at(-1)!;
-    const effectiveRequestedStart = request.realism?.enforcePointInTimeUniverse
-      ? request.startDate
-      : request.startDate < latestListDate ? latestListDate : request.startDate;
+    const latestMetadataListDate = instruments.map((instrument) => instrument.listDate).sort().at(-1)!;
+    // The provider's listDate can describe the current venue listing (for example,
+    // after an exchange transfer), so it is not a safe historical price boundary.
+    // The simulation starts from the requested range and lets the common observed
+    // price matrix determine the effective period.
+    const effectiveRequestedStart = request.startDate;
     if (request.cashFlows?.some((flow) => flow.date < effectiveRequestedStart || flow.date > request.endDate)) {
       throw new BacktestValidationError(`사용자 지정 현금흐름은 ${effectiveRequestedStart}부터 ${request.endDate} 사이여야 합니다.`);
     }
@@ -441,6 +453,20 @@ export class PortfolioBacktestService {
       ...(customBenchmark ? [instrumentKey(customBenchmark)] : []),
     ]));
     const localPrices = await this.store.getBacktestPrices(keys, effectiveRequestedStart, request.endDate);
+    const instrumentDateConsistency = instruments.map((instrument) => {
+      const firstObservationDate = localPrices.get(instrumentKey(instrument))?.[0]?.date;
+      return {
+        symbol: instrument.symbol,
+        ...(firstObservationDate ? { firstObservationDate } : {}),
+        metadataListDate: instrument.listDate,
+        status: !firstObservationDate
+          ? "unavailable" as const
+          : firstObservationDate < instrument.listDate
+            ? "price_precedes_metadata" as const
+            : "consistent" as const,
+      };
+    });
+    const listingDateConflicts = instrumentDateConsistency.filter((item) => item.status === "price_precedes_metadata");
     let benchmark: { key: string; name: string; prices: BacktestPricePoint[] } | undefined;
     if (customBenchmark) {
       benchmark = {
@@ -457,13 +483,30 @@ export class PortfolioBacktestService {
       };
     }
 
+    const firstRequiredObservationDates: string[] = [];
+    for (const instrument of instruments) {
+      const firstObservationDate = localPrices.get(instrumentKey(instrument))?.[0]?.date;
+      if (!firstObservationDate) {
+        throw new BacktestValidationError(`${instrument.name}의 선택 기간 일봉이 없습니다.`);
+      }
+      firstRequiredObservationDates.push(firstObservationDate);
+    }
+    if (benchmark) {
+      const firstBenchmarkObservationDate = benchmark.prices[0]?.date;
+      if (!firstBenchmarkObservationDate) {
+        throw new BacktestValidationError(`${benchmark.name}의 선택 기간 일봉이 없습니다.`);
+      }
+      firstRequiredObservationDates.push(firstBenchmarkObservationDate);
+    }
+    const firstAlignedEvaluationDate = firstRequiredObservationDates.sort().at(-1)!;
+
     const hasUsdSeries = instruments.some((instrument) => instrument.currency === "USD")
       || customBenchmark?.currency === "USD"
       || Boolean(builtInBenchmark && BENCHMARKS[builtInBenchmark].source === "stock");
     const valuationDates = Array.from(new Set([
       ...Array.from(localPrices.values()).flatMap((series) => series.map((point) => point.date)),
       ...(benchmark?.prices ?? []).map((point) => point.date),
-    ])).filter((date) => date >= effectiveRequestedStart && date <= request.endDate).sort();
+    ])).filter((date) => date >= firstAlignedEvaluationDate && date <= request.endDate).sort();
     const exchangeRates = currencyMode === "KRW" && hasUsdSeries
       ? await this.marketData.ensureExchangeRates(valuationDates)
       : new Map<string, number>();
@@ -473,7 +516,7 @@ export class PortfolioBacktestService {
     const valuationTimeline = Array.from(new Set([
       ...valuationDates,
       ...rateEntries.map(([date]) => date),
-    ])).filter((date) => date >= effectiveRequestedStart && date <= request.endDate).sort();
+    ])).filter((date) => date >= firstAlignedEvaluationDate && date <= request.endDate).sort();
     const observedDates = new Map<string, string[]>();
     for (const instrument of instruments) {
       const key = instrumentKey(instrument);
@@ -577,10 +620,11 @@ export class PortfolioBacktestService {
         : []),
       ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 이용 가능 값을 사용했습니다.`] : []),
       ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 계산에서 제외했습니다.`] : []),
+      ...listingDateConflicts.map((item) => (
+        `${item.symbol} 가격 첫 관측일 ${item.firstObservationDate}이 공급자 listDate ${item.metadataListDate}보다 빠릅니다. `
+        + "listDate로 기간을 자르지 않고 실제 공통 가격 관측일을 사용했습니다."
+      )),
     ];
-    if (!request.realism?.enforcePointInTimeUniverse && request.startDate < latestListDate) {
-      warnings.unshift(`가장 늦게 상장된 종목의 상장일 ${latestListDate}부터 계산했습니다.`);
-    }
     return {
       simulation,
       responseContext: {
@@ -595,9 +639,10 @@ export class PortfolioBacktestService {
           ...(request.rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
           ...(customBenchmark ? { benchmarkSymbol: customBenchmark.symbol } : {}),
           requestedStartDate: request.startDate,
-          latestListDate,
+          latestMetadataListDate,
         },
         assets: definitions,
+        instrument_date_consistency: instrumentDateConsistency,
         ...(request.benchmark === "NONE" ? {} : {
           benchmark: {
             key: request.benchmark,
@@ -637,6 +682,10 @@ export class PortfolioBacktestService {
       ...(context.benchmark ? { benchmark: context.benchmark } : {}),
       warnings,
       ...result,
+      dataQuality: {
+        ...result.dataQuality,
+        instrumentDateConsistency: context.instrument_date_consistency,
+      },
     };
   }
 

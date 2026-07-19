@@ -36,6 +36,76 @@ function manifestSeeds(value: unknown, prefix = "", depth = 0, found: Record<str
 
 const ARTIFACT_TYPES = new Set<ArtifactType>(SUPPORTED_ARTIFACT_TYPES);
 
+function failedRunDiagnostic(error: unknown, run: PortfolioRunRecord, current?: PortfolioRunRecord) {
+  const message = error instanceof Error ? error.message : String(error);
+  const config = run.input && typeof run.input === "object" && !Array.isArray(run.input)
+    ? run.input as Record<string, unknown>
+    : {};
+  const inferredCode = message.includes("응답 제한 시간")
+    ? "WORKER_RESPONSE_TIMEOUT"
+    : message.includes("연결 제한 시간")
+      ? "WORKER_CONNECT_TIMEOUT"
+      : message.includes("128MiB") || message.includes("프레임")
+        ? "WORKER_IPC_PAYLOAD_LIMIT"
+        : message.includes("socket closed") || message.includes("ECONNRESET")
+          ? "WORKER_DISCONNECTED"
+          : "RUN_FAILED";
+  const structured = error instanceof ServiceError ? error.detail : undefined;
+  const startedAt = current?.startedAt ?? run.startedAt ?? run.createdAt;
+  return {
+    code: structured?.code ?? inferredCode,
+    message: structured?.message ?? message,
+    retryable: structured?.retryable ?? inferredCode !== "WORKER_IPC_PAYLOAD_LIMIT",
+    phase: "compute_or_artifact_persistence",
+    algorithm: typeof config.algorithm === "string" ? config.algorithm : null,
+    symbol_count: Array.isArray(config.symbols) ? config.symbols.length : null,
+    candidate_budget: Number(config.candidateBudget ?? current?.totalCandidates ?? run.totalCandidates),
+    completed_candidate_count: current?.completedCandidates ?? run.completedCandidates,
+    total_candidate_count: current?.totalCandidates ?? run.totalCandidates,
+    elapsed_ms: Math.max(0, Date.now() - startedAt),
+    worker_job_id: null,
+    ...(structured?.details ? { details: structured.details } : {}),
+    ...(error instanceof Error ? {
+      error_type: error.name,
+      ...(error.stack ? { stack_trace: error.stack } : {}),
+    } : {}),
+  };
+}
+
+function runCreationMetadata(input: {
+  kind: PortfolioRunKind;
+  config: unknown;
+  dataRevision: string;
+}) {
+  const hash = requestHash({ config: input.config, engineVersion: PORTFOLIO_ENGINE_VERSION });
+  const seeds = manifestSeeds(input.config);
+  return {
+    hash,
+    manifest: {
+      schema_version: "portfolio-lens-run-manifest/v1",
+      finalized: false,
+      captured_at: new Date().toISOString(),
+      run: {
+        kind: input.kind,
+        request_hash: hash,
+        data_revision: input.dataRevision,
+        engine_version: PORTFOLIO_ENGINE_VERSION,
+        input: input.config,
+      },
+      build: buildInfo(),
+      reproducibility: {
+        deterministic_when: "동일 seed, 정규화 입력, data revision, 엔진·worker schema 버전이 동일할 때",
+        seed: seeds.seed ?? null,
+        seed_configuration: seeds,
+        formula_versions: input.kind === "optimization"
+          ? { optimization_objectives: "optimization-objectives/v2" }
+          : {},
+        artifact_checksums: [],
+      },
+    },
+  };
+}
+
 export type RunTaskContext = {
   runId: string;
   signal: AbortSignal;
@@ -109,8 +179,7 @@ export class RunService {
     dataRevision: string;
     totalCandidates?: number;
   }): Promise<PortfolioRunRecord> {
-    const hash = requestHash({ config: input.config, engineVersion: PORTFOLIO_ENGINE_VERSION });
-    const seeds = manifestSeeds(input.config);
+    const { hash, manifest } = runCreationMetadata(input);
     return this.repository.create({
       kind: input.kind,
       ownerSubject: input.ownerSubject,
@@ -119,25 +188,29 @@ export class RunService {
       engineVersion: PORTFOLIO_ENGINE_VERSION,
       config: input.config,
       totalCandidates: input.totalCandidates,
-      manifest: {
-        schema_version: "portfolio-lens-run-manifest/v1",
-        finalized: false,
-        captured_at: new Date().toISOString(),
-        run: {
-          kind: input.kind,
-          request_hash: hash,
-          data_revision: input.dataRevision,
-          engine_version: PORTFOLIO_ENGINE_VERSION,
-          input: input.config,
-        },
-        build: buildInfo(),
-        reproducibility: {
-          deterministic_when: "동일 seed, 정규화 입력, data revision, 엔진·worker schema 버전이 동일할 때",
-          seed: seeds.seed ?? null,
-          seed_configuration: seeds,
-          artifact_checksums: [],
-        },
-      },
+      manifest,
+    });
+  }
+
+  async recordPreflightFailure(input: {
+    ownerSubject: string;
+    kind: PortfolioRunKind;
+    config: unknown;
+    dataRevision: string;
+    error: unknown;
+    totalCandidates?: number;
+  }): Promise<{ run: PortfolioRunRecord; created: boolean }> {
+    const { hash, manifest } = runCreationMetadata(input);
+    return this.repository.createPreflightFailureIfAbsent({
+      kind: input.kind,
+      ownerSubject: input.ownerSubject,
+      requestHash: hash,
+      dataRevision: input.dataRevision,
+      engineVersion: PORTFOLIO_ENGINE_VERSION,
+      config: input.config,
+      error: input.error,
+      totalCandidates: input.totalCandidates,
+      manifest,
     });
   }
 
@@ -204,11 +277,8 @@ export class RunService {
           retryable: true,
         });
       } else {
-        await this.repository.fail(run.id, error instanceof ServiceError ? error.detail : {
-          code: "RUN_FAILED",
-          message: "실행 중 내부 오류가 발생했습니다.",
-          retryable: true,
-        });
+        const current = await this.repository.get(run.id, input.ownerSubject);
+        await this.repository.fail(run.id, failedRunDiagnostic(error, run, current));
       }
       throw error;
     } finally {
@@ -573,7 +643,7 @@ export class RunService {
       const candidates = Array.isArray(candidatesArtifact?.content)
         ? candidatesArtifact.content as Array<{
           weights: Record<string, number>;
-          metrics: Record<string, number | null> & { robustScore?: number | null };
+          metrics: Record<string, unknown> & { robustScore?: number | null };
         }>
         : [];
       const payload = input?.value.payload;
@@ -650,11 +720,11 @@ export class RunService {
           retryable: true,
         });
       } else {
-        await this.repository.fail(queued.run.id, error instanceof ServiceError ? error.detail : {
-          code: "RUN_FAILED",
-          message: "실행 중 내부 오류가 발생했습니다.",
-          retryable: true,
-        });
+        const current = await this.repository.get(queued.run.id, queued.ownerSubject);
+        await this.repository.fail(
+          queued.run.id,
+          failedRunDiagnostic(error, queued.run, current),
+        );
       }
     } finally {
       this.deactivateContext(queued.run.id, context.signal);

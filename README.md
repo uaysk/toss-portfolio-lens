@@ -45,7 +45,7 @@
 ![Portfolio Lens 최적화 화면](docs/readme/optimization.png)
 
 - 최소·최대 비중, 필수·제외 종목, 최대 종목 수와 sector·industry·국가·통화·자산유형 그룹 제약
-- 최대 Sharpe·Sortino·Calmar, 최소 변동성·CVaR 등 목적함수
+- 최대 CAGR·누적수익률·Sharpe·Sortino·Calmar, 최소 변동성·CVaR 등 목적함수
 - 동일비중·현재비중·역변동성·최소분산·Risk Parity/ERC·HRP와 평균연결·silhouette cut·군집 내/간 ERC를 사용하는 결정적 HERC-style 기준 후보
 - Ledoit–Wolf 공분산 축소와 Differential Evolution, separable CMA-ES, NSGA-II, 직접 CVaR 탐색
 - 빠른 screening 뒤 상위·Pareto 후보를 실제 현금·수량·비용 ledger로 재검증하는 2단계 최적화
@@ -89,7 +89,7 @@ MCP는 기본적으로 비활성입니다. 연결 방법과 OAuth 설정은 [MCP
 <!-- MCP_TOOLS:START -->
 <!-- `npm run docs:mcp`가 이 구간을 생성합니다. -->
 
-현재 MCP 도구 수는 **50개**, canonical input/output schema hash는 `cfd4200eba8476c9e8d79b6cfd10636c6d9f2cba7644dfeaedd2b2dac3ca8d2b`입니다.
+현재 MCP 도구 수는 **50개**, canonical input/output schema hash는 `5259cec5fa3e73ee4b9732ad87fc0fe25dc60e48996c1bf840f7df64721804f2`입니다.
 
 | 도구 | 기능 | 기존 OAuth scope |
 | --- | --- | --- |

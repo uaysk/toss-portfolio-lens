@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const MCP_SCHEMA_VERSION = "1.1";
-export const PORTFOLIO_ENGINE_VERSION = "portfolio-lens-rust-2026.07.2";
+export const PORTFOLIO_ENGINE_VERSION = "portfolio-lens-rust-2026.07.3";
 export const HISTORICAL_LIMITATION = "역사적 데이터에 기반한 분석·시뮬레이션이며 미래 성과를 보장하지 않습니다.";
 
 function canonicalize(value: unknown): unknown {

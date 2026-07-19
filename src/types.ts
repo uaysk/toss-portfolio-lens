@@ -561,7 +561,7 @@ export type BacktestResult = {
   endDate: string;
   config: BacktestRunConfiguration & {
     requestedStartDate: string;
-    latestListDate: string;
+    latestMetadataListDate: string;
     effectiveStartDate: string;
     effectiveEndDate: string;
   };

@@ -395,6 +395,76 @@ export class RunRepository {
     return existing;
   }
 
+  async createPreflightFailureIfAbsent(input: {
+    kind: PortfolioRunKind;
+    ownerSubject: string;
+    requestHash: string;
+    dataRevision: string;
+    engineVersion: string;
+    config: unknown;
+    error: unknown;
+    totalCandidates?: number;
+    manifest?: unknown;
+    now?: number;
+  }): Promise<{ run: PortfolioRunRecord; created: boolean }> {
+    const now = input.now ?? Date.now();
+    const id = randomUUID();
+    const values = [
+      id,
+      input.kind,
+      input.ownerSubject,
+      input.requestHash,
+      input.dataRevision,
+      input.engineVersion,
+      "failed",
+      0,
+      0,
+      input.totalCandidates ?? 0,
+      json(input.config),
+      json(input.error),
+      "[]",
+      "[]",
+      input.manifest === undefined ? undefined : json(input.manifest),
+      now,
+      now,
+      now,
+    ];
+    return this.database.transaction(async (database) => {
+      const inserted = database.dialect === "mysql"
+        ? await database.run(`
+            INSERT IGNORE INTO portfolio_backtest_runs (
+              run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
+              status, progress, completed_candidates, total_candidates, input_json,
+              error_json, warnings_json, tags_json, manifest_json, created_at, finished_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, values)
+        : await database.run(`
+            INSERT INTO portfolio_backtest_runs (
+              run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
+              status, progress, completed_candidates, total_candidates, input_json,
+              error_json, warnings_json, tags_json, manifest_json, created_at, finished_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_subject, run_kind, request_hash, data_revision) DO NOTHING
+          `, values);
+      const created = inserted.affectedRows === 1;
+      if (created) {
+        await this.insertEvent(database, id, "created", {
+          kind: input.kind,
+          request_hash: input.requestHash,
+          data_revision: input.dataRevision,
+        }, now);
+        await this.insertEvent(database, id, "preflight_failed", input.error, now);
+        await this.insertEvent(database, id, "failed", { error: input.error }, now);
+      }
+      const [row] = await database.query<RunRow>(`
+        SELECT * FROM portfolio_backtest_runs
+        WHERE owner_subject = ? AND run_kind = ? AND request_hash = ? AND data_revision = ?
+      `, [input.ownerSubject, input.kind, input.requestHash, input.dataRevision]);
+      if (!row) throw new Error("사전 실패 실행 레코드를 생성하거나 조회하지 못했습니다.");
+      return { run: asRun(row), created };
+    });
+  }
+
   async get(id: string, ownerSubject?: string, includeDeleted = false): Promise<PortfolioRunRecord | undefined> {
     const deleted = includeDeleted ? "" : " AND deleted_at IS NULL";
     const rows = ownerSubject
@@ -733,7 +803,9 @@ export class RunRepository {
           warnings_json = COALESCE(?, warnings_json), updated_at = ?
       WHERE run_id = ? AND status IN ('queued', 'running', 'cancel_requested')
     `, [
-      Math.max(0, Math.min(1, input.progress)),
+      // progress=1 is reserved for the same transaction that commits the
+      // completed terminal state. Active runs remain visibly finalizing.
+      Math.max(0, Math.min(0.99, input.progress)),
       input.completedCandidates,
       input.totalCandidates,
       input.currentValidationWindow,

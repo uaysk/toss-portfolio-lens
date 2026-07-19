@@ -1147,20 +1147,6 @@ fn common_observed_returns(
     (returns, dates.len().saturating_sub(1))
 }
 
-fn downsample<T: Clone>(values: &[T], maximum: usize) -> Vec<T> {
-    if values.len() <= maximum {
-        return values.to_vec();
-    }
-    let mut result = Vec::with_capacity(maximum);
-    result.push(values[0].clone());
-    let step = (values.len() - 1) as f64 / (maximum - 1) as f64;
-    for index in 1..maximum - 1 {
-        result.push(values[(index as f64 * step).round() as usize].clone());
-    }
-    result.push(values.last().unwrap().clone());
-    result
-}
-
 pub fn simulate(input: &BacktestSimulationInput) -> Result<BacktestSimulationResult> {
     simulate_with_control(input, None)
 }
@@ -1747,7 +1733,7 @@ pub fn simulate_with_control(
         requested_start_date: input.requested_start_date.clone(),
         effective_start_date: aligned[0].date.clone(),
         end_date: aligned.last().unwrap().date.clone(),
-        points: downsample(&points, 1_200),
+        points,
         metrics: BacktestMetrics {
             comparable,
             final_balance: round(final_balance, 2),
@@ -1994,6 +1980,37 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("TEST_BACKTEST_CANCELLED")
+        );
+    }
+
+    #[test]
+    fn equity_points_are_not_truncated_above_1200_rows() {
+        let mut input = fixture(QuantityMode::Fractional, 0.0, 0.0);
+        let points = (0..1_305)
+            .map(|index| {
+                let date = crate::date::add_days("2020-01-01", index).unwrap();
+                PricePoint {
+                    date,
+                    close: 100.0 + index as f64 * 0.01,
+                    local_close: Some(100.0 + index as f64 * 0.01),
+                    fx_rate: Some(1.0),
+                    volume: None,
+                    cash_dividend: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        input.requested_start_date = points[0].date.clone();
+        input.end_date = points.last().unwrap().date.clone();
+        input.prices.insert("KRW:AAA".into(), points);
+
+        let result = simulate(&input).unwrap();
+
+        assert_eq!(result.points.len(), 1_305);
+        assert_eq!(result.points[0].date, input.requested_start_date);
+        assert_eq!(result.points.last().unwrap().date, input.end_date);
+        assert_eq!(
+            result.points.last().unwrap().balance,
+            result.metrics.final_balance
         );
     }
 

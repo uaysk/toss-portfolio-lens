@@ -122,6 +122,38 @@ describe("RunRepository management", () => {
     expect(await repository.softDelete(created.id, "owner-b", 140)).toBe(false);
   });
 
+  it("active run은 100%로 표시하지 않고 completed 전이와 함께 100%를 기록한다", async () => {
+    const repository = await setup();
+    const run = await repository.create({
+      kind: "optimization",
+      ownerSubject: "owner-a",
+      requestHash: "9".repeat(64),
+      dataRevision: "revision-a",
+      engineVersion: "engine-a",
+      config: { symbols: ["AAA", "BBB"] },
+      totalCandidates: 2_000,
+      now: 100,
+    });
+    expect(await repository.markRunning(run.id, 110)).toBe(true);
+
+    await repository.updateProgress(run.id, {
+      progress: 1,
+      completedCandidates: 2_000,
+      totalCandidates: 2_000,
+    }, 120);
+    expect(await repository.get(run.id, "owner-a")).toMatchObject({
+      status: "running",
+      progress: 0.99,
+      completedCandidates: 2_000,
+    });
+
+    expect(await repository.complete(run.id, { best: {} }, { candidates: [] }, [], 130)).toBe(true);
+    expect(await repository.get(run.id, "owner-a")).toMatchObject({
+      status: "completed",
+      progress: 1,
+    });
+  });
+
   it("저장소 경계에서도 과도하게 긴 run 이름을 거부한다", async () => {
     const repository = await setup();
     await expect(repository.create({

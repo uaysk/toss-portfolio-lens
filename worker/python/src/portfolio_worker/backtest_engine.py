@@ -102,17 +102,6 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
     return js_round(covariance / denominator) if denominator > 0 else None
 
 
-def _downsample(values: list[Any], maximum: int = 1_200) -> list[Any]:
-    if len(values) <= maximum:
-        return values
-    result = [values[0]]
-    step = (len(values) - 1) / (maximum - 1)
-    for index in range(1, maximum - 1):
-        result.append(values[math.floor(index * step + 0.5)])
-    result.append(values[-1])
-    return result
-
-
 def _summarize_growth_series(
     points: list[dict[str, Any]], daily_returns: list[float], risk_free_rate_percent: float
 ) -> dict[str, Any]:
@@ -595,7 +584,7 @@ def simulate_backtest(input_value: dict[str, Any]) -> dict[str, Any]:
         "requestedStartDate": requested_start,
         "effectiveStartDate": effective_start_date,
         "endDate": effective_end_date,
-        "points": _downsample(full_points),
+        "points": full_points,
         "metrics": {
             "finalBalance": js_round(final_balance, 2),
             "totalContributions": js_round(total_contributions, 2),

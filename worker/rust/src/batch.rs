@@ -156,16 +156,33 @@ fn scenarios(
         "cvar95Percent": distribution(&computed, "cvar95Percent"),
         "totalTransactionCosts": distribution(&computed, "totalTransactionCosts"),
     });
-    Ok(json!({
+    let first_scenario_id = computed
+        .first()
+        .and_then(|value| value.get("id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut result = json!({
         "kind": serde_json::to_value(kind)?,
         "scenarioCount": computed.len(),
-        "baselineScenarioId": computed.first().and_then(|value| value.get("id")).cloned().unwrap_or(Value::Null),
         "scenarios": computed,
         "distributions": distributions,
         "worstScenario": worst,
         "summary": {"scenario_count": list.len(), "worst": worst},
         "warnings": warnings,
-    }))
+    });
+    result
+        .as_object_mut()
+        .expect("batch result is an object")
+        .insert(
+            if kind == JobKind::StressTest {
+                "referenceScenarioId"
+            } else {
+                "baselineScenarioId"
+            }
+            .to_owned(),
+            first_scenario_id,
+        );
+    Ok(result)
 }
 
 fn parse_price_series(value: &Value) -> Result<Vec<PriceSeries>> {
@@ -1129,6 +1146,8 @@ mod tests {
             .install(|| compute(JobKind::StressTest, &payload).unwrap());
         assert_eq!(single, parallel);
         assert_eq!(parallel["scenarioCount"], 2);
+        assert_eq!(parallel["referenceScenarioId"], "up");
+        assert!(parallel.get("baselineScenarioId").is_none());
         assert_eq!(parallel["worstScenario"]["id"], "down");
         assert_eq!(
             parallel["distributions"]["totalReturnPercent"]["min"],

@@ -41,6 +41,7 @@ import { ResearchReportService } from "../../services/research-report-service.js
 import { buildInfo } from "../../build-info.js";
 import { randomUUID } from "node:crypto";
 import { enforceToolRequestLimits } from "../../services/tool-request-limits.js";
+import { TossApiError } from "../../toss.js";
 
 export type ToolHandler = (input: unknown, ownerSubject: string) => Promise<unknown>;
 
@@ -94,6 +95,108 @@ function requireRust(dependencies: McpToolDependencies): RustComputeClient {
     });
   }
   return dependencies.rustCompute;
+}
+
+function preflightErrorDetail(error: unknown, input: {
+  phase: string;
+  algorithm: unknown;
+  symbolCount: number;
+  candidateBudget: number;
+  elapsedMs: number;
+}): Record<string, unknown> {
+  const structured = error instanceof ServiceError ? error.detail : undefined;
+  const upstream = error instanceof TossApiError
+    ? {
+      status: error.status,
+      code: error.code,
+      ...(error.requestId ? { request_id: error.requestId } : {}),
+    }
+    : undefined;
+  return {
+    code: structured?.code ?? (error instanceof TossApiError ? error.code : "OPTIMIZATION_PREFLIGHT_FAILED"),
+    message: structured?.message ?? (error instanceof Error ? error.message : "최적화 사전 준비에 실패했습니다."),
+    retryable: structured?.retryable
+      ?? (error instanceof TossApiError ? error.status >= 500 || error.status === 429 : true),
+    phase: input.phase,
+    algorithm: String(input.algorithm ?? "unknown"),
+    symbol_count: input.symbolCount,
+    candidate_budget: input.candidateBudget,
+    completed_candidate_count: 0,
+    elapsed_ms: input.elapsedMs,
+    worker_job_id: null,
+    worker_started: false,
+    peak_rss_bytes: null,
+    ...(structured?.details ? { details: structured.details } : {}),
+    ...(upstream ? { upstream } : {}),
+    ...(error instanceof Error && error.stack ? { stack_trace: error.stack } : {}),
+  };
+}
+
+async function throwPersistedOptimizationPreflightFailure(input: {
+  dependencies: McpToolDependencies;
+  ownerSubject: string;
+  config: GenericInput;
+  budget: number;
+  startedAt: number;
+  error: unknown;
+  phase: string;
+  loadedDataRevision?: string;
+}): Promise<never> {
+  const diagnostic = preflightErrorDetail(input.error, {
+    phase: input.phase,
+    algorithm: input.config.algorithm,
+    symbolCount: Array.isArray(input.config.symbols) ? input.config.symbols.length : 0,
+    candidateBudget: input.budget,
+    elapsedMs: Date.now() - input.startedAt,
+  });
+  let recorded: Awaited<ReturnType<RunService["recordPreflightFailure"]>> | undefined;
+  let persistenceError: unknown;
+  try {
+    const dataRevision = input.loadedDataRevision
+      ?? await input.dependencies.marketData.repository.dataRevision();
+    recorded = await input.dependencies.runs.recordPreflightFailure({
+      ownerSubject: input.ownerSubject,
+      kind: "optimization",
+      config: input.config,
+      dataRevision,
+      totalCandidates: input.budget,
+      error: diagnostic,
+    });
+  } catch (error) {
+    persistenceError = error;
+  }
+
+  const original = input.error instanceof ServiceError
+    ? input.error.detail
+    : {
+      code: input.error instanceof TossApiError ? input.error.code : "OPTIMIZATION_PREFLIGHT_FAILED",
+      message: input.error instanceof Error ? input.error.message : "최적화 사전 준비에 실패했습니다.",
+      retryable: input.error instanceof TossApiError
+        ? input.error.status >= 500 || input.error.status === 429
+        : true,
+    };
+  throw new ServiceError({
+    ...original,
+    details: {
+      ...original.details,
+      phase: input.phase,
+      ...(recorded ? {
+        run_id: recorded.run.id,
+        request_hash: recorded.run.requestHash,
+        diagnostic_run_created: recorded.created,
+        diagnostic_run_status: recorded.run.status,
+        ...(!recorded.created ? {
+          existing_run_id: recorded.run.id,
+          existing_run_status: recorded.run.status,
+        } : {}),
+      } : {}),
+      ...(persistenceError ? {
+        diagnostic_persistence_error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError),
+      } : {}),
+    },
+  });
 }
 
 function addDays(date: string, days: number): string {
@@ -169,6 +272,7 @@ function optimizationInput(
 ): OptimizationInput {
   const assetCount = Array.isArray(value.symbols) ? value.symbols.length : loaded.prices.length;
   return {
+    objective: value.objective as OptimizationObjective,
     priceSeries: loaded.prices.slice(0, assetCount),
     benchmarkPriceSeries: value.benchmark ? loaded.prices[assetCount] : undefined,
     benchmark: value.benchmark ? loaded.returns[assetCount] : undefined,
@@ -1055,6 +1159,23 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       const completed = runs.filter((run): run is NonNullable<typeof run> => run?.status === "completed");
       if (completed.length < 2) throw new ServiceError({ code: "INSUFFICIENT_COMPLETED_RUNS", message: "완료된 백테스트 run이 2개 이상 필요합니다.", retryable: false });
       if (completed.some((run) => run.kind !== "backtest")) throw new ServiceError({ code: "INVALID_RUN_KIND", message: "백테스트 run만 비교할 수 있습니다.", retryable: false });
+      const revisionGroups = Object.fromEntries(Array.from(new Set(completed.map((run) => run.dataRevision))).map((revision) => [
+        revision,
+        completed.filter((run) => run.dataRevision === revision).map((run) => run.id),
+      ]));
+      const revisions = new Set(Object.keys(revisionGroups));
+      if (revisions.size > 1 && value.allowMixedDataRevisions !== true) {
+        throw new ServiceError({
+          code: "DATA_REVISION_MISMATCH",
+          message: "서로 다른 data revision의 백테스트는 기본 ranking에서 비교하지 않습니다.",
+          retryable: false,
+          details: {
+            distinct_data_revisions: revisions.size,
+            revision_groups: revisionGroups,
+            remediation: "동일 data revision으로 재실행하거나 allowMixedDataRevisions=true를 명시하세요.",
+          },
+        });
+      }
       const comparable = completed.map((run) => {
         const summary = (run.summary ?? {}) as Record<string, unknown>;
         const result = (run.result ?? {}) as {
@@ -1132,7 +1253,6 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       const duplicateCandidates = inputSignatures.flatMap((left, index) => inputSignatures.slice(index + 1)
         .filter((right) => right.signature === left.signature)
         .map((right) => ({ left_run_id: left.run_id, right_run_id: right.run_id, reason: "same_assets_and_weights" })));
-      const revisions = new Set(completed.map((run) => run.dataRevision));
       return envelope({
         request: value,
         dataRevision: requestHash(Array.from(revisions).sort()),
@@ -1142,6 +1262,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           rankings,
           pareto_run_ids: paretoRunIds,
           duplicate_candidates: duplicateCandidates,
+          revision_groups: revisionGroups,
           cost_range: {
             minimum: Math.min(...comparable.map((item) => Number(item.cost?.estimatedTotalCost ?? 0))),
             maximum: Math.max(...comparable.map((item) => Number(item.cost?.estimatedTotalCost ?? 0))),
@@ -1327,27 +1448,53 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     optimize_portfolio: async (input, ownerSubject) => {
       const value = await resolvePresetExecution(dependencies, ownerSubject, object(input), "optimize_portfolio");
-      if (dependencies.runs.executionMode === "inline" && (
-        value.algorithm !== "random_search"
-        || (value.groupConstraints as unknown[]).length > 0
-        || Object.keys(value.robustScoreWeights as Record<string, number>).length > 0
-        || recordValue(value.regimePolicySearch)?.enabled === true
-      )) {
-        throw new ServiceError({
-          code: "RUST_ADVANCED_OPTIMIZER_REQUIRED",
-          message: "고급 optimizer 알고리즘·그룹 제약·사용자 robust score·국면 정책은 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
-          retryable: false,
-        });
-      }
-      const symbols = [...value.symbols as string[], ...(value.benchmark ? [String(value.benchmark)] : [])];
-      const loaded = await dependencies.returnSeries.load({ symbols, fromDate: String(value.fromDate), toDate: String(value.toDate), currencyMode: value.currencyMode as never, adjusted: true });
       const budget = Math.min(Number(value.candidateBudget), dependencies.maxCandidateBudget);
       value.candidateBudget = budget;
-      const ledger = dependencies.runs.executionMode === "inline"
-        ? { warnings: [
-          "inline 호환 엔진은 legacy random-search 계산만 수행하며 Ledoit–Wolf, 기준 포트폴리오, IS/OOS robust score 분리와 2단계 ledger 재검증은 Rust 실행 모드가 필요합니다.",
-        ] }
-        : await optimizationLedgerTemplate(dependencies, value);
+      const symbols = [...value.symbols as string[], ...(value.benchmark ? [String(value.benchmark)] : [])];
+      const preflightStartedAt = Date.now();
+      let preflightPhase = "validation";
+      let loaded: LoadedReturnSeries | undefined;
+      let ledger: Awaited<ReturnType<typeof optimizationLedgerTemplate>> | undefined;
+      try {
+        if (dependencies.runs.executionMode === "inline" && (
+          value.algorithm !== "random_search"
+          || (value.groupConstraints as unknown[]).length > 0
+          || Object.keys(value.robustScoreWeights as Record<string, number>).length > 0
+          || recordValue(value.regimePolicySearch)?.enabled === true
+        )) {
+          throw new ServiceError({
+            code: "RUST_ADVANCED_OPTIMIZER_REQUIRED",
+            message: "고급 optimizer 알고리즘·그룹 제약·사용자 robust score·국면 정책은 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
+            retryable: false,
+          });
+        }
+        preflightPhase = "market_data";
+        loaded = await dependencies.returnSeries.load({
+          symbols,
+          fromDate: String(value.fromDate),
+          toDate: String(value.toDate),
+          currencyMode: value.currencyMode as never,
+          adjusted: true,
+        });
+        preflightPhase = "ledger_template";
+        ledger = dependencies.runs.executionMode === "inline"
+          ? { warnings: [
+            "inline 호환 엔진은 legacy random-search 계산만 수행하며 Ledoit–Wolf, 기준 포트폴리오, IS/OOS robust score 분리와 2단계 ledger 재검증은 Rust 실행 모드가 필요합니다.",
+          ] }
+          : await optimizationLedgerTemplate(dependencies, value);
+      } catch (error) {
+        await throwPersistedOptimizationPreflightFailure({
+          dependencies,
+          ownerSubject,
+          config: value,
+          budget,
+          startedAt: preflightStartedAt,
+          error,
+          phase: preflightPhase,
+          ...(loaded ? { loadedDataRevision: loaded.dataRevision } : {}),
+        });
+      }
+      if (!loaded || !ledger) throw new Error("최적화 사전 준비 결과가 없습니다.");
       const workerPayload = {
         optimization: {
           ...optimizationInput(value, loaded),
@@ -1609,11 +1756,26 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
               ...result.metrics,
               cvar95Percent: result.advanced.tailRisk.expectedShortfall95Percent,
             };
-            results.push({ name: scenario.name, summary, data_quality: result.dataQuality, warnings: result.warnings });
+            results.push({
+              id: `stress-${index + 1}`,
+              name: scenario.name,
+              summary,
+              data_quality: result.dataQuality,
+              warnings: result.warnings,
+            });
             warnings.push(...result.warnings.map((warning) => `${scenario.name}: ${warning}`));
             await context.updateProgress((index + 1) / scenarios.length, { completedCandidates: index + 1, totalCandidates: scenarios.length });
           }
-          return { summary: { scenario_count: results.length }, result: { scenarios: results }, warnings: Array.from(new Set(warnings)), artifacts: [{ type: "result", content: { scenarios: results }, rowCount: results.length }] };
+          const result = {
+            referenceScenarioId: scenarios.length ? "stress-1" : null,
+            scenarios: results,
+          };
+          return {
+            summary: { scenario_count: results.length },
+            result,
+            warnings: Array.from(new Set(warnings)),
+            artifacts: [{ type: "result", content: result, rowCount: results.length }],
+          };
         },
       });
       return runResultEnvelope(queued.run, value);

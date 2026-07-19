@@ -151,6 +151,17 @@ describe("optimizer validation schemas", () => {
       robustValidation: { mode: "holdout", trainFraction: 0.8, testFraction: 0.3 },
     })).toThrow("inner train/test 비율 합계는 1 이하여야 합니다");
   });
+
+  it("CAGR와 동일기간 누적수익률 목적함수를 직접 표현한다", () => {
+    expect(toolSchemas.optimize_portfolio.safeParse({
+      ...optimization,
+      objective: "max_cagr",
+    }).success).toBe(true);
+    expect(toolSchemas.optimize_portfolio.safeParse({
+      ...optimization,
+      objective: "max_total_return",
+    }).success).toBe(true);
+  });
 });
 
 describe("exposure look-through schemas", () => {

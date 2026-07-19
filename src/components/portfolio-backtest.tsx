@@ -89,8 +89,10 @@ function rebalanceEvenly(assets: BacktestAsset[], totalWeight = 100): BacktestAs
   }));
 }
 
-function latestListDate(assets: BacktestAsset[]): string {
-  return assets.map((asset) => asset.listDate).filter(Boolean).sort().at(-1) ?? "";
+function defaultAnalysisStart(endDate: string): string {
+  const value = new Date(`${endDate}T00:00:00Z`);
+  value.setUTCFullYear(value.getUTCFullYear() - 5);
+  return value.toISOString().slice(0, 10);
 }
 
 function shortDate(value: string): string {
@@ -229,7 +231,7 @@ export function PortfolioBacktestView({
       }
       const next = rebalanceEvenly([...assets, { ...payload.instruments[0], weight: 0, lotSize: 1 }], 100 - cashTargetPercent);
       setAssets(next);
-      if (!manuallyEditedStart.current) setStartDate(latestListDate(next));
+      if (!manuallyEditedStart.current && !startDate) setStartDate(defaultAnalysisStart(today));
       setSymbol("");
       setResult(undefined);
     } catch (caught) {
@@ -242,7 +244,6 @@ export function PortfolioBacktestView({
   const removeAsset = (assetSymbol: string) => {
     const next = removeBacktestAssetPreservingWeights(assets, assetSymbol);
     setAssets(next);
-    if (!manuallyEditedStart.current) setStartDate(latestListDate(next));
     setResult(undefined);
   };
 
@@ -535,7 +536,6 @@ export function PortfolioBacktestView({
             <Input
               type="date"
               value={startDate}
-              min={enforcePointInTimeUniverse ? undefined : latestListDate(assets)}
               max={endDate}
               onChange={(event) => {
                 manuallyEditedStart.current = true;
@@ -544,7 +544,7 @@ export function PortfolioBacktestView({
               }}
               className="bg-secondary"
             />
-            <span className="mt-2 block text-[10px] text-muted-foreground">{enforcePointInTimeUniverse ? "PIT 구간을 적용하므로 종목별 편입 전 기간도 선택 가능" : `기본값: 가장 늦은 상장일 ${latestListDate(assets) || "-"}`}</span>
+            <span className="mt-2 block text-[10px] text-muted-foreground">{enforcePointInTimeUniverse ? "PIT 구간을 적용하며 실제 관측 가격과 명시된 membership으로 기간을 판정" : `기본 요청: 최근 5년 ${defaultAnalysisStart(endDate)} · 공급자 listDate로 자르지 않음`}</span>
           </label>
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">종료일</span>

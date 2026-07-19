@@ -6,7 +6,7 @@ export type OptimizationCandidateRecord = {
   runId: string;
   rank?: number;
   weights: Record<string, number>;
-  metrics: Record<string, number | null>;
+  metrics: Record<string, unknown>;
   score: number;
   pareto: boolean;
   createdAt: number;
@@ -29,7 +29,7 @@ function parseCandidate(row: CandidateRow): OptimizationCandidateRecord {
     runId: row.run_id,
     ...(row.candidate_rank !== null ? { rank: Number(row.candidate_rank) } : {}),
     weights: JSON.parse(row.weights_json) as Record<string, number>,
-    metrics: JSON.parse(row.metrics_json) as Record<string, number | null>,
+    metrics: JSON.parse(row.metrics_json) as Record<string, unknown>,
     score: Number(row.score),
     pareto: Boolean(row.pareto),
     createdAt: Number(row.created_at),

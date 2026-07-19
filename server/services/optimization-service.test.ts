@@ -25,6 +25,7 @@ function series(key: string, drift: number, phase: number) {
 describe("portfolio optimization regressions", () => {
   it("같은 seed와 candidate budget에서 결정론적인 후보 비중을 생성한다", () => {
     const input = {
+      objective: "robust_score" as const,
       priceSeries: [series("A", 0.001, 0), series("B", 0.0005, 1), series("C", 0.0008, 2)],
       constraints: { minWeight: 0, maxWeight: 0.8, maxAssets: 3 },
       seed: 12345,
@@ -34,6 +35,12 @@ describe("portfolio optimization regressions", () => {
     const first = optimizePortfolio(input);
     const second = optimizePortfolio(input);
     expect(first.candidateCount).toBeGreaterThan(0);
+    expect(first.bestByObjective.max_cagr?.metrics.cagr).toEqual(expect.any(Number));
+    expect(first.bestByObjective.max_total_return?.metrics.totalReturn).toEqual(expect.any(Number));
+    expect(first.candidates[0].metrics).toMatchObject({
+      return: first.candidates[0].metrics.cagr,
+      period: expect.objectContaining({ role: "screening_full", observationCount: 89 }),
+    });
     expect(first.candidates).toEqual(second.candidates);
     expect(first.bestByObjective).toEqual(second.bestByObjective);
     expect(optimizePortfolio({ ...input, seed: 54321 }).candidates).not.toEqual(first.candidates);
@@ -42,12 +49,14 @@ describe("portfolio optimization regressions", () => {
   it("필수·제외 충돌을 거부하고 종목별 비중 제약을 지킨다", () => {
     const priceSeries = [series("A", 0.001, 0), series("B", 0.0005, 1), series("C", 0.0008, 2)];
     expect(() => optimizePortfolio({
+      objective: "robust_score",
       priceSeries,
       constraints: { requiredAssets: ["A"], excludedAssets: ["A"] },
       candidateBudget: 10,
     })).toThrow("필수 자산");
 
     const result = optimizePortfolio({
+      objective: "robust_score",
       priceSeries,
       constraints: { minWeights: { A: 0.2 }, maxWeights: { A: 0.4 }, maxAssets: 3 },
       seed: 7,
@@ -61,9 +70,11 @@ describe("portfolio optimization regressions", () => {
       weights: { [name]: 1 },
       sampleCount: 100,
       metrics: {
+        cagr: 0.1, totalReturn: 0.1,
         sharpe: 1, sortino: 1, calmar: 1, volatility: 0.1, cvar: -0.1,
         informationRatio: null, robustScore: 1, return: 0.1, maxDrawdown: -0.1,
         turnover: 0.1, transactionCost: 0.001, ...values,
+        period: { observationCount: 100, role: "screening_full" },
       },
     });
     const strong = candidate("strong", { return: 0.2, volatility: 0.08, maxDrawdown: -0.08, cvar: -0.08, turnover: 0.05, transactionCost: 0.0005 });
@@ -135,6 +146,7 @@ describe("portfolio optimization regressions", () => {
     expect(holdout[0]!.testStartIndex - holdout[0]!.trainEndIndex - 1).toBe(3);
 
     const result = optimizePortfolio({
+      objective: "robust_score",
       priceSeries: [series("A", 0.001, 0), series("B", 0.0005, 1), series("C", 0.0008, 2)],
       constraints: { minWeight: 0, maxWeight: 0.8, maxAssets: 3 },
       seed: 12345,

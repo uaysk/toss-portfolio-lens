@@ -20,6 +20,7 @@
     "test:python-worker": "tsx scripts/verify-python-worker-postgres.ts",
     "benchmark:python-worker": "tsx scripts/benchmark-python-worker.ts",
     "benchmark:rust-ipc": "tsx scripts/benchmark-rust-ipc.ts",
+    "benchmark:optimization-load": "tsx scripts/benchmark-optimization-load.ts",
     "docs:capture-readme": "node scripts/capture-readme-showcase.mjs",
     "docs:mcp": "tsx scripts/generate-mcp-docs.ts",
     "docs:mcp:check": "tsx scripts/generate-mcp-docs.ts --check",

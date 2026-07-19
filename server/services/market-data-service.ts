@@ -5,10 +5,13 @@ import {
   MarketDataRepository,
   type CachedMarketCandle,
 } from "../repositories/market-data-repository.js";
-import type { InstrumentInfo, TossClient } from "../toss.js";
+import { TossApiError, type InstrumentInfo, type TossClient } from "../toss.js";
+import { ServiceError } from "./service-envelope.js";
 
 const API_PACING_MS = 230;
 const MAX_PRICE_PAGES = 100;
+const FX_SEED_LOOKBACK_DAYS = 7;
+const MAX_FX_CARRY_FORWARD_DAYS = 7;
 
 export type MarketInterval = "1d" | "1w" | "1mo";
 export type CurrencyMode = "local" | "KRW";
@@ -55,8 +58,20 @@ export type MarketSeriesResult = {
     observations: number;
     missingFxObservations: number;
     carriedFxObservations: number;
+    firstObservationDate?: string;
+    metadataListDate?: string;
+    metadataListDateRole: "provider_listing_metadata_not_verified_inception";
+    listingDateConsistency: "consistent" | "price_precedes_metadata" | "unavailable";
   };
 };
+
+function listingDateConsistency(
+  firstObservationDate: string | undefined,
+  metadataListDate: string | undefined,
+): "consistent" | "price_precedes_metadata" | "unavailable" {
+  if (!firstObservationDate || !metadataListDate) return "unavailable";
+  return firstObservationDate < metadataListDate ? "price_precedes_metadata" : "consistent";
+}
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -89,6 +104,29 @@ function addDays(date: string, days: number): string {
   const value = new Date(`${date}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
+}
+
+function calendarDaysBetween(fromDate: string, toDate: string): number {
+  return Math.round((Date.parse(`${toDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86_400_000);
+}
+
+function isMissingExchangeRate(error: unknown): error is TossApiError {
+  return error instanceof TossApiError
+    && error.status === 404
+    && error.code === "exchange-rate-not-found";
+}
+
+function upstreamErrorDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof TossApiError) {
+    return {
+      status: error.status,
+      code: error.code,
+      ...(error.requestId ? { request_id: error.requestId } : {}),
+    };
+  }
+  return {
+    type: error instanceof Error ? error.name : "UnknownError",
+  };
 }
 
 function weekKey(date: string): string {
@@ -248,18 +286,127 @@ export class MarketDataService {
   async ensureExchangeRates(dates: string[]): Promise<Map<string, number>> {
     const sorted = Array.from(new Set(dates.filter(isHistoryDate))).sort();
     if (!sorted.length) return new Map();
-    const cached = await this.store.getExchangeRates(sorted[0], sorted.at(-1)!);
+    const firstRequestedDate = sorted[0];
+    const lastRequestedDate = sorted.at(-1)!;
+    const seedFromDate = addDays(firstRequestedDate, -FX_SEED_LOOKBACK_DAYS);
+    let cached = await this.store.getExchangeRates(seedFromDate, lastRequestedDate);
+    const hasStartingRate = () => Array.from(cached.entries()).some(
+      ([date, rate]) => date <= firstRequestedDate && Number.isFinite(rate) && rate > 0,
+    );
+    let lastSeedError: unknown;
+
+    // A preceding close is a legitimate carry-forward seed for a market/FX
+    // holiday mismatch. Never use a later rate to backfill an older period.
+    if (!hasStartingRate()) {
+      for (let offset = 0; offset >= -FX_SEED_LOOKBACK_DAYS; offset -= 1) {
+        const date = addDays(firstRequestedDate, offset);
+        try {
+          await this.refreshExchangeRate(date);
+          cached = await this.store.getExchangeRates(seedFromDate, lastRequestedDate);
+          if (hasStartingRate()) break;
+        } catch (error) {
+          if (!isMissingExchangeRate(error)) {
+            throw new ServiceError({
+              code: "FX_RATE_FETCH_FAILED",
+              message: "USD/KRW 환율 공급자 조회에 실패했습니다.",
+              retryable: error instanceof TossApiError ? error.status >= 500 || error.status === 429 : true,
+              details: {
+                fx_pair: "USD/KRW",
+                requested_period: { from: firstRequestedDate, to: lastRequestedDate },
+                attempted_date: date,
+                upstream: upstreamErrorDetails(error),
+              },
+            });
+          }
+          lastSeedError = error;
+        }
+      }
+    }
+
+    if (!hasStartingRate()) {
+      const availableDates = Array.from(cached.entries())
+        .filter(([, rate]) => Number.isFinite(rate) && rate > 0)
+        .map(([date]) => date)
+        .sort();
+      throw new ServiceError({
+        code: "FX_HISTORY_UNAVAILABLE",
+        message: `USD/KRW 환율이 ${firstRequestedDate}부터 제공되지 않아 원화 가격을 계산할 수 없습니다.`,
+        retryable: false,
+        details: {
+          fx_pair: "USD/KRW",
+          requested_period: { from: firstRequestedDate, to: lastRequestedDate },
+          fx_available_period: availableDates.length
+            ? { from: availableDates[0], to: availableDates.at(-1)! }
+            : null,
+          missing_observation_count: sorted.filter((date) => !cached.has(date)).length,
+          attempted_seed_period: { from: seedFromDate, to: firstRequestedDate },
+          upstream: upstreamErrorDetails(lastSeedError),
+        },
+      });
+    }
+
     const missing = sorted.filter((date) => !cached.has(date));
     let cursor = 0;
     const workers = Math.min(2, missing.length);
     await Promise.all(Array.from({ length: workers }, async () => {
       while (cursor < missing.length) {
         const date = missing[cursor++];
-        await this.refreshExchangeRate(date);
+        try {
+          await this.refreshExchangeRate(date);
+        } catch (error) {
+          // Once a valid preceding rate exists, an isolated holiday miss is
+          // represented by carry-forward metadata instead of a generic 500.
+          if (!isMissingExchangeRate(error)) {
+            throw new ServiceError({
+              code: "FX_RATE_FETCH_FAILED",
+              message: "USD/KRW 환율 공급자 조회에 실패했습니다.",
+              retryable: error instanceof TossApiError ? error.status >= 500 || error.status === 429 : true,
+              details: {
+                fx_pair: "USD/KRW",
+                requested_period: { from: firstRequestedDate, to: lastRequestedDate },
+                attempted_date: date,
+                missing_observation_count: missing.length,
+                upstream: upstreamErrorDetails(error),
+              },
+            });
+          }
+        }
         if (cursor < missing.length) await sleep(API_PACING_MS);
       }
     }));
-    return this.store.getExchangeRates(sorted[0], sorted.at(-1)!);
+    const resolved = await this.store.getExchangeRates(seedFromDate, lastRequestedDate);
+    const validRates = Array.from(resolved.entries())
+      .filter(([, rate]) => Number.isFinite(rate) && rate > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    let rateIndex = 0;
+    let lastValidFxDate: string | undefined;
+    for (const date of sorted) {
+      while (rateIndex < validRates.length && validRates[rateIndex]![0] <= date) {
+        lastValidFxDate = validRates[rateIndex]![0];
+        rateIndex += 1;
+      }
+      if (!lastValidFxDate) continue;
+      const carryForwardDays = calendarDaysBetween(lastValidFxDate, date);
+      if (carryForwardDays <= MAX_FX_CARRY_FORWARD_DAYS) continue;
+      throw new ServiceError({
+        code: "FX_HISTORY_UNAVAILABLE",
+        message: `USD/KRW 환율을 ${MAX_FX_CARRY_FORWARD_DAYS}일 넘게 이월해야 하므로 ${date} 원화 가격을 계산할 수 없습니다.`,
+        retryable: false,
+        details: {
+          fx_pair: "USD/KRW",
+          requested_period: { from: firstRequestedDate, to: lastRequestedDate },
+          fx_available_period: validRates.length
+            ? { from: validRates[0]![0], to: validRates.at(-1)![0] }
+            : null,
+          missing_observation_count: sorted.filter((requiredDate) => !resolved.has(requiredDate)).length,
+          last_valid_fx_date: lastValidFxDate,
+          first_uncovered_date: date,
+          carry_forward_days: carryForwardDays,
+          carry_forward_limit_days: MAX_FX_CARRY_FORWARD_DAYS,
+        },
+      });
+    }
+    return resolved;
   }
 
   async getCachedExchangeRateAvailability(fromDate: string, toDate: string): Promise<{
@@ -302,8 +449,34 @@ export class MarketDataService {
       toDate: input.toDate,
     });
     const needsFx = currencyMode === "KRW" && instrument.currency === "USD";
-    const exchangeRates = needsFx ? await this.ensureExchangeRates(candles.map((item) => item.date)) : new Map<string, number>();
-    let latestRate = instrument.currency === "USD" && currencyMode === "local" ? 1 : 0;
+    let exchangeRates = new Map<string, number>();
+    if (needsFx) {
+      try {
+        exchangeRates = await this.ensureExchangeRates(candles.map((item) => item.date));
+      } catch (error) {
+        if (error instanceof ServiceError) {
+          throw new ServiceError({
+            ...error.detail,
+            details: {
+              ...error.detail.details,
+              symbol: instrument.symbol,
+              requested_period: { from: input.fromDate, to: input.toDate },
+            },
+          });
+        }
+        throw error;
+      }
+    }
+    const firstCandleDate = candles[0]?.date;
+    const startingRate = needsFx && firstCandleDate
+      ? Array.from(exchangeRates.entries())
+        .filter(([date, rate]) => date <= firstCandleDate && Number.isFinite(rate) && rate > 0)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .at(-1)?.[1]
+      : undefined;
+    let latestRate = needsFx
+      ? startingRate ?? 0
+      : instrument.currency === "USD" && currencyMode === "local" ? 1 : 0;
     let missingFxObservations = 0;
     let carriedFxObservations = 0;
     const points = candles.flatMap((candle): MarketSeriesPoint[] => {
@@ -330,6 +503,8 @@ export class MarketDataService {
       }];
     });
     const aggregated = aggregate(points, interval);
+    const firstObservationDate = candles[0]?.date;
+    const dateConsistency = listingDateConsistency(firstObservationDate, instrument.listDate);
     const dataRevision = createHash("sha256")
       .update(`${await this.repository.dataRevision()}:${instrument.symbol}:${adjusted}:${input.fromDate}:${input.toDate}`)
       .digest("hex");
@@ -353,6 +528,9 @@ export class MarketDataService {
         "별도 현금배당, 세금, 거래비용과 슬리피지는 가격 시계열에 추가하지 않습니다.",
       ],
       warnings: [
+        ...(dateConsistency === "price_precedes_metadata" ? [
+          `${instrument.symbol} 가격 첫 관측일 ${firstObservationDate}이 공급자 listDate ${instrument.listDate}보다 빠릅니다. listDate를 역사 시계열 시작일로 사용하지 않습니다.`,
+        ] : []),
         ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 값을 사용했습니다.`] : []),
         ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 제외했습니다.`] : []),
         "모든 결과는 역사적 관측이며 미래 성과를 보장하지 않습니다.",
@@ -361,6 +539,10 @@ export class MarketDataService {
         observations: aggregated.reduce((sum, item) => sum + item.observations, 0),
         missingFxObservations,
         carriedFxObservations,
+        ...(firstObservationDate ? { firstObservationDate } : {}),
+        ...(instrument.listDate ? { metadataListDate: instrument.listDate } : {}),
+        metadataListDateRole: "provider_listing_metadata_not_verified_inception",
+        listingDateConsistency: dateConsistency,
       },
     };
   }
@@ -369,6 +551,9 @@ export class MarketDataService {
     assets: Array<MarketInstrument & {
       firstDate?: string;
       lastDate?: string;
+      metadataListDate?: string;
+      metadataListDateRole: "provider_listing_metadata_not_verified_inception";
+      listingDateConsistency: "consistent" | "price_precedes_metadata" | "unavailable";
       observations: number;
       commonObservations: number;
       missingObservations: number;
@@ -405,6 +590,9 @@ export class MarketDataService {
       : new Set<string>();
     const assets = available.map((item, index) => ({
       ...item,
+      ...(item.listDate ? { metadataListDate: item.listDate } : {}),
+      metadataListDateRole: "provider_listing_metadata_not_verified_inception" as const,
+      listingDateConsistency: listingDateConsistency(item.firstDate, item.listDate),
       commonObservations: observedDates[index].size,
       missingObservations: Math.max(0, union.size - observedDates[index].size),
       observationRate: union.size ? observedDates[index].size / union.size : 0,

@@ -50,8 +50,8 @@ function date(index: number): string {
   return new Date(Date.UTC(2018, 0, 1 + index)).toISOString().slice(0, 10);
 }
 
-export function buildSyntheticFixture(dayCount = 1_260): Fixture {
-  const definitions = [
+export function buildSyntheticFixture(dayCount = 1_260, assetCount = 8): Fixture {
+  const baseDefinitions = [
     { symbol: "KR1", currency: "KRW" as const, weight: 18, phase: 0.1, drift: 0.00035 },
     { symbol: "KR2", currency: "KRW" as const, weight: 16, phase: 0.8, drift: 0.00028 },
     { symbol: "KR3", currency: "KRW" as const, weight: 15, phase: 1.6, drift: 0.00022 },
@@ -61,6 +61,22 @@ export function buildSyntheticFixture(dayCount = 1_260): Fixture {
     { symbol: "US3", currency: "USD" as const, weight: 8, phase: 2.0, drift: 0.00031 },
     { symbol: "US4", currency: "USD" as const, weight: 6, phase: 2.8, drift: 0.00026 },
   ];
+  const safeAssetCount = Math.max(2, Math.min(20, Math.trunc(assetCount)));
+  const expanded = [...baseDefinitions];
+  for (let index = expanded.length; index < safeAssetCount; index += 1) {
+    expanded.push({
+      symbol: `S${String(index + 1).padStart(2, "0")}`,
+      currency: index % 2 ? "USD" as const : "KRW" as const,
+      weight: 1,
+      phase: (index * 0.63) % Math.PI,
+      drift: 0.00016 + (index % 7) * 0.000035,
+    });
+  }
+  const selected = expanded.slice(0, safeAssetCount);
+  const selectedWeight = selected.reduce((sum, definition) => sum + definition.weight, 0);
+  const definitions = safeAssetCount === baseDefinitions.length
+    ? selected
+    : selected.map((definition) => ({ ...definition, weight: definition.weight / selectedWeight * 100 }));
   const prices = new Map<string, Array<{ date: string; close: number; localClose: number; fxRate: number }>>();
   const optimizationSeries: OptimizationInput["priceSeries"] = [];
 
@@ -114,6 +130,7 @@ export function buildSyntheticFixture(dayCount = 1_260): Fixture {
       benchmark: { key: "SYNTH", name: "Synthetic benchmark", prices: benchmark },
     },
     optimization: {
+      objective: "robust_score",
       priceSeries: optimizationSeries,
       benchmark: {
         key: "SYNTH",

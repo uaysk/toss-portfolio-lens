@@ -26,7 +26,9 @@ const BASELINE_NAMES: [&str; 7] = [
     "hrp",
     "herc",
 ];
-const OBJECTIVES: [&str; 7] = [
+const OBJECTIVES: [&str; 9] = [
+    "max_cagr",
+    "max_total_return",
     "max_sharpe",
     "max_sortino",
     "max_calmar",
@@ -1695,6 +1697,8 @@ fn training_objective_fitness(
     };
     let candidate = evaluate_candidate(frame, weights, &training_options);
     let key = match objective {
+        "max_cagr" => "cagr",
+        "max_total_return" => "totalReturn",
         "max_sharpe" => "sharpe",
         "max_sortino" => "sortino",
         "max_calmar" => "calmar",
@@ -2596,6 +2600,25 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let fold_count = windows.len();
+    let validation_requested = options.validation_config.is_some();
+    let validation_enabled = options
+        .validation_config
+        .and_then(Value::as_object)
+        .is_some_and(|value| value.get("enabled").and_then(Value::as_bool) != Some(false));
+    let validation_status = if !validation_requested {
+        "not_requested"
+    } else if !validation_enabled {
+        "disabled"
+    } else if fold_count == 0 {
+        "not_evaluated"
+    } else {
+        "completed"
+    };
+    let validation_reason = match validation_status {
+        "disabled" => Some("validation_disabled"),
+        "not_evaluated" => Some("no_valid_folds"),
+        _ => None,
+    };
     let component_coverage = |count: usize| {
         if fold_count == 0 {
             0.0
@@ -2612,10 +2635,21 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
     metrics.insert("cvar".to_owned(), nullable(cvar));
     metrics.insert("informationRatio".to_owned(), nullable(information_ratio));
     metrics.insert("robustScore".to_owned(), Value::Null);
+    metrics.insert("cagr".to_owned(), nullable(cagr));
+    metrics.insert("totalReturn".to_owned(), nullable(cumulative));
     metrics.insert("return".to_owned(), nullable(cagr));
     metrics.insert("maxDrawdown".to_owned(), nullable(max_drawdown));
     metrics.insert("turnover".to_owned(), json!(turnover));
     metrics.insert("transactionCost".to_owned(), json!(transaction_cost));
+    metrics.insert(
+        "period".to_owned(),
+        json!({
+            "from": frame.dates.first(),
+            "to": frame.dates.last(),
+            "observationCount": observations,
+            "role": if windows.is_empty() { "screening_full" } else { "screening_train" },
+        }),
+    );
 
     let metric = |key: &str| metrics.get(key).and_then(Value::as_f64);
     let robust_values = [
@@ -2637,6 +2671,8 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
         .insert(
             "validation".to_owned(),
             json!({
+                "status": validation_status,
+                "reason": validation_reason,
                 "mode": validation_mode,
                 "windowMode": window_mode,
                 "foldCount": fold_count,
@@ -2676,9 +2712,13 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
     json!({
         "weights": weights.to_json(),
         "sampleCount": observations,
+        "validationStatus": validation_status,
+        "validationReason": validation_reason,
         "metrics": metrics,
         "walkForwardTestCoverage": coverage,
         "walkForwardSignal": {
+            "status": validation_status,
+            "reason": validation_reason,
             "mode": validation_mode,
             "windowMode": window_mode,
             "foldCount": fold_count,
@@ -2695,6 +2735,8 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
 
 fn better(left: &Value, right: &Value, objective: &str) -> bool {
     let key = match objective {
+        "max_cagr" => "cagr",
+        "max_total_return" => "totalReturn",
         "max_sharpe" => "sharpe",
         "max_sortino" => "sortino",
         "max_calmar" => "calmar",
@@ -3020,6 +3062,7 @@ fn ledger_metrics(
 ) -> (Value, Value) {
     let comparable = &result.metrics.comparable;
     let cagr = comparable.cagr_percent.map(|value| value / 100.0);
+    let total_return = Some(comparable.total_return_percent / 100.0);
     let volatility = comparable
         .annualized_volatility_percent
         .map(|value| value / 100.0);
@@ -3055,6 +3098,8 @@ fn ledger_metrics(
     let (robust_score, detail) = robust_score_detail(robust_weights, &values, 0.0);
     (
         json!({
+            "cagr": cagr,
+            "totalReturn": total_return,
             "return": cagr,
             "sharpe": comparable.sharpe_ratio,
             "sortino": comparable.sortino_ratio,
@@ -3071,6 +3116,12 @@ fn ledger_metrics(
             "finalBalance": result.metrics.final_balance,
             "totalTransactionCosts": result.metrics.total_transaction_costs,
             "tradeCount": result.trades.len(),
+            "period": {
+                "from": result.effective_start_date,
+                "to": result.end_date,
+                "observationCount": result.points.len().saturating_sub(1),
+                "role": "ledger_full",
+            },
         }),
         detail,
     )
@@ -3078,6 +3129,8 @@ fn ledger_metrics(
 
 fn metric_delta(screening: &Value, ledger: &Value) -> Value {
     let keys = [
+        "cagr",
+        "totalReturn",
         "return",
         "sharpe",
         "sortino",
@@ -3891,7 +3944,7 @@ fn regime_policy_candidate_json(
         "trainingMetrics": candidate.training_metrics,
         "oosScreeningMetrics": candidate.oos_metrics,
         "screeningRank": candidate.screening_rank,
-        "validationStatus": candidate.validation_status,
+        "ledgerValidationStatus": candidate.validation_status,
         "validationError": candidate.validation_error,
         "ledgerMetrics": candidate.ledger_metrics,
         "ledgerRobustScoreDetail": candidate.ledger_robust_detail,
@@ -4331,7 +4384,7 @@ fn validate_with_ledger(
             object.insert("screeningRank".to_owned(), json!(index + 1));
             object.insert("screeningMetrics".to_owned(), screening_metrics);
             object.insert(
-                "validationStatus".to_owned(),
+                "ledgerValidationStatus".to_owned(),
                 json!(if config.ledger_template.is_some() {
                     "not_selected"
                 } else {
@@ -4381,7 +4434,7 @@ fn validate_with_ledger(
                     ledger_metrics(&result, &config.robust_weights);
                 let delta = metric_delta(&screening_metrics, &ledger_metrics);
                 if let Some(object) = candidates[index].as_object_mut() {
-                    object.insert("validationStatus".to_owned(), json!("completed"));
+                    object.insert("ledgerValidationStatus".to_owned(), json!("completed"));
                     object.insert("ledgerMetrics".to_owned(), ledger_metrics);
                     object.insert("ledgerRobustScoreDetail".to_owned(), robust_detail);
                     object.insert("metricDelta".to_owned(), delta);
@@ -4395,7 +4448,7 @@ fn validate_with_ledger(
             Err(error) => {
                 failed += 1;
                 if let Some(object) = candidates[index].as_object_mut() {
-                    object.insert("validationStatus".to_owned(), json!("failed"));
+                    object.insert("ledgerValidationStatus".to_owned(), json!("failed"));
                     object.insert("validationError".to_owned(), json!(error.to_string()));
                 }
             }
@@ -4472,9 +4525,11 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
         .filter(|value| !value.is_null())
         .and_then(Value::as_object)
         .is_some_and(|value| value.get("enabled").and_then(Value::as_bool) != Some(false));
-    let future_warning = (!validation_enabled).then_some(
-        "walk-forward 설정이 없어 전 구간 최적화입니다. 미래 누수(look-ahead) 위험이 존재합니다.",
-    );
+    let future_warning = (!validation_enabled).then_some(if get("walkForwardConfig").is_some() {
+        "robustValidation.enabled=false이므로 OOS 검증을 수행하지 않았습니다. 전 구간 최적화에는 미래 누수(look-ahead) 위험이 존재합니다."
+    } else {
+        "walk-forward 설정이 없어 전 구간 최적화입니다. 미래 누수(look-ahead) 위험이 존재합니다."
+    });
     let full_frame = aligned_frame(price_series);
     checkpoint(control)?;
     let windows = get("walkForwardConfig")
@@ -4794,9 +4849,14 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
             "not_requested"
         }
     } else if windows.is_empty() {
-        "insufficient_data"
+        "not_evaluated"
     } else {
         "completed"
+    };
+    let validation_reason = match validation_status {
+        "disabled" => Some("validation_disabled"),
+        "not_evaluated" => Some("no_valid_folds"),
+        _ => None,
     };
     let validation_config = get("walkForwardConfig").and_then(Value::as_object);
     let validation_mode = validation_config
@@ -4826,6 +4886,24 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
             .and_then(|value| value.get("foldCount"))
             .and_then(Value::as_u64)
             .unwrap_or(5)
+    };
+    let (
+        validation_train_window,
+        validation_test_window,
+        validation_step,
+        minimum_train,
+        minimum_test,
+    ) = walk_forward_config(get("walkForwardConfig"));
+    let first_fold_failure_reason = if validation_enabled && windows.is_empty() {
+        Some(if full_frame.dates.is_empty() {
+            "no_common_observations"
+        } else if validation_mode == "holdout" {
+            "insufficient_observations_for_holdout"
+        } else {
+            "insufficient_observations_for_first_fold"
+        })
+    } else {
+        None
     };
     let ledger_validation_status = if config.ledger_template.is_none() {
         "not_requested"
@@ -4885,12 +4963,15 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
             "searchObjective": objective,
             "searchProxy": search_proxy,
             "paretoObjectiveSpace": ["return", "volatility", "maxDrawdown", "cvar", "turnover", "transactionCost"],
+            "objectiveFormulaVersion": "optimization-objectives/v2",
+            "returnCompatibilityAlias": "cagr",
         },
         "covarianceEstimator": covariance_estimator,
         "baselines": config.baseline_names,
         "robustScoreWeights": config.robust_weights,
         "robustValidation": {
             "status": validation_status,
+            "reason": validation_reason,
             "leakageControl": "candidates_fit_on_inner_train_only",
             "foldLeakageControl": "candidate_weights_fit_on_first_fold_train_only_and_tests_are_chronological",
             "mode": validation_mode,
@@ -4903,6 +4984,19 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
             "coverage": validation_test_observations as f64 / full_frame.dates.len().max(1) as f64,
             "gap": validation_gap,
             "embargo": validation_embargo,
+            "diagnostics": {
+                "totalObservationCount": full_frame.dates.len(),
+                "trainWindow": validation_train_window,
+                "testWindow": validation_test_window,
+                "step": validation_step,
+                "requestedFoldCount": requested_validation_folds,
+                "gap": validation_gap,
+                "embargo": validation_embargo,
+                "minimumTrainObservations": minimum_train,
+                "minimumTestObservations": minimum_test,
+                "firstFoldFailureReason": first_fold_failure_reason,
+                "excludedFolds": [],
+            },
             "folds": windows,
         },
         "sampledAssets": available,
@@ -5143,6 +5237,50 @@ mod tests {
         assert!(windows.iter().all(|window| {
             window["trainEndIndex"].as_u64().unwrap() < window["testStartIndex"].as_u64().unwrap()
         }));
+    }
+
+    #[test]
+    fn default_walk_forward_settings_produce_folds_for_1319_observations() {
+        let windows = build_walk_forward_windows(
+            1_319,
+            Some(&json!({
+                "enabled": true,
+                "mode": "walk_forward",
+                "windowMode": "rolling",
+            })),
+        );
+
+        assert_eq!(windows.len(), 5);
+        assert!(windows.iter().all(|fold| {
+            fold["trainCount"].as_u64() == Some(126) && fold["testCount"].as_u64() == Some(21)
+        }));
+    }
+
+    #[test]
+    fn zero_fold_validation_is_not_reported_as_completed() {
+        let mut input = optimization_input();
+        input["walkForwardConfig"] = json!({
+            "enabled": true,
+            "mode": "walk_forward",
+            "windowMode": "rolling",
+            "trainWindow": 126,
+            "testWindow": 21,
+            "step": 21,
+            "foldCount": 5,
+        });
+
+        let result = optimize(&input).unwrap();
+        assert_eq!(result["robustValidation"]["status"], "not_evaluated");
+        assert_eq!(result["robustValidation"]["reason"], "no_valid_folds");
+        assert_eq!(result["robustValidation"]["foldCount"], 0);
+        assert_eq!(
+            result["robustValidation"]["diagnostics"]["firstFoldFailureReason"],
+            "insufficient_observations_for_first_fold"
+        );
+        for candidate in result["candidates"].as_array().unwrap() {
+            assert_eq!(candidate["validationStatus"], "not_evaluated");
+            assert_eq!(candidate["validationReason"], "no_valid_folds");
+        }
     }
 
     #[test]
@@ -5683,7 +5821,8 @@ mod tests {
         let validated = result["ledgerValidatedCandidates"].as_array().unwrap();
         assert_eq!(validated.len(), 3);
         for candidate in validated {
-            assert_eq!(candidate["validationStatus"], "completed");
+            assert_eq!(candidate["validationStatus"], "not_requested");
+            assert_eq!(candidate["ledgerValidationStatus"], "completed");
             assert!(candidate["screeningRank"].is_number());
             assert!(candidate["ledgerRank"].is_number());
             assert!(candidate["rankChange"].is_number());

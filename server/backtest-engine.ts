@@ -309,17 +309,6 @@ function pearson(left: number[], right: number[]): number | null {
   return denominator > 0 ? round(covariance / denominator, 4) : null;
 }
 
-function downsample<T>(values: T[], maximum = 1_200): T[] {
-  if (values.length <= maximum) return values;
-  const result: T[] = [values[0]];
-  const step = (values.length - 1) / (maximum - 1);
-  for (let index = 1; index < maximum - 1; index += 1) {
-    result.push(values[Math.round(index * step)]);
-  }
-  result.push(values.at(-1)!);
-  return result;
-}
-
 function summarizeGrowthSeries(
   points: Array<{ date: string; value: number }>,
   dailyReturns: number[],
@@ -784,7 +773,7 @@ export function simulateBacktest(input: BacktestSimulationInput): BacktestSimula
     requestedStartDate: input.requestedStartDate,
     effectiveStartDate,
     endDate: effectiveEndDate,
-    points: downsample(fullPoints),
+    points: fullPoints,
     metrics: {
       finalBalance: round(finalBalance, 2),
       totalContributions: round(totalContributions, 2),

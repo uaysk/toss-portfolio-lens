@@ -36,6 +36,7 @@ function fixture(withWalkForward: boolean): OptimizationInput {
     return { date: isoDate(index + 1), value: benchmark };
   }).filter((point) => commonDates.has(point.date));
   return {
+    objective: "robust_score",
     priceSeries: prices,
     benchmark: { key: "BM", label: "Benchmark", points: benchmarkPoints },
     constraints: {

@@ -12,6 +12,7 @@ import { enforceToolRequestLimits } from "../services/tool-request-limits.js";
 import type { McpAuditRepository, McpAuditStatus } from "../repositories/mcp-audit-repository.js";
 import { anonymizedAuditValue, persistMcpAudit, protocolRequestId } from "./audit.js";
 import { APP_VERSION, buildInfo } from "../build-info.js";
+import { TossApiError } from "../toss.js";
 
 function insufficientScope(scopes: McpScopeId[], resourceMetadataUrl: string): CallToolResult {
   const challenge = `Bearer error="insufficient_scope", scope="${scopes.join(" ")}", resource_metadata="${resourceMetadataUrl}"`;
@@ -173,7 +174,34 @@ export function createMcpServer(input: {
         errorCode = error instanceof ServiceError
           ? error.detail.code
           : error instanceof Error ? error.name.slice(0, 96) : "UNKNOWN_ERROR";
-        return toolError(error);
+        const serviceDetails = error instanceof ServiceError ? error.detail.details : undefined;
+        associatedRunId = runId(serviceDetails);
+        const correlatedError = error instanceof ServiceError
+          ? new ServiceError({
+            ...error.detail,
+            details: {
+              ...error.detail.details,
+              correlation_id: requestId,
+            },
+          })
+          : error;
+        console.error(JSON.stringify({
+          event: "mcp_tool_error",
+          request_id: requestId,
+          ...(actualRequestId ? { protocol_request_id: actualRequestId } : {}),
+          tool: name,
+          error_code: errorCode,
+          ...(associatedRunId ? { run_id: associatedRunId } : {}),
+          message: error instanceof Error ? error.message : String(error),
+          ...(error instanceof TossApiError ? {
+            upstream_status: error.status,
+            upstream_code: error.code,
+            ...(error.requestId ? { upstream_request_id: error.requestId } : {}),
+          } : {}),
+          ...(serviceDetails ? { details: serviceDetails } : {}),
+          ...(error instanceof Error && error.stack ? { stack_trace: error.stack } : {}),
+        }));
+        return toolError(correlatedError);
       } finally {
         const finishedAt = Date.now();
         await persistMcpAudit(input.audit, {
@@ -195,6 +223,8 @@ export function createMcpServer(input: {
           tool: name,
           duration_ms: finishedAt - started,
           status,
+          ...(errorCode ? { error_code: errorCode } : {}),
+          ...(associatedRunId ? { run_id: associatedRunId } : {}),
           subject: subjectHash,
         }));
       }

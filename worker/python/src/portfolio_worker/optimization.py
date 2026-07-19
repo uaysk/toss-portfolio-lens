@@ -13,6 +13,8 @@ MASK32 = 0xFFFFFFFF
 UINT32_SCALE = 4_294_967_296.0
 DEFAULT_SEED = 0xC0FFEE
 OBJECTIVES = (
+    "max_cagr",
+    "max_total_return",
     "max_sharpe",
     "max_sortino",
     "max_calmar",
@@ -435,6 +437,8 @@ def _metrics_batch(
     output: list[dict[str, Any]] = []
     for index, candidate_weights in enumerate(weight_dicts):
         metric = {
+            "cagr": present(cagr[index]),
+            "totalReturn": present(cumulative[index]),
             "sharpe": present(sharpe[index]),
             "sortino": present(sortino[index]),
             "calmar": present(calmar[index]),
@@ -446,6 +450,12 @@ def _metrics_batch(
             "maxDrawdown": present(max_drawdown[index]),
             "turnover": float(turnover[index]),
             "transactionCost": float(transaction_cost[index]),
+            "period": {
+                "from": frame.dates[0] if frame.dates else None,
+                "to": frame.dates[-1] if frame.dates else None,
+                "observationCount": observations,
+                "role": "screening_train" if windows else "screening_full",
+            },
         }
         robust_values = [
             metric["sharpe"],
@@ -490,6 +500,8 @@ def _metrics_batch(
 
 def _better(left: dict[str, Any], right: dict[str, Any], objective: str) -> bool:
     key = {
+        "max_cagr": "cagr",
+        "max_total_return": "totalReturn",
         "max_sharpe": "sharpe",
         "max_sortino": "sortino",
         "max_calmar": "calmar",

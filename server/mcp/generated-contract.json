@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "toolCount": 50,
-  "schemaHash": "cfd4200eba8476c9e8d79b6cfd10636c6d9f2cba7644dfeaedd2b2dac3ca8d2b",
+  "schemaHash": "5259cec5fa3e73ee4b9732ad87fc0fe25dc60e48996c1bf840f7df64721804f2",
   "tools": [
     {
       "name": "search_instruments",
@@ -125,7 +125,7 @@
     },
     {
       "name": "compare_backtests",
-      "inputSchemaHash": "a75f1424ea19cb29ef5bda06c6c438fc0f997b1dedb2230560229776c0c00011",
+      "inputSchemaHash": "dfefefd069fe4670c4b39afe7fe1e54841b4cb494bed014a0ed27656ee9c0bc2",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "백테스트 비교",
       "description": "저장된 여러 백테스트 run의 지표·안정성·비용·데이터 품질을 비교합니다.",
@@ -230,7 +230,7 @@
     },
     {
       "name": "optimize_portfolio",
-      "inputSchemaHash": "7a20b19a29e50ffe847cda8e2ea99cd7a7fafb77370145f631106915f43645a8",
+      "inputSchemaHash": "42233f95b8227e25ebd53fe34490d6e4d39b0918d813200b8df0064972b52ab9",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "포트폴리오 최적화",
       "description": "기준·Pareto 후보를 탐색하고 표본 내/OOS robust score와 실제 ledger 재검증 순위·지표 차이를 제공합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
@@ -245,7 +245,7 @@
     },
     {
       "name": "walk_forward_optimize",
-      "inputSchemaHash": "510d3b2cdf3e31c5f900e276c29839d738e15a093ed08eb41a9fd956a4e2f2b0",
+      "inputSchemaHash": "d0ad89ab26b8302ed66b0aa9dd9bcb0ca5e0e5ef72f14d549691d296250961f7",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "Walk-forward 최적화",
       "description": "rolling·anchored 학습과 gap·embargo, fold 예산·seed를 적용해 stitched OOS 성과와 안정성을 검증합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
@@ -395,7 +395,7 @@
     },
     {
       "name": "analyze_portfolio_outlook",
-      "inputSchemaHash": "22bfaede6d4d2b9c2ac10d4bbac2c7b414bc66c23c1377fa564a40d90de8ffda",
+      "inputSchemaHash": "8177815746880cb90bbe5005d636e9448b7995a6b483312d59a72ffad0712ba6",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "포트폴리오 미래 전망",
       "description": "Walk-forward OOS·Monte Carlo calibration·stress·시장 국면·ledger 민감도를 하나의 취소 가능한 역사적 전망 run으로 결합합니다.",

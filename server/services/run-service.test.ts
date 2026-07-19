@@ -3,6 +3,7 @@ import { SqliteDatabase } from "../database.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { RunRepository } from "../repositories/run-repository.js";
 import { ArtifactService } from "./artifact-service.js";
+import { PORTFOLIO_ENGINE_VERSION, requestHash } from "./service-envelope.js";
 import { RunService } from "./run-service.js";
 
 describe("RunService persistence and cancellation", () => {
@@ -45,6 +46,92 @@ describe("RunService persistence and cancellation", () => {
     expect(second.reused).toBe(true);
     expect(task).toHaveBeenCalledOnce();
     expect(secondTask).not.toHaveBeenCalled();
+  });
+
+  it("동시 preflight 실패는 정확히 한 failed run과 한 쌍의 실패 event만 생성한다", async () => {
+    const { runs, service } = await setup();
+    const input = {
+      ownerSubject: "owner",
+      kind: "optimization" as const,
+      config: { symbols: ["AAA", "BBB"], seed: 19 },
+      dataRevision: "preflight-revision",
+      totalCandidates: 32,
+      error: { code: "FX_HISTORY_UNAVAILABLE", message: "missing FX", retryable: false },
+    };
+
+    const results = await Promise.all(Array.from({ length: 8 }, () => service.recordPreflightFailure(input)));
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    expect(new Set(results.map((result) => result.run.id)).size).toBe(1);
+    expect(results[0]!.run).toMatchObject({
+      status: "failed",
+      error: input.error,
+      totalCandidates: 32,
+    });
+    const events = await runs.getEvents(results[0]!.run.id, "owner");
+    expect(events.filter((event) => event.type === "created")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "preflight_failed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "failed")).toHaveLength(1);
+  });
+
+  it("기존 queued/running/completed run은 동시 preflight 실패 기록으로 상태나 event가 바뀌지 않는다", async () => {
+    const { runs, service } = await setup();
+    for (const [index, status] of (["queued", "running", "completed"] as const).entries()) {
+      const config = { symbols: ["AAA", "BBB"], seed: 100 + index };
+      const dataRevision = `existing-${status}`;
+      const existing = await service.create({
+        ownerSubject: "owner",
+        kind: "optimization",
+        config,
+        dataRevision,
+        totalCandidates: 10,
+      });
+      if (status === "running") expect(await runs.markRunning(existing.id, 200 + index)).toBe(true);
+      if (status === "completed") {
+        expect(await runs.complete(existing.id, { done: true }, { candidates: [] }, [], 200 + index)).toBe(true);
+      }
+      const before = await runs.get(existing.id, "owner");
+      const eventsBefore = await runs.getEvents(existing.id, "owner");
+
+      const results = await Promise.all(Array.from({ length: 4 }, () => service.recordPreflightFailure({
+        ownerSubject: "owner",
+        kind: "optimization",
+        config,
+        dataRevision,
+        totalCandidates: 10,
+        error: { code: "PREFLIGHT_FAILED", message: "must not replace", retryable: false },
+      })));
+
+      expect(results.every((result) => !result.created && result.run.id === existing.id)).toBe(true);
+      expect(await runs.get(existing.id, "owner")).toEqual(before);
+      expect(await runs.getEvents(existing.id, "owner")).toEqual(eventsBefore);
+    }
+  });
+
+  it(".2 run을 보존하면서 동일 입력의 .3 run을 새로 만든다", async () => {
+    const { runs, service } = await setup();
+    const config = { assets: ["AAA"], seed: 7 };
+    const oldEngineVersion = "portfolio-lens-rust-2026.07.2";
+    const old = await runs.create({
+      kind: "backtest",
+      ownerSubject: "owner",
+      requestHash: requestHash({ config, engineVersion: oldEngineVersion }),
+      dataRevision: "revision-engine",
+      engineVersion: oldEngineVersion,
+      config,
+    });
+    await runs.complete(old.id, { old: true }, { points: [] });
+
+    const current = await service.create({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config,
+      dataRevision: "revision-engine",
+    });
+
+    expect(PORTFOLIO_ENGINE_VERSION).toBe("portfolio-lens-rust-2026.07.3");
+    expect(current.id).not.toBe(old.id);
+    expect(current).toMatchObject({ status: "queued", engineVersion: PORTFOLIO_ENGINE_VERSION });
+    expect(await runs.get(old.id, "owner")).toMatchObject({ status: "completed", engineVersion: oldEngineVersion });
   });
 
   it("중첩된 outlook·Walk-forward·Monte Carlo seed를 manifest에 모두 고정한다", async () => {
@@ -254,6 +341,14 @@ describe("RunService persistence and cancellation", () => {
       dataRevision: "revision-1",
     });
     expect(terminal.status).toBe("failed");
+    expect(terminal.error).toMatchObject({
+      code: "RUN_FAILED",
+      message: "synthetic failure",
+      phase: "compute_or_artifact_persistence",
+      error_type: "Error",
+      completed_candidate_count: 0,
+    });
+    expect((terminal.error as { stack_trace?: string }).stack_trace).toContain("synthetic failure");
     const retryTask = vi.fn().mockResolvedValue({ summary: { retried: true }, result: { ok: true } });
     const retried = await service.execute({
       ownerSubject: "owner",

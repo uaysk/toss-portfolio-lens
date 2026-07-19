@@ -9,6 +9,8 @@ import {
 } from "./quant-math.js";
 
 export type OptimizationObjective =
+  | "max_cagr"
+  | "max_total_return"
   | "max_sharpe"
   | "max_sortino"
   | "max_calmar"
@@ -32,6 +34,7 @@ export type PortfolioConstraint = {
 };
 
 export type OptimizationInput = {
+  objective: OptimizationObjective;
   priceSeries: PriceSeriesInput[];
   /** Raw prices used by rolling OOS evaluation. `benchmark` remains return observations. */
   benchmarkPriceSeries?: PriceSeriesInput;
@@ -77,6 +80,10 @@ export type OptimizationInput = {
 };
 
 export type CandidateMetricSet = {
+  /** Net CAGR over `period`; `return` remains a compatibility alias. */
+  cagr: number | null;
+  /** Net compounded return over the exact same `period`. */
+  totalReturn: number | null;
   sharpe: number | null;
   sortino: number | null;
   calmar: number | null;
@@ -88,6 +95,12 @@ export type CandidateMetricSet = {
   maxDrawdown: number | null;
   turnover: number;
   transactionCost: number;
+  period: {
+    from?: string;
+    to?: string;
+    observationCount: number;
+    role: "screening_train" | "screening_full" | "oos" | "ledger_full";
+  };
 };
 
 export type PortfolioCandidate = {
@@ -96,6 +109,8 @@ export type PortfolioCandidate = {
   metrics: CandidateMetricSet;
   walkForwardTestCoverage?: number;
   walkForwardSignal?: {
+    status?: "not_requested" | "disabled" | "not_evaluated" | "completed";
+    reason?: "validation_disabled" | "no_valid_folds";
     mode?: "holdout" | "walk_forward";
     windowMode?: "rolling" | "anchored";
     foldCount?: number;
@@ -110,6 +125,8 @@ export type PortfolioCandidate = {
   baseline?: string;
   algorithm?: string;
   validationStatus?: string;
+  validationReason?: string;
+  ledgerValidationStatus?: string;
   screeningRank?: number;
   ledgerRank?: number;
   rankChange?: number;
@@ -426,8 +443,17 @@ function evaluateWalkForwardCandidate(
   portfolio: ReturnSeriesInput,
   benchmark: ReturnSeriesInput | undefined,
   windows: WalkForwardWindow[],
-  options: { annualization?: number; confidence?: number; minimumSamples: number; riskFreeRatePercent: number; transactionCost: number },
+  options: {
+    annualization?: number;
+    confidence?: number;
+    minimumSamples: number;
+    riskFreeRatePercent: number;
+    transactionCost: number;
+    validationConfig?: WalkForwardConfig;
+  },
 ): { coverageRatio: number; signal: {
+  status: "not_requested" | "disabled" | "not_evaluated" | "completed";
+  reason?: "validation_disabled" | "no_valid_folds";
   mode: "holdout" | "walk_forward";
   windowMode: "rolling" | "anchored";
   foldCount: number;
@@ -438,12 +464,18 @@ function evaluateWalkForwardCandidate(
   worstSharpe: number | null;
   averageCvar: number | null;
 } } {
-  const mode = windows[0]?.mode ?? (windows.length > 1 ? "walk_forward" : "holdout");
-  const windowMode = windows[0]?.windowMode ?? "rolling";
+  const requested = options.validationConfig !== undefined;
+  const enabled = requested && options.validationConfig?.enabled !== false;
+  const status = !requested ? "not_requested" : !enabled ? "disabled" : !windows.length ? "not_evaluated" : "completed";
+  const reason = status === "disabled" ? "validation_disabled" : status === "not_evaluated" ? "no_valid_folds" : undefined;
+  const mode = windows[0]?.mode ?? options.validationConfig?.mode ?? "holdout";
+  const windowMode = windows[0]?.windowMode ?? options.validationConfig?.windowMode ?? "rolling";
   if (!windows.length) {
     return {
       coverageRatio: 0,
       signal: {
+        status,
+        ...(reason ? { reason } : {}),
         mode,
         windowMode,
         foldCount: 0,
@@ -524,6 +556,8 @@ function evaluateWalkForwardCandidate(
   return {
     coverageRatio: Math.min(1, uniqueTestObservations.size / Math.max(1, portfolio.points.length)),
     signal: {
+      status,
+      ...(reason ? { reason } : {}),
       mode,
       windowMode,
       foldCount: windows.length,
@@ -550,6 +584,7 @@ function evaluatePortfolioCandidate(
     oosFrame?: WeightedAlignedFrame;
     constraints: PortfolioConstraint;
     transactionCostBps: number;
+    walkForwardConfig?: WalkForwardConfig;
   },
 ): PortfolioCandidate {
   const grossPortfolio = buildPortfolioReturnSeries(frame, weights);
@@ -591,9 +626,12 @@ function evaluatePortfolioCandidate(
     minimumSamples: options.minimumSamples,
     riskFreeRatePercent: options.riskFreeRatePercent,
     transactionCost,
+    validationConfig: options.walkForwardConfig,
   });
 
   const metrics: CandidateMetricSet = {
+    cagr: stats.cagr,
+    totalReturn: stats.cumulativeReturn,
     sharpe: stats.sharpeRatio,
     sortino: stats.sortinoRatio,
     calmar: stats.calmarRatio,
@@ -605,6 +643,12 @@ function evaluatePortfolioCandidate(
     maxDrawdown: stats.maxDrawdown,
     turnover,
     transactionCost,
+    period: {
+      ...(frame.dates[0] ? { from: frame.dates[0] } : {}),
+      ...(frame.dates.at(-1) ? { to: frame.dates.at(-1)! } : {}),
+      observationCount: stats.observations,
+      role: options.walkForwardWindows.length ? "screening_train" : "screening_full",
+    },
   };
 
   const robustValues = [
@@ -676,6 +720,8 @@ function evaluatePortfolioCandidate(
       coverage: walkForward.coverageRatio,
       components,
       validation: {
+        status: walkForward.signal.status,
+        ...(walkForward.signal.reason ? { reason: walkForward.signal.reason } : {}),
         mode: walkForward.signal.mode,
         windowMode: walkForward.signal.windowMode,
         foldCount: walkForward.signal.foldCount,
@@ -696,9 +742,13 @@ function evaluatePortfolioCandidate(
   return {
     weights,
     sampleCount: stats.observations,
+    validationStatus: walkForward.signal.status,
+    ...(walkForward.signal.reason ? { validationReason: walkForward.signal.reason } : {}),
     metrics,
     walkForwardTestCoverage: walkForward.coverageRatio,
     walkForwardSignal: {
+      status: walkForward.signal.status,
+      ...(walkForward.signal.reason ? { reason: walkForward.signal.reason } : {}),
       mode: walkForward.signal.mode,
       windowMode: walkForward.signal.windowMode,
       foldCount: walkForward.signal.foldCount,
@@ -715,6 +765,8 @@ function evaluatePortfolioCandidate(
 
 function better(left: CandidateMetricSet, right: CandidateMetricSet, objective: OptimizationObjective): boolean {
   const leftValue = {
+    max_cagr: left.cagr,
+    max_total_return: left.totalReturn,
     max_sharpe: left.sharpe,
     max_sortino: left.sortino,
     max_calmar: left.calmar,
@@ -725,6 +777,8 @@ function better(left: CandidateMetricSet, right: CandidateMetricSet, objective: 
   }[objective];
 
   const rightValue = {
+    max_cagr: right.cagr,
+    max_total_return: right.totalReturn,
     max_sharpe: right.sharpe,
     max_sortino: right.sortino,
     max_calmar: right.calmar,
@@ -846,6 +900,8 @@ export function optimizePortfolio(input: OptimizationInput): OptimizationOutput 
 
   const candidates: PortfolioCandidate[] = [];
   const objectives: OptimizationObjective[] = [
+    "max_cagr",
+    "max_total_return",
     "max_sharpe",
     "max_sortino",
     "max_calmar",
@@ -856,6 +912,8 @@ export function optimizePortfolio(input: OptimizationInput): OptimizationOutput 
   ];
 
   const bestByObjective: Record<OptimizationObjective, PortfolioCandidate | null> = {
+    max_cagr: null,
+    max_total_return: null,
     max_sharpe: null,
     max_sortino: null,
     max_calmar: null,
@@ -882,6 +940,7 @@ export function optimizePortfolio(input: OptimizationInput): OptimizationOutput 
       oosFrame: walkForwardWindows.length ? aligned : undefined,
       constraints,
       transactionCostBps: Math.max(0, Math.min(500, input.transactionCostBps ?? 0)),
+      walkForwardConfig: input.walkForwardConfig,
     });
 
     const perAssetValid = Object.entries(candidate.weights).every(([id, weight]) => (

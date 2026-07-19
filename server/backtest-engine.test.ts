@@ -24,6 +24,26 @@ function generatedPrices(days: number, valueAt: (index: number) => number): Back
 }
 
 describe("portfolio backtest engine", () => {
+  it("1,200행을 넘는 equity 경로도 중간 관측을 버리지 않는다", () => {
+    const history = generatedPrices(1_305, (index) => 100 + index * 0.01);
+    const result = simulateBacktest({
+      assets: [{ ...assets[0], weight: 100 }],
+      prices: new Map([["KRW:005930", history]]),
+      requestedStartDate: history[0].date,
+      endDate: history.at(-1)!.date,
+      initialAmount: 1_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+    });
+
+    expect(result.points).toHaveLength(1_305);
+    expect(result.points[0].date).toBe(history[0].date);
+    expect(result.points.at(-1)).toMatchObject({
+      date: history.at(-1)!.date,
+      balance: result.metrics.finalBalance,
+    });
+  });
+
   it("국내·해외 종목의 공통 거래일부터 현금흐름을 제거한 성장과 위험을 계산한다", () => {
     const result = simulateBacktest({
       assets,

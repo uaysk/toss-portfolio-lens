@@ -64,7 +64,7 @@ describe("PortfolioBacktestService", () => {
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
-  it("현재 국내·해외 보유 종목을 원화 비중으로 불러오고 가장 늦은 상장일을 기본값으로 정한다", async () => {
+  it("현재 국내·해외 보유 종목을 원화 비중으로 불러오고 listDate와 무관한 5년 요청 기간을 기본값으로 정한다", async () => {
     const toss = {
       getPortfolio: vi.fn().mockResolvedValue(currentPortfolio()),
       getInstruments: vi.fn().mockResolvedValue(instruments),
@@ -79,14 +79,16 @@ describe("PortfolioBacktestService", () => {
       { symbol: "005930", weight: 30 },
       { symbol: "AAPL", weight: 70 },
     ]);
-    expect(result.defaultStartDate).toBe("1980-12-12");
+    const expectedStart = new Date(`${result.defaultEndDate}T00:00:00Z`);
+    expectedStart.setUTCFullYear(expectedStart.getUTCFullYear() - 5);
+    expect(result.defaultStartDate).toBe(expectedStart.toISOString().slice(0, 10));
     expect(result.initialAmount).toBe(2_000);
   });
 
-  it("요청 시작일이 이르면 가장 늦은 상장일로 보정하고 수정주가 일봉으로 실행한다", async () => {
+  it("공급자 listDate보다 이른 실제 가격이 있으면 기간을 자르지 않고 충돌을 명시한다", async () => {
     const customInstruments: InstrumentInfo[] = [
       { ...instruments[0], listDate: "2020-01-01" },
-      { ...instruments[1], listDate: "2020-01-02" },
+      { ...instruments[1], listDate: "2024-11-26" },
     ];
     const toss = {
       getInstruments: vi.fn().mockResolvedValue(customInstruments),
@@ -118,13 +120,21 @@ describe("PortfolioBacktestService", () => {
       benchmark: "NONE",
     });
 
-    expect(result.config.latestListDate).toBe("2020-01-02");
+    expect(result.config.latestMetadataListDate).toBe("2024-11-26");
     expect(result.effectiveStartDate).toBe("2020-01-02");
     expect(result.metrics.totalReturnPercent).toBe(5);
     expect(result.config).toMatchObject({ riskFreeRatePercent: 2.5, transactionCostBps: 15 });
     expect(result.advanced.costEfficiency).toMatchObject({ transactionCostBps: 15, tradeCount: 2 });
     expect(result.advanced.costEfficiency.estimatedTotalCost).toBeGreaterThan(0);
-    expect(result.warnings[0]).toContain("2020-01-02");
+    expect(result.warnings.join(" ")).toContain("AAPL 가격 첫 관측일 2020-01-02");
+    expect(result.dataQuality.instrumentDateConsistency).toEqual(expect.arrayContaining([
+      {
+        symbol: "AAPL",
+        firstObservationDate: "2020-01-02",
+        metadataListDate: "2024-11-26",
+        status: "price_precedes_metadata",
+      },
+    ]));
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("005930", undefined, true);
   });
 
@@ -164,6 +174,118 @@ describe("PortfolioBacktestService", () => {
     expect(result.benchmarkMetrics?.totalReturnPercent).toBe(-10);
     expect(result.config.benchmarkSymbol).toBe("AAPL");
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("AAPL", undefined, true);
+  });
+
+  it("늦게 시작하는 USD 자산 이전의 KRW-only 날짜에는 환율을 조회하지 않는다", async () => {
+    const getUsdKrwExchangeRate = vi.fn().mockImplementation(async (date: string) => ({
+      date,
+      rate: 1_300,
+      timestamp: `${date}T15:30:00+09:00`,
+    }));
+    const toss = {
+      getInstruments: vi.fn().mockResolvedValue(instruments),
+      getDailyCandles: vi.fn().mockImplementation(async (symbol: string, _before?: string, adjusted?: boolean) => ({
+        candles: symbol === "005930"
+          ? [
+            candle(symbol, "KRW", "2024-01-01", 100),
+            candle(symbol, "KRW", "2024-01-02", 101),
+            candle(symbol, "KRW", "2024-01-03", 102),
+            candle(symbol, "KRW", "2024-01-04", 103),
+          ]
+          : [
+            candle(symbol, "USD", "2024-01-03", 100),
+            candle(symbol, "USD", "2024-01-04", 101),
+          ],
+        nextBefore: undefined,
+        adjusted,
+      })),
+      getUsdKrwExchangeRate,
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+
+    const result = await new PortfolioBacktestService(toss, store).run({
+      assets: [{ symbol: "005930", weight: 50 }, { symbol: "AAPL", weight: 50 }],
+      startDate: "2024-01-01",
+      endDate: "2024-01-04",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: "NONE",
+      currencyMode: "KRW",
+    });
+
+    expect(result.effectiveStartDate).toBe("2024-01-03");
+    expect(getUsdKrwExchangeRate.mock.calls.map(([date]) => date)).toEqual(["2024-01-03", "2024-01-04"]);
+  });
+
+  it("늦게 시작하는 USD 벤치마크 이전의 KRW-only 날짜에는 환율을 조회하지 않는다", async () => {
+    const getUsdKrwExchangeRate = vi.fn().mockImplementation(async (date: string) => ({
+      date,
+      rate: 1_300,
+      timestamp: `${date}T15:30:00+09:00`,
+    }));
+    const toss = {
+      getInstruments: vi.fn().mockImplementation(async (symbols: string[]) => (
+        instruments.filter((instrument) => symbols.includes(instrument.symbol))
+      )),
+      getDailyCandles: vi.fn().mockImplementation(async (symbol: string, _before?: string, adjusted?: boolean) => ({
+        candles: symbol === "005930"
+          ? [
+            candle(symbol, "KRW", "2024-01-01", 100),
+            candle(symbol, "KRW", "2024-01-02", 101),
+            candle(symbol, "KRW", "2024-01-03", 102),
+            candle(symbol, "KRW", "2024-01-04", 103),
+          ]
+          : [
+            candle(symbol, "USD", "2024-01-03", 100),
+            candle(symbol, "USD", "2024-01-04", 101),
+          ],
+        nextBefore: undefined,
+        adjusted,
+      })),
+      getUsdKrwExchangeRate,
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+
+    const result = await new PortfolioBacktestService(toss, store).run({
+      assets: [{ symbol: "005930", weight: 100 }],
+      startDate: "2024-01-01",
+      endDate: "2024-01-04",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: "CUSTOM",
+      benchmarkSymbol: "AAPL",
+      currencyMode: "KRW",
+    });
+
+    expect(result.effectiveStartDate).toBe("2024-01-03");
+    expect(getUsdKrwExchangeRate.mock.calls.map(([date]) => date)).toEqual(["2024-01-03", "2024-01-04"]);
+  });
+
+  it("필요 가격 시계열이 비어 있으면 환율 조회 전에 가격 이력 오류를 반환한다", async () => {
+    const getUsdKrwExchangeRate = vi.fn();
+    const toss = {
+      getInstruments: vi.fn().mockResolvedValue([instruments[1]]),
+      getDailyCandles: vi.fn().mockResolvedValue({ candles: [], nextBefore: undefined, adjusted: true }),
+      getUsdKrwExchangeRate,
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+
+    await expect(new PortfolioBacktestService(toss, store).run({
+      assets: [{ symbol: "AAPL", weight: 100 }],
+      startDate: "2024-01-01",
+      endDate: "2024-01-04",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none",
+      benchmark: "NONE",
+      currencyMode: "KRW",
+    })).rejects.toThrow("미국 종목의 선택 기간 일봉이 없습니다.");
+    expect(getUsdKrwExchangeRate).not.toHaveBeenCalled();
   });
 
   it("미국 종목의 전체 기간 USD/KRW 경로를 반영하고 현지가격·환율 기여를 분리한다", async () => {

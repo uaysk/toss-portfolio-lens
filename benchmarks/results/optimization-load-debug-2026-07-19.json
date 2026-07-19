@@ -1,0 +1,52 @@
+{
+  "schema_version": "optimization-load-benchmark/v1",
+  "generated_at": "2026-07-19T02:02:03+09:00",
+  "fixture": {
+    "day_count": 1319,
+    "synthetic": true,
+    "engine": "portfolio-lens-rust-2026.07.2"
+  },
+  "results": [
+    {
+      "symbol_count": 20,
+      "candidate_budget": 500,
+      "algorithm": "random_search",
+      "robust_validation": false,
+      "ledger_validation_budget": 8,
+      "status": "completed",
+      "elapsed_ms": 1112.901217,
+      "compute_ms": 847.098626,
+      "serialization_ms": 8.164688,
+      "db_write_ms": 73.362239,
+      "peak_rss_bytes": 177430528,
+      "completed_candidate_count": 500,
+      "candidate_throughput_per_second": 449.276173,
+      "artifact_byte_size": 2239516,
+      "serialized_result_bytes": 5441962,
+      "worker_exit_status": "running"
+    },
+    {
+      "symbol_count": 20,
+      "candidate_budget": 3000,
+      "algorithm": "nsga_ii",
+      "robust_validation": true,
+      "ledger_validation_budget": 64,
+      "status": "completed",
+      "elapsed_ms": 6307.109635,
+      "compute_ms": 5745.1501,
+      "serialization_ms": 41.536193,
+      "db_write_ms": 411.904384,
+      "peak_rss_bytes": 409288704,
+      "completed_candidate_count": 2369,
+      "candidate_throughput_per_second": 375.607867,
+      "artifact_byte_size": 11420455,
+      "serialized_result_bytes": 25595481,
+      "worker_exit_status": "running"
+    }
+  ],
+  "notes": [
+    "두 조합 모두 worker crash, timeout, OOM 없이 완료됐다.",
+    "NSGA-II는 requested budget 3000 중 유효·고유 후보 2369개를 생성했다.",
+    "실서비스 당시 실패 audit는 worker 진입 전 TossApiError였으므로 이 synthetic 결과는 그 원인이 worker 부하가 아니었다는 진단과 일치한다."
+  ]
+}

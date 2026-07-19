@@ -25,6 +25,22 @@ use serde_json::{Value, json};
 const MAX_SOCKET_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const SOCKET_PEER_CHECK_INTERVAL: usize = 32;
 
+fn peak_process_rss_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage initializes the supplied rusage value on success.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: the successful call above initialized `usage`.
+    let usage = unsafe { usage.assume_init() };
+    #[cfg(target_os = "macos")]
+    return u64::try_from(usage.ru_maxrss).ok();
+    #[cfg(not(target_os = "macos"))]
+    return u64::try_from(usage.ru_maxrss)
+        .ok()
+        .and_then(|value| value.checked_mul(1_024));
+}
+
 #[derive(Clone)]
 struct Settings {
     database_url: String,
@@ -235,6 +251,9 @@ fn handle_socket(mut stream: UnixStream) -> Result<()> {
             let mut output =
                 compute::compute_with_control(&input, include_artifacts, Some(&control))?;
             let compute_ms = compute_started.elapsed().as_secs_f64() * 1000.0;
+            let serialization_started = Instant::now();
+            let serialized_result_bytes = serde_json::to_vec(&output)?.len();
+            let serialization_ms = serialization_started.elapsed().as_secs_f64() * 1000.0;
             output
                 .artifacts
                 .get_or_insert_with(Vec::new)
@@ -243,6 +262,9 @@ fn handle_socket(mut stream: UnixStream) -> Result<()> {
                     content: json!({
                         "request_decode_ms": compute_started.duration_since(started).as_secs_f64() * 1000.0,
                         "compute_ms": compute_ms,
+                        "serialization_ms": serialization_ms,
+                        "serialized_result_bytes": serialized_result_bytes,
+                        "peak_process_rss_bytes": peak_process_rss_bytes(),
                         "worker_elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
                         "engine": portfolio_lens_compute::ENGINE_VERSION,
                         "ipc": "unix_domain_socket_length_frame_v2",
@@ -363,10 +385,16 @@ fn start_heartbeat(
 }
 
 fn append_metrics(output: &mut WorkerOutput, started: Instant, claim: &JobClaim) {
+    let serialization_started = Instant::now();
+    let serialized_result_bytes = serde_json::to_vec(&output).ok().map(|value| value.len());
+    let serialization_ms = serialization_started.elapsed().as_secs_f64() * 1000.0;
     let artifact = OutputArtifact {
         artifact_type: "worker-metrics".into(),
         content: json!({
             "compute_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "serialization_ms": serialization_ms,
+            "serialized_result_bytes": serialized_result_bytes,
+            "peak_process_rss_bytes": peak_process_rss_bytes(),
             "attempt": claim.attempt_count,
             "engine": portfolio_lens_compute::ENGINE_VERSION,
             "ipc": "postgres_artifact_queue",
