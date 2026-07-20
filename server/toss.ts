@@ -84,6 +84,7 @@ export type DailyCandle = {
   highPrice: number;
   lowPrice: number;
   closePrice: number;
+  volume?: number;
 };
 
 export type ExchangeRate = {
@@ -164,6 +165,16 @@ function numberFrom(record: UnknownRecord, keys: string[], fallback = 0): number
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+function optionalNonNegativeNumber(record: UnknownRecord, keys: string[]): number | undefined {
+  const value = pick(record, keys);
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[,\s]/g, "");
+  if (!normalized || !/^\d+(?:\.\d+)?$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function numberValue(value: unknown, fallback = 0): number {
@@ -354,6 +365,7 @@ export function normalizeCandlePage(payload: unknown, symbol: string): CandlePag
     const openPrice = numberFrom(record, ["open", "openPrice", "openingPrice"], closePrice);
     const highPrice = numberFrom(record, ["high", "highPrice", "highestPrice"], Math.max(openPrice, closePrice));
     const lowPrice = numberFrom(record, ["low", "lowPrice", "lowestPrice"], Math.min(openPrice, closePrice));
+    const volume = optionalNonNegativeNumber(record, ["volume"]);
     return {
       symbol,
       date: dateFromTimestamp(explicitDate) || dateFromTimestamp(timestamp),
@@ -363,6 +375,7 @@ export function normalizeCandlePage(payload: unknown, symbol: string): CandlePag
       highPrice: Math.max(highPrice, openPrice, closePrice),
       lowPrice: Math.min(lowPrice, openPrice, closePrice),
       closePrice,
+      ...(volume === undefined ? {} : { volume }),
     } satisfies DailyCandle;
   }).filter((candle) => candle.date && candle.closePrice > 0);
   return {

@@ -128,7 +128,7 @@ describe("RunService persistence and cancellation", () => {
       dataRevision: "revision-engine",
     });
 
-    expect(PORTFOLIO_ENGINE_VERSION).toBe("portfolio-lens-rust-2026.07.3");
+    expect(PORTFOLIO_ENGINE_VERSION).toBe("portfolio-lens-rust-2026.07.5");
     expect(current.id).not.toBe(old.id);
     expect(current).toMatchObject({ status: "queued", engineVersion: PORTFOLIO_ENGINE_VERSION });
     expect(await runs.get(old.id, "owner")).toMatchObject({ status: "completed", engineVersion: oldEngineVersion });

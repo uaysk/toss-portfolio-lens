@@ -138,6 +138,39 @@ describe("PortfolioBacktestService", () => {
     expect(vi.mocked(toss.getDailyCandles)).toHaveBeenCalledWith("005930", undefined, true);
   });
 
+  it("기술 전략의 inactive 시작을 위해 0% 종목과 100% 현금 초기 상태를 Rust 입력으로 준비한다", async () => {
+    const toss = {
+      getInstruments: vi.fn().mockResolvedValue([instruments[0]]),
+      getDailyCandles: vi.fn().mockResolvedValue({
+        candles: [candle("005930", "KRW", "2024-01-02", 100), candle("005930", "KRW", "2024-01-03", 110)],
+        nextBefore: undefined,
+        adjusted: true,
+      }),
+    } as unknown as TossClient;
+    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    stores.push(store);
+    const service = new PortfolioBacktestService(toss, store);
+    const request = {
+      assets: [{ symbol: "005930", weight: 0 }],
+      startDate: "2024-01-02",
+      endDate: "2024-01-03",
+      initialAmount: 1_000_000,
+      monthlyCashFlow: 0,
+      rebalanceFrequency: "none" as const,
+      benchmark: "NONE" as const,
+      execution: { cashTargetPercent: 100 },
+    };
+
+    const prepared = await service.prepare(request);
+
+    expect(prepared.simulation.assets).toMatchObject([{ symbol: "005930", weight: 0 }]);
+    expect(prepared.simulation.execution?.cashTargetPercent).toBe(100);
+    expect(prepared.responseContext.config).toMatchObject({
+      assets: [{ symbol: "005930", weight: 0 }],
+      execution: { cashTargetPercent: 100 },
+    });
+  });
+
   it("국내·해외 개별 종목을 벤치마크로 선택하고 비교 지표를 반환한다", async () => {
     const toss = {
       getInstruments: vi.fn().mockImplementation(async (symbols: string[]) => (

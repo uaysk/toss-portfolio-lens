@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
-  "toolCount": 50,
-  "schemaHash": "5259cec5fa3e73ee4b9732ad87fc0fe25dc60e48996c1bf840f7df64721804f2",
+  "toolCount": 53,
+  "schemaHash": "34ddcb8d606935ca7ab499c752ebcaea12fb8c1487d103f86e6ca452de8c8ea9",
   "tools": [
     {
       "name": "search_instruments",
@@ -45,6 +45,51 @@
       "annotations": {
         "readOnlyHint": true,
         "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "analyze_technical_signals",
+      "inputSchemaHash": "4f9b7d3c89b1cb26da90771c8fbb58f22f833962dd2cd27da7ff1b03f76e646b",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "기술적 지표·신호 분석",
+      "description": "기존 지표 batch 요청과 typed 기술 조건 신호-only 요청을 함께 지원합니다. 지표·조건 평가는 하나의 Rust batch를 사용하고 종가 신호는 다음 공통 실제 관측일에만 계획합니다.",
+      "scopes": [
+        "market:read"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "validate_technical_strategy",
+      "inputSchemaHash": "b3577a9e8de57daaf804b7f39b3966333d1bb766d8525193535eea85427fa727",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "기술 신호 전략 검증",
+      "description": "typed 조건·지표 참조·allocation·백테스트 연결과 데이터 가용성을 Rust 계산 없이 검증합니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "name": "run_technical_strategy_backtest",
+      "inputSchemaHash": "b3577a9e8de57daaf804b7f39b3966333d1bb766d8525193535eea85427fa727",
+      "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
+      "title": "기술 신호 전략 백테스트",
+      "description": "Rust에서 지표 계산→조건 평가→다음 안전 거래일 schedule→기존 ledger를 한 run으로 실행하며 주문은 만들지 않습니다.",
+      "scopes": [
+        "backtest:run"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
         "destructiveHint": false
       }
     },
@@ -95,7 +140,7 @@
     },
     {
       "name": "validate_backtest_config",
-      "inputSchemaHash": "d38cfea450b42747b0cd4a4a5ad1443abe73bad26e79c38d033c275572f5c630",
+      "inputSchemaHash": "531bdf89bb1e9456743ad0ba4fe4695c69a7cdac3af7f2146a8e521c3a17a360",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "백테스트 설정 검증",
       "description": "백테스트 입력·비중·기간·데이터 가용성을 계산 실행 없이 검증합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
@@ -110,7 +155,7 @@
     },
     {
       "name": "run_portfolio_backtest",
-      "inputSchemaHash": "13cf8c51a4c363f9ae232049a4979ec70213c031296409b3602674315374ed9c",
+      "inputSchemaHash": "db336a8964456c4b26d50739e1879597d4de4e883e25f68ae9d8dbc54b900545",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "포트폴리오 백테스트",
       "description": "현금·정수 수량·목표비중 정책·배당·세금·유동성 비용과 point-in-time universe를 ledger에 반영합니다. presetId 사용 시 명시한 필드를 덮어쓰고 정책 부분 객체는 깊게 병합합니다.",
@@ -260,7 +305,7 @@
     },
     {
       "name": "stress_test_portfolio",
-      "inputSchemaHash": "033a5a10c05a24f0c7029f8d4bc5aaf617e9016bb3cbc4815012e9889e955722",
+      "inputSchemaHash": "8115f069b03aa0519c4a76ad280813a7efb36315388b8603be5b0c4582c04efd",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "포트폴리오 스트레스 테스트",
       "description": "비용·환율·현금흐름·리밸런싱·종목 제외 가정을 바꾼 복수 시나리오를 실행합니다.",
@@ -320,7 +365,7 @@
     },
     {
       "name": "analyze_weight_sensitivity",
-      "inputSchemaHash": "d57ca2f2cb1c68cf21520c6c2e1d50eff824b562d4a1aaf46a06b0c3451630c1",
+      "inputSchemaHash": "7de0702dbf0fa1a462b82ed6bb51e985132d1b3ddbf9979a37bc09d436cc9f41",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "비중 민감도 분석",
       "description": "특정 종목의 명시적 비중 범위에서 성과·위험 지표 변화를 실행합니다.",
@@ -335,7 +380,7 @@
     },
     {
       "name": "analyze_start_date_sensitivity",
-      "inputSchemaHash": "d3793d7f364b6a81c4cbc7b0d0a853f57fbb931abbbc06aff0638375a58cf826",
+      "inputSchemaHash": "10129795b7dc7dd2baa517ef8138a8a778293615d369411a1084195af21c48c8",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "시작일 민감도 분석",
       "description": "시작일 이동에 따른 백테스트 성과와 위험 분포를 실행합니다.",
@@ -350,7 +395,7 @@
     },
     {
       "name": "analyze_rebalance_sensitivity",
-      "inputSchemaHash": "ebc364ca7698224dd316c88b53d7e4be37794c4a28a9799ea372a4e952eda30b",
+      "inputSchemaHash": "58a8ebad6bc4a75da0c5256737d8e6f26bf5d3dd415d6a86054acb831514c118",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "리밸런싱 민감도 분석",
       "description": "없음·월·분기·연·threshold 리밸런싱 가정을 비교합니다.",
@@ -365,7 +410,7 @@
     },
     {
       "name": "analyze_cash_flow_sensitivity",
-      "inputSchemaHash": "921b2e00be6b817591c1c05815d0ebefd7e25ee2409d0bb4c58dfa41b9d033db",
+      "inputSchemaHash": "036d10191204d5ceacf1c2b840bc60299bf08c3373961fa00b332aeb816cb66c",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "현금흐름 민감도 분석",
       "description": "정기 납입·인출 금액·주기·기간 내 시점 변화가 백테스트에 미치는 영향을 실행합니다.",
@@ -395,7 +440,7 @@
     },
     {
       "name": "analyze_portfolio_outlook",
-      "inputSchemaHash": "8177815746880cb90bbe5005d636e9448b7995a6b483312d59a72ffad0712ba6",
+      "inputSchemaHash": "286d8797d0654e95cfd32912926f153990fad8c7acb65beac4578ffbfdf8a7ba",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "포트폴리오 미래 전망",
       "description": "Walk-forward OOS·Monte Carlo calibration·stress·시장 국면·ledger 민감도를 하나의 취소 가능한 역사적 전망 run으로 결합합니다.",
@@ -485,7 +530,7 @@
     },
     {
       "name": "list_runs",
-      "inputSchemaHash": "2dc6bf5b444af7b62ebbeadae2c2f082d2e7512225b5adb98bc21b81710ef9d2",
+      "inputSchemaHash": "aa64b088bc8dc1323a7a59fba79bf4a09674afc775dd9302303d76bc7110d7e0",
       "outputSchemaHash": "b05369960ce240bed40aaeb47081bcbb37115004ede0a20b20a1e5c4c2765cef",
       "title": "실행 기록 검색",
       "description": "영구 run을 이름·종류·상태·태그·보관 여부로 검색하고 cursor 페이지로 조회합니다.",

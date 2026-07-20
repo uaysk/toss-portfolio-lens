@@ -45,6 +45,7 @@ import {
   listLibraryRuns,
   normalizeTags,
   runLibraryAction,
+  specializedPresetPresentation,
   updateLibraryPreset,
   updateLibraryRun,
   type PresetLibraryItem,
@@ -742,8 +743,10 @@ function PresetLibrary({ portfolio, onUnauthorized }: { portfolio: Portfolio; on
       {executionResult !== undefined ? <LazyJsonDetails value={executionResult} className="rounded-[18px] bg-secondary p-4" /> : null}
       {loading ? <EmptyPanel><LoaderCircle className="mx-auto mb-3 animate-spin" />프리셋을 불러오는 중입니다.</EmptyPanel> : !visible.length ? <EmptyPanel>저장된 프리셋이 없습니다.</EmptyPanel> : (
         <div className="grid gap-3 xl:grid-cols-2">
-          {visible.map((preset) => (
-            <Card key={preset.id} className="min-w-0 bg-secondary p-5">
+          {visible.map((preset) => {
+            const specialized = specializedPresetPresentation(preset);
+            return (
+            <Card key={preset.id} className="min-w-0 bg-secondary p-5" data-preset-type={String(preset.config.presetType ?? preset.config.preset_type ?? "portfolio")}>
               <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h4 className="truncate text-lg font-black">{preset.name}</h4><p className="mt-1 break-all text-[9px] text-muted-foreground">{preset.id}</p></div><span className="shrink-0 rounded-full bg-card px-2.5 py-1 text-[9px] font-black">v{preset.version ?? 1}</span></div>
               {preset.description ? <p className="mt-3 text-xs leading-5 text-muted-foreground">{preset.description}</p> : null}
               <div className="mt-3 flex flex-wrap gap-1.5">{preset.symbols.map((symbol) => <span key={symbol} className="rounded-full bg-card px-2.5 py-1 text-[10px] font-black">{symbol}</span>)}</div>
@@ -751,18 +754,21 @@ function PresetLibrary({ portfolio, onUnauthorized }: { portfolio: Portfolio; on
               {preset.tags.length ? <div className="mt-3 flex flex-wrap gap-1">{preset.tags.map((tag) => <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-card px-2 py-1 text-[9px] font-bold"><Tags className="size-2.5" />{tag}</span>)}</div> : null}
               <LazyJsonDetails value={{ source: preset.source, config: preset.config }} className="mt-4 rounded-2xl bg-card p-3" />
               <PresetLazyHistory presetId={preset.id} onUnauthorized={onUnauthorized} />
+              {specialized ? <p role="note" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-xs font-semibold leading-5"><span className="font-black">{specialized.label}</span> · {specialized.restoreHint}</p> : null}
               <div className="mt-4 flex flex-wrap gap-1.5">
-                <Button size="sm" onClick={() => void executePreset(preset, "run_portfolio_backtest")} disabled={Boolean(busy)}><Play />백테스트</Button>
-                <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "optimize_portfolio")} disabled={Boolean(busy)}><Activity />최적화</Button>
-                <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "walk_forward_optimize")} disabled={Boolean(busy)}><Play />Walk-forward</Button>
-                <Button size="sm" variant="secondary" onClick={() => { setEditingId(preset.id); setDraft(draftFromPreset(preset)); window.scrollTo({ top: 0, behavior: "smooth" }); }} disabled={Boolean(busy)}><Pencil />수정</Button>
+                {!specialized ? <>
+                  <Button size="sm" onClick={() => void executePreset(preset, "run_portfolio_backtest")} disabled={Boolean(busy)}><Play />백테스트</Button>
+                  <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "optimize_portfolio")} disabled={Boolean(busy)}><Activity />최적화</Button>
+                  <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "walk_forward_optimize")} disabled={Boolean(busy)}><Play />Walk-forward</Button>
+                  <Button size="sm" variant="secondary" onClick={() => { setEditingId(preset.id); setDraft(draftFromPreset(preset)); window.scrollTo({ top: 0, behavior: "smooth" }); }} disabled={Boolean(busy)}><Pencil />수정</Button>
+                </> : null}
                 <Button size="sm" variant="secondary" onClick={() => void duplicate(preset)} disabled={Boolean(busy)}><BookCopy />복제</Button>
                 <Button size="sm" variant="secondary" onClick={() => void exportPreset(preset)} disabled={Boolean(busy)}><Download />내보내기</Button>
                 {deletePendingId === preset.id ? <Button size="sm" onClick={() => void remove(preset)} disabled={Boolean(busy)}><Trash2 />정말 삭제</Button> : <Button size="sm" variant="ghost" onClick={() => void remove(preset)} disabled={Boolean(busy)}><Trash2 />삭제</Button>}
                 {deletePendingId === preset.id ? <Button size="sm" variant="ghost" onClick={() => setDeletePendingId(undefined)}><X />취소</Button> : null}
               </div>
             </Card>
-          ))}
+          ); })}
         </div>
       )}
     </div>

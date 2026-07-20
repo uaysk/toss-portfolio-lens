@@ -25,6 +25,8 @@ pub enum JobKind {
     CashFlowSensitivity,
     MonteCarlo,
     Outlook,
+    TechnicalAnalysis,
+    TechnicalStrategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +314,8 @@ pub fn job_kind(value: &str) -> Result<JobKind> {
         "cash_flow_sensitivity" => Ok(JobKind::CashFlowSensitivity),
         "monte_carlo" => Ok(JobKind::MonteCarlo),
         "outlook" => Ok(JobKind::Outlook),
+        "technical_analysis" => Ok(JobKind::TechnicalAnalysis),
+        "technical_strategy" => Ok(JobKind::TechnicalStrategy),
         _ => bail!("unsupported job kind: {value}"),
     }
 }
@@ -339,5 +343,29 @@ mod tests {
     fn outlook_job_kind_round_trips_as_snake_case() {
         assert_eq!(job_kind("outlook").unwrap(), JobKind::Outlook);
         assert_eq!(serde_json::to_value(JobKind::Outlook).unwrap(), "outlook");
+    }
+
+    #[test]
+    fn technical_analysis_job_kind_round_trips_as_snake_case() {
+        assert_eq!(
+            job_kind("technical_analysis").unwrap(),
+            JobKind::TechnicalAnalysis
+        );
+        assert_eq!(
+            serde_json::to_value(JobKind::TechnicalAnalysis).unwrap(),
+            "technical_analysis"
+        );
+    }
+
+    #[test]
+    fn technical_strategy_job_kind_round_trips_as_snake_case() {
+        assert_eq!(
+            job_kind("technical_strategy").unwrap(),
+            JobKind::TechnicalStrategy
+        );
+        assert_eq!(
+            serde_json::to_value(JobKind::TechnicalStrategy).unwrap(),
+            "technical_strategy"
+        );
     }
 }

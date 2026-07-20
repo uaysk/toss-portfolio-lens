@@ -60,6 +60,195 @@ describe("backtest policy schemas", () => {
   });
 });
 
+describe("technical analysis schema", () => {
+  const request = {
+    symbols: ["aaa", "BBB"],
+    fromDate: "2024-01-01",
+    toDate: "2024-12-31",
+    interval: "1d",
+    adjusted: true,
+    currencyMode: "KRW",
+    responseMode: "full_series",
+    indicators: [
+      { id: "sma-main", kind: "sma", parameters: { period: 20 }, instrumentKeys: ["aaa", "BBB"] },
+    ],
+  } as const;
+
+  it("공개 batch 입력을 strict하게 정규화하고 31개 exact kind만 허용한다", () => {
+    const parsed = toolSchemas.analyze_technical_signals.parse(request);
+    expect(parsed.symbols).toEqual(["AAA", "BBB"]);
+    expect(parsed.indicators[0]?.instrumentKeys).toEqual(["AAA", "BBB"]);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...request,
+      indicators: [{ id: "unknown", kind: "not_an_indicator" }],
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({ ...request, unexpected: true }).success).toBe(false);
+  });
+
+  it("기간·중복 symbol/id·instrument 범위와 primitive parameter를 검증한다", () => {
+    expect(toolSchemas.analyze_technical_signals.safeParse({ ...request, fromDate: "2025-01-01" }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({ ...request, symbols: ["aaa", "AAA"] }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...request,
+      indicators: [{ id: "same", kind: "sma" }, { id: "same", kind: "ema" }],
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...request,
+      indicators: [{ id: "sma-main", kind: "sma", instrumentKeys: ["MISSING"] }],
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...request,
+      indicators: [{ id: "sma-main", kind: "sma", parameters: { period: { invalid: true } } }],
+    }).success).toBe(false);
+  });
+
+  it("Volume Profile은 한 종목·한 정의로만 허용하고 focused target을 정규화한다", () => {
+    const focused = {
+      ...request,
+      symbols: ["aaa"],
+      indicators: [{ id: "profile", kind: "volume_profile", instrumentKeys: ["aaa"] }],
+    } as const;
+    expect(toolSchemas.analyze_technical_signals.parse(focused)).toMatchObject({
+      symbols: ["AAA"],
+      indicators: [{ kind: "volume_profile", instrumentKeys: ["AAA"] }],
+    });
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...request,
+      indicators: [{ id: "profile", kind: "volume_profile" }],
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...focused,
+      indicators: [{ id: "profile-a", kind: "volume_profile" }, { id: "profile-b", kind: "volume_profile" }],
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...focused,
+      indicators: [{ id: "profile", kind: "volume_profile" }, { id: "sma", kind: "sma" }],
+    }).success).toBe(false);
+  });
+
+  it("run 목록에서 technical_analysis kind를 필터링할 수 있다", () => {
+    expect(toolSchemas.list_runs.parse({ kinds: ["technical_analysis"] }).kinds).toEqual(["technical_analysis"]);
+  });
+});
+
+describe("technical signal strategy schemas", () => {
+  const condition = {
+    operator: "crosses_above",
+    left: { type: "indicator", instrumentKey: "AAA", indicatorId: "sma-main", field: "value" },
+    right: { type: "constant", value: 10 },
+  } as const;
+  const strategyRequest = {
+    analysis: {
+      symbols: ["AAA"],
+      fromDate: "2023-01-01",
+      toDate: "2024-12-31",
+      interval: "1d",
+      adjusted: true,
+      currencyMode: "KRW",
+      responseMode: "full_series",
+      indicators: [{ id: "sma-main", kind: "sma", parameters: { period: 20 } }],
+    },
+    strategy: {
+      schemaVersion: "technical-strategy/v1",
+      id: "trend-main",
+      entryCondition: condition,
+      exitCondition: {
+        operator: "less_than",
+        left: { type: "bar", instrumentKey: "AAA", field: "close" },
+        right: { type: "constant", value: 8 },
+      },
+      minimumHoldingPeriod: 2,
+      cooldownPeriod: 1,
+      initialState: "inactive",
+      allocations: {
+        active: { weights: { AAA: 100 }, cashPercent: 0 },
+        inactive: { weights: { AAA: 0 }, cashPercent: 100 },
+      },
+    },
+  } as const;
+  const technicalBacktest = {
+    assets: [{ symbol: "AAA", weight: 0 }],
+    startDate: "2024-01-01",
+    endDate: "2024-12-31",
+    initialAmount: 1_000_000,
+    monthlyCashFlow: 0,
+    rebalanceFrequency: "none",
+    benchmark: "NONE",
+    currencyMode: "KRW",
+    execution: { cashTargetPercent: 100 },
+  } as const;
+
+  it("signal-only와 cash-only 초기 combined 전략을 허용하고 preset-only 실행도 표현한다", () => {
+    expect(toolSchemas.analyze_technical_signals.safeParse(strategyRequest).success).toBe(true);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({ ...strategyRequest, backtest: technicalBacktest }).success).toBe(true);
+    expect(toolSchemas.run_portfolio_backtest.safeParse(technicalBacktest).success).toBe(true);
+    const presetId = "00000000-0000-4000-8000-000000000888";
+    expect(toolSchemas.analyze_technical_signals.safeParse({ presetId }).success).toBe(true);
+    expect(toolSchemas.validate_technical_strategy.safeParse({ presetId }).success).toBe(true);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({ presetId }).success).toBe(true);
+    expect(toolSchemas.list_runs.parse({ kinds: ["technical_strategy"] }).kinds).toEqual(["technical_strategy"]);
+  });
+
+  it("정의되지 않은 지표·field·instrument와 Volume Profile 조건 참조를 거부한다", () => {
+    const withOperand = (left: Record<string, unknown>, indicators = strategyRequest.analysis.indicators) => ({
+      ...strategyRequest,
+      analysis: { ...strategyRequest.analysis, indicators },
+      strategy: { ...strategyRequest.strategy, entryCondition: { operator: "greater_than", left, right: { type: "constant", value: 1 } } },
+    });
+    expect(toolSchemas.analyze_technical_signals.safeParse(withOperand({ type: "indicator", instrumentKey: "AAA", indicatorId: "missing", field: "value" })).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse(withOperand({ type: "indicator", instrumentKey: "AAA", indicatorId: "sma-main", field: "histogram" })).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse(withOperand({ type: "bar", instrumentKey: "MISSING", field: "close" })).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse(withOperand(
+      { type: "indicator", instrumentKey: "AAA", indicatorId: "profile", field: "point_of_control" },
+      [{ id: "profile", kind: "volume_profile" }] as never,
+    )).success).toBe(false);
+  });
+
+  it("조건 깊이·전체 노드·allocation exact 합계를 제한한다", () => {
+    let deep: Record<string, unknown> = strategyRequest.strategy.exitCondition;
+    for (let index = 0; index < 17; index += 1) deep = { operator: "not", condition: deep };
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...strategyRequest,
+      strategy: { ...strategyRequest.strategy, entryCondition: deep },
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...strategyRequest,
+      strategy: {
+        ...strategyRequest.strategy,
+        entryCondition: { operator: "all", conditions: Array.from({ length: 255 }, () => strategyRequest.strategy.exitCondition) },
+      },
+    }).success).toBe(false);
+    expect(toolSchemas.analyze_technical_signals.safeParse({
+      ...strategyRequest,
+      strategy: {
+        ...strategyRequest.strategy,
+        allocations: { ...strategyRequest.strategy.allocations, inactive: { weights: { AAA: 1 }, cashPercent: 100 } },
+      },
+    }).success).toBe(false);
+  });
+
+  it("사용자 target schedule·정기 rebalance·report와 분석/ledger 불일치를 거부한다", () => {
+    const combined = { ...strategyRequest, backtest: technicalBacktest };
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({
+      ...combined,
+      backtest: { ...technicalBacktest, targetWeightSchedule: [{ date: "2024-02-01", weights: { AAA: 100 }, cashTargetPercent: 0 }] },
+    }).success).toBe(false);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({
+      ...combined, backtest: { ...technicalBacktest, rebalanceFrequency: "monthly" },
+    }).success).toBe(false);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({
+      ...combined, backtest: { ...technicalBacktest, report: { enabled: true } },
+    }).success).toBe(false);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({
+      ...combined, analysis: { ...strategyRequest.analysis, adjusted: false },
+    }).success).toBe(false);
+    expect(toolSchemas.run_technical_strategy_backtest.safeParse({
+      ...combined,
+      backtest: { ...technicalBacktest, assets: [{ symbol: "AAA", weight: 100 }], execution: { cashTargetPercent: 0 } },
+    }).success).toBe(false);
+  });
+});
+
 describe("optimizer validation schemas", () => {
   const optimization = {
     symbols: ["AAA", "BBB"],

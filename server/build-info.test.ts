@@ -6,7 +6,7 @@ describe("build info", () => {
     expect(mcpSchemaHash()).toMatch(/^[a-f0-9]{64}$/);
     expect(mcpSchemaHash()).toBe(mcpSchemaHash());
     expect(buildInfo()).toMatchObject({
-      mcpToolCount: 50,
+      mcpToolCount: 53,
       workerSchemaVersion: "1.0",
       mcpSchemaVersion: "1.1",
     });

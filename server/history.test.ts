@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { isHistoryDate, kstDateString, PortfolioHistoryStore } from "./history.js";
+import { MarketDataRepository } from "./repositories/market-data-repository.js";
 import type { HistoricalOrder, Holding, Portfolio } from "./toss.js";
 
 function holding(symbol: string, evaluationAmount: number, currency = "KRW"): Holding {
@@ -263,7 +264,7 @@ describe("PortfolioHistoryStore", () => {
     stores.push(store);
     const payload = {
       result: {
-        candles: [{ timestamp: "2026-07-01T00:00:00+09:00", closePrice: "73500" }],
+        candles: [{ timestamp: "2026-07-01T00:00:00+09:00", closePrice: "73500", volume: "12345678" }],
         nextBefore: "2026-06-30T00:00:00+09:00",
       },
     };
@@ -285,6 +286,7 @@ describe("PortfolioHistoryStore", () => {
         highPrice: 74000,
         lowPrice: 71500,
         closePrice: 73500,
+        volume: 12_345_678,
       }],
       fetchedAt: 1000,
       expiresAt: 0,
@@ -292,6 +294,15 @@ describe("PortfolioHistoryStore", () => {
 
     expect(await store.getCachedCandleResponse("request-1", 10_000)).toEqual(payload);
     expect(await store.getMarketCandleCount()).toBe(1);
+    await expect(new MarketDataRepository(store.relationalDatabase).getCandles({
+      symbol: "005930",
+      adjusted: false,
+      fromDate: "2026-07-01",
+      toDate: "2026-07-01",
+    })).resolves.toEqual([expect.objectContaining({
+      date: "2026-07-01",
+      volume: 12_345_678,
+    })]);
 
     await store.cacheCandleResponse({
       requestKey: "expired",

@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "./database.js";
-import { applyPortfolioMigrations, listAppliedMigrations } from "./migrations.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type DatabaseDialect, type RelationalDatabase, SqliteDatabase } from "./database.js";
+import { applyPortfolioMigrations, ensureMarketCandleVolumeColumn, listAppliedMigrations } from "./migrations.js";
 import { RunRepository } from "./repositories/run-repository.js";
 
 describe("versioned portfolio migrations", () => {
@@ -9,6 +9,30 @@ describe("versioned portfolio migrations", () => {
   afterEach(async () => {
     await database?.close();
     database = undefined;
+  });
+
+  it.each([
+    ["mysql", "DOUBLE NULL"],
+    ["postgres", "DOUBLE PRECISION"],
+  ] as const)("%s 기존 candle table에 nullable volume을 additive migration한다", async (dialect, columnType) => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 0, insertId: 0 });
+    const database = {
+      dialect: dialect as DatabaseDialect,
+      query: vi.fn(async (sql: string) => (
+        sql.includes("information_schema.tables")
+          ? [{ table_name: "portfolio_market_candles" }]
+          : []
+      )),
+      run,
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+
+    await ensureMarketCandleVolumeColumn(database);
+
+    expect(run).toHaveBeenCalledWith(
+      `ALTER TABLE portfolio_market_candles ADD COLUMN volume ${columnType}`,
+    );
   });
 
   it("기존 run 테이블에 관리 컬럼을 보존적으로 추가하고 ledger를 멱등 기록한다", async () => {
@@ -102,6 +126,18 @@ describe("versioned portfolio migrations", () => {
       "c".repeat(64),
       "d".repeat(64),
     ]);
+    await database.run(`
+      CREATE TABLE portfolio_market_candles (
+        source_kind TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        candle_interval TEXT NOT NULL,
+        adjusted INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        close_price REAL NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
+      )
+    `);
 
     const runs = new RunRepository(database);
     await runs.initialize();
@@ -117,8 +153,11 @@ describe("versioned portfolio migrations", () => {
       "20260718_002_portfolio_presets",
       "20260718_003_canonical_local_owner",
       "20260718_004_canonical_local_owner_reconciliation",
+      "20260721_005_market_candle_volume",
     ]);
-    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(4);
+    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(5);
+    const marketCandleColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_market_candles)");
+    expect(marketCandleColumns.map((column) => column.name)).toContain("volume");
 
     const legacy = await runs.get("00000000-0000-4000-8000-000000000001", "owner-a");
     expect(legacy).toMatchObject({ tags: [], input: {}, status: "completed" });

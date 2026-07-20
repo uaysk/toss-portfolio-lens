@@ -594,4 +594,157 @@ mod tests {
                 .contains("CANCELLED")
         );
     }
+
+    #[test]
+    fn technical_analysis_round_trips_over_the_real_length_framed_socket() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || handle_socket(server));
+        let request = json!({
+            "schema_version": portfolio_lens_compute::WORKER_SCHEMA_VERSION,
+            "engine_version": portfolio_lens_compute::ENGINE_VERSION,
+            "run_id": "technical-socket-test",
+            "job_kind": "technical_analysis",
+            "data_revision": "technical-revision-1",
+            "request_hash": "b".repeat(64),
+            "payload": {
+                "technical_analysis": {
+                    "schema_version": portfolio_lens_compute::indicators::TECHNICAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
+                    "response_mode": "latest_summary",
+                    "adjustment_policy": "adjusted",
+                    "instruments": [{
+                        "key": "USD:AAPL",
+                        "symbol": "AAPL",
+                        "market": "US",
+                        "currency": "USD",
+                        "instrument_type": "stock",
+                        "bars": [{
+                            "date": "2024-01-02",
+                            "open": 185.0,
+                            "high": 188.0,
+                            "low": 184.0,
+                            "close": 187.0,
+                            "volume": 1000000.0
+                        }]
+                    }],
+                    "indicators": [{"id": "ema-20", "kind": "ema"}]
+                }
+            },
+            "include_artifacts": true
+        });
+        if let Err(error) = write_socket_frame(&mut client, &request) {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == ErrorKind::PermissionDenied)
+            {
+                drop(client);
+                let _ = server_thread.join();
+                return;
+            }
+            panic!("write technical analysis socket frame: {error}");
+        }
+        let source = read_socket_frame(&mut client).unwrap().unwrap();
+        let output: WorkerOutput = serde_json::from_slice(&source).unwrap();
+        assert_eq!(output.job_kind, JobKind::TechnicalAnalysis);
+        assert_eq!(output.status, "completed");
+        assert_eq!(
+            output.result.as_ref().unwrap()["indicator_engine_version"],
+            portfolio_lens_compute::indicators::INDICATOR_ENGINE_VERSION
+        );
+        assert!(
+            output
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|artifact| artifact.artifact_type == "technical-indicators")
+        );
+        drop(client);
+        server_thread.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn technical_strategy_round_trips_over_the_real_length_framed_socket() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || handle_socket(server));
+        let request = json!({
+            "schema_version": portfolio_lens_compute::WORKER_SCHEMA_VERSION,
+            "engine_version": portfolio_lens_compute::ENGINE_VERSION,
+            "run_id": "technical-strategy-socket-test",
+            "job_kind": "technical_strategy",
+            "data_revision": "technical-strategy-revision-1",
+            "request_hash": "d".repeat(64),
+            "payload": {
+                "technical_analysis": {
+                    "schema_version": portfolio_lens_compute::indicators::TECHNICAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
+                    "response_mode": "full_series",
+                    "adjustment_policy": "adjusted",
+                    "instruments": [{
+                        "key": "KRW:AAA",
+                        "symbol": "AAA",
+                        "market": "KR",
+                        "currency": "KRW",
+                        "instrument_type": "stock",
+                        "bars": [
+                            {"date": "2024-01-01", "open": 9.0, "high": 10.0, "low": 8.0, "close": 9.0, "volume": 1000.0},
+                            {"date": "2024-01-02", "open": 11.0, "high": 12.0, "low": 10.0, "close": 11.0, "volume": 1000.0},
+                            {"date": "2024-01-03", "open": 12.0, "high": 13.0, "low": 11.0, "close": 12.0, "volume": 1000.0}
+                        ]
+                    }],
+                    "indicators": [{"id": "sma-one", "kind": "sma", "parameters": {"period": 1}}]
+                },
+                "strategy": {
+                    "schema_version": portfolio_lens_compute::technical_strategy::TECHNICAL_STRATEGY_SCHEMA_VERSION,
+                    "initial_state": "inactive",
+                    "active_when": {
+                        "operator": "crosses_above",
+                        "left": {"type": "bar", "instrument_key": "KRW:AAA", "field": "close"},
+                        "right": {"type": "constant", "value": 10.0}
+                    },
+                    "inactive_when": {
+                        "operator": "greater_than",
+                        "left": {"type": "constant", "value": 0.0},
+                        "right": {"type": "constant", "value": 1.0}
+                    },
+                    "minimum_holding_period": 0,
+                    "cooldown_period": 0,
+                    "allocations": {
+                        "active": {"weights": {"AAA": 100.0}, "cash_target_percent": 0.0},
+                        "inactive": {"weights": {"AAA": 0.0}, "cash_target_percent": 100.0}
+                    }
+                },
+                "safe_trade_dates": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "evaluation_start_date": "2024-01-01",
+                "evaluation_end_date": "2024-01-03"
+            },
+            "include_artifacts": true
+        });
+        if let Err(error) = write_socket_frame(&mut client, &request) {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == ErrorKind::PermissionDenied)
+            {
+                drop(client);
+                let _ = server_thread.join();
+                return;
+            }
+            panic!("write technical strategy socket frame: {error}");
+        }
+        let source = read_socket_frame(&mut client).unwrap().unwrap();
+        let output: WorkerOutput = serde_json::from_slice(&source).unwrap();
+        assert_eq!(output.job_kind, JobKind::TechnicalStrategy);
+        assert_eq!(output.status, "completed");
+        assert_eq!(
+            output.result.as_ref().unwrap()["technical_strategy"]["signals"][0]["status"],
+            "planned"
+        );
+        assert!(output.result.as_ref().unwrap().get("backtest").is_none());
+        let artifacts = output.artifacts.as_ref().unwrap();
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "technical-signals")
+        );
+        drop(client);
+        server_thread.join().unwrap().unwrap();
+    }
 }

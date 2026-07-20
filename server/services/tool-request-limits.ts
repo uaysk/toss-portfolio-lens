@@ -37,10 +37,18 @@ export function enforceToolRequestLimits(value: unknown, limits: ToolRequestLimi
   const nested = input.baseConfig && typeof input.baseConfig === "object"
     ? input.baseConfig as Record<string, unknown>
     : undefined;
+  const technicalAnalysis = input.analysis && typeof input.analysis === "object" && !Array.isArray(input.analysis)
+    ? input.analysis as Record<string, unknown>
+    : undefined;
+  const strategyBacktest = input.backtest && typeof input.backtest === "object" && !Array.isArray(input.backtest)
+    ? input.backtest as Record<string, unknown>
+    : undefined;
   const rootFrom = input.fromDate ?? input.startDate;
   const rootTo = input.toDate ?? input.endDate;
   if (rootFrom !== undefined || rootTo !== undefined) assertDateRange(rootFrom, rootTo, limits, "fromDate");
   if (nested) assertDateRange(nested.startDate, nested.endDate, limits, "baseConfig.startDate");
+  if (technicalAnalysis) assertDateRange(technicalAnalysis.fromDate, technicalAnalysis.toDate, limits, "analysis.fromDate");
+  if (strategyBacktest) assertDateRange(strategyBacktest.startDate, strategyBacktest.endDate, limits, "backtest.startDate");
 
   if (nested && Array.isArray(input.scenarios)) {
     for (const [index, scenarioValue] of input.scenarios.entries()) {
@@ -76,12 +84,39 @@ export function enforceToolRequestLimits(value: unknown, limits: ToolRequestLimi
       : Array.isArray(input.symbols) ? input.symbols
         : researchSymbols.length ? Array.from(new Set(researchSymbols))
           : weightedSymbols.length ? Array.from(new Set(weightedSymbols)) : undefined;
-  if (assets && assets.length > limits.maxAssets) {
+  const assetLimit = Array.isArray(input.indicators)
+    && (input.responseMode === "full_series" || input.responseMode === "latest_summary")
+    ? 50
+    : limits.maxAssets;
+  if (assets && assets.length > assetLimit) {
+    throw new ServiceError({
+      code: "ASSET_LIMIT",
+      message: `종목은 최대 ${assetLimit}개까지 사용할 수 있습니다.`,
+      retryable: false,
+      field: "assets",
+    });
+  }
+  const technicalSymbols = technicalAnalysis && Array.isArray(technicalAnalysis.symbols)
+    ? technicalAnalysis.symbols
+    : undefined;
+  const technicalAssetLimit = strategyBacktest ? limits.maxAssets : 50;
+  if (technicalSymbols && technicalSymbols.length > technicalAssetLimit) {
+    throw new ServiceError({
+      code: "ASSET_LIMIT",
+      message: `종목은 최대 ${technicalAssetLimit}개까지 사용할 수 있습니다.`,
+      retryable: false,
+      field: "analysis.symbols",
+    });
+  }
+  const backtestAssets = strategyBacktest && Array.isArray(strategyBacktest.assets)
+    ? strategyBacktest.assets
+    : undefined;
+  if (backtestAssets && backtestAssets.length > limits.maxAssets) {
     throw new ServiceError({
       code: "ASSET_LIMIT",
       message: `종목은 최대 ${limits.maxAssets}개까지 사용할 수 있습니다.`,
       retryable: false,
-      field: "assets",
+      field: "backtest.assets",
     });
   }
 }

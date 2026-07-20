@@ -238,6 +238,7 @@ describe("과거 데이터 정규화", () => {
           highPrice: "74000",
           lowPrice: "71500",
           closePrice: "73500",
+          volume: "12,345,678",
           currency: "KRW",
         }],
       },
@@ -253,6 +254,7 @@ describe("과거 데이터 정규화", () => {
         highPrice: 74000,
         lowPrice: 71500,
         closePrice: 73500,
+        volume: 12_345_678,
       }],
     });
 
@@ -284,5 +286,59 @@ describe("과거 데이터 정규화", () => {
       rate: 1387.25,
       timestamp: "2026-07-01T15:30:00+09:00",
     });
+  });
+
+  it.each([
+    ["005930", "KRW", "19,928,148"],
+    ["AAPL", "USD", "48,052,900"],
+    ["069500", "KRW", "4,122,351"],
+    ["SPY", "USD", "77,409,112"],
+  ] as const)("실제 Toss 응답 형태의 %s %s volume 문자열을 보존한다", (symbol, currency, rawVolume) => {
+    const page = normalizeCandlePage({
+      result: {
+        candles: [{
+          date: "2026-07-20",
+          timestamp: "2026-07-20T00:00:00+09:00",
+          currency,
+          openPrice: "100",
+          highPrice: "110",
+          lowPrice: "90",
+          closePrice: "105",
+          volume: rawVolume,
+        }],
+      },
+    }, symbol);
+
+    expect(page.candles[0]?.volume).toBe(Number(rawVolume.replaceAll(",", "")));
+  });
+
+  it.each([
+    undefined,
+    null,
+    "",
+    " , ",
+    "-1",
+    "NaN",
+    Number.NaN,
+    -1,
+    {},
+    "12x",
+  ])("volume 결측·비정상 값 %j을 0으로 만들지 않는다", (volume) => {
+    const page = normalizeCandlePage({
+      result: {
+        candles: [{
+          date: "2026-07-20",
+          timestamp: "2026-07-20T00:00:00+09:00",
+          currency: "KRW",
+          openPrice: 100,
+          highPrice: 110,
+          lowPrice: 90,
+          closePrice: 105,
+          volume,
+        }],
+      },
+    }, "005930");
+
+    expect(page.candles[0]).not.toHaveProperty("volume");
   });
 });

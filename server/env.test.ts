@@ -45,6 +45,36 @@ describe("database environment configuration", () => {
       resultPollMs: 250,
       resultDeadlineMs: 300_000,
     });
+    expect(config.kisExchangeRate).toBeUndefined();
+  });
+
+  it("한국투자증권 환율 폴백 설정을 검증한다", () => {
+    Object.assign(process.env, {
+      KI_APP_KEY: "kis-app-key",
+      KI_APP_SECRET: "kis-app-secret",
+    });
+    expect(loadConfig().kisExchangeRate).toEqual({
+      appKey: "kis-app-key",
+      appSecret: "kis-app-secret",
+      environment: "demo",
+      requestIntervalMs: 600,
+      timeoutMs: 15_000,
+    });
+
+    process.env.KI_API_ENV = "real";
+    process.env.KI_API_REQUEST_INTERVAL_MS = "750";
+    process.env.KI_API_TIMEOUT_MS = "20000";
+    expect(loadConfig().kisExchangeRate).toMatchObject({
+      environment: "real",
+      requestIntervalMs: 750,
+      timeoutMs: 20_000,
+    });
+
+    delete process.env.KI_APP_SECRET;
+    expect(() => loadConfig()).toThrow("KI_APP_KEY와 KI_APP_SECRET은 함께 설정");
+    process.env.KI_APP_SECRET = "kis-app-secret";
+    process.env.KI_API_ENV = "unsupported";
+    expect(() => loadConfig()).toThrow("KI_API_ENV는 demo 또는 real");
   });
 
   it("external compute는 PostgreSQL에서만 허용하고 실행 제한값을 검증한다", () => {

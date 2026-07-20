@@ -26,6 +26,7 @@ import {
   type BacktestRunRequest,
 } from "./backtest.js";
 import { loadConfig } from "./env.js";
+import { KisExchangeRateClient } from "./kis-exchange-rate.js";
 import { BedrockReportWriter } from "./bedrock-report-ai.js";
 import {
   isHistoryDate,
@@ -63,6 +64,9 @@ import { ReturnSeriesService } from "./services/return-series-service.js";
 import { RunService } from "./services/run-service.js";
 import { PresetService } from "./services/preset-service.js";
 import { ResearchReportService } from "./services/research-report-service.js";
+import { TechnicalAnalysisService } from "./services/technical-analysis-service.js";
+import { TechnicalStrategyService } from "./services/technical-strategy-service.js";
+import { TechnicalTradeMarkerService } from "./services/technical-trade-marker-service.js";
 import { McpResourceRegistry } from "./mcp/resources.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
@@ -87,7 +91,10 @@ const toss = new TossClient(config);
 const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
-const marketData = new MarketDataService(toss, historyStore);
+const kisExchangeRate = config.kisExchangeRate
+  ? new KisExchangeRateClient(config.kisExchangeRate)
+  : undefined;
+const marketData = new MarketDataService(toss, historyStore, kisExchangeRate);
 const portfolioBacktest = new PortfolioBacktestService(toss, historyStore, marketData);
 const reportStorage = createReportStorage(config.reportStorage);
 const rustCompute = config.compute.executionMode === "rust_socket"
@@ -172,6 +179,17 @@ const returnSeries = new ReturnSeriesService(marketData);
 const analytics = new AnalyticsService(returnSeries, marketData);
 const portfolioService = new PortfolioService(toss, portfolioBacktest, config.sessionSecret);
 const researchReportService = new ResearchReportService();
+const technicalAnalysisService = new TechnicalAnalysisService(marketData, runService, artifactService, rustCompute);
+const technicalStrategyService = new TechnicalStrategyService(
+  technicalAnalysisService,
+  portfolioBacktest,
+  backtests,
+  marketData,
+  runService,
+  artifactService,
+  rustCompute,
+);
+const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
 const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
 const computeToolDependencies = {
   instruments: instrumentService,
@@ -187,6 +205,8 @@ const computeToolDependencies = {
   runRepository,
   presets: presetService,
   researchReports: researchReportService,
+  technicalAnalysis: technicalAnalysisService,
+  technicalStrategies: technicalStrategyService,
   optimizationRepository,
   resources,
   rustCompute,
@@ -318,6 +338,10 @@ app.get("/api/health", (_request, response) => {
     storage: historyStore.backend,
     reportStorage: portfolioReports.storageBackend,
     reportGeneration: portfolioReports.generationConfigured ? "configured" : "unconfigured",
+    marketData: {
+      exchangeRateFallback: kisExchangeRate ? "kis" : "disabled",
+      kisEnvironment: config.kisExchangeRate?.environment,
+    },
     mcp: config.mcp.enabled ? "enabled" : "disabled",
     mcpAuth: !config.mcp.enabled
       ? "disabled"
@@ -949,6 +973,24 @@ function queryValue(value: unknown): string | undefined {
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
+
+app.get("/api/portfolio/technical/trades", requireSession, async (request, response) => {
+  setNoStore(response);
+  const accountId = queryValue(request.query.account) ?? "";
+  const fromDate = queryValue(request.query.from);
+  const toDate = queryValue(request.query.to);
+  const symbols = queryValues(request.query.symbols).map((symbol) => symbol.toUpperCase());
+  try {
+    response.json(await technicalTradeMarkerService.getMarkers({
+      accountId,
+      ...(fromDate ? { fromDate } : {}),
+      ...(toDate ? { toDate } : {}),
+      ...(symbols.length ? { symbols } : {}),
+    }));
+  } catch (error) {
+    sendDashboardAnalysisError(response, error);
+  }
+});
 
 async function executeDashboardManagement(name: ToolName, input: unknown): Promise<unknown> {
   const parsed = toolSchemas[name].parse(input);

@@ -52,6 +52,26 @@ export type LibraryRequestOptions = {
   onUnauthorized?: () => void;
 };
 
+export type SpecializedPresetPresentation = {
+  label: string;
+  restoreHint: string;
+};
+
+const specializedPresetPresentations: Record<string, SpecializedPresetPresentation> = {
+  technical_watchlist: {
+    label: "기술적 분석 종목 목록",
+    restoreHint: "기술적 분석 화면에서 복원",
+  },
+  technical_chart_config: {
+    label: "기술적 분석 차트 구성",
+    restoreHint: "기술적 분석 화면에서 복원",
+  },
+  technical_signal_strategy: {
+    label: "기술 신호 전략",
+    restoreHint: "기술적 분석/백테스트 화면에서 복원",
+  },
+};
+
 type UnknownRecord = Record<string, unknown>;
 
 function record(value: unknown): UnknownRecord {
@@ -182,6 +202,18 @@ export function normalizePresetDetails(payload: unknown): PresetLibraryDetails {
     preset: normalizePreset(container.preset ?? container),
     history: Array.isArray(container.history) ? container.history : [],
   };
+}
+
+/**
+ * Specialized technical presets are restored by their owning screen. The generic
+ * library editor/executors do not understand their versioned nested contracts and
+ * must not silently coerce them into an allocation preset.
+ */
+export function specializedPresetPresentation(
+  preset: Pick<PresetLibraryItem, "config">,
+): SpecializedPresetPresentation | undefined {
+  const presetType = stringValue(preset.config.presetType, preset.config.preset_type);
+  return presetType ? specializedPresetPresentations[presetType] : undefined;
 }
 
 export function buildRunLibraryUrl(filters: RunLibraryFilters = {}): string {

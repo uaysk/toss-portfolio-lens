@@ -18,6 +18,7 @@ export type CachedMarketCandle = {
   high: number;
   low: number;
   close: number;
+  volume: number | null;
   updatedAt: number;
 };
 
@@ -88,9 +89,10 @@ export class MarketDataRepository {
       high_price: number;
       low_price: number;
       close_price: number;
+      volume: number | null;
       updated_at: number;
     }>(`
-      SELECT price_date, timestamp, currency, open_price, high_price, low_price, close_price, updated_at
+      SELECT price_date, timestamp, currency, open_price, high_price, low_price, close_price, volume, updated_at
       FROM portfolio_market_candles
       WHERE source_kind = ? AND symbol = ? AND candle_interval = '1d' AND adjusted = ?
         AND price_date BETWEEN ? AND ?
@@ -106,6 +108,9 @@ export class MarketDataRepository {
             high: Number(row.high_price),
             low: Number(row.low_price),
             close: Number(row.close_price),
+            volume: row.volume === null || !Number.isFinite(Number(row.volume)) || Number(row.volume) < 0
+              ? null
+              : Number(row.volume),
             updatedAt: Number(row.updated_at),
           }]
         : []
@@ -116,15 +121,17 @@ export class MarketDataRepository {
     source?: MarketCandleSource;
     symbol: string;
     adjusted: boolean;
-  }): Promise<{ firstDate?: string; lastDate?: string; observations: number; revision: number }> {
+  }): Promise<{ firstDate?: string; lastDate?: string; observations: number; volumeObservations: number; revision: number }> {
     const [row] = await this.database.query<{
       first_date: string | null;
       last_date: string | null;
       observations: number;
+      volume_observations: number;
       revision: number;
     }>(`
       SELECT MIN(price_date) AS first_date, MAX(price_date) AS last_date,
-             COUNT(*) AS observations, COALESCE(MAX(updated_at), 0) AS revision
+             COUNT(*) AS observations, COUNT(volume) AS volume_observations,
+             COALESCE(MAX(updated_at), 0) AS revision
       FROM portfolio_market_candles
       WHERE source_kind = ? AND symbol = ? AND candle_interval = '1d' AND adjusted = ?
     `, [input.source ?? "stock", input.symbol, input.adjusted ? 1 : 0]);
@@ -132,19 +139,50 @@ export class MarketDataRepository {
       ...(row?.first_date ? { firstDate: row.first_date } : {}),
       ...(row?.last_date ? { lastDate: row.last_date } : {}),
       observations: Number(row?.observations ?? 0),
+      volumeObservations: Number(row?.volume_observations ?? 0),
       revision: Number(row?.revision ?? 0),
     };
   }
 
+  async volumeCoverage(input: {
+    source?: MarketCandleSource;
+    symbol: string;
+    adjusted: boolean;
+    fromDate: string;
+    toDate: string;
+  }): Promise<{ observations: number; volumeObservations: number }> {
+    const [row] = await this.database.query<{
+      observations: number;
+      volume_observations: number;
+    }>(`
+      SELECT COUNT(*) AS observations, COUNT(volume) AS volume_observations
+      FROM portfolio_market_candles
+      WHERE source_kind = ? AND symbol = ? AND candle_interval = '1d' AND adjusted = ?
+        AND price_date BETWEEN ? AND ?
+    `, [
+      input.source ?? "stock",
+      input.symbol,
+      input.adjusted ? 1 : 0,
+      input.fromDate,
+      input.toDate,
+    ]);
+    return {
+      observations: Number(row?.observations ?? 0),
+      volumeObservations: Number(row?.volume_observations ?? 0),
+    };
+  }
+
   async dataRevision(): Promise<string> {
-    const [candle] = await this.database.query<{ count: number; revision: number }>(`
-      SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision FROM portfolio_market_candles
+    const [candle] = await this.database.query<{ count: number; revision: number; volume_sum: number }>(`
+      SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision,
+             COALESCE(SUM(volume), 0) AS volume_sum
+      FROM portfolio_market_candles
     `);
     const [fx] = await this.database.query<{ count: number; revision: number }>(`
       SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision FROM portfolio_exchange_rates
     `);
     return createHash("sha256")
-      .update(`${Number(candle?.count ?? 0)}:${Number(candle?.revision ?? 0)}:${Number(fx?.count ?? 0)}:${Number(fx?.revision ?? 0)}`)
+      .update(`${Number(candle?.count ?? 0)}:${Number(candle?.revision ?? 0)}:${Number(candle?.volume_sum ?? 0)}:${Number(fx?.count ?? 0)}:${Number(fx?.revision ?? 0)}`)
       .digest("hex");
   }
 }

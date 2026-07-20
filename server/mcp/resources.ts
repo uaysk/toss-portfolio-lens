@@ -4,6 +4,7 @@ import { isArtifactType, type ArtifactType } from "../repositories/artifact-repo
 import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
 import { MCP_SCHEMA_VERSION } from "../services/service-envelope.js";
+import type { PortfolioRunRecord } from "../repositories/run-repository.js";
 
 type MarketResource = {
   ownerSubject: string;
@@ -28,6 +29,37 @@ function authorizeResource(
   if (authMode === "oauth" && !extra.authInfo) throw new Error("OAuth 인증이 필요합니다.");
   if (authMode === "oauth" && !extra.authInfo?.scopes?.includes(scope)) throw new Error(`${scope} scope가 필요합니다.`);
   return typeof extra.authInfo?.extra?.sub === "string" ? extra.authInfo.extra.sub : "local-owner";
+}
+
+function authenticatedOwner(
+  extra: { authInfo?: { scopes?: string[]; extra?: Record<string, unknown> } },
+  authMode: "oauth" | "none",
+): string {
+  if (authMode === "oauth" && !extra.authInfo) throw new Error("OAuth 인증이 필요합니다.");
+  return typeof extra.authInfo?.extra?.sub === "string" ? extra.authInfo.extra.sub : "local-owner";
+}
+
+function requireResourceScope(
+  extra: { authInfo?: { scopes?: string[] } },
+  scope: "market:read" | "backtest:run",
+  authMode: "oauth" | "none",
+): void {
+  if (authMode === "oauth" && !extra.authInfo?.scopes?.includes(scope)) throw new Error(`${scope} scope가 필요합니다.`);
+}
+
+function resourceScopeForRun(run: Pick<PortfolioRunRecord, "kind" | "input" | "result">): "market:read" | "backtest:run" {
+  if (run.kind === "technical_analysis") return "market:read";
+  if (run.kind !== "technical_strategy") return "backtest:run";
+  const result = typeof run.result === "object" && run.result !== null
+    ? run.result as Record<string, unknown>
+    : undefined;
+  if (result?.backtest && typeof result.backtest === "object") return "backtest:run";
+  const input = typeof run.input === "object" && run.input !== null
+    ? run.input as Record<string, unknown>
+    : undefined;
+  return input?.mode === "signal_only" || (input && !("backtest" in input))
+    ? "market:read"
+    : "backtest:run";
 }
 
 export class McpResourceRegistry {
@@ -105,11 +137,17 @@ export class McpResourceRegistry {
         mimeType: "application/json",
       },
       async (_uri, variables, extra) => {
-        const owner = authorizeResource(extra, "backtest:run", this.authMode);
+        const owner = authenticatedOwner(extra, this.authMode);
         const runId = String(variables.runId ?? "");
         const artifactType = String(variables.artifactType ?? "");
         if (!isArtifactType(artifactType)) throw new Error("지원하지 않는 artifact type입니다.");
-        if (!await this.runs.get(runId, owner)) throw new Error("실행을 찾을 수 없습니다.");
+        const run = await this.runs.get(runId, owner);
+        if (!run) throw new Error("실행을 찾을 수 없습니다.");
+        requireResourceScope(
+          extra,
+          resourceScopeForRun(run),
+          this.authMode,
+        );
         const artifact = await this.artifacts.get(runId, artifactType);
         if (!artifact) throw new Error("artifact를 찾을 수 없습니다.");
         return {

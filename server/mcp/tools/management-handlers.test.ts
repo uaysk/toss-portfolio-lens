@@ -81,7 +81,7 @@ describe("management MCP handlers", () => {
     expect(firstManifest).toMatchObject({
       schema_version: "portfolio-lens-run-manifest/v1",
       run: { id: created.id, data_revision: "revision-a" },
-      build: { mcpToolCount: 50, mcpSchemaHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      build: { mcpToolCount: 53, mcpSchemaHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     });
 
     const report = result(await handlers.generate_research_report({ runId: created.id, format: "markdown" }, "owner-a"));

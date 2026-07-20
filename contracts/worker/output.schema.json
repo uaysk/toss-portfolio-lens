@@ -20,7 +20,9 @@
         "rebalance_sensitivity",
         "cash_flow_sensitivity",
         "monte_carlo",
-        "outlook"
+        "outlook",
+        "technical_analysis",
+        "technical_strategy"
       ]
     },
     "status": { "enum": ["completed", "failed", "cancelled"] },

@@ -89,13 +89,16 @@ MCP는 기본적으로 비활성입니다. 연결 방법과 OAuth 설정은 [MCP
 <!-- MCP_TOOLS:START -->
 <!-- `npm run docs:mcp`가 이 구간을 생성합니다. -->
 
-현재 MCP 도구 수는 **50개**, canonical input/output schema hash는 `5259cec5fa3e73ee4b9732ad87fc0fe25dc60e48996c1bf840f7df64721804f2`입니다.
+현재 MCP 도구 수는 **53개**, canonical input/output schema hash는 `34ddcb8d606935ca7ab499c752ebcaea12fb8c1487d103f86e6ca452de8c8ea9`입니다.
 
 | 도구 | 기능 | 기존 OAuth scope |
 | --- | --- | --- |
 | `search_instruments` | 코드·이름·시장·자산유형으로 국내·미국 주식과 ETF를 검색합니다. | `market:read` |
 | `get_data_availability` | 종목별 수정주가 cache 기간·관측수와 공통 계산 기간을 확인합니다. | `market:read` |
 | `get_price_series` | 수정 여부와 기준통화를 지정해 일·주·월 OHLC 시계열을 조회합니다. | `market:read` |
+| `analyze_technical_signals` | 기존 지표 batch 요청과 typed 기술 조건 신호-only 요청을 함께 지원합니다. 지표·조건 평가는 하나의 Rust batch를 사용하고 종가 신호는 다음 공통 실제 관측일에만 계획합니다. | `market:read` |
+| `validate_technical_strategy` | typed 조건·지표 참조·allocation·백테스트 연결과 데이터 가용성을 Rust 계산 없이 검증합니다. | `backtest:run` |
+| `run_technical_strategy_backtest` | Rust에서 지표 계산→조건 평가→다음 안전 거래일 schedule→기존 ledger를 한 run으로 실행하며 주문은 만들지 않습니다. | `backtest:run` |
 | `analyze_instrument` | 수정주가 수익률의 성과·위험·낙폭·tail risk와 벤치마크 상대성과를 분석합니다. | `market:read` |
 | `analyze_asset_relationship` | 기준 종목과 비교 종목의 공통 관측일 수익률 상관·Beta·상대성과를 분석합니다. | `market:read` |
 | `get_correlation_matrix` | 여러 자산의 수정주가 수익률을 전체 공통 거래일로 inner join해 상관행렬을 계산합니다. | `market:read` |

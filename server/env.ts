@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { MySqlConnectionConfig, PostgresConnectionConfig } from "./database.js";
+import type { KisExchangeRateConfig } from "./kis-exchange-rate.js";
 
 export type OpenAiConfig = {
   endpoint: string;
@@ -113,6 +114,7 @@ export type AppConfig = TossApiAuthConfig & {
   reportStorage: ReportStorageConfig;
   compute: ComputeConfig;
   mcp: McpConfig;
+  kisExchangeRate?: KisExchangeRateConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -547,6 +549,26 @@ function readReportStorage(): ReportStorageConfig {
   };
 }
 
+function readKisExchangeRateConfig(): KisExchangeRateConfig | undefined {
+  const appKey = optional("KI_APP_KEY");
+  const appSecret = optional("KI_APP_SECRET");
+  if (!appKey && !appSecret) return undefined;
+  if (!appKey || !appSecret) {
+    throw new Error("KI_APP_KEY와 KI_APP_SECRET은 함께 설정해야 합니다.");
+  }
+  const environment = (optional("KI_API_ENV") || "demo").toLowerCase();
+  if (environment !== "demo" && environment !== "real") {
+    throw new Error("KI_API_ENV는 demo 또는 real이어야 합니다.");
+  }
+  return {
+    appKey,
+    appSecret,
+    environment,
+    requestIntervalMs: readBoundedInteger("KI_API_REQUEST_INTERVAL_MS", 600, 100, 10_000),
+    timeoutMs: readBoundedInteger("KI_API_TIMEOUT_MS", 15_000, 1_000, 60_000),
+  };
+}
+
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
@@ -589,5 +611,6 @@ export function loadConfig(): AppConfig {
     reportStorage: readReportStorage(),
     compute: readComputeConfig(dbProvider),
     mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
+    kisExchangeRate: readKisExchangeRateConfig(),
   };
 }

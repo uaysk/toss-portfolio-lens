@@ -3,6 +3,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  CandlestickChart,
   ChartNoAxesCombined,
   CircleGauge,
   FlaskConical,
@@ -26,6 +27,7 @@ import { PortfolioAnalysisView } from "@/components/portfolio-analysis";
 import { PortfolioBacktestView } from "@/components/portfolio-backtest";
 import { ResearchLibrary } from "@/components/research-library";
 import { StockVisibilitySettings } from "@/components/stock-visibility-settings";
+import { TechnicalAnalysisView } from "@/components/technical-analysis";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -38,6 +40,7 @@ import { formatMoney, formatPercent, formatQuantity, formatSignedMoney, formatSy
 import { PORTFOLIO_REFRESH_INTERVAL_MS, portfolioRequestUrl } from "@/lib/portfolio-refresh";
 import { holdingKey, stockColor, stockForeground } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
+import type { TechnicalStrategyHandoff } from "@/lib/technical-strategy";
 import {
   buildVisibilityStocks,
   HIDDEN_STOCKS_STORAGE_KEY,
@@ -106,6 +109,7 @@ function Sidebar({
         {([
           { value: "overview" as const, label: "포트폴리오", icon: LayoutDashboard },
           { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
+          { value: "technical" as const, label: "기술적 분석", icon: CandlestickChart },
           { value: "backtest" as const, label: "백테스트", icon: FlaskConical },
           { value: "optimization" as const, label: "최적화", icon: Sparkles },
           { value: "library" as const, label: "실행·프리셋", icon: LibraryBig },
@@ -185,10 +189,10 @@ function DashboardHeader({
     <header className="dashboard-header">
       <div>
         <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION", library: "RUNS & PRESETS" }[view]}
+          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", technical: "TECHNICAL ANALYSIS", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION", library: "RUNS & PRESETS" }[view]}
         </p>
         <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
-          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", backtest: "백테스트", optimization: "포트폴리오 최적화", library: "실행·프리셋" }[view]}
+          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", technical: "기술적 분석", backtest: "백테스트", optimization: "포트폴리오 최적화", library: "실행·프리셋" }[view]}
         </h1>
       </div>
 
@@ -241,6 +245,7 @@ function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (vi
       {([
         { value: "overview" as const, label: "포트폴리오" },
         { value: "analysis" as const, label: "분석" },
+        { value: "technical" as const, label: "기술 분석" },
         { value: "backtest" as const, label: "백테스트" },
         { value: "optimization" as const, label: "최적화" },
         { value: "library" as const, label: "실행·프리셋" },
@@ -646,6 +651,7 @@ function InitialError({
 
 export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: DashboardProps) {
   const [view, setView] = useState<DashboardView>(() => dashboardViewFromHash(window.location.hash));
+  const [technicalStrategyHandoff, setTechnicalStrategyHandoff] = useState<TechnicalStrategyHandoff>();
   const [portfolio, setPortfolio] = useState<Portfolio>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -672,6 +678,18 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
     window.history.replaceState(null, "", dashboardHash(nextView));
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
+
+  const openTechnicalBacktest = useCallback((handoff: TechnicalStrategyHandoff) => {
+    setTechnicalStrategyHandoff(handoff);
+    changeView("backtest");
+  }, [changeView]);
+  const consumeTechnicalBacktestHandoff = useCallback(() => setTechnicalStrategyHandoff(undefined), []);
+
+  useEffect(() => {
+    if (portfolio && technicalStrategyHandoff && technicalStrategyHandoff.accountId !== portfolio.selectedAccountId) {
+      setTechnicalStrategyHandoff(undefined);
+    }
+  }, [portfolio, technicalStrategyHandoff]);
 
   useEffect(() => {
     try {
@@ -879,8 +897,18 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
           </div>
         ) : view === "analysis" ? (
           <PortfolioAnalysisView key={portfolio.selectedAccountId} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} />
+        ) : view === "technical" ? (
+          <TechnicalAnalysisView key={`${portfolio.selectedAccountId}:technical`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} onOpenTechnicalBacktest={openTechnicalBacktest} />
         ) : view === "backtest" ? (
-          <PortfolioBacktestView key={`${portfolio.selectedAccountId}:backtest`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="backtest" />
+          <PortfolioBacktestView
+            key={`${portfolio.selectedAccountId}:backtest`}
+            portfolio={portfolio}
+            theme={theme}
+            onUnauthorized={onUnauthorized}
+            mode="backtest"
+            technicalStrategyHandoff={technicalStrategyHandoff?.accountId === portfolio.selectedAccountId ? technicalStrategyHandoff : undefined}
+            onTechnicalStrategyHandoffConsumed={consumeTechnicalBacktestHandoff}
+          />
         ) : view === "optimization" ? (
           <PortfolioBacktestView key={`${portfolio.selectedAccountId}:optimization`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} mode="optimization" />
         ) : (

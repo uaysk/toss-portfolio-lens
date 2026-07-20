@@ -11,6 +11,7 @@ export const ARTIFACT_TYPES = [
   "screening-candidates", "ledger-validated-candidates", "outlook-summary",
   "outlook-oos-equity", "outlook-quantile-paths", "outlook-calibration",
   "outlook-worst-scenarios", "outlook-sensitivity", "outlook-market-regimes",
+  "technical-indicators", "technical-signals", "technical-diagnostics",
   "portfolio-exposures", "pareto-frontier", "research-report", "worker-metrics", "result",
 ] as const;
 

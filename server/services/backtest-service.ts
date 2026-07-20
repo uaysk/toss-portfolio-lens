@@ -7,6 +7,8 @@ import type { ReportService, GeneratedReportMetadata } from "./report-service.js
 import type { ArtifactService } from "./artifact-service.js";
 import { envelope, ServiceError } from "./service-envelope.js";
 import type { RustComputeClient } from "../worker/rust-client.js";
+import { backtestArtifacts } from "./backtest-artifacts.js";
+export { backtestArtifacts } from "./backtest-artifacts.js";
 
 export type BacktestReportOption = {
   enabled?: boolean;
@@ -17,50 +19,7 @@ export type SharedBacktestRequest = BacktestRunRequest & {
   report?: BacktestReportOption;
 };
 
-type BacktestRunResult = Awaited<ReturnType<PortfolioBacktestService["run"]>>;
-
-function artifacts(result: BacktestRunResult): Array<{ type: ArtifactType; content: unknown; rowCount?: number }> {
-  return [
-    { type: "equity", content: result.points, rowCount: result.points.length },
-    {
-      type: "drawdown",
-      content: result.points.map((point) => ({ date: point.date, drawdownPercent: point.drawdownPercent })),
-      rowCount: result.points.length,
-    },
-    {
-      type: "holdings",
-      content: result.contributions.map((item) => ({
-        date: result.endDate,
-        symbol: item.symbol,
-        name: item.name,
-        currency: item.currency,
-        ending_value: item.endingValue,
-        ending_weight: result.metrics.finalBalance > 0 ? item.endingValue / result.metrics.finalBalance : 0,
-      })),
-      rowCount: result.contributions.length,
-    },
-    { type: "trades", content: result.trades, rowCount: result.trades.length },
-    {
-      type: "cash-ledger",
-      content: result.points.map((point) => ({
-        date: point.date,
-        balance: point.balance,
-        investedBalance: point.investedBalance,
-        cashBalance: point.cashBalance,
-        unitPrice: point.unitPrice,
-      })),
-      rowCount: result.points.length,
-    },
-    { type: "cash-flows", content: result.cashFlows ?? [], rowCount: result.cashFlows?.length ?? 0 },
-    { type: "dividends", content: result.dividends ?? [], rowCount: result.dividends?.length ?? 0 },
-    { type: "target-weight-schedule", content: result.targetWeightSchedule ?? [], rowCount: result.targetWeightSchedule?.length ?? 0 },
-    { type: "data-quality", content: result.dataQuality, rowCount: 1 },
-    { type: "rolling", content: result.advanced.rolling, rowCount: result.advanced.rolling.length },
-    { type: "correlation", content: result.correlations, rowCount: result.correlations.assets.length },
-    { type: "risk-contribution", content: result.advanced.riskContributions, rowCount: result.advanced.riskContributions.length },
-    { type: "monthly-returns", content: result.advanced.monthlyReturns, rowCount: result.advanced.monthlyReturns.length },
-  ];
-}
+export type BacktestRunResult = Awaited<ReturnType<PortfolioBacktestService["run"]>>;
 
 export class BacktestService {
   constructor(
@@ -80,7 +39,7 @@ export class BacktestService {
     const errors: Array<{ field: string; message: string }> = [];
     const warnings: string[] = [];
     if (Math.abs(weightTotal + cashTarget - 100) > 0.01) errors.push({ field: "assets", message: "종목과 현금 목표 비중 합계는 100%여야 합니다." });
-    if (request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0)) errors.push({ field: "assets", message: "각 종목 비중은 0보다 커야 합니다." });
+    if (request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight < 0)) errors.push({ field: "assets", message: "각 종목 비중은 0 이상이어야 합니다." });
     if (new Set(request.assets.map((asset) => asset.symbol.toUpperCase())).size !== request.assets.length) errors.push({ field: "assets", message: "중복 종목을 제거해 주세요." });
     if (request.startDate > request.endDate) errors.push({ field: "startDate", message: "시작일은 종료일보다 빠르거나 같아야 합니다." });
     if (!Number.isFinite(request.initialAmount) || request.initialAmount < 10_000 || request.initialAmount > 10_000_000_000_000) errors.push({ field: "initialAmount", message: "초기 투자금 범위를 확인해 주세요." });
@@ -292,7 +251,7 @@ export class BacktestService {
             result: output.result,
             warnings: output.warnings,
             artifacts: [
-              ...artifacts(output.result),
+              ...backtestArtifacts(output.result),
               ...output.artifacts.map((artifact) => ({
                 type: artifact.type as ArtifactType,
                 content: artifact.content,
@@ -314,7 +273,7 @@ export class BacktestService {
         summary: calculated.metrics,
         result: calculated,
         warnings: calculated.warnings,
-        artifacts: artifacts(calculated),
+        artifacts: backtestArtifacts(calculated),
       }),
     });
   }

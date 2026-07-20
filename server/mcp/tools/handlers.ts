@@ -8,6 +8,12 @@ import type { RunService } from "../../services/run-service.js";
 import type { ArtifactService } from "../../services/artifact-service.js";
 import type { PortfolioService } from "../../services/portfolio-service.js";
 import type { ReportService } from "../../services/report-service.js";
+import type { TechnicalAnalysisRequest, TechnicalAnalysisService } from "../../services/technical-analysis-service.js";
+import type {
+  TechnicalSignalAnalysisRequest,
+  TechnicalStrategyBacktestRequest,
+  TechnicalStrategyService,
+} from "../../services/technical-strategy-service.js";
 import type { OptimizationRepository } from "../../repositories/optimization-repository.js";
 import type { RunRepository, PortfolioRunKind, PortfolioRunRecord } from "../../repositories/run-repository.js";
 import type { PresetService } from "../../services/preset-service.js";
@@ -32,7 +38,7 @@ import {
 } from "../../services/optimization-service.js";
 import { envelope, HISTORICAL_LIMITATION, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "../../services/service-envelope.js";
 import type { McpResourceRegistry } from "../resources.js";
-import { resolvedPresetExecutionSchemas, type ToolName } from "../schemas.js";
+import { resolvedPresetExecutionSchemas, toolSchemas, type ToolName } from "../schemas.js";
 import type { RustComputeClient } from "../../worker/rust-client.js";
 import type { ArtifactType } from "../../repositories/artifact-repository.js";
 import { isArtifactType } from "../../repositories/artifact-repository.js";
@@ -59,6 +65,8 @@ export type McpToolDependencies = {
   runRepository: RunRepository;
   presets: PresetService;
   researchReports: ResearchReportService;
+  technicalAnalysis: TechnicalAnalysisService;
+  technicalStrategies: TechnicalStrategyService;
   optimizationRepository: OptimizationRepository;
   resources: McpResourceRegistry;
   rustCompute?: RustComputeClient;
@@ -504,7 +512,7 @@ function metricDistributions(rows: Array<{ metrics: Record<string, unknown> }>) 
   ]));
 }
 
-const REPLAY_TOOL_BY_KIND: Record<PortfolioRunKind, ToolName> = {
+const REPLAY_TOOL_BY_KIND: Partial<Record<PortfolioRunKind, ToolName>> = {
   backtest: "run_portfolio_backtest",
   optimization: "optimize_portfolio",
   walk_forward: "walk_forward_optimize",
@@ -518,6 +526,8 @@ const REPLAY_TOOL_BY_KIND: Record<PortfolioRunKind, ToolName> = {
   exposure_analysis: "analyze_portfolio_exposures",
   pareto_frontier: "build_pareto_frontier",
   research_report: "generate_research_report",
+  technical_analysis: "analyze_technical_signals",
+  technical_strategy: "run_technical_strategy_backtest",
 };
 
 function serviceNotFound(entity: "run" | "preset", id: string): ServiceError {
@@ -655,7 +665,14 @@ function recordValue(value: unknown): GenericInput | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as GenericInput : undefined;
 }
 
-type PresetExecutionTool = "validate_backtest_config" | "run_portfolio_backtest" | "optimize_portfolio" | "walk_forward_optimize";
+type PresetExecutionTool =
+  | "analyze_technical_signals"
+  | "validate_technical_strategy"
+  | "run_technical_strategy_backtest"
+  | "validate_backtest_config"
+  | "run_portfolio_backtest"
+  | "optimize_portfolio"
+  | "walk_forward_optimize";
 
 const BACKTEST_PRESET_FIELDS = [
   "assets", "startDate", "endDate", "initialAmount", "monthlyCashFlow", "cashFlowFrequency",
@@ -671,8 +688,10 @@ const OPTIMIZATION_PRESET_FIELDS = [
   "robustValidation", "ledgerValidation", "regimePolicySearch", "mode", "trainWindow", "testWindow", "step",
   "gap", "embargo", "foldCandidateBudget", "seeds",
 ] as const;
+const TECHNICAL_STRATEGY_PRESET_FIELDS = ["analysis", "strategy", "backtest"] as const;
 const BACKTEST_DEEP_OVERRIDE_FIELDS = new Set(["execution", "realism", "report"]);
 const OPTIMIZATION_DEEP_OVERRIDE_FIELDS = new Set(["robustValidation", "ledgerValidation", "regimePolicySearch"]);
+const TECHNICAL_STRATEGY_DEEP_OVERRIDE_FIELDS = new Set(["analysis", "strategy", "backtest"]);
 
 function selectedFields(source: GenericInput, fields: readonly string[]): GenericInput {
   return Object.fromEntries(fields.flatMap((field) => source[field] === undefined ? [] : [[field, source[field]]]));
@@ -768,6 +787,17 @@ function normalizedOptimizationPreset(config: GenericInput): GenericInput {
   };
 }
 
+function normalizedTechnicalStrategyPreset(config: GenericInput): GenericInput {
+  const nested = recordValue(config.technicalStrategy) ?? recordValue(config.technical_strategy);
+  const source = nested ? { ...config, ...nested } : config;
+  return selectedFields({
+    ...source,
+    ...(source.analysis === undefined && recordValue(source.technicalAnalysis)
+      ? { analysis: source.technicalAnalysis }
+      : {}),
+  }, TECHNICAL_STRATEGY_PRESET_FIELDS);
+}
+
 export async function resolvePresetExecution(
   dependencies: McpToolDependencies,
   ownerSubject: string,
@@ -796,17 +826,25 @@ export async function resolvePresetExecution(
     throw new ServiceError({ code: "INVALID_PRESET_CONFIG", message: "실행할 preset config가 객체가 아닙니다.", retryable: false, details: { preset_id: preset.id } });
   }
   const { presetId: _presetId, ...overrides } = publicInput;
-  const normalized = tool === "run_portfolio_backtest" || tool === "validate_backtest_config"
-    ? normalizedBacktestPreset(stored)
-    : normalizedOptimizationPreset(stored);
+  const isTechnicalStrategyTool = tool === "analyze_technical_signals"
+    || tool === "validate_technical_strategy"
+    || tool === "run_technical_strategy_backtest";
+  const normalized = isTechnicalStrategyTool
+    ? normalizedTechnicalStrategyPreset(stored)
+    : tool === "run_portfolio_backtest" || tool === "validate_backtest_config"
+      ? normalizedBacktestPreset(stored)
+      : normalizedOptimizationPreset(stored);
   const candidate = mergePresetOverrides(
     normalized,
     overrides,
-    tool === "run_portfolio_backtest" || tool === "validate_backtest_config"
-      ? BACKTEST_DEEP_OVERRIDE_FIELDS
-      : OPTIMIZATION_DEEP_OVERRIDE_FIELDS,
+    isTechnicalStrategyTool
+      ? TECHNICAL_STRATEGY_DEEP_OVERRIDE_FIELDS
+      : tool === "run_portfolio_backtest" || tool === "validate_backtest_config"
+        ? BACKTEST_DEEP_OVERRIDE_FIELDS
+        : OPTIMIZATION_DEEP_OVERRIDE_FIELDS,
   );
   if (tool === "validate_backtest_config") delete candidate.report;
+  if (tool === "analyze_technical_signals") delete candidate.backtest;
   const parsed = resolvedPresetExecutionSchemas[tool].safeParse(candidate);
   if (!parsed.success) {
     throw new ServiceError({
@@ -822,7 +860,7 @@ export async function resolvePresetExecution(
   }
   const resolved = { ...object(parsed.data), ...replayMetadata };
   enforceToolRequestLimits(resolved, dependencies);
-  if (tool !== "validate_backtest_config" && options.markUsed !== false) {
+  if (tool !== "validate_backtest_config" && tool !== "validate_technical_strategy" && options.markUsed !== false) {
     const used = await presetOperation(() => dependencies.presets.markUsed(preset.id, ownerSubject));
     if (!used) throw serviceNotFound("preset", preset.id);
   }
@@ -1106,6 +1144,37 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           currency: series.currency,
           ...(descriptor ? { resource: descriptor } : { points: series.points }),
         },
+      });
+    },
+    analyze_technical_signals: async (input, ownerSubject) => {
+      const value = object(input);
+      if (value.presetId || (value.analysis && value.strategy)) {
+        const resolved = await resolvePresetExecution(dependencies, ownerSubject, value, "analyze_technical_signals");
+        const { _replayNonce, _replayOf: _replaySource, ...request } = resolved;
+        return dependencies.technicalStrategies.analyzeSignals({
+          ownerSubject,
+          request: request as TechnicalSignalAnalysisRequest,
+          ...(typeof _replayNonce === "string" ? { cacheNonce: _replayNonce } : {}),
+        });
+      }
+      const { _replayNonce, _replayOf: _replaySource, ...request } = value;
+      return dependencies.technicalAnalysis.analyze({
+        ownerSubject,
+        request: request as TechnicalAnalysisRequest,
+        ...(typeof _replayNonce === "string" ? { cacheNonce: _replayNonce } : {}),
+      });
+    },
+    validate_technical_strategy: async (input, ownerSubject) => {
+      const request = await resolvePresetExecution(dependencies, ownerSubject, object(input), "validate_technical_strategy");
+      return dependencies.technicalStrategies.validate({ ownerSubject, request: request as TechnicalStrategyBacktestRequest });
+    },
+    run_technical_strategy_backtest: async (input, ownerSubject) => {
+      const value = await resolvePresetExecution(dependencies, ownerSubject, object(input), "run_technical_strategy_backtest");
+      const { _replayNonce, _replayOf: _replaySource, ...request } = value;
+      return dependencies.technicalStrategies.runBacktest({
+        ownerSubject,
+        request: request as TechnicalStrategyBacktestRequest,
+        ...(typeof _replayNonce === "string" ? { cacheNonce: _replayNonce } : {}),
       });
     },
     analyze_instrument: async (input, ownerSubject) => {
@@ -2454,8 +2523,46 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       if (!storedInput) {
         throw new ServiceError({ code: "RUN_INPUT_UNAVAILABLE", message: "재실행할 저장 입력이 없습니다.", retryable: false });
       }
-      const replayInput = { ...storedInput, _replayNonce: randomUUID(), _replayOf: source.id };
-      const invoked = await handlers[REPLAY_TOOL_BY_KIND[source.kind]](replayInput, ownerSubject);
+      const replayTool = source.kind === "technical_strategy" && storedInput.mode === "signal_only"
+        ? "analyze_technical_signals"
+        : REPLAY_TOOL_BY_KIND[source.kind];
+      if (!replayTool) {
+        throw new ServiceError({
+          code: "RUN_REPLAY_UNSUPPORTED",
+          message: `${source.kind} run은 아직 저장된 실행 재실행을 지원하지 않습니다.`,
+          retryable: false,
+          details: { run_id: source.id, run_kind: source.kind },
+        });
+      }
+      const replayBase = source.kind === "technical_analysis"
+        ? (() => {
+            const {
+              cacheSchemaVersion: _cacheSchemaVersion,
+              indicator_engine_version: _indicatorEngineVersion,
+              _replayNonce: _previousReplayNonce,
+              _replayOf: _previousReplaySource,
+              ...technicalInput
+            } = storedInput;
+            return toolSchemas.analyze_technical_signals.parse({
+              ...technicalInput,
+              responseMode: "full_series",
+            });
+          })()
+        : source.kind === "technical_strategy"
+          ? (() => {
+              const {
+                cacheSchemaVersion: _cacheSchemaVersion,
+                indicator_engine_version: _indicatorEngineVersion,
+                mode: _mode,
+                _replayNonce: _previousReplayNonce,
+                _replayOf: _previousReplaySource,
+                ...strategyInput
+              } = storedInput;
+              return resolvedPresetExecutionSchemas[replayTool as "analyze_technical_signals" | "run_technical_strategy_backtest"].parse(strategyInput);
+            })()
+        : storedInput;
+      const replayInput = { ...replayBase, _replayNonce: randomUUID(), _replayOf: source.id };
+      const invoked = await handlers[replayTool](replayInput, ownerSubject);
       const replayId = nestedRunId(invoked);
       if (!replayId || replayId === source.id) {
         throw new ServiceError({ code: "RUN_REPLAY_FAILED", message: "새 재실행 run을 만들지 못했습니다.", retryable: true });

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type DatabaseRow, type RelationalDatabase, SqliteDatabase } from "./database.js";
+import { ensureMarketCandleVolumeColumn } from "./migrations.js";
 import type { DailyCandle, HistoricalOrder, InstrumentInfo, Portfolio } from "./toss.js";
 
 export type HistoryCurrency = "KRW" | "USD";
@@ -437,11 +438,11 @@ export class PortfolioHistoryStore {
             table: "portfolio_market_candles",
             columns: [
               "source_kind", "symbol", "candle_interval", "adjusted", "price_date", "timestamp", "currency",
-              "open_price", "high_price", "low_price", "close_price", "updated_at",
+              "open_price", "high_price", "low_price", "close_price", "volume", "updated_at",
             ],
             rows: marketCandles,
             conflicts: ["source_kind", "symbol", "candle_interval", "adjusted", "timestamp"],
-            updates: ["price_date", "currency", "open_price", "high_price", "low_price", "close_price", "updated_at"],
+            updates: ["price_date", "currency", "open_price", "high_price", "low_price", "close_price", "volume", "updated_at"],
             freshness: "updated_at",
           },
           {
@@ -663,7 +664,7 @@ export class PortfolioHistoryStore {
         "portfolio_market_candles",
         [
           "source_kind", "symbol", "candle_interval", "adjusted", "price_date", "timestamp", "currency",
-          "open_price", "high_price", "low_price", "close_price", "updated_at",
+          "open_price", "high_price", "low_price", "close_price", "volume", "updated_at",
         ],
         marketCandles,
         `price_date = IF(VALUES(updated_at) >= updated_at, VALUES(price_date), price_date),
@@ -672,6 +673,7 @@ export class PortfolioHistoryStore {
          high_price = IF(VALUES(updated_at) >= updated_at, VALUES(high_price), high_price),
          low_price = IF(VALUES(updated_at) >= updated_at, VALUES(low_price), low_price),
          close_price = IF(VALUES(updated_at) >= updated_at, VALUES(close_price), close_price),
+         volume = IF(VALUES(updated_at) >= updated_at, VALUES(volume), volume),
          updated_at = GREATEST(updated_at, VALUES(updated_at))`,
       );
       await batchUpsertMySql(
@@ -848,6 +850,7 @@ export class PortfolioHistoryStore {
         high_price REAL NOT NULL,
         low_price REAL NOT NULL,
         close_price REAL NOT NULL,
+        volume REAL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
       )`,
@@ -1013,6 +1016,7 @@ export class PortfolioHistoryStore {
         high_price DOUBLE NOT NULL,
         low_price DOUBLE NOT NULL,
         close_price DOUBLE NOT NULL,
+        volume DOUBLE NULL,
         updated_at BIGINT NOT NULL,
         PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp),
         KEY idx_market_candles_lookup (source_kind, symbol, candle_interval, adjusted, price_date)
@@ -1180,6 +1184,7 @@ export class PortfolioHistoryStore {
         high_price DOUBLE PRECISION NOT NULL,
         low_price DOUBLE PRECISION NOT NULL,
         close_price DOUBLE PRECISION NOT NULL,
+        volume DOUBLE PRECISION,
         updated_at BIGINT NOT NULL,
         PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
       )`,
@@ -1212,6 +1217,7 @@ export class PortfolioHistoryStore {
     for (const statement of schema) {
       await this.db.run(statement);
     }
+    await ensureMarketCandleVolumeColumn(this.db);
     if (this.db.dialect === "sqlite") {
       const snapshotColumns = await this.db.query<{ name: string }>("PRAGMA table_info(portfolio_snapshots)");
       if (!snapshotColumns.some((column) => column.name === "origin")) {
@@ -1233,13 +1239,13 @@ export class PortfolioHistoryStore {
     await this.db.run(`
       ${conflict} INTO portfolio_market_candles (
         source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, updated_at
+        open_price, high_price, low_price, close_price, volume, updated_at
       )
       SELECT 'stock', instruments.symbol, '1d', 0, prices.price_date, prices.timestamp, prices.currency,
              COALESCE(prices.open_price, prices.close_price),
              COALESCE(prices.high_price, prices.close_price),
              COALESCE(prices.low_price, prices.close_price),
-             prices.close_price, prices.updated_at
+             prices.close_price, NULL, prices.updated_at
       FROM portfolio_daily_prices AS prices
       JOIN portfolio_instruments AS instruments ON instruments.instrument_key = prices.instrument_key
       WHERE 1 = 1${suffix}
@@ -1253,10 +1259,10 @@ export class PortfolioHistoryStore {
     await this.db.run(`
       ${conflict} INTO portfolio_market_candles (
         source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, updated_at
+        open_price, high_price, low_price, close_price, volume, updated_at
       )
       SELECT 'stock', ${backtestSymbol}, '1d', 1, prices.price_date, prices.timestamp, prices.currency,
-             prices.close_price, prices.close_price, prices.close_price, prices.close_price, prices.updated_at
+             prices.close_price, prices.close_price, prices.close_price, prices.close_price, NULL, prices.updated_at
       FROM portfolio_backtest_prices AS prices
       WHERE 1 = 1${suffix}
     `);
@@ -1264,12 +1270,12 @@ export class PortfolioHistoryStore {
     await this.db.run(`
       ${conflict} INTO portfolio_market_candles (
         source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, updated_at
+        open_price, high_price, low_price, close_price, volume, updated_at
       )
       SELECT CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 'indicator' ELSE 'stock' END,
              CASE benchmark_key WHEN 'NASDAQ100' THEN 'QQQ' WHEN 'SP500' THEN 'SPY' ELSE benchmark_key END,
              '1d', CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 0 ELSE 1 END,
-             price_date, timestamp, '', close_price, close_price, close_price, close_price, updated_at
+             price_date, timestamp, '', close_price, close_price, close_price, close_price, NULL, updated_at
       FROM portfolio_benchmark_prices
       WHERE 1 = 1${suffix}
     `);
@@ -1311,7 +1317,7 @@ export class PortfolioHistoryStore {
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_benchmark_prices"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(rate), 0) AS sum_value FROM portfolio_exchange_rates"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS max_value FROM portfolio_backfill_state"),
-      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value FROM portfolio_market_candles"),
+      this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS max_value, COALESCE(SUM(close_price), 0) AS sum_value, COALESCE(SUM(volume), 0) AS volume_sum FROM portfolio_market_candles"),
       this.db.query<DatabaseRow>("SELECT COUNT(*) AS count, COALESCE(MAX(fetched_at), 0) AS max_value FROM portfolio_candle_responses"),
     ]);
     if (await this.hasTable("portfolio_cash_ledger")) {
@@ -1326,8 +1332,8 @@ export class PortfolioHistoryStore {
     return this.sql(`
       INSERT INTO portfolio_market_candles (
         source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        open_price, high_price, low_price, close_price, volume, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_kind, symbol, candle_interval, adjusted, timestamp) DO UPDATE SET
         price_date = excluded.price_date,
         currency = excluded.currency,
@@ -1335,15 +1341,17 @@ export class PortfolioHistoryStore {
         high_price = excluded.high_price,
         low_price = excluded.low_price,
         close_price = excluded.close_price,
+        volume = excluded.volume,
         updated_at = excluded.updated_at
     `, `
       INSERT INTO portfolio_market_candles (
         source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        open_price, high_price, low_price, close_price, volume, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         price_date = VALUES(price_date), currency = VALUES(currency), open_price = VALUES(open_price),
         high_price = VALUES(high_price), low_price = VALUES(low_price), close_price = VALUES(close_price),
+        volume = VALUES(volume),
         updated_at = VALUES(updated_at)
     `);
   }
@@ -1371,6 +1379,7 @@ export class PortfolioHistoryStore {
         candle.highPrice,
         candle.lowPrice,
         candle.closePrice,
+        candle.volume ?? null,
         updatedAt,
       ]);
     }

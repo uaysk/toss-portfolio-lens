@@ -33,6 +33,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import { StockSwatch } from "@/components/stock-swatch";
+import { TechnicalSignalTrace, TechnicalStrategyBuilder } from "@/components/technical-strategy-builder";
 import { PortfolioStrategyLab } from "@/components/portfolio-strategy-lab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
@@ -40,8 +41,27 @@ import { MONOCHROME_DASHES, MONOCHROME_SERIES, monochromeHeatmapStyle } from "@/
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { parseTargetWeightScheduleJson } from "@/lib/backtest-realism";
+import {
+  TECHNICAL_BATCH_INDICATORS,
+  buildTechnicalIndicatorDefinitions,
+} from "@/lib/technical-analysis";
+import {
+  buildTechnicalStrategyEndpointRequest,
+  createDefaultTechnicalStrategy,
+  normalizeTechnicalStrategyPresetConfig,
+  technicalStrategySourceMatchesBacktest,
+  unwrapTechnicalStrategyRun,
+  unwrapTechnicalStrategyValidation,
+  validateTechnicalStrategyDraft,
+  type TechnicalStrategy,
+  type TechnicalStrategyAnalysis,
+  type TechnicalStrategyHandoff,
+  type TechnicalStrategyRunPayload,
+  type TechnicalStrategyValidationResult,
+} from "@/lib/technical-strategy";
 import { seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
+import { getLibraryPreset, listLibraryPresets, type PresetLibraryItem } from "@/lib/research-library";
 import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
@@ -135,11 +155,15 @@ export function PortfolioBacktestView({
   theme,
   onUnauthorized,
   mode = "backtest",
+  technicalStrategyHandoff,
+  onTechnicalStrategyHandoffConsumed,
 }: {
   portfolio: Portfolio;
   theme: Theme;
   onUnauthorized: () => void;
   mode?: "backtest" | "optimization";
+  technicalStrategyHandoff?: TechnicalStrategyHandoff;
+  onTechnicalStrategyHandoffConsumed?: () => void;
 }) {
   const today = useMemo(() => seoulDateString(), []);
   const [assets, setAssets] = useState<BacktestAsset[]>([]);
@@ -166,6 +190,17 @@ export function PortfolioBacktestView({
   const [enforcePointInTimeUniverse, setEnforcePointInTimeUniverse] = useState(false);
   const [showRealismControls, setShowRealismControls] = useState(false);
   const [targetWeightScheduleJson, setTargetWeightScheduleJson] = useState("");
+  const [strategyMode, setStrategyMode] = useState<"allocation" | "technical_signal">(technicalStrategyHandoff ? "technical_signal" : "allocation");
+  const [technicalAnalysis, setTechnicalAnalysis] = useState<TechnicalStrategyAnalysis | undefined>(technicalStrategyHandoff?.analysis);
+  const [technicalStrategy, setTechnicalStrategy] = useState<TechnicalStrategy | undefined>(technicalStrategyHandoff?.strategy);
+  const [technicalValidation, setTechnicalValidation] = useState<TechnicalStrategyValidationResult>();
+  const [technicalValidationFingerprint, setTechnicalValidationFingerprint] = useState("");
+  const [validatingTechnical, setValidatingTechnical] = useState(false);
+  const [technicalRun, setTechnicalRun] = useState<TechnicalStrategyRunPayload>();
+  const [technicalRunFingerprint, setTechnicalRunFingerprint] = useState("");
+  const [directTechnicalKinds, setDirectTechnicalKinds] = useState<Array<(typeof TECHNICAL_BATCH_INDICATORS)[number]["kind"]>>(["sma", "rsi"]);
+  const [technicalPresets, setTechnicalPresets] = useState<PresetLibraryItem[]>([]);
+  const [selectedTechnicalPresetId, setSelectedTechnicalPresetId] = useState("");
   const [currencyMode, setCurrencyMode] = useState<"local" | "KRW">("KRW");
   const [cashTargetPercent, setCashTargetPercent] = useState(0);
   const [quantityMode, setQuantityMode] = useState<BacktestQuantityMode>("fractional");
@@ -179,8 +214,12 @@ export function PortfolioBacktestView({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<BacktestResult>();
+  const [resultOrigin, setResultOrigin] = useState<{ strategyMode: "allocation" | "technical_signal"; fingerprint: string }>();
   const [backtestRuns, setBacktestRuns] = useState<Array<{ runId: string; label: string }>>([]);
   const manuallyEditedStart = useRef(false);
+  const handoffInitializationStarted = useRef(Boolean(technicalStrategyHandoff));
+  const runGeneration = useRef(0);
+  const currentExecutionContext = useRef<{ strategyMode: "allocation" | "technical_signal"; fingerprint: string }>({ strategyMode, fingerprint: "" });
 
   const loadCurrentPortfolio = useCallback(async () => {
     setLoadingCurrent(true);
@@ -195,12 +234,20 @@ export function PortfolioBacktestView({
       }
       if (!response.ok) throw new Error(payload.error?.message || "현재 포트폴리오를 불러오지 못했습니다.");
       setAssets(payload.assets);
+      setStrategyMode("allocation");
+      setTechnicalAnalysis(undefined);
+      setTechnicalStrategy(undefined);
+      setTechnicalValidation(undefined);
+      setTechnicalValidationFingerprint("");
+      setTechnicalRun(undefined);
+      setTechnicalRunFingerprint("");
       setCashTargetPercent(0);
       setStartDate(payload.defaultStartDate);
       setEndDate(payload.defaultEndDate);
       if (payload.initialAmount >= 10_000) setInitialAmount(payload.initialAmount);
       manuallyEditedStart.current = false;
       setResult(undefined);
+      setResultOrigin(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "현재 포트폴리오를 불러오지 못했습니다.");
     } finally {
@@ -208,9 +255,68 @@ export function PortfolioBacktestView({
     }
   }, [onUnauthorized, portfolio.selectedAccountId]);
 
+  const applyTechnicalSource = useCallback(async (analysis: TechnicalStrategyAnalysis, strategy: TechnicalStrategy): Promise<boolean> => {
+    setLoadingCurrent(true);
+    setError("");
+    try {
+      const normalized = analysis.symbols.join(",");
+      const response = await fetch(`/api/portfolio/backtest/instruments?symbols=${encodeURIComponent(normalized)}`, {
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json().catch(() => ({})) as { instruments?: BacktestInstrument[] } & ApiError;
+      if (response.status === 401) {
+        onUnauthorized();
+        return false;
+      }
+      if (!response.ok) throw new Error(payload.error?.message || "기술 신호 전략 종목 정보를 불러오지 못했습니다.");
+      const instrumentBySymbol = new Map((payload.instruments ?? []).map((instrument) => [instrument.symbol.toUpperCase(), instrument]));
+      const missing = analysis.symbols.filter((symbol) => !instrumentBySymbol.has(symbol));
+      if (missing.length) throw new Error(`기술 신호 전략 종목 정보를 찾지 못했습니다: ${missing.join(", ")}`);
+      const initialAllocation = strategy.allocations[strategy.initialState];
+      setAssets(analysis.symbols.map((symbol) => ({
+        ...instrumentBySymbol.get(symbol)!,
+        weight: initialAllocation.weights[symbol] ?? 0,
+        lotSize: 1,
+      })));
+      setStartDate(analysis.fromDate);
+      setEndDate(analysis.toDate);
+      setCurrencyMode(analysis.currencyMode);
+      setCashTargetPercent(initialAllocation.cashPercent);
+      setTechnicalAnalysis(analysis);
+      setTechnicalStrategy(strategy);
+      setTechnicalValidation(undefined);
+      setTechnicalValidationFingerprint("");
+      setTechnicalRun(undefined);
+      setTechnicalRunFingerprint("");
+      setTargetWeightScheduleJson("");
+      setStrategyMode("technical_signal");
+      setResult(undefined);
+      setResultOrigin(undefined);
+      manuallyEditedStart.current = true;
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "기술 신호 전략 종목 정보를 불러오지 못했습니다.");
+      return false;
+    } finally {
+      setLoadingCurrent(false);
+    }
+  }, [onUnauthorized]);
+
   useEffect(() => {
-    void loadCurrentPortfolio();
-  }, [loadCurrentPortfolio]);
+    if (technicalStrategyHandoff) {
+      handoffInitializationStarted.current = true;
+      void applyTechnicalSource(technicalStrategyHandoff.analysis, technicalStrategyHandoff.strategy).then((applied) => {
+        if (applied) onTechnicalStrategyHandoffConsumed?.();
+      });
+    } else if (!handoffInitializationStarted.current) void loadCurrentPortfolio();
+  }, [applyTechnicalSource, loadCurrentPortfolio, onTechnicalStrategyHandoffConsumed, technicalStrategyHandoff]);
+
+  useEffect(() => {
+    if (mode !== "backtest") return;
+    listLibraryPresets({ onUnauthorized })
+      .then((page) => setTechnicalPresets(page.items.filter((item) => normalizeTechnicalStrategyPresetConfig(item.config) !== undefined)))
+      .catch(() => undefined);
+  }, [mode, onUnauthorized]);
 
   const addInstrument = async () => {
     const normalized = symbol.trim().toUpperCase();
@@ -268,7 +374,15 @@ export function PortfolioBacktestView({
     setResult(undefined);
   };
 
-  const weightTotal = assets.reduce((sum, asset) => sum + asset.weight, 0);
+  const technicalInitialAllocation = strategyMode === "technical_signal" && technicalStrategy
+    ? technicalStrategy.allocations[technicalStrategy.initialState]
+    : undefined;
+  const effectiveCashTargetPercent = technicalInitialAllocation?.cashPercent ?? cashTargetPercent;
+  const effectiveAssets = useMemo(() => assets.map((asset) => ({
+    ...asset,
+    weight: technicalInitialAllocation?.weights[asset.symbol] ?? asset.weight,
+  })), [assets, technicalInitialAllocation]);
+  const weightTotal = effectiveAssets.reduce((sum, asset) => sum + asset.weight, 0);
   const targetWeightSchedule = useMemo(() => parseTargetWeightScheduleJson(targetWeightScheduleJson, {
     assetSymbols: assets.map((asset) => asset.symbol),
     startDate,
@@ -294,32 +408,18 @@ export function PortfolioBacktestView({
     && (maxParticipationRatePercent === undefined || (Number.isFinite(maxParticipationRatePercent) && maxParticipationRatePercent > 0 && maxParticipationRatePercent <= 100))
     && Number.isFinite(minimumFee) && minimumFee >= 0 && minimumFee <= 1_000_000_000
     && Number.isFinite(dividendTaxBps) && dividendTaxBps >= 0 && dividendTaxBps <= 10_000;
-  const canRun = assets.length > 0
-    && Math.abs(weightTotal + cashTargetPercent - 100) <= 0.01
-    && Boolean(startDate)
-    && startDate <= endDate
-    && endDate <= today
-    && initialAmount >= 10_000
-    && Number.isFinite(riskFreeRatePercent)
-    && riskFreeRatePercent >= -10
-    && riskFreeRatePercent <= 50
-    && Number.isFinite(transactionCostBps)
-    && transactionCostBps >= 0
-    && transactionCostBps <= 500
-    && cashTargetPercent >= 0
-    && cashTargetPercent < 100
-    && cashAnnualYieldPercent >= -100
-    && cashAnnualYieldPercent <= 100
-    && (quantityMode !== "whole" || assets.every((asset) => Number.isFinite(asset.lotSize ?? 1) && (asset.lotSize ?? 1) > 0))
-    && (rebalanceFrequency !== "threshold" || (rebalanceThresholdPercent >= 0.1 && rebalanceThresholdPercent <= 50))
-    && customCashFlows.every((flow) => Boolean(flow.date) && flow.date >= startDate && flow.date <= endDate && Number.isFinite(flow.amount))
-    && realismCostsValid
-    && pointInTimeMetadataValid
-    && !targetWeightSchedule.error
-    && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
+  const technicalStrategyErrors = useMemo(() => technicalAnalysis && technicalStrategy
+    ? validateTechnicalStrategyDraft(technicalAnalysis, technicalStrategy)
+    : ["기술 신호 전략 원본이 필요합니다."], [technicalAnalysis, technicalStrategy]);
+  const technicalSourceMatchesBase = strategyMode !== "technical_signal" || technicalStrategySourceMatchesBacktest(technicalAnalysis, {
+    symbols: assets.map((asset) => asset.symbol),
+    startDate,
+    endDate,
+    currencyMode,
+  });
 
   const baseConfig = useMemo<BacktestRunConfiguration>(() => ({
-    assets: assets.map((asset) => ({
+    assets: effectiveAssets.map((asset) => ({
       symbol: asset.symbol,
       weight: asset.weight,
       lotSize: asset.lotSize ?? 1,
@@ -333,16 +433,16 @@ export function PortfolioBacktestView({
     monthlyCashFlow,
     cashFlowFrequency,
     cashFlowTiming,
-    rebalanceFrequency,
-    ...(rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
+    rebalanceFrequency: strategyMode === "technical_signal" ? "none" : rebalanceFrequency,
+    ...(strategyMode !== "technical_signal" && rebalanceFrequency === "threshold" ? { rebalanceThresholdPercent } : {}),
     riskFreeRatePercent,
     transactionCostBps,
     currencyMode,
     baseCurrency: "KRW",
     cashFlows: customCashFlows.map((flow) => ({ ...flow, ...(flow.memo?.trim() ? { memo: flow.memo.trim() } : {}) })),
-    targetWeightSchedule: targetWeightSchedule.value ?? [],
+    targetWeightSchedule: strategyMode === "technical_signal" ? [] : targetWeightSchedule.value ?? [],
     execution: {
-      cashTargetPercent,
+      cashTargetPercent: effectiveCashTargetPercent,
       quantityMode,
       cashFlowRebalanceMode,
       tradeDatePolicy: "next_common_observation",
@@ -364,33 +464,181 @@ export function PortfolioBacktestView({
     },
     benchmark,
     ...(benchmark === "CUSTOM" ? { benchmarkSymbol: benchmarkSymbol.trim().toUpperCase() } : {}),
-  }), [assets, benchmark, benchmarkSymbol, cashAnnualYieldPercent, cashFlowFrequency, cashFlowRebalanceMode, cashFlowTiming, cashTargetPercent, commissionBps, currencyMode, customCashFlows, dividendMode, dividendTaxBps, endDate, enforcePointInTimeUniverse, fixedSlippageBps, initialAmount, marketImpactCoefficient, marketImpactExponent, maxParticipationRatePercent, minimumFee, monthlyCashFlow, quantityMode, rebalanceFrequency, rebalanceThresholdPercent, riskFreeRatePercent, sellTaxBps, startDate, targetWeightSchedule.value, transactionCostBps]);
+  }), [benchmark, benchmarkSymbol, cashAnnualYieldPercent, cashFlowFrequency, cashFlowRebalanceMode, cashFlowTiming, commissionBps, currencyMode, customCashFlows, dividendMode, dividendTaxBps, effectiveAssets, effectiveCashTargetPercent, endDate, enforcePointInTimeUniverse, fixedSlippageBps, initialAmount, marketImpactCoefficient, marketImpactExponent, maxParticipationRatePercent, minimumFee, monthlyCashFlow, quantityMode, rebalanceFrequency, rebalanceThresholdPercent, riskFreeRatePercent, sellTaxBps, startDate, strategyMode, targetWeightSchedule.value, transactionCostBps]);
 
-  const runBacktest = async () => {
-    if (!canRun) return;
-    setRunning(true);
+  const technicalEndpointRequest = useMemo(() => technicalAnalysis && technicalStrategy
+    ? buildTechnicalStrategyEndpointRequest({ analysis: technicalAnalysis, strategy: technicalStrategy, backtest: baseConfig })
+    : undefined, [baseConfig, technicalAnalysis, technicalStrategy]);
+  const technicalRequestFingerprint = technicalEndpointRequest ? JSON.stringify(technicalEndpointRequest) : "";
+  const executionFingerprint = strategyMode === "technical_signal" ? technicalRequestFingerprint : JSON.stringify(baseConfig);
+  currentExecutionContext.current = { strategyMode, fingerprint: executionFingerprint };
+  const technicalServerValidated = strategyMode !== "technical_signal"
+    || Boolean(technicalValidation?.valid && technicalValidationFingerprint === technicalRequestFingerprint);
+  const canRun = assets.length > 0
+    && Math.abs(weightTotal + effectiveCashTargetPercent - 100) <= 0.01
+    && Boolean(startDate)
+    && startDate <= endDate
+    && endDate <= today
+    && initialAmount >= 10_000
+    && Number.isFinite(riskFreeRatePercent)
+    && riskFreeRatePercent >= -10
+    && riskFreeRatePercent <= 50
+    && Number.isFinite(transactionCostBps)
+    && transactionCostBps >= 0
+    && transactionCostBps <= 500
+    && effectiveCashTargetPercent >= 0
+    && effectiveCashTargetPercent <= 100
+    && cashAnnualYieldPercent >= -100
+    && cashAnnualYieldPercent <= 100
+    && (quantityMode !== "whole" || assets.every((asset) => Number.isFinite(asset.lotSize ?? 1) && (asset.lotSize ?? 1) > 0))
+    && (strategyMode === "technical_signal" || rebalanceFrequency !== "threshold" || (rebalanceThresholdPercent >= 0.1 && rebalanceThresholdPercent <= 50))
+    && customCashFlows.every((flow) => Boolean(flow.date) && flow.date >= startDate && flow.date <= endDate && Number.isFinite(flow.amount))
+    && realismCostsValid
+    && pointInTimeMetadataValid
+    && (strategyMode === "technical_signal" || !targetWeightSchedule.error)
+    && (strategyMode !== "technical_signal" || (technicalStrategyErrors.length === 0 && technicalSourceMatchesBase && technicalServerValidated))
+    && (benchmark !== "CUSTOM" || Boolean(benchmarkSymbol.trim()));
+
+  const initializeTechnicalFromBase = () => {
+    if (!assets.length || !startDate || !endDate || !directTechnicalKinds.length) {
+      setError("기술 신호 전략에 사용할 종목·기간·지표를 먼저 선택해 주세요.");
+      return;
+    }
+    const symbols = assets.map((asset) => asset.symbol);
+    const indicators = buildTechnicalIndicatorDefinitions(symbols, directTechnicalKinds, {}, symbols[0]);
+    const analysis: TechnicalStrategyAnalysis = {
+      symbols,
+      fromDate: startDate,
+      toDate: endDate,
+      interval: "1d",
+      adjusted: true,
+      currencyMode,
+      responseMode: "full_series",
+      indicators,
+    };
+    const strategy = createDefaultTechnicalStrategy(analysis, Object.fromEntries(assets.map((asset) => [asset.symbol, asset.weight])));
+    if (cashTargetPercent > 0 && Math.abs(assets.reduce((sum, asset) => sum + asset.weight, 0) + cashTargetPercent - 100) <= 0.01) {
+      strategy.allocations.active.cashPercent = cashTargetPercent;
+    }
+    setTechnicalAnalysis(analysis);
+    setTechnicalStrategy(strategy);
+    setTechnicalValidation(undefined);
+    setTechnicalValidationFingerprint("");
+    setTechnicalRun(undefined);
+    setTechnicalRunFingerprint("");
+    setTargetWeightScheduleJson("");
+    setResult(undefined);
+    setResultOrigin(undefined);
+    setStrategyMode("technical_signal");
+    setError("");
+  };
+
+  const restoreTechnicalPreset = async (id: string) => {
+    setSelectedTechnicalPresetId(id);
     setError("");
     try {
-      const response = await fetch("/api/portfolio/backtest", {
+      const details = await getLibraryPreset(id, false, { onUnauthorized });
+      const config = normalizeTechnicalStrategyPresetConfig(details.preset?.config);
+      if (!config) throw new Error("기술 신호 전략 프리셋 형식이 아닙니다.");
+      await applyTechnicalSource(config.analysis, config.strategy);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "기술 신호 전략 프리셋을 복원하지 못했습니다.");
+    }
+  };
+
+  const updateTechnicalStrategy = (strategy: TechnicalStrategy) => {
+    setTechnicalStrategy(strategy);
+    setTechnicalValidation(undefined);
+    setTechnicalValidationFingerprint("");
+    setTechnicalRun(undefined);
+    setTechnicalRunFingerprint("");
+    setResult(undefined);
+    setResultOrigin(undefined);
+  };
+
+  const validateTechnical = async () => {
+    if (!technicalEndpointRequest || technicalStrategyErrors.length || !technicalSourceMatchesBase) return;
+    setValidatingTechnical(true);
+    setError("");
+    try {
+      const response = await fetch("/api/portfolio/tools/validate_technical_strategy", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(baseConfig),
+        body: JSON.stringify(technicalEndpointRequest),
       });
-      const payload = await response.json().catch(() => ({})) as BacktestResult & ApiError;
+      const raw = await response.json().catch(() => ({}));
       if (response.status === 401) {
         onUnauthorized();
         return;
       }
-      if (!response.ok) throw new Error(payload.error?.message || "백테스트를 실행하지 못했습니다.");
+      const payload = unwrapTechnicalStrategyValidation(raw);
+      const apiError = raw as ApiError;
+      if (!response.ok || !payload) throw new Error(apiError.error?.message || "기술 신호 전략을 검증하지 못했습니다.");
+      setTechnicalValidation(payload);
+      setTechnicalValidationFingerprint(technicalRequestFingerprint);
+      if (!payload.valid) setError("기술 신호 전략의 서버 검증 오류를 확인해 주세요.");
+    } catch (caught) {
+      setTechnicalValidation(undefined);
+      setTechnicalValidationFingerprint("");
+      setError(caught instanceof Error ? caught.message : "기술 신호 전략을 검증하지 못했습니다.");
+    } finally {
+      setValidatingTechnical(false);
+    }
+  };
+
+  const runBacktest = async () => {
+    if (!canRun) return;
+    const startedContext = { ...currentExecutionContext.current };
+    const generation = ++runGeneration.current;
+    setRunning(true);
+    setError("");
+    setResult(undefined);
+    setResultOrigin(undefined);
+    setTechnicalRun(undefined);
+    setTechnicalRunFingerprint("");
+    try {
+      const technicalRequest = strategyMode === "technical_signal" ? technicalEndpointRequest : undefined;
+      const response = await fetch(technicalRequest
+        ? "/api/portfolio/tools/run_technical_strategy_backtest"
+        : "/api/portfolio/backtest", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(technicalRequest ?? baseConfig),
+      });
+      const raw = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      if (generation !== runGeneration.current
+        || currentExecutionContext.current.strategyMode !== startedContext.strategyMode
+        || currentExecutionContext.current.fingerprint !== startedContext.fingerprint) return;
+      const technicalPayload = technicalRequest ? unwrapTechnicalStrategyRun(raw) : undefined;
+      const payload = (technicalPayload?.backtest ?? raw) as BacktestResult & ApiError;
+      if (!response.ok) throw new Error((raw as ApiError).error?.message || "백테스트를 실행하지 못했습니다.");
+      if (technicalRequest && (!technicalPayload || !technicalPayload.backtest)) throw new Error("기술 신호 백테스트 응답 형식을 확인하지 못했습니다.");
+      if (technicalPayload) {
+        setTechnicalRun(technicalPayload);
+        setTechnicalRunFingerprint(technicalRequestFingerprint);
+        if (technicalPayload.run_id && !payload.runId) payload.runId = technicalPayload.run_id;
+      } else {
+        setTechnicalRun(undefined);
+        setTechnicalRunFingerprint("");
+      }
       setResult(payload);
+      setResultOrigin(startedContext);
       if (payload.runId) {
         const label = `${new Date(payload.generatedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} · ${payload.config.assets.length}종목 · CAGR ${payload.metrics.cagrPercent === null ? "-" : formatPercent(payload.metrics.cagrPercent, true)}`;
         setBacktestRuns((current) => [{ runId: payload.runId!, label }, ...current.filter((item) => item.runId !== payload.runId)].slice(0, 20));
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "백테스트를 실행하지 못했습니다.");
+      if (generation === runGeneration.current
+        && currentExecutionContext.current.strategyMode === startedContext.strategyMode
+        && currentExecutionContext.current.fingerprint === startedContext.fingerprint) {
+        setError(caught instanceof Error ? caught.message : "백테스트를 실행하지 못했습니다.");
+      }
     } finally {
-      setRunning(false);
+      if (generation === runGeneration.current) setRunning(false);
     }
   };
 
@@ -432,6 +680,32 @@ export function PortfolioBacktestView({
           </Button>
         </div>
 
+        {mode === "backtest" ? (
+          <div className="mt-5 rounded-[22px] bg-card p-2" data-backtest-strategy-mode>
+            <div className="grid grid-cols-2 gap-1" role="group" aria-label="백테스트 전략 모드">
+              <button type="button" aria-pressed={strategyMode === "allocation"} onClick={() => { setStrategyMode("allocation"); setResult(undefined); setTechnicalRun(undefined); setTechnicalRunFingerprint(""); }} className={cn("rounded-full px-4 py-2.5 text-xs font-black", strategyMode === "allocation" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>기본 비중 전략</button>
+              <button type="button" aria-pressed={strategyMode === "technical_signal"} onClick={() => { if (technicalAnalysis && technicalStrategy) setStrategyMode("technical_signal"); else initializeTechnicalFromBase(); setResult(undefined); }} className={cn("rounded-full px-4 py-2.5 text-xs font-black", strategyMode === "technical_signal" ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>기술 신호 전략</button>
+            </div>
+          </div>
+        ) : null}
+
+        {mode === "backtest" && strategyMode === "technical_signal" ? (
+          <div className="mt-3 rounded-[22px] bg-card p-4 sm:p-5" data-technical-backtest-source>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">TECHNICAL SOURCE</p><h3 className="mt-1 text-base font-black">지표 계산 원본</h3><p className="mt-1 text-[10px] leading-4 text-muted-foreground">기술적 분석 메뉴의 handoff 또는 프리셋을 그대로 사용하거나, 현재 백테스트 종목과 기본 parameter로 새 원본을 만듭니다.</p></div>
+              <Select value={selectedTechnicalPresetId} onValueChange={(id) => void restoreTechnicalPreset(id)} disabled={!technicalPresets.length || loadingCurrent}><SelectTrigger className="w-full bg-secondary sm:w-64" aria-label="백테스트 기술 신호 전략 프리셋"><SelectValue placeholder="전략 프리셋 복원" /></SelectTrigger><SelectContent>{technicalPresets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}</SelectContent></Select>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2" aria-label="직접 기술 지표 선택">
+              {TECHNICAL_BATCH_INDICATORS.map((indicator) => <button key={indicator.kind} type="button" aria-pressed={directTechnicalKinds.includes(indicator.kind)} onClick={() => setDirectTechnicalKinds((current) => current.includes(indicator.kind) ? current.filter((kind) => kind !== indicator.kind) : [...current, indicator.kind])} className={cn("rounded-full px-2.5 py-2 text-[9px] font-black", directTechnicalKinds.includes(indicator.kind) ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground")}>{indicator.shortLabel}</button>)}
+            </div>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-[10px] text-muted-foreground">{technicalAnalysis ? `${technicalAnalysis.symbols.length}종목 · ${technicalAnalysis.indicators.length}지표 정의 · ${technicalAnalysis.interval}` : "기술 신호 원본이 없습니다."}</p>
+              <Button type="button" size="sm" variant="secondary" onClick={initializeTechnicalFromBase} disabled={!assets.length || !directTechnicalKinds.length}>현재 종목·기간으로 조건 초기화</Button>
+            </div>
+            {!technicalSourceMatchesBase ? <p role="alert" className="mt-3 rounded-[14px] bg-amber-500/10 px-3 py-2 text-[10px] font-bold text-amber-700 dark:text-amber-300">전략 원본의 종목·기간·통화가 현재 백테스트 설정과 다릅니다. 현재 설정으로 초기화하거나 원본 설정을 복원하세요.</p> : null}
+          </div>
+        ) : null}
+
         <div className="mt-6 rounded-[24px] bg-card p-4 sm:p-5">
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -452,7 +726,7 @@ export function PortfolioBacktestView({
               {adding ? <LoaderCircle className="animate-spin" /> : <Plus />}
               종목 추가
             </Button>
-            <Button type="button" variant="secondary" onClick={() => setAssets(rebalanceEvenly(assets, 100 - cashTargetPercent))} disabled={!assets.length}>
+            <Button type="button" variant="secondary" onClick={() => setAssets(rebalanceEvenly(assets, 100 - cashTargetPercent))} disabled={!assets.length || strategyMode === "technical_signal"}>
               <Scale />균등 배분
             </Button>
           </div>
@@ -475,10 +749,11 @@ export function PortfolioBacktestView({
                 <div className="relative">
                   <Input
                     type="number"
-                    min={0.01}
+                    min={0}
                     max={100}
                     step={0.01}
-                    value={asset.weight}
+                    value={technicalInitialAllocation?.weights[asset.symbol] ?? asset.weight}
+                    disabled={strategyMode === "technical_signal"}
                     onChange={(event) => {
                       const value = Number(event.target.value);
                       setAssets((current) => current.map((candidate) => candidate.symbol === asset.symbol
@@ -522,9 +797,23 @@ export function PortfolioBacktestView({
         </div>
 
         <div className="mt-3 flex items-center justify-between rounded-[18px] bg-card px-4 py-3 text-xs font-bold">
-          <span className="text-muted-foreground">총 {assets.length}종목 · 주식 {weightTotal.toFixed(2)}% + 현금 {cashTargetPercent.toFixed(2)}%</span>
-          <span className={cn(Math.abs(weightTotal + cashTargetPercent - 100) > 0.01 && "text-rose-500")}>{(weightTotal + cashTargetPercent).toFixed(2)}%</span>
+          <span className="text-muted-foreground">총 {assets.length}종목 · 주식 {weightTotal.toFixed(2)}% + 현금 {effectiveCashTargetPercent.toFixed(2)}%</span>
+          <span className={cn(Math.abs(weightTotal + effectiveCashTargetPercent - 100) > 0.01 && "text-rose-500")}>{(weightTotal + effectiveCashTargetPercent).toFixed(2)}%</span>
         </div>
+
+        {mode === "backtest" && strategyMode === "technical_signal" && technicalAnalysis && technicalStrategy ? (
+          <div className="mt-4 min-w-0 rounded-[24px] bg-card p-4 sm:p-5">
+            <TechnicalStrategyBuilder analysis={technicalAnalysis} value={technicalStrategy} onChange={updateTechnicalStrategy} title="백테스트 기술 신호 전략" />
+            <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-[10px] leading-4 text-muted-foreground">
+                {technicalValidationFingerprint && technicalValidationFingerprint !== technicalRequestFingerprint ? <p className="font-bold text-amber-700 dark:text-amber-300">전략 또는 백테스트 가정이 변경되어 서버 검증이 만료되었습니다.</p> : technicalValidation?.valid ? <p className="font-bold text-emerald-700 dark:text-emerald-300">공통 서비스의 전략 검증을 통과했습니다.</p> : <p>실행 전에 공통 서비스에서 조건·가용성·기간을 검증합니다.</p>}
+                {technicalValidation?.warnings?.map((warning) => <p key={warning}>{warning}</p>)}
+              </div>
+              <Button type="button" variant="secondary" onClick={() => void validateTechnical()} disabled={validatingTechnical || Boolean(technicalStrategyErrors.length) || !technicalSourceMatchesBase} data-technical-strategy-validate>{validatingTechnical ? <LoaderCircle className="animate-spin" /> : <Activity />}전략 검증</Button>
+            </div>
+            {technicalValidation && !technicalValidation.valid ? <div role="alert" className="mt-3 rounded-[16px] bg-destructive/10 px-4 py-3 text-[10px] leading-5 text-destructive">{technicalValidation.errors.map((item, index) => <p key={`${index}:${typeof item === "string" ? item : item.message}`}>{typeof item === "string" ? item : `${item.path ? `${item.path}: ` : ""}${item.message ?? "검증 오류"}`}</p>)}</div> : null}
+          </div>
+        ) : null}
       </Card>
 
       <Card className={cn("bg-secondary p-5 sm:p-7", mode === "optimization" && "order-3")}>
@@ -563,13 +852,13 @@ export function PortfolioBacktestView({
           </label>
           <label className="rounded-[20px] bg-card p-4">
             <span className="mb-2 block text-[11px] font-bold text-muted-foreground">리밸런싱</span>
-            <Select value={rebalanceFrequency} onValueChange={(value) => { setRebalanceFrequency(value as BacktestRebalanceFrequency); setResult(undefined); }}>
+            <Select value={strategyMode === "technical_signal" ? "none" : rebalanceFrequency} disabled={strategyMode === "technical_signal"} onValueChange={(value) => { setRebalanceFrequency(value as BacktestRebalanceFrequency); setResult(undefined); }}>
               <SelectTrigger className="w-full rounded-2xl bg-secondary"><SelectValue /></SelectTrigger>
               <SelectContent>{rebalanceOptions.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
             </Select>
-            <span className="mt-2 block text-[10px] text-muted-foreground">기간 첫 거래일에 목표 비중으로 조정</span>
+            <span className="mt-2 block text-[10px] text-muted-foreground">{strategyMode === "technical_signal" ? "기술 신호의 상태 전환 일정만 사용" : "기간 첫 거래일에 목표 비중으로 조정"}</span>
           </label>
-          {rebalanceFrequency === "threshold" ? (
+          {strategyMode !== "technical_signal" && rebalanceFrequency === "threshold" ? (
             <label className="rounded-[20px] bg-card p-4">
               <span className="mb-2 block text-[11px] font-bold text-muted-foreground">비중 이탈 임계치 · %p</span>
               <Input type="number" min={0.1} max={50} step={0.1} value={rebalanceThresholdPercent} onChange={(event) => { setRebalanceThresholdPercent(Number(event.target.value)); setResult(undefined); }} className="bg-secondary text-right font-black" />
@@ -621,7 +910,8 @@ export function PortfolioBacktestView({
             <label className="rounded-[20px] bg-card p-4">
               <span className="mb-2 block text-[11px] font-bold text-muted-foreground">현금 목표 비중 · %</span>
               <Input
-                type="number" min={0} max={99.99} step={0.1} value={cashTargetPercent}
+                type="number" min={0} max={100} step={0.1} value={effectiveCashTargetPercent}
+                disabled={strategyMode === "technical_signal"}
                 onChange={(event) => {
                   const next = Math.min(99.99, Math.max(0, Number(event.target.value)));
                   setCashTargetPercent(next);
@@ -775,7 +1065,7 @@ export function PortfolioBacktestView({
                 {enforcePointInTimeUniverse && !pointInTimeMetadataValid ? <p role="alert" className="mt-3 text-xs font-semibold text-rose-500">PIT 강제 시 모든 종목에 분석 기간과 겹치는 [편입일, 제외일) 구간이 필요합니다. 상장폐지일은 편입일보다 늦어야 합니다.</p> : null}
               </div>
 
-              <div className="rounded-[22px] bg-card p-4 sm:p-5">
+              {strategyMode !== "technical_signal" ? <div className="rounded-[22px] bg-card p-4 sm:p-5">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div><p className="text-[11px] font-black">시점별 목표비중 일정 · JSON</p><p id="target-weight-schedule-help" className="mt-1 text-[10px] leading-4 text-muted-foreground">날짜별로 현재 모든 종목과 현금의 합이 100%가 되도록 입력합니다. 같은 날짜는 한 번만 허용됩니다.</p></div>
                   <Button type="button" variant="secondary" onClick={insertTargetWeightScheduleExample} disabled={!assets.length || !startDate}>현재 비중 예시</Button>
@@ -792,7 +1082,7 @@ export function PortfolioBacktestView({
                   className="mt-3 w-full resize-y rounded-2xl border border-input bg-secondary px-4 py-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 />
                 {targetWeightSchedule.error ? <p role="alert" className="mt-2 text-xs font-semibold text-rose-500">{targetWeightSchedule.error}</p> : <p className="mt-2 text-[10px] text-muted-foreground">검증된 일정 {targetWeightSchedule.value?.length ?? 0}개 · 빈 입력은 기존 단일 목표비중 경로를 유지합니다.</p>}
-              </div>
+              </div> : <div className="rounded-[22px] bg-card p-4 text-xs leading-5 text-muted-foreground"><strong className="text-foreground">기술 신호 일정:</strong> 수동 목표비중 JSON은 사용하지 않습니다. Rust가 종가 조건을 평가하고 다음 안전 거래일의 targetWeightSchedule을 만든 뒤 기존 ledger에 전달합니다.</div>}
             </div>
           ) : null}
         </div>
@@ -818,7 +1108,7 @@ export function PortfolioBacktestView({
         {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
         <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void runBacktest()} disabled={!canRun || running}>
           {running ? <LoaderCircle className="animate-spin" /> : <TrendingUp />}
-          {running ? "수정주가를 수집하고 계산하는 중" : mode === "backtest" ? "백테스트 실행" : "비교 기준 백테스트 저장"}
+          {running ? (strategyMode === "technical_signal" ? "지표·신호·ledger를 계산하는 중" : "수정주가를 수집하고 계산하는 중") : mode === "backtest" ? (strategyMode === "technical_signal" ? "기술 신호 백테스트 실행" : "백테스트 실행") : "비교 기준 백테스트 저장"}
         </Button>
       </Card>
 
@@ -835,9 +1125,17 @@ export function PortfolioBacktestView({
         </div>
       ) : null}
 
-      {mode === "backtest" && result ? (
+      {mode === "backtest" && result && resultOrigin?.strategyMode === "technical_signal" && resultOrigin.fingerprint === executionFingerprint && technicalRun && technicalRunFingerprint === technicalRequestFingerprint ? (
+        <TechnicalSignalTrace signals={technicalRun.technical_strategy.signals} />
+      ) : null}
+
+      {mode === "backtest" && result && resultOrigin?.strategyMode === strategyMode && resultOrigin.fingerprint === executionFingerprint ? (
         <>
-          <Card className="bg-secondary p-5 sm:p-7">
+          {resultOrigin.strategyMode === "technical_signal" ? (
+            <Card className="bg-secondary p-5 text-xs leading-5 text-muted-foreground sm:p-7" role="note" data-technical-report-unavailable>
+              <strong className="text-foreground">기술 신호 전략 보고서:</strong> 일반 비중 백테스트 보고서는 빈 수동 일정으로 전략을 다시 실행하므로 이 결과에는 제공하지 않습니다. 신호·일정·진단은 combined run artifact에서 확인하세요.
+            </Card>
+          ) : <Card className="bg-secondary p-5 sm:p-7">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="max-w-2xl">
                 <p className="text-xs font-bold tracking-[0.14em] text-muted-foreground">AI REPORT</p>
@@ -871,7 +1169,7 @@ export function PortfolioBacktestView({
                 onUnauthorized={onUnauthorized}
               />
             </div>
-          </Card>
+          </Card>}
 
           <Card className="bg-secondary p-5 sm:p-7">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">

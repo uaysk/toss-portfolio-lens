@@ -267,6 +267,76 @@ describe("preset-backed execution", () => {
     }).success).toBe(true);
   });
 
+  it("기술 신호 preset을 deep override하고 validate는 미사용, 실행은 lastUsedAt을 갱신한다", async () => {
+    const service = await presets();
+    const stored = await service.create({
+      ownerSubject: "owner-a",
+      name: "기술 신호 전략",
+      config: {
+        analysis: {
+          symbols: ["AAA"], fromDate: "2023-01-01", toDate: "2024-12-31", interval: "1d",
+          adjusted: true, currencyMode: "KRW", responseMode: "full_series",
+          indicators: [{ id: "sma-main", kind: "sma", parameters: { period: 20 } }],
+        },
+        strategy: {
+          schemaVersion: "technical-strategy/v1", id: "trend-main",
+          entryCondition: { operator: "greater_than", left: { type: "indicator", instrumentKey: "AAA", indicatorId: "sma-main", field: "value" }, right: { type: "constant", value: 10 } },
+          exitCondition: { operator: "less_than", left: { type: "bar", instrumentKey: "AAA", field: "close" }, right: { type: "constant", value: 8 } },
+          minimumHoldingPeriod: 0, cooldownPeriod: 0, initialState: "inactive",
+          allocations: { active: { weights: { AAA: 100 }, cashPercent: 0 }, inactive: { weights: { AAA: 0 }, cashPercent: 100 } },
+        },
+        backtest: {
+          assets: [{ symbol: "AAA", weight: 0 }], startDate: "2024-01-01", endDate: "2024-12-31",
+          initialAmount: 1_000_000, monthlyCashFlow: 0, rebalanceFrequency: "none", benchmark: "NONE",
+          currencyMode: "KRW", execution: { cashTargetPercent: 100, cashAnnualYieldPercent: 2 },
+        },
+      },
+      source: { type: "manual" },
+    });
+    const validate = vi.fn(async (input: unknown) => input);
+    const runBacktest = vi.fn(async (input: unknown) => input);
+    const analyzeSignals = vi.fn(async (input: unknown) => input);
+    const handlers = createToolHandlers({
+      presets: service,
+      technicalStrategies: { validate, runBacktest, analyzeSignals },
+      maxAssets: 20,
+      maxDateRangeYears: 20,
+    } as unknown as McpToolDependencies);
+
+    await handlers.validate_technical_strategy(toolSchemas.validate_technical_strategy.parse({
+      presetId: stored.id,
+      strategy: { minimumHoldingPeriod: 5 },
+      backtest: { initialAmount: 2_000_000, execution: { cashAnnualYieldPercent: 4 } },
+    }), "owner-a");
+    expect((await service.get(stored.id, "owner-a"))?.lastUsedAt).toBeUndefined();
+    expect(validate).toHaveBeenCalledWith({
+      ownerSubject: "owner-a",
+      request: expect.objectContaining({
+        strategy: expect.objectContaining({ id: "trend-main", minimumHoldingPeriod: 5 }),
+        backtest: expect.objectContaining({
+          initialAmount: 2_000_000,
+          execution: expect.objectContaining({ cashTargetPercent: 100, cashAnnualYieldPercent: 4 }),
+        }),
+      }),
+    });
+
+    await handlers.run_technical_strategy_backtest(toolSchemas.run_technical_strategy_backtest.parse({
+      presetId: stored.id,
+      analysis: { fromDate: "2022-01-01" },
+    }), "owner-a");
+    expect(runBacktest).toHaveBeenCalledWith({
+      ownerSubject: "owner-a",
+      request: expect.objectContaining({ analysis: expect.objectContaining({ fromDate: "2022-01-01", symbols: ["AAA"] }) }),
+    });
+    expect((await service.get(stored.id, "owner-a"))?.lastUsedAt).toEqual(expect.any(Number));
+
+    await handlers.analyze_technical_signals(toolSchemas.analyze_technical_signals.parse({ presetId: stored.id }), "owner-a");
+    expect(analyzeSignals).toHaveBeenCalledWith({
+      ownerSubject: "owner-a",
+      request: expect.objectContaining({ analysis: expect.any(Object), strategy: expect.any(Object) }),
+    });
+  });
+
   it("최적화 market-data preflight 실패를 failed run과 event로 영구 기록한다", async () => {
     const runId = "00000000-0000-4000-8000-000000000777";
     const recordPreflightFailure = vi.fn().mockResolvedValue({

@@ -13,6 +13,8 @@ export type PortfolioRunKind =
   | "cash_flow_sensitivity"
   | "monte_carlo"
   | "outlook"
+  | "technical_analysis"
+  | "technical_strategy"
   | "exposure_analysis"
   | "pareto_frontier"
   | "research_report";

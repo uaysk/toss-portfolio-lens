@@ -6,6 +6,10 @@ import {
   type CachedMarketCandle,
 } from "../repositories/market-data-repository.js";
 import { TossApiError, type InstrumentInfo, type TossClient } from "../toss.js";
+import {
+  KisApiError,
+  type KisExchangeRateProvider,
+} from "../kis-exchange-rate.js";
 import { ServiceError } from "./service-envelope.js";
 
 const API_PACING_MS = 230;
@@ -15,6 +19,7 @@ const MAX_FX_CARRY_FORWARD_DAYS = 7;
 
 export type MarketInterval = "1d" | "1w" | "1mo";
 export type CurrencyMode = "local" | "KRW";
+export type MarketVolumeStatus = "available" | "partial" | "volume_unavailable";
 
 export type MarketInstrument = {
   symbol: string;
@@ -40,6 +45,7 @@ export type MarketSeriesPoint = {
   localLow: number;
   localClose: number;
   fxRate: number;
+  volume: number | null;
 };
 
 export type MarketSeriesResult = {
@@ -56,6 +62,15 @@ export type MarketSeriesResult = {
   warnings: string[];
   dataQuality: {
     observations: number;
+    outputObservations: number;
+    volumeObservations: number;
+    missingVolumeObservations: number;
+    volumeCoverage: number;
+    volumeStatus: MarketVolumeStatus;
+    sourceDailyVolumeObservations: number;
+    sourceDailyMissingVolumeObservations: number;
+    sourceDailyVolumeCoverage: number;
+    sourceDailyVolumeStatus: MarketVolumeStatus;
     missingFxObservations: number;
     carriedFxObservations: number;
     firstObservationDate?: string;
@@ -119,9 +134,17 @@ function isMissingExchangeRate(error: unknown): error is TossApiError {
 function upstreamErrorDetails(error: unknown): Record<string, unknown> {
   if (error instanceof TossApiError) {
     return {
+      provider: "toss",
       status: error.status,
       code: error.code,
       ...(error.requestId ? { request_id: error.requestId } : {}),
+    };
+  }
+  if (error instanceof KisApiError) {
+    return {
+      provider: "kis",
+      status: error.status,
+      code: error.code,
     };
   }
   return {
@@ -167,6 +190,9 @@ function aggregate(points: MarketSeriesPoint[], interval: MarketInterval): Marke
       localLow: Math.min(...values.map((item) => item.localLow)),
       localClose: last.localClose,
       fxRate: last.fxRate,
+      volume: values.every((item) => item.volume !== null)
+        ? values.reduce((sum, item) => sum + item.volume!, 0)
+        : null,
     };
   });
 }
@@ -174,10 +200,12 @@ function aggregate(points: MarketSeriesPoint[], interval: MarketInterval): Marke
 export class MarketDataService {
   readonly repository: MarketDataRepository;
   private readonly fxInFlight = new Map<string, Promise<void>>();
+  private readonly fxFallbackInFlight = new Map<string, Promise<number>>();
 
   constructor(
     private readonly toss: TossClient,
     private readonly store: PortfolioHistoryStore,
+    private readonly exchangeRateFallback?: KisExchangeRateProvider,
   ) {
     this.repository = new MarketDataRepository(store.relationalDatabase);
   }
@@ -244,13 +272,25 @@ export class MarketDataService {
     fromDate: string,
     toDate: string,
     adjusted: boolean,
+    requireVolume: boolean,
   ): Promise<void> {
     const available = await this.repository.availability({ symbol: instrument.symbol, adjusted });
     const historicalEnd = toDate < addDays(kstDateString(new Date()), -7);
     const hasEnd = historicalEnd
       ? Boolean(available.lastDate && available.lastDate >= toDate)
       : Boolean(available.lastDate && available.lastDate >= addDays(toDate, -7));
-    if (available.firstDate && available.firstDate <= fromDate && hasEnd) return;
+    const cachedVolume = requireVolume
+      ? await this.repository.volumeCoverage({
+          symbol: instrument.symbol,
+          adjusted,
+          fromDate,
+          toDate,
+        })
+      : undefined;
+    const hasProviderVolume = !requireVolume
+      || cachedVolume?.observations === 0
+      || (cachedVolume?.volumeObservations ?? 0) > 0;
+    if (available.firstDate && available.firstDate <= fromDate && hasEnd && hasProviderVolume) return;
 
     const seenBefore = new Set<string>();
     let before: string | undefined;
@@ -280,6 +320,31 @@ export class MarketDataService {
       .then((rate) => this.store.upsertExchangeRate(rate.date, rate.rate, rate.timestamp))
       .finally(() => this.fxInFlight.delete(date));
     this.fxInFlight.set(date, task);
+    return task;
+  }
+
+  private async refreshExchangeRatesFromFallback(fromDate: string, toDate: string): Promise<number> {
+    if (!this.exchangeRateFallback || fromDate > toDate) return 0;
+    const key = `${fromDate}:${toDate}`;
+    const existing = this.fxFallbackInFlight.get(key);
+    if (existing) return existing;
+    const task = (async () => {
+      const rates = await this.exchangeRateFallback!.getUsdKrwExchangeRates(fromDate, toDate);
+      if (!rates.length) {
+        throw new KisApiError(
+          "한국투자증권에도 요청 기간의 USD/KRW 환율이 없습니다.",
+          404,
+          "exchange-rate-not-found",
+          false,
+        );
+      }
+      for (const rate of rates) {
+        await this.store.upsertExchangeRate(rate.date, rate.rate, rate.timestamp);
+      }
+      console.info(`[fx] KIS 폴백으로 USD/KRW ${rates.length}개 관측을 채웠습니다.`);
+      return rates.length;
+    })().finally(() => this.fxFallbackInFlight.delete(key));
+    this.fxFallbackInFlight.set(key, task);
     return task;
   }
 
@@ -319,6 +384,35 @@ export class MarketDataService {
             });
           }
           lastSeedError = error;
+        }
+      }
+    }
+
+    if (!hasStartingRate() && this.exchangeRateFallback) {
+      const firstCachedDate = Array.from(cached.entries())
+        .filter(([, rate]) => Number.isFinite(rate) && rate > 0)
+        .map(([date]) => date)
+        .sort()[0];
+      const fallbackToDate = firstCachedDate ? addDays(firstCachedDate, -1) : lastRequestedDate;
+      if (seedFromDate <= fallbackToDate) {
+        try {
+          await this.refreshExchangeRatesFromFallback(seedFromDate, fallbackToDate);
+          cached = await this.store.getExchangeRates(seedFromDate, lastRequestedDate);
+        } catch (error) {
+          lastSeedError = error;
+          if (!(error instanceof KisApiError) || error.code !== "exchange-rate-not-found") {
+            throw new ServiceError({
+              code: "FX_RATE_FETCH_FAILED",
+              message: "USD/KRW 환율 폴백 공급자 조회에 실패했습니다.",
+              retryable: error instanceof KisApiError ? error.retryable : true,
+              details: {
+                fx_pair: "USD/KRW",
+                requested_period: { from: firstRequestedDate, to: lastRequestedDate },
+                attempted_period: { from: seedFromDate, to: fallbackToDate },
+                upstream: upstreamErrorDetails(error),
+              },
+            });
+          }
         }
       }
     }
@@ -430,6 +524,7 @@ export class MarketDataService {
     interval?: MarketInterval;
     adjusted?: boolean;
     currencyMode?: CurrencyMode;
+    requireVolume?: boolean;
   }): Promise<MarketSeriesResult> {
     if (!isHistoryDate(input.fromDate) || !isHistoryDate(input.toDate) || input.fromDate > input.toDate) {
       throw new BacktestValidationError("가격 조회 시작일과 종료일을 확인해 주세요.");
@@ -441,7 +536,7 @@ export class MarketDataService {
       throw new BacktestValidationError("가격 interval 또는 통화 기준을 확인해 주세요.");
     }
     const instrument = (await this.resolveInstruments([input.symbol]))[0];
-    await this.ensureDailyCandles(instrument, input.fromDate, input.toDate, adjusted);
+    await this.ensureDailyCandles(instrument, input.fromDate, input.toDate, adjusted, input.requireVolume ?? false);
     const candles = await this.repository.getCandles({
       symbol: instrument.symbol,
       adjusted,
@@ -500,13 +595,41 @@ export class MarketDataService {
         localLow: candle.low,
         localClose: candle.close,
         fxRate: rate,
+        volume: candle.volume,
       }];
     });
     const aggregated = aggregate(points, interval);
+    const sourceDailyVolumeObservations = points.filter((point) => point.volume !== null).length;
+    const sourceDailyMissingVolumeObservations = points.length - sourceDailyVolumeObservations;
+    const sourceDailyVolumeCoverage = points.length ? sourceDailyVolumeObservations / points.length : 0;
+    const sourceDailyVolumeStatus: MarketVolumeStatus = sourceDailyVolumeObservations === 0
+      ? "volume_unavailable"
+      : sourceDailyMissingVolumeObservations > 0 ? "partial" : "available";
+    const volumeObservations = aggregated.filter((point) => point.volume !== null).length;
+    const missingVolumeObservations = aggregated.length - volumeObservations;
+    const volumeCoverage = aggregated.length ? volumeObservations / aggregated.length : 0;
+    const volumeStatus: MarketVolumeStatus = volumeObservations === 0
+      ? "volume_unavailable"
+      : missingVolumeObservations > 0 ? "partial" : "available";
     const firstObservationDate = candles[0]?.date;
     const dateConsistency = listingDateConsistency(firstObservationDate, instrument.listDate);
     const dataRevision = createHash("sha256")
-      .update(`${await this.repository.dataRevision()}:${instrument.symbol}:${adjusted}:${input.fromDate}:${input.toDate}`)
+      .update(JSON.stringify({
+        schema_version: "market-series-data/v2",
+        repository_revision: await this.repository.dataRevision(),
+        symbol: instrument.symbol,
+        adjusted,
+        from_date: input.fromDate,
+        to_date: input.toDate,
+        candles: candles.map((candle) => ({
+          date: candle.date,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        })),
+      }))
       .digest("hex");
     return {
       instrument,
@@ -526,6 +649,8 @@ export class MarketDataService {
           : "계좌 과거 평가 복원용 비수정 가격입니다. 투자 성과 비교에 사용하지 마세요.",
         "수정주가에 포함된 기업행위 범위는 공급자 정의를 따릅니다.",
         "별도 현금배당, 세금, 거래비용과 슬리피지는 가격 시계열에 추가하지 않습니다.",
+        "거래량은 공급자 원값이며 통화 환산하지 않습니다. 주·월봉은 구성 일봉 거래량이 모두 있을 때만 합계를 제공합니다.",
+        "거래량 지표 요청에서 기존 cache의 거래량이 전부 null이면 공급자를 다시 조회하고, 일부 관측만 있는 cache는 공급자의 partial coverage로 보존합니다.",
       ],
       warnings: [
         ...(dateConsistency === "price_precedes_metadata" ? [
@@ -533,10 +658,25 @@ export class MarketDataService {
         ] : []),
         ...(carriedFxObservations ? [`환율 ${carriedFxObservations}개 관측은 직전 값을 사용했습니다.`] : []),
         ...(missingFxObservations ? [`환율 ${missingFxObservations}개 관측이 없어 제외했습니다.`] : []),
+        ...(input.requireVolume && volumeStatus === "partial" ? [
+          `${instrument.symbol} 거래량 ${missingVolumeObservations}개 관측이 누락되어 일부 집계봉은 unavailable입니다.`,
+        ] : []),
+        ...(input.requireVolume && volumeStatus === "volume_unavailable" ? [
+          `${instrument.symbol} 공급자 일봉 거래량을 확인할 수 없어 거래량 지표는 unavailable입니다.`,
+        ] : []),
         "모든 결과는 역사적 관측이며 미래 성과를 보장하지 않습니다.",
       ],
       dataQuality: {
         observations: aggregated.reduce((sum, item) => sum + item.observations, 0),
+        outputObservations: aggregated.length,
+        volumeObservations,
+        missingVolumeObservations,
+        volumeCoverage,
+        volumeStatus,
+        sourceDailyVolumeObservations,
+        sourceDailyMissingVolumeObservations,
+        sourceDailyVolumeCoverage,
+        sourceDailyVolumeStatus,
         missingFxObservations,
         carriedFxObservations,
         ...(firstObservationDate ? { firstObservationDate } : {}),
@@ -555,6 +695,10 @@ export class MarketDataService {
       metadataListDateRole: "provider_listing_metadata_not_verified_inception";
       listingDateConsistency: "consistent" | "price_precedes_metadata" | "unavailable";
       observations: number;
+      volumeObservations: number;
+      missingVolumeObservations: number;
+      volumeCoverage: number;
+      volumeStatus: MarketVolumeStatus;
       commonObservations: number;
       missingObservations: number;
       observationRate: number;
@@ -588,15 +732,25 @@ export class MarketDataService {
     const common = observedDates.length
       ? new Set(Array.from(observedDates[0]).filter((date) => observedDates.every((dates) => dates.has(date))))
       : new Set<string>();
-    const assets = available.map((item, index) => ({
-      ...item,
-      ...(item.listDate ? { metadataListDate: item.listDate } : {}),
-      metadataListDateRole: "provider_listing_metadata_not_verified_inception" as const,
-      listingDateConsistency: listingDateConsistency(item.firstDate, item.listDate),
-      commonObservations: observedDates[index].size,
-      missingObservations: Math.max(0, union.size - observedDates[index].size),
-      observationRate: union.size ? observedDates[index].size / union.size : 0,
-    }));
+    const assets = available.map((item, index) => {
+      const missingVolumeObservations = Math.max(0, item.observations - item.volumeObservations);
+      const volumeStatus: MarketVolumeStatus = item.volumeObservations === 0
+        ? "volume_unavailable"
+        : missingVolumeObservations > 0 ? "partial" : "available";
+      return {
+        ...item,
+        ...(item.listDate ? { metadataListDate: item.listDate } : {}),
+        metadataListDateRole: "provider_listing_metadata_not_verified_inception" as const,
+        listingDateConsistency: listingDateConsistency(item.firstDate, item.listDate),
+        volumeObservations: item.volumeObservations,
+        missingVolumeObservations,
+        volumeCoverage: item.observations ? item.volumeObservations / item.observations : 0,
+        volumeStatus,
+        commonObservations: observedDates[index].size,
+        missingObservations: Math.max(0, union.size - observedDates[index].size),
+        observationRate: union.size ? observedDates[index].size / union.size : 0,
+      };
+    });
     return {
       assets: assets.map(({ revision: _revision, ...item }) => item),
       ...(commonPeriod ? { commonPeriod } : {}),

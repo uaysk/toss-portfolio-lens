@@ -341,7 +341,7 @@ export class PortfolioBacktestService {
     }
     const weightTotal = request.assets.reduce((sum, asset) => sum + Number(asset.weight), 0);
     if (!request.assets.length || request.assets.length > 20
-      || request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight <= 0
+      || request.assets.some((asset) => !Number.isFinite(asset.weight) || asset.weight < 0
         || (asset.lotSize !== undefined && (!Number.isFinite(asset.lotSize) || asset.lotSize <= 0))
         || (asset.delistDate !== undefined && !isHistoryDate(asset.delistDate))
         || (asset.universeMemberFrom !== undefined && !isHistoryDate(asset.universeMemberFrom))

@@ -45,6 +45,36 @@ const optimization = {
   objective: "robust_score",
   candidateBudget: 20,
 };
+const technicalStrategyRequest = {
+  analysis: {
+    symbols: ["AAA", "BBB"],
+    fromDate: "2023-01-01",
+    toDate: "2024-12-31",
+    interval: "1d",
+    adjusted: true,
+    currencyMode: "KRW",
+    responseMode: "full_series",
+    indicators: [{ id: "sma-main", kind: "sma", parameters: { period: 20 } }],
+  },
+  strategy: {
+    schemaVersion: "technical-strategy/v1",
+    id: "trend-main",
+    entryCondition: { operator: "greater_than", left: { type: "indicator", instrumentKey: "AAA", indicatorId: "sma-main", field: "value" }, right: { type: "constant", value: 10 } },
+    exitCondition: { operator: "less_than", left: { type: "bar", instrumentKey: "AAA", field: "close" }, right: { type: "constant", value: 8 } },
+    minimumHoldingPeriod: 0,
+    cooldownPeriod: 0,
+    initialState: "inactive",
+    allocations: {
+      active: { weights: { AAA: 60, BBB: 40 }, cashPercent: 0 },
+      inactive: { weights: { AAA: 0, BBB: 0 }, cashPercent: 100 },
+    },
+  },
+  backtest: {
+    ...baseBacktest,
+    assets: [{ symbol: "AAA", weight: 0 }, { symbol: "BBB", weight: 0 }],
+    execution: { cashTargetPercent: 100 },
+  },
+};
 const run1 = "00000000-0000-4000-8000-000000000001";
 const run2 = "00000000-0000-4000-8000-000000000002";
 const reportId = "00000000-0000-4000-8000-000000000003";
@@ -66,6 +96,18 @@ const validToolInputs: Record<ToolName, Record<string, unknown>> = {
   search_instruments: { query: "AAA" },
   get_data_availability: { symbols: ["AAA", "BBB"] },
   get_price_series: { symbol: "AAA", fromDate: "2024-01-01", toDate: "2024-12-31" },
+  analyze_technical_signals: {
+    symbols: ["AAA", "BBB"],
+    fromDate: "2024-01-01",
+    toDate: "2024-12-31",
+    interval: "1d",
+    adjusted: true,
+    currencyMode: "KRW",
+    responseMode: "full_series",
+    indicators: [{ id: "sma-main", kind: "sma", parameters: { period: 20 } }],
+  },
+  validate_technical_strategy: technicalStrategyRequest,
+  run_technical_strategy_backtest: technicalStrategyRequest,
   analyze_instrument: { symbol: "AAA", fromDate: "2024-01-01", toDate: "2024-12-31" },
   analyze_asset_relationship: { base: "AAA", comparisons: ["BBB"], fromDate: "2024-01-01", toDate: "2024-12-31" },
   get_correlation_matrix: { symbols: ["AAA", "BBB"], fromDate: "2024-01-01", toDate: "2024-12-31" },
@@ -136,7 +178,7 @@ describe("MCP tool contract", () => {
     await server?.close().catch(() => undefined);
   });
 
-  it("tools/list가 생성된 50개 contract와 이름·schema·metadata exact-match한다", async () => {
+  it("tools/list가 생성된 53개 contract와 이름·schema·metadata exact-match한다", async () => {
     const resources = { register: vi.fn() };
     const dependencies = {
       resources,
@@ -183,7 +225,7 @@ describe("MCP tool contract", () => {
     }
   });
 
-  it("50개 도구의 대표 유효 입력과 enum·날짜·비중·상한 오류를 스키마에서 검증한다", () => {
+  it("53개 도구의 대표 유효 입력과 enum·날짜·비중·상한 오류를 스키마에서 검증한다", () => {
     for (const name of expectedTools) {
       expect(toolSchemas[name].safeParse(validToolInputs[name]).success, name).toBe(true);
       expect(toolSchemas[name].safeParse({ ...validToolInputs[name], unexpectedField: true }).success, name).toBe(false);
@@ -195,7 +237,7 @@ describe("MCP tool contract", () => {
     expect(toolSchemas.optimize_portfolio.safeParse({ ...optimization, objective: "max_information_ratio" }).success).toBe(false);
   });
 
-  it("50개 handler가 합성 서비스와 저장소에서 유효 입력을 처리하고 공통 envelope를 반환한다", async () => {
+  it("53개 handler가 합성 서비스와 저장소에서 유효 입력을 처리하고 공통 envelope를 반환한다", async () => {
     const dates = Array.from({ length: 80 }, (_, index) => new Date(Date.UTC(2024, 0, 2 + index)).toISOString().slice(0, 10));
     const loaded = (symbols: string[]) => ({
       prices: symbols.map((symbol, symbolIndex) => ({
@@ -315,6 +357,21 @@ describe("MCP tool contract", () => {
         correlationMatrix: vi.fn().mockImplementation((request) => simpleEnvelope(request, relationship.correlationMatrix)),
         marketRegimes: vi.fn().mockImplementation((request) => simpleEnvelope(request, { thresholds: {}, regimes: [], observations: [] })),
         dataQuality: vi.fn().mockImplementation((request) => simpleEnvelope(request, { confidence: "high" })),
+      },
+      technicalAnalysis: {
+        analyze: vi.fn().mockImplementation(({ request }) => simpleEnvelope(request, {
+          run_id: "00000000-0000-4000-8000-000000000099",
+          reused: false,
+          response_mode: request.responseMode,
+          price_series: [],
+          technical_analysis: { calculations: [] },
+          artifact_index: [],
+        })),
+      },
+      technicalStrategies: {
+        analyzeSignals: vi.fn().mockImplementation(({ request }) => simpleEnvelope(request, { run_id: "00000000-0000-4000-8000-000000000097" })),
+        validate: vi.fn().mockImplementation(({ request }) => simpleEnvelope(request, { valid: true, errors: [] })),
+        runBacktest: vi.fn().mockImplementation(({ request }) => simpleEnvelope(request, { run_id: "00000000-0000-4000-8000-000000000098" })),
       },
       returnSeries: { load: vi.fn().mockImplementation(({ symbols }) => Promise.resolve(loaded(symbols))) },
       backtests: {
@@ -549,7 +606,7 @@ describe("MCP tool contract", () => {
     }
   });
 
-  it("50개 도구가 각자의 OAuth scope 부족을 challenge로 반환하고 민감값을 노출하지 않는다", async () => {
+  it("53개 도구가 각자의 OAuth scope 부족을 challenge로 반환하고 민감값을 노출하지 않는다", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const dependencies = {
       resources: { register: vi.fn() },

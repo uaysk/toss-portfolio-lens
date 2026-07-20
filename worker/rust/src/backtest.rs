@@ -276,6 +276,20 @@ fn align(input: &BacktestSimulationInput) -> Result<Alignment> {
     ))
 }
 
+/// Returns the exact dates on which the ledger can execute a portfolio-wide
+/// policy change. This deliberately reuses the ledger's alignment and
+/// point-in-time-universe rules so upstream signal code cannot invent a
+/// different definition of a safe trading day.
+pub(crate) fn common_observation_dates(input: &BacktestSimulationInput) -> Result<Vec<String>> {
+    validate(input)?;
+    let (aligned, ..) = align(input)?;
+    Ok(aligned
+        .iter()
+        .filter(|point| point.common_observation(input))
+        .map(|point| point.date.clone())
+        .collect())
+}
+
 fn cash_flow_due(
     previous_date: &str,
     current_date: &str,

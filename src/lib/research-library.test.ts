@@ -20,6 +20,7 @@ import {
   normalizeRunPage,
   normalizeTags,
   runLibraryAction,
+  specializedPresetPresentation,
   updateLibraryPreset,
   updateLibraryRun,
 } from "./research-library";
@@ -83,6 +84,16 @@ describe("research library normalization", () => {
   it("run 검색 query와 상한이 안정적인 URL을 만든다", () => {
     expect(buildRunLibraryUrl({ query: "  alpha  ", kind: "backtest", status: "completed", archived: false, tag: "core", cursor: "c 1", limit: 500 }))
       .toBe("/api/portfolio/runs?query=alpha&kind=backtest&status=completed&archived=false&tag=core&cursor=c+1&limit=100");
+  });
+
+  it("전용 기술 프리셋은 소유 화면 복원 안내로 분류한다", () => {
+    expect(specializedPresetPresentation({ config: { presetType: "technical_signal_strategy" } })).toEqual({
+      label: "기술 신호 전략",
+      restoreHint: "기술적 분석/백테스트 화면에서 복원",
+    });
+    expect(specializedPresetPresentation({ config: { preset_type: "technical_chart_config" } })?.restoreHint)
+      .toBe("기술적 분석 화면에서 복원");
+    expect(specializedPresetPresentation({ config: { presetType: "portfolio_allocation" } })).toBeUndefined();
   });
 });
 

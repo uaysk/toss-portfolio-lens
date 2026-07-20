@@ -11,7 +11,7 @@ describe("return series data revision", () => {
     expect(combineDataRevisions([...revisions].reverse())).toBe(combined);
     expect(WorkerInputSchema.safeParse({
       schema_version: "1.0",
-      engine_version: "portfolio-lens-rust-2026.07.3",
+      engine_version: "portfolio-lens-rust-2026.07.4",
       run_id: "run-1",
       job_kind: "optimization",
       data_revision: combined,

@@ -8,8 +8,15 @@ use crate::backtest;
 use crate::contracts::{JobKind, OutputArtifact, WorkerInput, WorkerOutput};
 use crate::control::{ComputeControl, checkpoint};
 use crate::date::civil_from_days;
+use crate::indicators::{
+    AvailabilityStatus, TechnicalAnalysisRequest, analyze as analyze_technical_indicators,
+};
 use crate::model::BacktestSimulationInput;
 use crate::stats::round;
+use crate::technical_strategy::{
+    TechnicalSignalStatus, TechnicalStrategyDefinition, TechnicalStrategyRunResult,
+    execute as execute_technical_strategy,
+};
 
 fn iso_now() -> String {
     let elapsed = SystemTime::now()
@@ -34,6 +41,18 @@ fn array_artifact(artifact_type: &str, content: Value) -> OutputArtifact {
         artifact_type: artifact_type.into(),
         content,
         row_count,
+    }
+}
+
+fn artifact_with_row_count(
+    artifact_type: &str,
+    content: Value,
+    row_count: usize,
+) -> OutputArtifact {
+    OutputArtifact {
+        artifact_type: artifact_type.into(),
+        content,
+        row_count: Some(row_count),
     }
 }
 
@@ -82,6 +101,14 @@ fn backtest_artifacts(result: &Value) -> Vec<OutputArtifact> {
     })).collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let correlations = result
+        .get("correlations")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let correlation_rows = correlations
+        .get("assets")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     vec![
         array_artifact("equity", points),
         array_artifact("drawdown", json!(drawdown)),
@@ -105,13 +132,7 @@ fn backtest_artifacts(result: &Value) -> Vec<OutputArtifact> {
                 .cloned()
                 .unwrap_or_else(|| json!([])),
         ),
-        array_artifact(
-            "correlation",
-            result
-                .get("correlations")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        ),
+        artifact_with_row_count("correlation", correlations, correlation_rows),
         array_artifact(
             "risk-contribution",
             result
@@ -216,6 +237,24 @@ fn finalize_backtest(
     if let Value::Object(simulation) = simulation {
         result.extend(simulation);
     }
+    let instrument_date_consistency = context
+        .get("instrument_date_consistency")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    match result.get_mut("dataQuality").and_then(Value::as_object_mut) {
+        Some(data_quality) => {
+            data_quality.insert(
+                "instrumentDateConsistency".into(),
+                instrument_date_consistency,
+            );
+        }
+        None => {
+            result.insert(
+                "dataQuality".into(),
+                json!({ "instrumentDateConsistency": instrument_date_consistency }),
+            );
+        }
+    }
     (Value::Object(result), warnings)
 }
 
@@ -246,6 +285,128 @@ fn compute_backtest(
         vec![]
     };
     WorkerOutput::completed(input, summary, result, warnings, artifacts)
+}
+
+fn compute_technical_analysis(
+    input: &WorkerInput,
+    include_artifacts: bool,
+    control: Option<&dyn ComputeControl>,
+) -> Result<WorkerOutput> {
+    let request_value = input
+        .payload
+        .get("technical_analysis")
+        .context("technical analysis payload.technical_analysis must be an object")?;
+    let request: TechnicalAnalysisRequest = serde_json::from_value(request_value.clone())
+        .context("invalid technical analysis request")?;
+    let technical = analyze_technical_indicators(&request, control)?;
+    checkpoint(control)?;
+    let available_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| calculation.availability.status == AvailabilityStatus::Available)
+        .count();
+    let partial_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| calculation.availability.status == AvailabilityStatus::Partial)
+        .count();
+    let insufficient_history_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| {
+            calculation.availability.status == AvailabilityStatus::InsufficientHistory
+        })
+        .count();
+    let volume_unavailable_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| {
+            calculation.availability.status == AvailabilityStatus::VolumeUnavailable
+        })
+        .count();
+    let unsupported_instrument_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| {
+            calculation.availability.status == AvailabilityStatus::UnsupportedInstrument
+        })
+        .count();
+    let unavailable_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| calculation.availability.status == AvailabilityStatus::Unavailable)
+        .count();
+    let profile_bucket_count = technical
+        .calculations
+        .iter()
+        .filter_map(|calculation| calculation.profile.as_ref())
+        .map(|profile| profile.buckets.len())
+        .sum::<usize>();
+    let approximate_calculation_count = technical
+        .calculations
+        .iter()
+        .filter(|calculation| {
+            calculation
+                .metadata
+                .get("approximate")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .count();
+    let summary = json!({
+        "indicator_engine_version": technical.indicator_engine_version,
+        "response_mode": technical.response_mode,
+        "adjustment_policy": technical.adjustment_policy,
+        "instrument_count": technical.diagnostics.instrument_count,
+        "indicator_definition_count": technical.diagnostics.indicator_definition_count,
+        "calculation_count": technical.diagnostics.calculation_count,
+        "total_bar_count": technical.diagnostics.total_bar_count,
+        "available_count": available_count,
+        "partial_count": partial_count,
+        "insufficient_history_count": insufficient_history_count,
+        "volume_unavailable_count": volume_unavailable_count,
+        "unsupported_instrument_count": unsupported_instrument_count,
+        "unavailable_count": unavailable_count,
+        "profile_bucket_count": profile_bucket_count,
+        "approximate_calculation_count": approximate_calculation_count,
+    });
+    let artifacts = if include_artifacts {
+        vec![
+            array_artifact(
+                "technical-indicators",
+                serde_json::to_value(&technical.calculations)?,
+            ),
+            array_artifact(
+                "technical-diagnostics",
+                serde_json::to_value(&technical.diagnostics)?,
+            ),
+        ]
+    } else {
+        vec![]
+    };
+    let mut warnings = Vec::new();
+    if volume_unavailable_count > 0 {
+        warnings.push(format!(
+            "{volume_unavailable_count} requested volume indicator calculations have no usable volume observations"
+        ));
+    }
+    if unsupported_instrument_count > 0 {
+        warnings.push(format!(
+            "{unsupported_instrument_count} requested volume indicator calculations target unsupported instrument types"
+        ));
+    }
+    if unavailable_count > 0 {
+        warnings.push(format!(
+            "{unavailable_count} requested indicator calculations are unavailable"
+        ));
+    }
+    WorkerOutput::completed(
+        input,
+        summary,
+        serde_json::to_value(technical)?,
+        warnings,
+        artifacts,
+    )
 }
 
 fn compute_optimization(
@@ -353,6 +514,161 @@ fn compute_optimization(
         vec![]
     };
     WorkerOutput::completed(input, summary, result, warnings, artifacts)
+}
+
+fn compute_technical_strategy(
+    input: &WorkerInput,
+    include_artifacts: bool,
+    control: Option<&dyn ComputeControl>,
+) -> Result<WorkerOutput> {
+    let technical_request: TechnicalAnalysisRequest = serde_json::from_value(
+        input
+            .payload
+            .get("technical_analysis")
+            .context("technical strategy payload.technical_analysis must be an object")?
+            .clone(),
+    )
+    .context("invalid technical strategy technical_analysis input")?;
+    let strategy: TechnicalStrategyDefinition = serde_json::from_value(
+        input
+            .payload
+            .get("strategy")
+            .context("technical strategy payload.strategy must be an object")?
+            .clone(),
+    )
+    .context("invalid technical strategy definition")?;
+    let simulation = input
+        .payload
+        .get("simulation")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<BacktestSimulationInput>(value.clone())
+                .context("invalid technical strategy simulation input")
+        })
+        .transpose()?;
+    let response_context = if simulation.is_some() {
+        Some(
+            input
+                .payload
+                .get("response_context")
+                .and_then(Value::as_object)
+                .context(
+                    "technical strategy payload.response_context must be an object when payload.simulation is provided",
+                )?,
+        )
+    } else {
+        None
+    };
+    let safe_trade_dates = input
+        .payload
+        .get("safe_trade_dates")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<Vec<String>>(value.clone())
+                .context("invalid technical strategy safe_trade_dates")
+        })
+        .transpose()?;
+    let evaluation_start_date = input
+        .payload
+        .get("evaluation_start_date")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<String>(value.clone())
+                .context("invalid technical strategy evaluation_start_date")
+        })
+        .transpose()?;
+    let evaluation_end_date = input
+        .payload
+        .get("evaluation_end_date")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<String>(value.clone())
+                .context("invalid technical strategy evaluation_end_date")
+        })
+        .transpose()?;
+    let TechnicalStrategyRunResult {
+        technical_analysis,
+        technical_strategy,
+        backtest,
+    } = execute_technical_strategy(
+        &technical_request,
+        &strategy,
+        simulation,
+        safe_trade_dates,
+        evaluation_start_date,
+        evaluation_end_date,
+        control,
+    )?;
+    checkpoint(control)?;
+
+    let technical_analysis_value = serde_json::to_value(&technical_analysis)?;
+    let technical_strategy_value = serde_json::to_value(&technical_strategy)?;
+    let (backtest_value, warnings) = if let Some(backtest) = backtest {
+        let (backtest, warnings) =
+            finalize_backtest(serde_json::to_value(backtest)?, response_context);
+        (Some(backtest), warnings)
+    } else {
+        (None, vec![])
+    };
+    let signal_count = technical_strategy.signals.len();
+    let applied_signal_count = technical_strategy
+        .signals
+        .iter()
+        .filter(|signal| signal.status == TechnicalSignalStatus::Applied)
+        .count();
+    let planned_signal_count = technical_strategy
+        .signals
+        .iter()
+        .filter(|signal| signal.status == TechnicalSignalStatus::Planned)
+        .count();
+    let no_safe_trade_date_count = technical_strategy
+        .signals
+        .iter()
+        .filter(|signal| signal.status == TechnicalSignalStatus::NoSafeTradeDate)
+        .count();
+    let summary = json!({
+        "metrics": backtest_value.as_ref().and_then(|value| value.get("metrics")).cloned().unwrap_or(Value::Null),
+        "indicator_engine_version": technical_analysis.indicator_engine_version,
+        "signal_count": signal_count,
+        "applied_signal_count": applied_signal_count,
+        "planned_signal_count": planned_signal_count,
+        "no_safe_trade_date_count": no_safe_trade_date_count,
+        "target_weight_schedule_count": technical_strategy.target_weight_schedule.len(),
+    });
+    let mut result = Map::from_iter([
+        ("technical_analysis".to_owned(), technical_analysis_value),
+        ("technical_strategy".to_owned(), technical_strategy_value),
+    ]);
+    if let Some(backtest) = backtest_value.as_ref() {
+        result.insert("backtest".to_owned(), backtest.clone());
+    }
+    let artifacts = if include_artifacts {
+        let mut artifacts = backtest_value
+            .as_ref()
+            .map(backtest_artifacts)
+            .unwrap_or_default();
+        artifacts.extend([
+            array_artifact(
+                "technical-indicators",
+                serde_json::to_value(&technical_analysis.calculations)?,
+            ),
+            array_artifact(
+                "technical-signals",
+                serde_json::to_value(&technical_strategy.signals)?,
+            ),
+            array_artifact(
+                "technical-diagnostics",
+                json!({
+                    "indicator": technical_analysis.diagnostics,
+                    "strategy": technical_strategy.diagnostics,
+                }),
+            ),
+        ]);
+        artifacts
+    } else {
+        vec![]
+    };
+    WorkerOutput::completed(input, summary, Value::Object(result), warnings, artifacts)
 }
 
 fn compute_monte_carlo(
@@ -1248,6 +1564,8 @@ pub fn compute_with_control(
         JobKind::Optimization => compute_optimization(input, include_artifacts, control),
         JobKind::MonteCarlo => compute_monte_carlo(input, include_artifacts, control),
         JobKind::Outlook => compute_outlook(input, include_artifacts, control),
+        JobKind::TechnicalAnalysis => compute_technical_analysis(input, include_artifacts, control),
+        JobKind::TechnicalStrategy => compute_technical_strategy(input, include_artifacts, control),
         JobKind::WalkForward
         | JobKind::StressTest
         | JobKind::WeightSensitivity
@@ -1304,6 +1622,357 @@ mod tests {
         assert_eq!(value.len(), 24);
         assert!(value.ends_with('Z'));
         assert_eq!(&value[4..5], "-");
+    }
+
+    #[test]
+    fn technical_analysis_dispatches_batch_and_all_indicator_statuses_and_artifacts() {
+        let payload = json!({
+            "technical_analysis": {
+                "schema_version": crate::indicators::TECHNICAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
+                "response_mode": "latest_summary",
+                "adjustment_policy": "adjusted",
+                "instruments": [{
+                    "key": "KRW:005930",
+                    "symbol": "005930",
+                    "market": "KR",
+                    "currency": "KRW",
+                    "instrument_type": "stock",
+                    "bars": [{
+                        "date": "2024-01-02",
+                        "open": 100.0,
+                        "high": 102.0,
+                        "low": 99.0,
+                        "close": 101.0,
+                        "volume": 1000.0
+                    }]
+                }],
+                "indicators": [{"id": "sma-20", "kind": "sma"}]
+            }
+        });
+        let input = WorkerInput {
+            schema_version: WORKER_SCHEMA_VERSION.into(),
+            engine_version: ENGINE_VERSION.into(),
+            run_id: "technical-test".into(),
+            job_kind: JobKind::TechnicalAnalysis,
+            data_revision: "revision-1".into(),
+            request_hash: "a".repeat(64),
+            payload,
+        };
+        let output = compute_with_artifacts(&input, true).unwrap();
+        assert_eq!(output.status, "completed");
+        assert_eq!(
+            output.result.as_ref().unwrap()["indicator_engine_version"],
+            crate::indicators::INDICATOR_ENGINE_VERSION
+        );
+        assert_eq!(output.summary.as_ref().unwrap()["available_count"], 0);
+        assert_eq!(
+            output.summary.as_ref().unwrap()["insufficient_history_count"],
+            1
+        );
+        assert_eq!(output.summary.as_ref().unwrap()["partial_count"], 0);
+        assert_eq!(
+            output.summary.as_ref().unwrap()["volume_unavailable_count"],
+            0
+        );
+        assert_eq!(
+            output.summary.as_ref().unwrap()["unsupported_instrument_count"],
+            0
+        );
+        assert_eq!(output.summary.as_ref().unwrap()["unavailable_count"], 0);
+        assert!(output.warnings.is_empty());
+        let artifacts = output.artifacts.unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].artifact_type, "technical-indicators");
+        assert_eq!(artifacts[0].row_count, Some(1));
+        assert_eq!(artifacts[1].artifact_type, "technical-diagnostics");
+        assert_eq!(artifacts[1].row_count, Some(1));
+
+        let without_artifacts = compute_with_artifacts(&input, false).unwrap();
+        assert!(without_artifacts.artifacts.unwrap().is_empty());
+
+        let mut partial_input = input.clone();
+        partial_input.payload["technical_analysis"] = json!({
+            "schema_version": crate::indicators::TECHNICAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
+            "response_mode": "latest_summary",
+            "adjustment_policy": "adjusted",
+            "instruments": [
+                {
+                    "key": "asset",
+                    "symbol": "ASSET",
+                    "market": "US",
+                    "currency": "USD",
+                    "instrument_type": "stock",
+                    "bars": [
+                        {"date": "2024-01-01", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
+                        {"date": "2024-01-02", "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0}
+                    ]
+                },
+                {
+                    "key": "benchmark",
+                    "symbol": "BENCHMARK",
+                    "market": "US",
+                    "currency": "USD",
+                    "instrument_type": "index",
+                    "bars": [
+                        {"date": "2024-01-01", "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0},
+                        {"date": "2024-01-03", "open": 21.0, "high": 21.0, "low": 21.0, "close": 21.0}
+                    ]
+                }
+            ],
+            "indicators": [{
+                "id": "relative",
+                "kind": "benchmark_relative_strength",
+                "parameters": {"benchmark_key": "benchmark"},
+                "instrument_keys": ["asset"]
+            }]
+        });
+        let partial = compute_with_artifacts(&partial_input, false).unwrap();
+        assert_eq!(partial.summary.as_ref().unwrap()["available_count"], 0);
+        assert_eq!(partial.summary.as_ref().unwrap()["partial_count"], 1);
+        assert_eq!(partial.summary.as_ref().unwrap()["unavailable_count"], 0);
+        assert!(partial.warnings.is_empty());
+
+        let mut stage_three_input = input.clone();
+        stage_three_input
+            .payload
+            .pointer_mut("/technical_analysis/indicators")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "volume-20", "kind": "volume_sma"}));
+        let stage_three = compute_with_artifacts(&stage_three_input, false).unwrap();
+        assert_eq!(stage_three.summary.as_ref().unwrap()["partial_count"], 0);
+        assert_eq!(
+            stage_three.summary.as_ref().unwrap()["insufficient_history_count"],
+            2
+        );
+        assert_eq!(
+            stage_three.summary.as_ref().unwrap()["volume_unavailable_count"],
+            0
+        );
+        assert_eq!(
+            stage_three.summary.as_ref().unwrap()["unavailable_count"],
+            0
+        );
+        assert!(stage_three.warnings.is_empty());
+
+        let mut missing_volume_input = stage_three_input.clone();
+        missing_volume_input
+            .payload
+            .pointer_mut("/technical_analysis/instruments/0/bars/0/volume")
+            .unwrap()
+            .clone_from(&Value::Null);
+        let missing_volume = compute_with_artifacts(&missing_volume_input, false).unwrap();
+        assert_eq!(
+            missing_volume.summary.as_ref().unwrap()["volume_unavailable_count"],
+            1
+        );
+        assert_eq!(missing_volume.warnings.len(), 1);
+        assert!(missing_volume.warnings[0].contains("no usable volume"));
+
+        let mut unsupported_input = stage_three_input.clone();
+        unsupported_input
+            .payload
+            .pointer_mut("/technical_analysis/instruments/0/instrument_type")
+            .unwrap()
+            .clone_from(&json!("index"));
+        let unsupported = compute_with_artifacts(&unsupported_input, false).unwrap();
+        assert_eq!(
+            unsupported.summary.as_ref().unwrap()["unsupported_instrument_count"],
+            1
+        );
+        assert_eq!(unsupported.warnings.len(), 1);
+        assert!(unsupported.warnings[0].contains("unsupported instrument"));
+
+        let mut stage_four_input = input;
+        stage_four_input
+            .payload
+            .pointer_mut("/technical_analysis/indicators")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "vwap", "kind": "vwap_anchored_vwap"}));
+        let stage_four = compute_with_artifacts(&stage_four_input, false).unwrap();
+        assert_eq!(stage_four.summary.as_ref().unwrap()["available_count"], 1);
+        assert_eq!(stage_four.summary.as_ref().unwrap()["unavailable_count"], 0);
+        assert!(stage_four.warnings.is_empty());
+    }
+
+    #[test]
+    fn technical_strategy_combines_causal_signals_real_ledger_and_exact_artifacts() {
+        let technical_analysis = json!({
+            "schema_version": crate::indicators::TECHNICAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
+            "response_mode": "full_series",
+            "adjustment_policy": "adjusted",
+            "instruments": [{
+                "key": "KRW:AAA",
+                "symbol": "AAA",
+                "market": "KR",
+                "currency": "KRW",
+                "instrument_type": "stock",
+                "bars": [
+                    {"date": "2024-01-01", "open": 9.0, "high": 10.0, "low": 8.0, "close": 9.0, "volume": 1000.0},
+                    {"date": "2024-01-02", "open": 11.0, "high": 12.0, "low": 10.0, "close": 11.0, "volume": 1000.0},
+                    {"date": "2024-01-03", "open": 12.0, "high": 13.0, "low": 11.0, "close": 12.0, "volume": 1000.0}
+                ]
+            }],
+            "indicators": [{"id": "sma-one", "kind": "sma", "parameters": {"period": 1}}]
+        });
+        let strategy = json!({
+            "schema_version": crate::technical_strategy::TECHNICAL_STRATEGY_SCHEMA_VERSION,
+            "initial_state": "inactive",
+            "active_when": {
+                "operator": "crosses_above",
+                "left": {"type": "bar", "instrument_key": "KRW:AAA", "field": "close"},
+                "right": {"type": "constant", "value": 10.0}
+            },
+            "inactive_when": {
+                "operator": "greater_than",
+                "left": {"type": "constant", "value": 0.0},
+                "right": {"type": "constant", "value": 1.0}
+            },
+            "minimum_holding_period": 0,
+            "cooldown_period": 0,
+            "allocations": {
+                "active": {"weights": {"AAA": 100.0}, "cash_target_percent": 0.0},
+                "inactive": {"weights": {"AAA": 0.0}, "cash_target_percent": 100.0}
+            }
+        });
+        let simulation = json!({
+            "assets": [{
+                "symbol": "AAA", "name": "AAA", "market": "KR", "currency": "KRW",
+                "listDate": "2020-01-01", "weight": 100.0
+            }],
+            "prices": {"KRW:AAA": [
+                {"date": "2024-01-01", "close": 9.0, "localClose": 9.0, "fxRate": 1.0, "volume": 1000.0},
+                {"date": "2024-01-02", "close": 11.0, "localClose": 11.0, "fxRate": 1.0, "volume": 1000.0},
+                {"date": "2024-01-03", "close": 12.0, "localClose": 12.0, "fxRate": 1.0, "volume": 1000.0}
+            ]},
+            "requestedStartDate": "2024-01-01",
+            "endDate": "2024-01-03",
+            "initialAmount": 1000000.0,
+            "execution": {"cashTargetPercent": 0.0}
+        });
+        let mut input = WorkerInput {
+            schema_version: WORKER_SCHEMA_VERSION.to_owned(),
+            engine_version: ENGINE_VERSION.to_owned(),
+            run_id: "technical-strategy-combined".to_owned(),
+            job_kind: JobKind::TechnicalStrategy,
+            data_revision: "technical-strategy-revision".to_owned(),
+            request_hash: "c".repeat(64),
+            payload: json!({
+                "technical_analysis": technical_analysis,
+                "strategy": strategy,
+                "simulation": simulation
+            }),
+        };
+        let missing_context_error = compute_with_artifacts(&input, true).unwrap_err();
+        assert!(missing_context_error.to_string().contains(
+            "payload.response_context must be an object when payload.simulation is provided"
+        ));
+        input.payload["response_context"] = json!({
+            "effective_requested_start": "2024-01-01",
+            "currency_method": "KRW_FX_CONVERTED",
+            "warnings": [],
+            "config": {},
+            "instrument_date_consistency": [{"symbol": "AAA", "status": "consistent"}],
+            "assets": [{
+                "symbol": "AAA", "name": "AAA", "market": "KR", "currency": "KRW",
+                "listDate": "2020-01-01", "weight": 100.0
+            }]
+        });
+        let output = compute_with_artifacts(&input, true).unwrap();
+        let result = output.result.as_ref().unwrap();
+        assert_eq!(output.summary.as_ref().unwrap()["signal_count"], 1);
+        assert_eq!(output.summary.as_ref().unwrap()["applied_signal_count"], 1);
+        assert_eq!(
+            result["technical_strategy"]["signals"][0]["signal_date"],
+            "2024-01-02"
+        );
+        assert_eq!(
+            result["technical_strategy"]["signals"][0]["planned_trade_date"],
+            "2024-01-03"
+        );
+        assert_eq!(
+            result["technical_strategy"]["signals"][0]["actual_application_date"],
+            "2024-01-03"
+        );
+        assert_eq!(
+            result["technical_strategy"]["signals"][0]["status"],
+            "applied"
+        );
+        assert_eq!(
+            result["backtest"]["targetWeightSchedule"][0]["effectiveDate"],
+            "2024-01-03"
+        );
+        assert_eq!(
+            result["backtest"]["dataQuality"]["instrumentDateConsistency"][0]["symbol"],
+            "AAA"
+        );
+        let artifacts = output.artifacts.as_ref().unwrap();
+        for expected in [
+            "equity",
+            "target-weight-schedule",
+            "technical-indicators",
+            "technical-signals",
+            "technical-diagnostics",
+        ] {
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact.artifact_type == expected),
+                "missing {expected}"
+            );
+        }
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_type == "technical-indicators")
+                .unwrap()
+                .content,
+            result["technical_analysis"]["calculations"]
+        );
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_type == "technical-signals")
+                .unwrap()
+                .content,
+            result["technical_strategy"]["signals"]
+        );
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_type == "correlation")
+                .unwrap()
+                .row_count,
+            result["backtest"]["correlations"]["assets"]
+                .as_array()
+                .map(Vec::len)
+        );
+
+        let mut signal_only = input.clone();
+        signal_only.run_id = "technical-strategy-signal-only".to_owned();
+        signal_only
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("simulation");
+        signal_only.payload["safe_trade_dates"] = json!(["2024-01-01", "2024-01-02", "2024-01-03"]);
+        signal_only.payload["evaluation_start_date"] = json!("2024-01-01");
+        signal_only.payload["evaluation_end_date"] = json!("2024-01-03");
+        let signal_only_output = compute_with_artifacts(&signal_only, true).unwrap();
+        let signal_only_result = signal_only_output.result.as_ref().unwrap();
+        assert!(signal_only_result.get("backtest").is_none());
+        assert_eq!(
+            signal_only_output.summary.as_ref().unwrap()["planned_signal_count"],
+            1
+        );
+        assert_eq!(
+            signal_only_result["technical_strategy"]["signals"][0]["status"],
+            "planned"
+        );
+        assert_eq!(signal_only_output.artifacts.as_ref().unwrap().len(), 3);
     }
 
     #[test]

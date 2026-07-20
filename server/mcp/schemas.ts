@@ -1,4 +1,14 @@
 import { z } from "zod";
+import {
+  TECHNICAL_INDICATOR_KINDS,
+  TECHNICAL_INDICATOR_OUTPUT_FIELDS,
+} from "../services/technical-analysis-contract.js";
+import {
+  MAX_TECHNICAL_CONDITION_DEPTH,
+  MAX_TECHNICAL_CONDITION_NODES,
+  MAX_TECHNICAL_HOLDING_OR_COOLDOWN,
+  TECHNICAL_STRATEGY_SCHEMA_VERSION,
+} from "../services/technical-strategy-contract.js";
 
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00Z`);
@@ -11,7 +21,200 @@ const tag = z.string().trim().min(1).max(40);
 const executionMode = z.enum(["sync", "async"]).optional();
 const currencyMode = z.enum(["local", "KRW"]).default("KRW");
 const period = { fromDate: date, toDate: date };
-const weight = z.number().finite().gt(0).max(100);
+const technicalIndicatorParameter = z.union([
+  z.string().max(256),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+]);
+const technicalIndicatorParameters = z.record(
+  z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/),
+  technicalIndicatorParameter,
+).refine((value) => Object.keys(value).length <= 32, "지표 parameters는 최대 32개까지 사용할 수 있습니다.");
+const technicalIndicator = z.object({
+  id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/),
+  kind: z.enum(TECHNICAL_INDICATOR_KINDS),
+  parameters: technicalIndicatorParameters.optional(),
+  instrumentKeys: z.array(symbol).min(1).max(50).optional(),
+}).strict();
+const technicalAnalysisInputBase = z.object({
+  symbols: z.array(symbol).min(1).max(50),
+  ...period,
+  interval: z.enum(["1d", "1w"]),
+  adjusted: z.boolean(),
+  currencyMode: z.enum(["local", "KRW"]),
+  responseMode: z.enum(["full_series", "latest_summary"]),
+  indicators: z.array(technicalIndicator).min(1).max(64),
+}).strict();
+export const technicalAnalysisInputSchema = technicalAnalysisInputBase.superRefine((value, context) => {
+  if (value.fromDate > value.toDate) {
+    context.addIssue({ code: "custom", path: ["fromDate"], message: "시작일은 종료일보다 늦을 수 없습니다." });
+  }
+  const symbols = new Set(value.symbols);
+  if (symbols.size !== value.symbols.length) {
+    context.addIssue({ code: "custom", path: ["symbols"], message: "중복 종목을 제거해 주세요." });
+  }
+  const indicatorIds = new Set<string>();
+  let volumeProfileCount = 0;
+  for (const [index, indicator] of value.indicators.entries()) {
+    if (indicatorIds.has(indicator.id)) {
+      context.addIssue({ code: "custom", path: ["indicators", index, "id"], message: "지표 id는 중복될 수 없습니다." });
+    }
+    indicatorIds.add(indicator.id);
+    if (indicator.kind === "volume_profile") {
+      volumeProfileCount += 1;
+      if (value.symbols.length !== 1) {
+        context.addIssue({ code: "custom", path: ["symbols"], message: "Volume Profile은 정확히 한 종목의 집중 분석 요청이어야 합니다." });
+      }
+      if (indicator.instrumentKeys && (indicator.instrumentKeys.length !== 1 || indicator.instrumentKeys[0] !== value.symbols[0])) {
+        context.addIssue({ code: "custom", path: ["indicators", index, "instrumentKeys"], message: "Volume Profile 대상은 요청의 단일 종목과 정확히 일치해야 합니다." });
+      }
+    }
+    if (!indicator.instrumentKeys) continue;
+    if (new Set(indicator.instrumentKeys).size !== indicator.instrumentKeys.length) {
+      context.addIssue({ code: "custom", path: ["indicators", index, "instrumentKeys"], message: "중복 instrument key를 제거해 주세요." });
+    }
+    if (indicator.instrumentKeys.some((key) => !symbols.has(key))) {
+      context.addIssue({ code: "custom", path: ["indicators", index, "instrumentKeys"], message: "요청 종목에 없는 instrument key가 있습니다." });
+    }
+  }
+  if (volumeProfileCount > 1) {
+    context.addIssue({ code: "custom", path: ["indicators"], message: "Volume Profile 정의는 요청당 하나만 사용할 수 있습니다." });
+  }
+  if (volumeProfileCount === 1 && value.indicators.length !== 1) {
+    context.addIssue({ code: "custom", path: ["indicators"], message: "Volume Profile 집중 분석 요청은 지표 정의를 정확히 하나만 포함해야 합니다." });
+  }
+});
+
+const technicalStrategyOperand = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("indicator"),
+    instrumentKey: symbol,
+    indicatorId: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/),
+    field: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
+  }).strict(),
+  z.object({
+    type: z.literal("bar"),
+    instrumentKey: symbol,
+    field: z.enum(["open", "high", "low", "close", "volume"]),
+  }).strict(),
+  z.object({ type: z.literal("constant"), value: z.number().finite() }).strict(),
+]);
+
+type TechnicalConditionInput =
+  | { operator: "greater_than" | "less_than" | "crosses_above" | "crosses_below"; left: z.infer<typeof technicalStrategyOperand>; right: z.infer<typeof technicalStrategyOperand> }
+  | { operator: "between"; value: z.infer<typeof technicalStrategyOperand>; lower: z.infer<typeof technicalStrategyOperand>; upper: z.infer<typeof technicalStrategyOperand> }
+  | { operator: "all" | "any"; conditions: TechnicalConditionInput[] }
+  | { operator: "not"; condition: TechnicalConditionInput };
+
+const technicalCondition: z.ZodType<TechnicalConditionInput> = z.lazy(() => z.discriminatedUnion("operator", [
+  z.object({ operator: z.literal("greater_than"), left: technicalStrategyOperand, right: technicalStrategyOperand }).strict(),
+  z.object({ operator: z.literal("less_than"), left: technicalStrategyOperand, right: technicalStrategyOperand }).strict(),
+  z.object({ operator: z.literal("crosses_above"), left: technicalStrategyOperand, right: technicalStrategyOperand }).strict(),
+  z.object({ operator: z.literal("crosses_below"), left: technicalStrategyOperand, right: technicalStrategyOperand }).strict(),
+  z.object({ operator: z.literal("between"), value: technicalStrategyOperand, lower: technicalStrategyOperand, upper: technicalStrategyOperand }).strict(),
+  z.object({ operator: z.literal("all"), conditions: z.array(technicalCondition).min(1).max(MAX_TECHNICAL_CONDITION_NODES) }).strict(),
+  z.object({ operator: z.literal("any"), conditions: z.array(technicalCondition).min(1).max(MAX_TECHNICAL_CONDITION_NODES) }).strict(),
+  z.object({ operator: z.literal("not"), condition: technicalCondition }).strict(),
+]));
+
+const technicalStrategyAllocation = z.object({
+  weights: z.record(symbol, z.number().finite().min(0).max(100)),
+  cashPercent: z.number().finite().min(0).max(100),
+}).strict();
+
+export const technicalStrategyDefinitionSchema = z.object({
+  schemaVersion: z.literal(TECHNICAL_STRATEGY_SCHEMA_VERSION),
+  id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/),
+  entryCondition: technicalCondition,
+  exitCondition: technicalCondition,
+  minimumHoldingPeriod: z.number().int().min(0).max(MAX_TECHNICAL_HOLDING_OR_COOLDOWN),
+  cooldownPeriod: z.number().int().min(0).max(MAX_TECHNICAL_HOLDING_OR_COOLDOWN),
+  initialState: z.enum(["active", "inactive"]),
+  allocations: z.object({
+    active: technicalStrategyAllocation,
+    inactive: technicalStrategyAllocation,
+  }).strict(),
+}).strict();
+
+function conditionChildren(condition: TechnicalConditionInput): TechnicalConditionInput[] {
+  if (condition.operator === "all" || condition.operator === "any") return condition.conditions;
+  if (condition.operator === "not") return [condition.condition];
+  return [];
+}
+
+function conditionOperands(condition: TechnicalConditionInput): Array<z.infer<typeof technicalStrategyOperand>> {
+  if (["greater_than", "less_than", "crosses_above", "crosses_below"].includes(condition.operator)) {
+    const comparison = condition as Extract<TechnicalConditionInput, { left: unknown }>;
+    return [comparison.left, comparison.right];
+  }
+  if (condition.operator === "between") return [condition.value, condition.lower, condition.upper];
+  return [];
+}
+
+function refineTechnicalStrategy(value: {
+  analysis: z.infer<typeof technicalAnalysisInputSchema>;
+  strategy: z.infer<typeof technicalStrategyDefinitionSchema>;
+}, context: z.RefinementCtx): void {
+  if (value.analysis.responseMode !== "full_series") {
+    context.addIssue({ code: "custom", path: ["analysis", "responseMode"], message: "기술 신호 조건 평가는 full_series 지표가 필요합니다." });
+  }
+  const symbols = new Set(value.analysis.symbols);
+  const definitions = new Map(value.analysis.indicators.map((indicator) => [indicator.id, indicator]));
+  let nodes = 0;
+  const visit = (condition: TechnicalConditionInput, path: Array<string | number>, depth: number): void => {
+    nodes += 1;
+    if (depth > MAX_TECHNICAL_CONDITION_DEPTH) {
+      context.addIssue({ code: "custom", path, message: `조건 트리 깊이는 최대 ${MAX_TECHNICAL_CONDITION_DEPTH}입니다.` });
+    }
+    if (nodes > MAX_TECHNICAL_CONDITION_NODES) {
+      context.addIssue({ code: "custom", path, message: `조건 노드는 최대 ${MAX_TECHNICAL_CONDITION_NODES}개입니다.` });
+      return;
+    }
+    for (const [index, operand] of conditionOperands(condition).entries()) {
+      if (operand.type === "constant") continue;
+      if (!symbols.has(operand.instrumentKey)) {
+        context.addIssue({ code: "custom", path: [...path, index, "instrumentKey"], message: "조건이 분석 종목에 없는 instrument를 참조합니다." });
+      }
+      if (operand.type !== "indicator") continue;
+      const definition = definitions.get(operand.indicatorId);
+      if (!definition) {
+        context.addIssue({ code: "custom", path: [...path, index, "indicatorId"], message: "조건이 정의되지 않은 지표 id를 참조합니다." });
+        continue;
+      }
+      if (definition.kind === "volume_profile") {
+        context.addIssue({ code: "custom", path: [...path, index, "indicatorId"], message: "Volume Profile은 시점별 기술 신호 조건에서 참조할 수 없습니다." });
+      }
+      if (definition.instrumentKeys && !definition.instrumentKeys.includes(operand.instrumentKey)) {
+        context.addIssue({ code: "custom", path: [...path, index, "instrumentKey"], message: "조건의 instrument가 해당 지표 계산 대상이 아닙니다." });
+      }
+      if (!(TECHNICAL_INDICATOR_OUTPUT_FIELDS[definition.kind] as readonly string[]).includes(operand.field)) {
+        context.addIssue({ code: "custom", path: [...path, index, "field"], message: `${definition.kind} 지표에 없는 출력 field입니다.` });
+      }
+    }
+    const children = conditionChildren(condition);
+    children.forEach((child, index) => visit(child, [...path, "conditions", index], depth + 1));
+  };
+  visit(value.strategy.entryCondition, ["strategy", "entryCondition"], 1);
+  visit(value.strategy.exitCondition, ["strategy", "exitCondition"], 1);
+  for (const stateName of ["active", "inactive"] as const) {
+    const allocation = value.strategy.allocations[stateName];
+    const keys = Object.keys(allocation.weights);
+    if (keys.length !== symbols.size || keys.some((key) => !symbols.has(key))) {
+      context.addIssue({ code: "custom", path: ["strategy", "allocations", stateName, "weights"], message: "allocation은 분석 종목을 빠짐없이 정확히 포함해야 합니다." });
+    }
+    const total = Object.values(allocation.weights).reduce((sum, weight) => sum + weight, 0) + allocation.cashPercent;
+    if (Math.abs(total - 100) > 0.01) {
+      context.addIssue({ code: "custom", path: ["strategy", "allocations", stateName], message: "종목과 현금 allocation 합계는 100%여야 합니다." });
+    }
+  }
+}
+
+export const technicalSignalAnalysisInputSchema = z.object({
+  analysis: technicalAnalysisInputSchema,
+  strategy: technicalStrategyDefinitionSchema,
+}).strict().superRefine(refineTechnicalStrategy);
+const weight = z.number().finite().min(0).max(100);
 const weights = z.record(symbol, z.number().finite().min(0).max(1));
 const asset = z.object({
   symbol,
@@ -141,6 +344,51 @@ function refineBacktest(value: Pick<z.infer<typeof backtestBase>,
 const backtest = backtestBase.superRefine(refineBacktest);
 const backtestWithoutReportBase = backtestBase.omit({ report: true });
 const backtestWithoutReport = backtestWithoutReportBase.superRefine(refineBacktest);
+
+function refineTechnicalStrategyBacktest(value: {
+  analysis: z.infer<typeof technicalAnalysisInputSchema>;
+  strategy: z.infer<typeof technicalStrategyDefinitionSchema>;
+  backtest: z.infer<typeof backtestBase>;
+}, context: z.RefinementCtx): void {
+  refineTechnicalStrategy(value, context);
+  const analysisSymbols = new Set(value.analysis.symbols);
+  const backtestSymbols = value.backtest.assets.map((asset) => asset.symbol);
+  if (backtestSymbols.length !== analysisSymbols.size || backtestSymbols.some((symbol) => !analysisSymbols.has(symbol))) {
+    context.addIssue({ code: "custom", path: ["backtest", "assets"], message: "백테스트 종목은 기술 분석·allocation 종목과 정확히 일치해야 합니다." });
+  }
+  const initialAllocation = value.strategy.allocations[value.strategy.initialState];
+  if (value.backtest.assets.some((asset) => asset.weight !== initialAllocation.weights[asset.symbol])
+    || value.backtest.execution.cashTargetPercent !== initialAllocation.cashPercent) {
+    context.addIssue({ code: "custom", path: ["backtest", "assets"], message: "백테스트 초기 종목·현금 비중은 strategy.initialState allocation과 정확히 일치해야 합니다." });
+  }
+  if (value.backtest.targetWeightSchedule.length) {
+    context.addIssue({ code: "custom", path: ["backtest", "targetWeightSchedule"], message: "기술 신호 전략의 목표비중 schedule은 Rust worker만 생성할 수 있습니다." });
+  }
+  if (value.backtest.rebalanceFrequency !== "none") {
+    context.addIssue({ code: "custom", path: ["backtest", "rebalanceFrequency"], message: "기술 신호 전략은 생성된 schedule만 적용하므로 rebalanceFrequency는 none이어야 합니다." });
+  }
+  if (value.backtest.report.enabled) {
+    context.addIssue({ code: "custom", path: ["backtest", "report", "enabled"], message: "기술 신호 combined run에서는 별도 보고서 생성을 지원하지 않습니다." });
+  }
+  if (!value.analysis.adjusted) {
+    context.addIssue({ code: "custom", path: ["analysis", "adjusted"], message: "기술 신호 백테스트는 ledger와 같은 수정주가 정책을 사용해야 합니다." });
+  }
+  if (value.analysis.currencyMode !== value.backtest.currencyMode) {
+    context.addIssue({ code: "custom", path: ["analysis", "currencyMode"], message: "기술 분석과 백테스트의 통화 기준이 같아야 합니다." });
+  }
+  if (value.analysis.fromDate > value.backtest.startDate) {
+    context.addIssue({ code: "custom", path: ["analysis", "fromDate"], message: "지표 조회 시작일은 백테스트 시작일과 같거나 더 빨라야 합니다." });
+  }
+  if (value.analysis.toDate !== value.backtest.endDate) {
+    context.addIssue({ code: "custom", path: ["analysis", "toDate"], message: "지표 조회 종료일과 백테스트 종료일이 같아야 합니다." });
+  }
+}
+
+export const technicalStrategyBacktestInputSchema = z.object({
+  analysis: technicalAnalysisInputSchema,
+  strategy: technicalStrategyDefinitionSchema,
+  backtest,
+}).strict().superRefine(refineTechnicalStrategyBacktest);
 function presetOverrideField(schema: z.ZodType): z.ZodType {
   const unwrapped = schema instanceof z.ZodDefault ? schema.removeDefault() : schema;
   if (!(unwrapped instanceof z.ZodObject)) return unwrapped as z.ZodType;
@@ -171,6 +419,29 @@ const backtestValidationExecution = presetOverrideObject(backtestWithoutReportBa
   presetId: presetId.optional(),
 }).strict().superRefine((value, context) => {
   if (!value.presetId) validateResolvedExecution(backtestWithoutReport, value, context);
+});
+const technicalSignalExecution = presetOverrideObject(technicalAnalysisInputBase.shape).extend({
+  presetId: presetId.optional(),
+  analysis: presetOverrideObject(technicalAnalysisInputBase.shape).optional(),
+  strategy: presetOverrideObject(technicalStrategyDefinitionSchema.shape).optional(),
+}).strict().superRefine((value, context) => {
+  const signalMode = value.presetId !== undefined || value.analysis !== undefined || value.strategy !== undefined;
+  if (signalMode) {
+    for (const key of Object.keys(technicalAnalysisInputBase.shape) as Array<keyof typeof value>) {
+      if (value[key] !== undefined) context.addIssue({ code: "custom", path: [key], message: "legacy 지표 입력과 typed strategy 입력을 섞을 수 없습니다." });
+    }
+    if (!value.presetId) validateResolvedExecution(technicalSignalAnalysisInputSchema, value, context);
+  } else {
+    validateResolvedExecution(technicalAnalysisInputSchema, value, context);
+  }
+});
+const technicalStrategyBacktestExecution = z.object({
+  presetId: presetId.optional(),
+  analysis: presetOverrideObject(technicalAnalysisInputBase.shape).optional(),
+  strategy: presetOverrideObject(technicalStrategyDefinitionSchema.shape).optional(),
+  backtest: presetOverrideObject(backtestBase.shape).optional(),
+}).strict().superRefine((value, context) => {
+  if (!value.presetId) validateResolvedExecution(technicalStrategyBacktestInputSchema, value, context);
 });
 const optimizerBaseline = z.enum([
   "equal_weight", "current_weight", "inverse_volatility", "minimum_variance",
@@ -373,6 +644,9 @@ const walkForwardExecution = presetOverrideObject(walkForwardBase.shape).extend(
 });
 
 export const resolvedPresetExecutionSchemas = {
+  analyze_technical_signals: technicalSignalAnalysisInputSchema,
+  validate_technical_strategy: technicalStrategyBacktestInputSchema,
+  run_technical_strategy_backtest: technicalStrategyBacktestInputSchema,
   validate_backtest_config: backtestWithoutReport,
   run_portfolio_backtest: backtest,
   optimize_portfolio: optimization,
@@ -436,7 +710,7 @@ const rebalancePlan = z.object({
 
 const runListFilter = z.object({
   query: z.string().trim().max(120).optional(),
-  kinds: z.array(z.enum(["backtest", "optimization", "walk_forward", "stress_test", "weight_sensitivity", "start_date_sensitivity", "rebalance_sensitivity", "cash_flow_sensitivity", "monte_carlo", "outlook", "exposure_analysis", "pareto_frontier", "research_report"])).max(13).default([]),
+  kinds: z.array(z.enum(["backtest", "optimization", "walk_forward", "stress_test", "weight_sensitivity", "start_date_sensitivity", "rebalance_sensitivity", "cash_flow_sensitivity", "monte_carlo", "outlook", "technical_analysis", "technical_strategy", "exposure_analysis", "pareto_frontier", "research_report"])).max(15).default([]),
   statuses: z.array(z.enum(["queued", "running", "cancel_requested", "cancelled", "completed", "failed"])).max(6).default([]),
   tags: z.array(tag).max(20).default([]),
   archived: z.enum(["active", "archived", "all"]).default("active"),
@@ -673,6 +947,9 @@ export const toolSchemas = {
   search_instruments: z.object({ query: z.string().trim().min(1).max(80), market: z.string().trim().max(32).optional(), assetType: z.string().trim().max(32).optional(), limit: z.number().int().min(1).max(100).default(20) }).strict(),
   get_data_availability: z.object({ symbols: z.array(symbol).min(1).max(20), adjusted: z.boolean().default(true) }).strict(),
   get_price_series: z.object({ symbol, ...period, interval: z.enum(["1d", "1w", "1mo"]).default("1d"), adjusted: z.boolean().default(true), currencyMode, outputMode: z.enum(["inline", "resource", "auto"]).default("auto") }).strict(),
+  analyze_technical_signals: technicalSignalExecution,
+  validate_technical_strategy: technicalStrategyBacktestExecution,
+  run_technical_strategy_backtest: technicalStrategyBacktestExecution,
   analyze_instrument: z.object({ symbol, benchmark: symbol.optional(), ...period, currencyMode, riskFreeRatePercent: z.number().finite().min(-10).max(50).default(0), rollingWindow: z.number().int().min(2).max(1_000).default(60) }).strict(),
   analyze_asset_relationship: z.object({ base: symbol, comparisons: z.array(symbol).min(1).max(19), ...period, currencyMode, method: z.enum(["pearson", "spearman"]).default("pearson"), rollingWindow: z.number().int().min(2).max(1_000).default(60), riskFreeRatePercent: z.number().finite().min(-10).max(50).default(0) }).strict(),
   get_correlation_matrix: z.object({ symbols: z.array(symbol).min(2).max(20), ...period, currencyMode, method: z.enum(["pearson", "spearman"]).default("pearson") }).strict(),

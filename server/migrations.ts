@@ -105,6 +105,16 @@ async function addMissingColumns(
   }
 }
 
+export async function ensureMarketCandleVolumeColumn(database: RelationalDatabase): Promise<void> {
+  await addMissingColumns(database, "portfolio_market_candles", {
+    volume: {
+      sqlite: "REAL",
+      mysql: "DOUBLE NULL",
+      postgres: "DOUBLE PRECISION",
+    },
+  });
+}
+
 async function hasIndex(database: RelationalDatabase, index: string): Promise<boolean> {
   if (database.dialect === "sqlite") {
     const rows = await database.query<{ index_name: string }>(
@@ -377,6 +387,11 @@ const migrations: readonly Migration[] = [
     id: "20260718_004_canonical_local_owner_reconciliation",
     signature: "canonical-owner-reconcile-v2;preserve-run-and-report-conflicts;record-original-hash",
     up: canonicalizeLocalOwner,
+  },
+  {
+    id: "20260721_005_market_candle_volume",
+    signature: "portfolio_market_candles:nullable-provider-volume-v1",
+    up: ensureMarketCandleVolumeColumn,
   },
 ];
 

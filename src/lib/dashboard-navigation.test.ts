@@ -5,6 +5,7 @@ describe("dashboard navigation", () => {
   it.each([
     ["overview", "#overview"],
     ["analysis", "#analysis"],
+    ["technical", "#technical-analysis"],
     ["backtest", "#backtest"],
     ["optimization", "#optimization"],
     ["library", "#library"],
