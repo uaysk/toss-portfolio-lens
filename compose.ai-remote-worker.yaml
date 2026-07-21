@@ -20,3 +20,11 @@ services:
       - ${AI_MODEL_CACHE_SOURCE:?set AI_MODEL_CACHE_SOURCE to an absolute offline model cache directory}:/models:ro
       - ${AI_AUTH_SECRET_SOURCE:?set AI_AUTH_SECRET_SOURCE to an absolute pre-provisioned token directory}:/app/ai-auth:ro
       - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
+
+# Docker doesn't install published host-port ingress for an internal network.
+# The remote-worker deployment therefore opts this otherwise private service
+# network into LAN ingress; authentication and offline model settings remain
+# mandatory.
+networks:
+  ai_internal:
+    internal: false

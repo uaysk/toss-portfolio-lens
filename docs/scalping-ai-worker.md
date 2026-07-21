@@ -91,6 +91,9 @@ AI_ALLOW_CPU_FALLBACK=false
 ```
 
 `AI_REMOTE_BIND_ADDRESS`는 `0.0.0.0`이나 public interface가 아닌 GPU 서버의 private LAN 주소로 고정한다.
+원격 override는 Docker가 published port ingress를 설치할 수 있도록 AI network의 `internal` 속성만 해제한다.
+기본 동일 호스트 Compose의 internal network는 유지된다. 따라서 원격 배치에서는 host firewall로 main host의
+접근만 허용하고, runtime의 offline model 정책과 bearer token 인증을 함께 유지해야 한다.
 이미지를 registry에서 받을 때는 `pull`, 현 checkout에서 만들 때는 `build` 중 하나를 선택한다.
 
 ```bash
