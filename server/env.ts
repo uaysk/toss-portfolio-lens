@@ -762,10 +762,10 @@ function readScalpingConfig(): ScalpingConfig {
   };
 
   const retryMaxAttempts = readBoundedInteger("TOSS_SCALPING_RETRY_MAX_ATTEMPTS", 3, 1, 10);
-  const rankingMaximumCount = providerLimit("TOSS_SCALPING_RANKING_MAX_COUNT", 10_000);
+  const rankingMaximumCount = providerLimit("TOSS_SCALPING_RANKING_MAX_COUNT", 100);
   const pricesBatchSize = providerLimit("TOSS_SCALPING_PRICE_BATCH_SIZE", 10_000);
-  const candlesMaximumCount = providerLimit("TOSS_SCALPING_CANDLE_MAX_COUNT", 10_000);
-  const tradesMaximumCount = providerLimit("TOSS_SCALPING_TRADE_MAX_COUNT", 10_000);
+  const candlesMaximumCount = providerLimit("TOSS_SCALPING_CANDLE_MAX_COUNT", 200);
+  const tradesMaximumCount = providerLimit("TOSS_SCALPING_TRADE_MAX_COUNT", 50);
   const kisWebSocketMaximumSubscriptions = providerLimit("KI_SCALPING_WS_MAX_SUBSCRIPTIONS", 10_000);
   if (kisWebSocketMaximumSubscriptions < maximumTopCount * 2) {
     throw new Error(

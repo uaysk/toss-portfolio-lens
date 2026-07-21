@@ -78,7 +78,7 @@ describe("database environment configuration", () => {
       TOSS_SCALPING_RANKING_MAX_COUNT: "100",
       TOSS_SCALPING_PRICE_BATCH_SIZE: "200",
       TOSS_SCALPING_CANDLE_MAX_COUNT: "200",
-      TOSS_SCALPING_TRADE_MAX_COUNT: "200",
+      TOSS_SCALPING_TRADE_MAX_COUNT: "50",
       KI_SCALPING_REST_REQUEST_INTERVAL_MS: "600",
       KI_SCALPING_WS_MAX_SUBSCRIPTIONS: "100",
       KI_SCALPING_WS_SUBSCRIBE_INTERVAL_MS: "100",
@@ -117,6 +117,10 @@ describe("database environment configuration", () => {
       },
       ai: { maximumRequestBytes: 33_554_432, maximumResponseBytes: 67_108_864 },
     });
+
+    process.env.TOSS_SCALPING_CANDLE_MAX_COUNT = "201";
+    expect(() => loadConfig()).toThrow("TOSS_SCALPING_CANDLE_MAX_COUNT");
+    process.env.TOSS_SCALPING_CANDLE_MAX_COUNT = "200";
 
     process.env.SCALPING_SESSION_OPEN_KST = "16:00";
     expect(() => loadConfig()).toThrow("SCALPING_SESSION_OPEN_KST는 SCALPING_SESSION_CLOSE_KST보다 빨라야");
