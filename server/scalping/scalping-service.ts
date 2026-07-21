@@ -407,7 +407,12 @@ export class ScalpingService {
     const request = this.workspaceSchema.parse(input);
     const requestedSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
     const rankingsResult = await this.collectRankings(request.criterion, request.topCount);
-    const universe = this.universe(rankingsResult.rankings, requestedSymbols);
+    const universe = this.universe(
+      rankingsResult.rankings,
+      requestedSymbols,
+      request.topCount,
+      request.criterion,
+    );
     const [pricesResult, instrumentsResult, portfolioResult] = await Promise.all([
       this.safe(() => this.toss.getPrices(universe), "toss_prices"),
       this.portfolio
@@ -802,10 +807,27 @@ export class ScalpingService {
     return { rankings, errors };
   }
 
-  private universe(rankings: readonly NormalizedRanking[], requested: readonly string[]): string[] {
+  private universe(
+    rankings: readonly NormalizedRanking[],
+    requested: readonly string[],
+    desiredCount: number,
+    criterion: ScannerCriterion,
+  ): string[] {
     const ranked = [...rankings].sort((left, right) => left.rank - right.rank || left.symbol.localeCompare(right.symbol));
+    // Keep filter headroom without fetching minute bars and quote enrichment for
+    // an unrelated full provider ranking page on every smaller workspace request.
+    const multiplier = criterion === "volatility" ? 4 : 2;
+    const minimumPool = criterion === "volatility" ? 20 : 10;
+    const rankedLimit = Math.min(
+      this.config.maximumTopCount,
+      Math.max(minimumPool, desiredCount * multiplier),
+    );
+    const universeLimit = Math.min(
+      this.config.maximumTopCount,
+      Math.max(requested.length, rankedLimit),
+    );
     return Array.from(new Set([...requested, ...ranked.map(({ symbol }) => symbol)]))
-      .slice(0, this.config.maximumTopCount);
+      .slice(0, universeLimit);
   }
 
   private async enrich(symbols: readonly string[]) {

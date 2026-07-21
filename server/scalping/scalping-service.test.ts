@@ -268,6 +268,31 @@ describe("ScalpingService", () => {
     expect(output.workspace.diagnostics.providerErrors).toContain("toss_warning_status_unavailable:005930");
   });
 
+  it("표시 수에 비례한 후보 풀만 분봉·호가·Rust batch 보강 대상으로 사용한다", async () => {
+    const parts = dependencies();
+    parts.toss.getRankings.mockResolvedValue(Array.from({ length: 30 }, (_, index) => ({
+      provider: "toss",
+      symbol: String(index + 1).padStart(6, "0"),
+      name: `종목 ${index + 1}`,
+      marketCountry: "KR",
+      currency: "KRW",
+      rank: index + 1,
+      rankedAt: new Date(NOW).toISOString(),
+      price: 100 + index,
+      changeRateRatio: 0.01,
+      volume: 1_000_000,
+      tradingAmount: 200_000_000,
+    })) as never);
+    await service(parts).workspace({
+      criterion: "volume", topCount: 5, interval: "1m", layoutColumns: 2, preset: "trend",
+    });
+    expect(parts.toss.getPrices).toHaveBeenCalledWith(
+      Array.from({ length: 10 }, (_, index) => String(index + 1).padStart(6, "0")),
+    );
+    const payload = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    expect(payload.scalping_analysis.instruments).toHaveLength(10);
+  });
+
   it("확정 봉 revision별 실시간 분석을 모든 종목 한 batch로 계산하고 provider를 재조회하지 않는다", async () => {
     const parts = dependencies();
     parts.repository.listBars.mockImplementation(async ({ symbol }: { symbol: string }) => (
