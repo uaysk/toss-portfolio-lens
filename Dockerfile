@@ -6,6 +6,7 @@ COPY tsconfig.json tsconfig.server.json vite.config.ts tailwind.config.ts postcs
 COPY src ./src
 COPY server ./server
 COPY contracts ./contracts
+COPY docs/mcp-chatgpt.md ./docs/mcp-chatgpt.md
 RUN npm run typecheck
 RUN npm test
 RUN npm run build

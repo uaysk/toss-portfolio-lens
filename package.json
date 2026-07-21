@@ -49,7 +49,7 @@
     "react-dom": "19.1.0",
     "recharts": "2.15.4",
     "tailwind-merge": "2.6.0",
-    "ws": "8.18.3",
+    "ws": "8.21.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
