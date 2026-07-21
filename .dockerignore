@@ -18,6 +18,7 @@ dist
 .env
 .env.*
 *.log
+*.swp
 *.db
 *.sqlite
 *.sqlite3

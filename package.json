@@ -17,6 +17,7 @@
     "test:backtest-worker-parity": "tsx scripts/verify-rust-worker.ts",
     "test:rust-worker": "tsx scripts/verify-rust-worker.ts",
     "test:technical-uds": "cargo build --manifest-path worker/rust/Cargo.toml --locked && tsx scripts/verify-technical-analysis-uds.ts",
+    "test:ai-websocket": "tsx scripts/verify-ai-websocket-roundtrip.ts",
     "test:technical-ui": "node scripts/verify-technical-analysis-ui.mjs",
     "test:scalping-ui": "node scripts/verify-scalping-assistant-ui.mjs",
     "test:rust-worker-postgres": "tsx scripts/verify-rust-worker-postgres.ts",
@@ -48,6 +49,7 @@
     "react-dom": "19.1.0",
     "recharts": "2.15.4",
     "tailwind-merge": "2.6.0",
+    "ws": "8.18.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -56,6 +58,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "19.1.6",
     "@types/react-dom": "19.1.5",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "4.5.2",
     "autoprefixer": "10.4.21",
     "concurrently": "9.1.2",

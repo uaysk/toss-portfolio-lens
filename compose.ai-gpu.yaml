@@ -1,0 +1,12 @@
+services:
+  ai-worker:
+    environment:
+      AI_DEVICE: cuda
+      AI_ALLOW_CPU_FALLBACK: ${AI_ALLOW_CPU_FALLBACK:-true}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

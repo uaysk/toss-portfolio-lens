@@ -1,0 +1,22 @@
+services:
+  web:
+    profiles: ["remote-worker-disabled"]
+  compute-ipc:
+    profiles: ["remote-worker-disabled"]
+  compute-worker:
+    profiles: ["remote-worker-disabled"]
+  ai-worker:
+    environment:
+      AI_WEBSOCKET_HOST: 0.0.0.0
+      AI_WEBSOCKET_PORT: "8765"
+      AI_WEBSOCKET_GENERATE_AUTH_TOKEN: "false"
+    ports:
+      - name: scalping-ai-websocket
+        target: 8765
+        published: "${AI_REMOTE_PORT:-18765}"
+        host_ip: ${AI_REMOTE_BIND_ADDRESS:?set AI_REMOTE_BIND_ADDRESS to the GPU server private LAN address}
+        protocol: tcp
+    volumes:
+      - ${AI_MODEL_CACHE_SOURCE:?set AI_MODEL_CACHE_SOURCE to an absolute offline model cache directory}:/models:ro
+      - ${AI_AUTH_SECRET_SOURCE:?set AI_AUTH_SECRET_SOURCE to an absolute pre-provisioned token directory}:/app/ai-auth:ro
+      - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro

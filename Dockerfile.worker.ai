@@ -9,23 +9,30 @@ ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
     CUDA_MODULE_LOADING=LAZY \
-    AI_COMPUTE_SOCKET=/app/run/ai.sock \
     AI_MODEL_CACHE_DIR=/models \
+    AI_WEBSOCKET_HOST=0.0.0.0 \
+    AI_WEBSOCKET_PORT=8765 \
+    AI_WEBSOCKET_PATH=/ws/scalping-ai/v1 \
+    AI_WEBSOCKET_AUTH_TOKEN_FILE=/app/ai-auth/token \
     AI_DEVICE=auto \
     AI_ALLOW_CPU_FALLBACK=true \
     AI_EXPECTED_CUDA_CAPABILITY=6.1
 WORKDIR /app
 RUN groupadd --gid 10001 portfolio \
     && useradd --uid 10001 --gid portfolio --no-create-home portfolio \
-    && mkdir -p /app/run /models \
-    && chown portfolio:portfolio /app/run
+    && mkdir -p /app/ai-auth /models \
+    && touch /app/ai-auth/.volume-owner \
+    && chown -R portfolio:portfolio /app/ai-auth
 COPY --from=uv /uv /uvx /bin/
 COPY worker/ai/pyproject.toml worker/ai/uv.lock worker/ai/.python-version ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 uv sync --frozen --no-dev --extra model --no-install-project
 COPY worker/ai/model-manifest.json worker/ai/THIRD_PARTY_NOTICES.md worker/ai/README.md ./
 COPY worker/ai/src ./src
-RUN uv sync --frozen --no-dev --extra model
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 uv sync --frozen --no-dev --extra model
 USER portfolio
 HEALTHCHECK --interval=30s --timeout=3s --start-period=120s --retries=3 \
-  CMD ["python", "-c", "import os,socket;s=socket.socket(socket.AF_UNIX);s.settimeout(2);s.connect(os.environ['AI_COMPUTE_SOCKET']);s.close()"]
+  CMD ["uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker", "healthcheck"]
 ENTRYPOINT ["uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker"]
 CMD ["serve"]

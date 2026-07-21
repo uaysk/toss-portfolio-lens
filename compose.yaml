@@ -4,7 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
@@ -18,7 +19,15 @@ services:
       RUST_COMPUTE_SOCKET: /app/run/compute.sock
       # The control plane only dials this socket when SCALPING_ENABLED=true.
       SCALPING_ENABLED: ${SCALPING_ENABLED:-false}
-      AI_COMPUTE_SOCKET: /app/run/ai.sock
+      AI_COMPUTE_URL: ${AI_COMPUTE_URL:-ws://ai-worker:8765/ws/scalping-ai/v1}
+      AI_COMPUTE_AUTH_TOKEN_FILE: /run/ai-auth/token
+      AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: ${AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS:-false}
+      AI_COMPUTE_CONNECT_TIMEOUT_MS: ${AI_COMPUTE_CONNECT_TIMEOUT_MS:-10000}
+      AI_COMPUTE_TIMEOUT_MS: ${AI_COMPUTE_TIMEOUT_MS:-120000}
+      AI_COMPUTE_RECONNECT_BASE_MS: ${AI_COMPUTE_RECONNECT_BASE_MS:-250}
+      AI_COMPUTE_RECONNECT_MAX_MS: ${AI_COMPUTE_RECONNECT_MAX_MS:-10000}
+      AI_COMPUTE_MAX_IN_FLIGHT: ${AI_COMPUTE_MAX_IN_FLIGHT:-4}
+      AI_COMPUTE_TLS_CA_FILE: ${AI_COMPUTE_TLS_CA_FILE:-}
       TZ: Asia/Seoul
     extra_hosts:
       - "${POSTGRES_HOST:-postgres.internal}:${POSTGRES_DOCKER_HOST_IP:-host-gateway}"
@@ -29,7 +38,12 @@ services:
     volumes:
       - portfolio_data:/app/data
       - compute_socket:/app/run
+      - ${AI_AUTH_SECRET_SOURCE:-ai_auth}:/run/ai-auth:ro
+      - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
       - ${POSTGRES_CA_HOST_PATH:-/dev/null}:/app/certs/cnpg-ca.crt:ro
+    networks:
+      - default
+      - ai_internal
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
@@ -90,18 +104,30 @@ services:
       start_period: 5s
 
   ai-worker:
-    profiles: ["scalping-ai"]
+    image: ${AI_WORKER_IMAGE:-toss-portfolio-lens-ai-worker:local}
     build:
       context: .
       dockerfile: Dockerfile.worker.ai
     command: ["serve"]
     environment:
-      AI_COMPUTE_SOCKET: /app/run/ai.sock
+      AI_WEBSOCKET_HOST: 0.0.0.0
+      AI_WEBSOCKET_PORT: "8765"
+      AI_WEBSOCKET_PATH: /ws/scalping-ai/v1
+      AI_WEBSOCKET_AUTH_TOKEN_FILE: /app/ai-auth/token
+      AI_WEBSOCKET_GENERATE_AUTH_TOKEN: ${AI_WEBSOCKET_GENERATE_AUTH_TOKEN:-true}
+      AI_WEBSOCKET_MAX_CONNECTIONS: ${AI_WEBSOCKET_MAX_CONNECTIONS:-8}
+      AI_WEBSOCKET_QUEUE_CAPACITY: ${AI_WEBSOCKET_QUEUE_CAPACITY:-16}
+      AI_WEBSOCKET_MAX_IN_FLIGHT: ${AI_WEBSOCKET_MAX_IN_FLIGHT:-4}
+      AI_WEBSOCKET_PING_INTERVAL_SECONDS: ${AI_WEBSOCKET_PING_INTERVAL_SECONDS:-20}
+      AI_WEBSOCKET_PING_TIMEOUT_SECONDS: ${AI_WEBSOCKET_PING_TIMEOUT_SECONDS:-20}
+      AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS: ${AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS:-10}
+      AI_WEBSOCKET_TLS_CERT_FILE: ${AI_WEBSOCKET_TLS_CERT_FILE:-}
+      AI_WEBSOCKET_TLS_KEY_FILE: ${AI_WEBSOCKET_TLS_KEY_FILE:-}
       AI_MODEL_CACHE_DIR: /models
       AI_MODEL_MANIFEST: /app/model-manifest.json
       AI_MODEL_PRIMARY: ${AI_MODEL_PRIMARY:-kronos-small}
       AI_MODEL_FALLBACK: ${AI_MODEL_FALLBACK:-chronos-bolt-small}
-      AI_DEVICE: ${AI_DEVICE:-cuda}
+      AI_DEVICE: ${AI_DEVICE:-cpu}
       AI_ALLOW_CPU_FALLBACK: ${AI_ALLOW_CPU_FALLBACK:-true}
       AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}
       AI_MICROBATCH_SIZE: ${AI_MICROBATCH_SIZE:-4}
@@ -120,27 +146,34 @@ services:
     init: true
     restart: unless-stopped
     read_only: true
-    network_mode: none
+    expose:
+      - "8765"
+    networks:
+      - ai_internal
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     tmpfs:
       - /tmp:size=256m,mode=1777
     volumes:
-      - compute_socket:/app/run
-      - type: bind
-        source: ${AI_MODEL_CACHE_HOST_PATH:-./data/ai-model-cache}
-        target: /models
-        read_only: true
-        bind:
-          create_host_path: false
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - ${AI_MODEL_CACHE_SOURCE:-ai_model_cache}:/models:ro
+      - ${AI_AUTH_SECRET_SOURCE:-ai_auth}:/app/ai-auth
+      - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
+    healthcheck:
+      test: ["CMD", "uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
 
 volumes:
   portfolio_data:
   compute_socket:
+  ai_auth:
+  ai_model_cache:
+  ai_tls:
+
+networks:
+  ai_internal:
+    internal: true

@@ -87,7 +87,6 @@ class DeterministicAdapter:
 
 def settings(tmp_path: Path, **updates: object) -> AISettings:
     value = AISettings(
-        socket_path=tmp_path / "ai.sock",
         model_cache_dir=tmp_path / "models",
         manifest_path=tmp_path / "manifest.json",
         primary_model="kronos-small",

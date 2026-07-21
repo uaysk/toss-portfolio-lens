@@ -18,6 +18,11 @@ dist
 !.env.chatgpt.example
 secrets/
 *.log
+*.swp
+*.pem
+*.key
+*.p12
+*.pfx
 .DS_Store
 .idea
 .vscode

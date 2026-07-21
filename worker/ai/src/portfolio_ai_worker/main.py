@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
+import ssl
 import sys
 
 from pydantic import ValidationError
@@ -16,7 +18,12 @@ from .settings import AISettings
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Toss Portfolio Lens offline AI forecasting worker")
-    parser.add_argument("command", choices=("serve", "forecast-json", "preflight-json"), nargs="?", default="serve")
+    parser.add_argument(
+        "command",
+        choices=("serve", "forecast-json", "preflight-json", "healthcheck"),
+        nargs="?",
+        default="serve",
+    )
     return parser
 
 
@@ -24,6 +31,30 @@ def _runtime() -> tuple[AISettings, AIService]:
     settings = AISettings.from_env()
     adapter = load_production_adapter(settings)
     return settings, AIService(settings, adapter)
+
+
+def _healthcheck(settings: AISettings) -> int:
+    host = settings.websocket_host
+    if host in {"0.0.0.0", "::", ""}:
+        host = "::1" if host == "::" else "127.0.0.1"
+    try:
+        connection = socket.create_connection((host, settings.websocket_port), timeout=2)
+        if settings.websocket_tls_cert_file is not None:
+            # This is a loopback-only liveness probe. Remote clients still enforce
+            # the configured certificate trust and identity checks.
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            connection = context.wrap_socket(connection, server_hostname=host)
+        with connection:
+            request = (
+                f"GET /health/live HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+            )
+            connection.sendall(request.encode("ascii"))
+            response = connection.recv(256)
+        return 0 if response.startswith(b"HTTP/1.1 200") else 2
+    except (OSError, ssl.SSLError):
+        return 2
 
 
 def _preflight(service: AIService) -> int:
@@ -71,6 +102,8 @@ def _json_request(service: AIService) -> int:
 
 def main() -> int:
     arguments = _parser().parse_args()
+    if arguments.command == "healthcheck":
+        return _healthcheck(AISettings.from_env())
     _settings, service = _runtime()
     if arguments.command == "preflight-json":
         return _preflight(service)

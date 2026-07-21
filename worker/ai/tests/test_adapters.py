@@ -163,8 +163,26 @@ def test_incompatible_visible_cuda_is_an_error_when_cpu_fallback_is_disabled(tmp
         allow_cpu_fallback=False,
         expected_cuda_capability="6.1",
     )
-    with pytest.raises(adapters.AdapterLoadError, match="does not include sm_61"):
+    with pytest.raises(adapters.AdapterLoadError, match="compatible cubin for sm_61"):
         adapters.preflight_device(configured)
+
+
+def test_p40_accepts_same_major_lower_minor_cubin(tmp_path, monkeypatch) -> None:
+    fake_cuda = SimpleNamespace(
+        is_available=lambda: True,
+        get_device_capability=lambda: (6, 1),
+        get_arch_list=lambda: ("sm_60", "sm_70", "compute_90"),
+    )
+    fake_torch = SimpleNamespace(cuda=fake_cuda)
+    monkeypatch.setattr(adapters, "_import_torch", lambda: fake_torch)
+    configured = settings(
+        tmp_path,
+        device="cuda",
+        allow_cpu_fallback=False,
+        expected_cuda_capability="6.1",
+    )
+
+    assert adapters.preflight_device(configured).name == "cuda"
 
 
 def test_production_loader_records_cpu_when_p40_arch_is_missing_from_torch(tmp_path, monkeypatch) -> None:

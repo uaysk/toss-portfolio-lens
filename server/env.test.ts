@@ -51,7 +51,12 @@ describe("database environment configuration", () => {
       minimumTopCount: 5,
       maximumTopCount: 50,
       ai: {
-        socketPath: "/app/run/ai.sock",
+        url: "ws://ai-worker:8765/ws/scalping-ai/v1",
+        authTokenFile: "/run/ai-auth/token",
+        connectTimeoutMs: 10_000,
+        reconnectBaseMs: 250,
+        reconnectMaxMs: 10_000,
+        maximumInFlight: 4,
         maximumBatchSize: 50,
         maximumRequestBytes: 64 * 1024 * 1024,
         maximumResponseBytes: 128 * 1024 * 1024,
@@ -89,6 +94,7 @@ describe("database environment configuration", () => {
       SCALPING_WEIGHT_SPREAD: "5",
       AI_MAX_REQUEST_BYTES: "33554432",
       AI_MAX_RESPONSE_BYTES: "67108864",
+      AI_COMPUTE_AUTH_TOKEN_FILE: "/run/secrets/test-scalping-ai-token",
     });
     expect(loadConfig().scalping).toMatchObject({
       enabled: true,
@@ -126,6 +132,30 @@ describe("database environment configuration", () => {
     process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "100";
     process.env.AI_COMPUTE_MAX_BATCH_SIZE = "49";
     expect(() => loadConfig()).toThrow("SCALPING_TOP_COUNT_MAX 이상");
+  });
+
+  it("AI WebSocket URL의 local, private opt-in, remote TLS 경계를 검증하고 비활성 시 token file을 읽지 않는다", () => {
+    process.env.AI_COMPUTE_AUTH_TOKEN_FILE = "/definitely/missing/scalping-ai-token";
+    expect(loadConfig().scalping.ai).toMatchObject({
+      url: "ws://ai-worker:8765/ws/scalping-ai/v1",
+      authTokenFile: "/definitely/missing/scalping-ai-token",
+    });
+
+    process.env.AI_COMPUTE_URL = "ws://10.20.30.40:8765/ws/scalping-ai/v1";
+    expect(() => loadConfig()).toThrow("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS=true");
+    process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";
+    expect(loadConfig().scalping.ai.url).toBe("ws://10.20.30.40:8765/ws/scalping-ai/v1");
+
+    process.env.AI_COMPUTE_URL = "ws://203.0.113.10:8765/ws/scalping-ai/v1";
+    expect(() => loadConfig()).toThrow("원격 AI_COMPUTE_URL은 wss://");
+    process.env.AI_COMPUTE_URL = "wss://gpu.example.test:8765/ws/scalping-ai/v1";
+    expect(loadConfig().scalping.ai.url).toBe("wss://gpu.example.test:8765/ws/scalping-ai/v1");
+
+    process.env.AI_COMPUTE_URL = "wss://user:password@gpu.example.test:8765/ws/scalping-ai/v1";
+    expect(() => loadConfig()).toThrow("/ws/scalping-ai/v1 경로");
+    process.env.AI_COMPUTE_URL = "wss://gpu.example.test:8765/ws/scalping-ai/v1";
+    process.env.AI_COMPUTE_AUTH_TOKEN_FILE = "relative/token";
+    expect(() => loadConfig()).toThrow("절대 경로");
   });
 
   it("한국투자증권 환율 폴백 설정을 검증한다", () => {

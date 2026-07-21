@@ -205,6 +205,7 @@ const technicalStrategyService = new TechnicalStrategyService(
 const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
 let scalpingService: ScalpingService | undefined;
+let aiComputeClient: AiComputeClient | undefined;
 if (config.scalping.enabled && scalpingRepository) {
   const tossScalping = new TossScalpingProvider(toss, config.scalping.toss);
   const kisScalpingRest = new KisRestClient(config.scalping.kisRest);
@@ -222,13 +223,20 @@ if (config.scalping.enabled && scalpingRepository) {
       recoveryBarLimit: config.scalping.recoveryBarLimit,
     },
   );
+  aiComputeClient = new AiComputeClient({
+    url: config.scalping.ai.url,
+    authTokenFile: config.scalping.ai.authTokenFile,
+    timeoutMs: config.scalping.ai.timeoutMs,
+    connectTimeoutMs: config.scalping.ai.connectTimeoutMs,
+    reconnectBaseMs: config.scalping.ai.reconnectBaseMs,
+    reconnectMaxMs: config.scalping.ai.reconnectMaxMs,
+    maximumInFlight: config.scalping.ai.maximumInFlight,
+    maximumRequestBytes: config.scalping.ai.maximumRequestBytes,
+    maximumResponseBytes: config.scalping.ai.maximumResponseBytes,
+    tlsCa: config.scalping.ai.tlsCa,
+  });
   const scalpingAi = new ScalpingAiService(
-    new AiComputeClient({
-      socketPath: config.scalping.ai.socketPath,
-      timeoutMs: config.scalping.ai.timeoutMs,
-      maximumRequestBytes: config.scalping.ai.maximumRequestBytes,
-      maximumResponseBytes: config.scalping.ai.maximumResponseBytes,
-    }),
+    aiComputeClient,
     scalpingRepository,
     runService,
     config.scalping.ai.maximumBatchSize,
@@ -1521,6 +1529,7 @@ function shutdown(signal: string): void {
   server.close(async () => {
     await mcpHttpRuntime?.close();
     await mcpOAuthRuntime?.cleanup().catch(() => undefined);
+    aiComputeClient?.close();
     rustCompute?.close();
     await scalpingLiveRuntime?.waitForIdle();
     await historicalBackfill.waitForIdle();

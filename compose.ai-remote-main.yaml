@@ -1,0 +1,7 @@
+services:
+  web:
+    environment:
+      AI_COMPUTE_URL: ${AI_COMPUTE_URL:?set AI_COMPUTE_URL to the remote wss URL or an explicitly allowed private-LAN ws URL}
+      AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: ${AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS:-false}
+  ai-worker:
+    profiles: ["local-ai-disabled"]

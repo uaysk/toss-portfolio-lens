@@ -91,6 +91,27 @@ def _import_torch() -> Any:
         raise AdapterLoadError("torch is not installed in the AI worker image") from error
 
 
+def _has_compatible_cubin(compiled_arches: Sequence[str], major: int, minor: int) -> bool:
+    """Return whether an NVIDIA cubin can execute on the visible device.
+
+    CUDA cubins are binary-compatible with devices that have the same major
+    compute capability and an equal or greater minor capability. For example,
+    an sm_60 cubin is valid on the Tesla P40's sm_61 device even when PyTorch
+    doesn't list an explicit sm_61 build target.
+    """
+    for architecture in compiled_arches:
+        if not architecture.startswith("sm_"):
+            continue
+        encoded = architecture.removeprefix("sm_")
+        if not encoded.isdecimal() or len(encoded) < 2:
+            continue
+        compiled_major = int(encoded[:-1])
+        compiled_minor = int(encoded[-1])
+        if compiled_major == major and compiled_minor <= minor:
+            return True
+    return False
+
+
 def preflight_device(settings: AISettings) -> RuntimeDevice:
     torch = _import_torch()
     requested = settings.device
@@ -102,9 +123,9 @@ def preflight_device(settings: AISettings) -> RuntimeDevice:
             if settings.allow_cpu_fallback:
                 return RuntimeDevice(name="cpu", torch=torch)
             raise AdapterLoadError(message)
-        compiled = set(torch.cuda.get_arch_list())
-        if f"sm_{major}{minor}" not in compiled:
-            message = f"installed torch binary does not include sm_{major}{minor}"
+        compiled = tuple(torch.cuda.get_arch_list())
+        if not _has_compatible_cubin(compiled, major, minor):
+            message = f"installed torch binary does not include a compatible cubin for sm_{major}{minor}"
             if settings.allow_cpu_fallback:
                 return RuntimeDevice(name="cpu", torch=torch)
             raise AdapterLoadError(message)
