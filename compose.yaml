@@ -31,6 +31,8 @@ services:
       AI_COMPUTE_MAX_IN_FLIGHT: ${AI_COMPUTE_MAX_IN_FLIGHT:-4}
       AI_COMPUTE_TLS_CA_FILE: ${AI_COMPUTE_TLS_CA_FILE:-}
       TZ: Asia/Seoul
+    group_add:
+      - "${AI_AUTH_SECRET_GID:-1000}"
     extra_hosts:
       - "${POSTGRES_HOST:-postgres.internal}:${POSTGRES_DOCKER_HOST_IP:-host-gateway}"
     ports:
