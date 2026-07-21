@@ -36,6 +36,7 @@ function config(overrides: Partial<TossProviderConfig> = {}): TossProviderConfig
       orderbook: 1_000,
       trades: 1_000,
       warnings: 1_000,
+      calendar: 1_000,
     },
     retry: {
       maxAttempts: 3,
@@ -49,6 +50,7 @@ function config(overrides: Partial<TossProviderConfig> = {}): TossProviderConfig
       market_data: { ...rateLimit },
       chart: { ...rateLimit },
       stock: { ...rateLimit },
+      market_info: { ...rateLimit },
     },
     now: () => 0,
     ...overrides,
@@ -103,6 +105,24 @@ describe("Toss normalizers", () => {
       low: 98,
       close: 101,
     }] } }, "005930")).toThrow(/high must bound/);
+  });
+
+  it("preserves US currency and canonical exchange without guessing unknown venues", () => {
+    expect(normalizeTossRankings({ result: {
+      rankedAt: "2026-07-21T09:31:00-04:00",
+      rankings: [{ rank: 1, symbol: "AAPL", currency: "USD", market: "NASDAQ", price: 220 }],
+    } }, fetchedAt, "US")).toEqual([expect.objectContaining({
+      symbol: "AAPL", marketCountry: "US", currency: "USD", exchange: "NAS",
+    })]);
+    expect(normalizeTossRankings({ result: {
+      rankedAt: "2026-07-21T09:31:00-04:00",
+      rankings: [{ rank: 1, symbol: "TEST", currency: "USD", market: "OTC", price: 10 }],
+    } }, fetchedAt, "US")[0]).not.toHaveProperty("exchange");
+
+    const candle = normalizeTossMinuteCandles({ result: { candles: [{
+      timestamp: "2026-07-21T00:30:00Z", open: 10, high: 11, low: 9, close: 10,
+    }] } }, "AAPL", "US")[0]!;
+    expect(candle.sessionDate).toBe("2026-07-20");
   });
 
   it("sorts orderbook levels and retains unknown warning codes", () => {
@@ -191,6 +211,43 @@ describe("TossScalpingProvider", () => {
       duration: "1d",
       count: "5",
     }));
+  });
+
+  it("passes the selected US market through ranking requests and normalizes USD results", async () => {
+    const getReadOnlyMarketData = vi.fn(async (feature, query) => response(feature, { result: {
+      rankedAt: "2026-07-21T09:31:00-04:00",
+      rankings: [{ rank: 1, symbol: "AAPL", currency: "USD", exchange: "NAS", price: 220 }],
+    } }));
+    const provider = new TossScalpingProvider({ getReadOnlyMarketData } as TossRawMarketClient, config());
+    await expect(provider.getRankings("trading_amount", 5, "US")).resolves.toEqual([
+      expect.objectContaining({ symbol: "AAPL", marketCountry: "US", currency: "USD", exchange: "NAS" }),
+    ]);
+    expect(getReadOnlyMarketData).toHaveBeenCalledWith("rankings", expect.objectContaining({ marketCountry: "US" }));
+  });
+
+  it("caches and validates US regular-market calendar sessions including early closes", async () => {
+    const getReadOnlyMarketData = vi.fn(async (feature) => response(feature, { result: {
+      today: {
+        date: "2026-11-27",
+        regularMarket: { startTime: "2026-11-27T23:30:00+09:00", endTime: "2026-11-28T03:00:00+09:00" },
+      },
+    } }));
+    const provider = new TossScalpingProvider({ getReadOnlyMarketData } as TossRawMarketClient, config());
+    const first = provider.getMarketCalendar("US", "2026-11-27");
+    const second = provider.getMarketCalendar("US", "2026-11-27");
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({
+        marketCountry: "US", sessionDate: "2026-11-27",
+        regularMarket: {
+          startAt: "2026-11-27T23:30:00+09:00", endAt: "2026-11-28T03:00:00+09:00",
+        },
+      }),
+      expect.anything(),
+    ]);
+    expect(getReadOnlyMarketData).toHaveBeenCalledTimes(1);
+    expect(getReadOnlyMarketData).toHaveBeenCalledWith("market-calendar", {
+      country: "US", date: "2026-11-27",
+    });
   });
 
   it("batches price requests using configured capacity", async () => {

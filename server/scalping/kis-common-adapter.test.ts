@@ -3,6 +3,7 @@ import {
   adaptKisExecution,
   adaptKisMinuteBars,
   adaptKisOrderbook,
+  adaptKisOverseasRankings,
   adaptKisVolumeRankings,
 } from "./kis-common-adapter.js";
 
@@ -58,11 +59,40 @@ describe("KIS common contract adapters", () => {
     expect(result.quality).toMatchObject({ status: "partial", missing: ["row:volume"] });
   });
 
+  it("maps US rankings with exchange/USD and preserves per-minute overseas turnover", () => {
+    const ranking = adaptKisOverseasRankings({
+      items: [{
+        symbol: "AAPL", name: "Apple Inc", exchange: "NAS", rank: 1, price: 212.5,
+        changeAmount: 2.5, changeRate: 1.25, accumulatedVolume: 1_000,
+        accumulatedTradingAmount: 212_500,
+      }],
+      quality: "available",
+      diagnostics: [],
+      providerTimestamp,
+    });
+    expect(ranking.items[0]).toMatchObject({
+      marketCountry: "US", exchange: "NAS", currency: "USD", changeRateRatio: 0.0125,
+    });
+
+    const candles = adaptKisMinuteBars({
+      items: [{
+        symbol: "AAPL", sessionDate: "20260721", timestamp: "2026-07-21T13:30:00.000Z",
+        open: 100, high: 102, low: 99, close: 101, volume: 5, tradingAmount: 505,
+        status: "final", source: "kis_rest_recovery",
+      }],
+      quality: "available",
+      diagnostics: [],
+      providerTimestamp,
+    });
+    expect(candles.items[0]).toMatchObject({ tradingAmount: 505 });
+  });
+
   it("adapts executions with deterministic provider IDs and delta trading amount", () => {
     const trade = adaptKisExecution({
       type: "execution",
       trId: "H0STCNT0",
       market: "KRX",
+      marketCountry: "KR",
       symbol: "005930",
       eventId: "kis:event:1",
       providerTimestamp,
@@ -92,12 +122,14 @@ describe("KIS common contract adapters", () => {
       type: "orderbook",
       trId: "H0STASP0",
       market: "KRX",
+      marketCountry: "KR",
       symbol: "005930",
       providerTimestamp,
       receivedAt: providerTimestamp,
       sessionDate: "20260721",
       quoteTime: "090100",
       timestampDateSource: "received-session-date",
+      depth: "ten_level",
       asks: [{ level: 2, price: 102, quantity: 2 }, { level: 1, price: 101, quantity: 1 }],
       bids: [{ level: 2, price: 99, quantity: 4 }, { level: 1, price: 100, quantity: 3 }],
       totalAskQuantity: 3,

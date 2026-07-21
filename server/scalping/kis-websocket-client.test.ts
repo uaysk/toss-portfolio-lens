@@ -148,6 +148,54 @@ function orderbookValues(symbol = "005930"): string[] {
   return values;
 }
 
+function overseasExecutionValues(symbol = "AAPL", exchange = "NAS"): string[] {
+  const values = Array.from({ length: 26 }, () => "");
+  values[0] = `D${exchange}${symbol}`;
+  values[1] = symbol;
+  values[2] = "4";
+  values[3] = "20260721";
+  values[4] = "20260721";
+  values[5] = "101530";
+  values[6] = "20260721";
+  values[7] = "231530";
+  values[8] = "210.00";
+  values[9] = "213.00";
+  values[10] = "209.00";
+  values[11] = "212.50";
+  values[15] = "212.49";
+  values[16] = "212.51";
+  values[17] = "100";
+  values[18] = "120";
+  values[19] = "25";
+  values[20] = "1234567";
+  values[21] = "262345678.90";
+  values[22] = "11";
+  values[23] = "14";
+  values[24] = "108.75";
+  values[25] = "1";
+  return values;
+}
+
+function overseasOrderbookValues(symbol = "AAPL", exchange = "NAS"): string[] {
+  const values = Array.from({ length: 17 }, () => "");
+  values[0] = `D${exchange}${symbol}`;
+  values[1] = symbol;
+  values[2] = "4";
+  values[3] = "20260721";
+  values[4] = "101531";
+  values[5] = "20260721";
+  values[6] = "231531";
+  values[7] = "5000";
+  values[8] = "4500";
+  values[11] = "212.49";
+  values[12] = "212.51";
+  values[13] = "100";
+  values[14] = "120";
+  values[15] = "10";
+  values[16] = "-5";
+  return values;
+}
+
 function dataFrame(trId: KisMarketTrId, values: string[], count = 1): string {
   return `0|${trId}|${count}|${values.join("^")}`;
 }
@@ -301,6 +349,58 @@ describe("KisWebSocketClient", () => {
       totalAskQuantity: 120_000,
       totalBidQuantity: 135_000,
     });
+  });
+
+  it("uses explicit US exchange subscription keys and parses official 26/17-field US raw frames", async () => {
+    const { client, sockets, events } = testHarness();
+    client.subscribe({ trId: "HDFSCNT0", symbol: "AAPL", exchange: "NAS" });
+    client.subscribe({ trId: "HDFSASP0", symbol: "AAPL", exchange: "NAS" });
+    await client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    expect(JSON.parse(socket.sent[0]!)).toMatchObject({
+      body: { input: { tr_id: "HDFSCNT0", tr_key: "DNASAAPL" } },
+    });
+
+    socket.message(dataFrame("HDFSCNT0", overseasExecutionValues()));
+    socket.message(dataFrame("HDFSASP0", overseasOrderbookValues()));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "execution",
+      trId: "HDFSCNT0",
+      market: "US",
+      marketCountry: "US",
+      exchange: "NAS",
+      symbol: "AAPL",
+      providerTimestamp: "2026-07-21T14:15:30.000Z",
+      price: 212.5,
+      executionVolume: 25,
+      accumulatedVolume: 1_234_567,
+      accumulatedTradingAmount: 262_345_678.9,
+      bidPrice1: 212.49,
+      askPrice1: 212.51,
+      executionStrength: 108.75,
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "orderbook",
+      trId: "HDFSASP0",
+      marketCountry: "US",
+      exchange: "NAS",
+      symbol: "AAPL",
+      providerTimestamp: "2026-07-21T14:15:31.000Z",
+      timestampDateSource: "provider-local-date",
+      depth: "top_of_book",
+      bids: [{ level: 1, price: 212.49, quantity: 100 }],
+      asks: [{ level: 1, price: 212.51, quantity: 120 }],
+      totalBidQuantity: 5_000,
+      totalAskQuantity: 4_500,
+    }));
+  });
+
+  it("rejects US subscriptions without an exchange instead of guessing NASDAQ", () => {
+    const { client } = testHarness();
+    expect(() => client.subscribe({ trId: "HDFSCNT0", symbol: "AAPL" }))
+      .toThrow("require exchange NAS, NYS, or AMS");
   });
 
   it("emits parser diagnostics with TR, market, symbol and time instead of zero-filling malformed records", async () => {

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type DatabaseDialect, type RelationalDatabase, SqliteDatabase } from "./database.js";
-import { applyPortfolioMigrations, ensureMarketCandleVolumeColumn, listAppliedMigrations } from "./migrations.js";
+import {
+  applyPortfolioMigrations,
+  ensureMarketCandleVolumeColumn,
+  ensureScalpingMarketCountry,
+  listAppliedMigrations,
+} from "./migrations.js";
 import { RunRepository } from "./repositories/run-repository.js";
 
 describe("versioned portfolio migrations", () => {
@@ -32,6 +37,53 @@ describe("versioned portfolio migrations", () => {
 
     expect(run).toHaveBeenCalledWith(
       `ALTER TABLE portfolio_market_candles ADD COLUMN volume ${columnType}`,
+    );
+  });
+
+  it("PostgreSQL 기존 단타 테이블을 KR 기본값과 시장 복합 PK로 보존 마이그레이션한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 0, insertId: 0 });
+    const query = vi.fn(async (sql: string, parameters: unknown[] = []) => {
+      if (sql.includes("information_schema.tables")) return [{ table_name: parameters[0] }];
+      if (sql.includes("information_schema.columns")) return [{ column_name: "symbol" }];
+      if (sql.includes("JOIN information_schema.key_column_usage")) {
+        return ["symbol", "interval_minutes", "open_time"].map((column_name, index) => ({
+          column_name,
+          ordinal_position: index + 1,
+        }));
+      }
+      if (sql.includes("information_schema.table_constraints")) {
+        return [{ constraint_name: "portfolio_intraday_bars_pkey" }];
+      }
+      if (sql.includes("pg_indexes")) return [];
+      return [];
+    });
+    const postgres = {
+      dialect: "postgres" as const,
+      query,
+      run,
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+
+    await ensureScalpingMarketCountry(postgres);
+
+    expect(run).toHaveBeenCalledWith(
+      "ALTER TABLE portfolio_intraday_bars ADD COLUMN market_country TEXT NOT NULL DEFAULT 'KR'",
+    );
+    expect(run).toHaveBeenCalledWith(
+      "ALTER TABLE portfolio_scalping_predictions ADD COLUMN market_country TEXT NOT NULL DEFAULT 'KR'",
+    );
+    expect(run).toHaveBeenCalledWith(
+      "UPDATE portfolio_intraday_bars SET market_country = 'KR' WHERE market_country IS NULL OR market_country = ''",
+    );
+    expect(run).toHaveBeenCalledWith(
+      "ALTER TABLE portfolio_intraday_bars DROP CONSTRAINT \"portfolio_intraday_bars_pkey\"",
+    );
+    expect(run).toHaveBeenCalledWith(expect.stringContaining(
+      "ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)",
+    ));
+    expect(run).toHaveBeenCalledWith(
+      "CREATE INDEX idx_portfolio_scalping_prediction_market_latest ON portfolio_scalping_predictions(market_country, symbol, retrospective, generated_at)",
     );
   });
 
@@ -138,6 +190,57 @@ describe("versioned portfolio migrations", () => {
         PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
       )
     `);
+    await database.run(`
+      CREATE TABLE portfolio_intraday_bars (
+        symbol TEXT NOT NULL,
+        interval_minutes INTEGER NOT NULL,
+        open_time TEXT NOT NULL,
+        close_time TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        bar_state TEXT NOT NULL,
+        open_price REAL NOT NULL,
+        high_price REAL NOT NULL,
+        low_price REAL NOT NULL,
+        close_price REAL NOT NULL,
+        volume REAL NOT NULL,
+        turnover REAL,
+        trade_count INTEGER,
+        quality_status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(symbol, interval_minutes, open_time)
+      )
+    `);
+    await database.run(`
+      INSERT INTO portfolio_intraday_bars (
+        symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
+        open_price, high_price, low_price, close_price, volume, turnover, trade_count,
+        quality_status, updated_at
+      ) VALUES ('AAPL', 1, '2026-07-20T13:30:00.000Z', '2026-07-20T13:31:00.000Z',
+        '2026-07-20', 'kis_rest', 'final', 100, 101, 99, 100.5, 10, 1005, 2, 'complete', 1)
+    `);
+    await database.run(`
+      CREATE TABLE portfolio_scalping_predictions (
+        prediction_id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        input_ended_at TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        data_quality TEXT NOT NULL,
+        retrospective INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    await database.run(`
+      INSERT INTO portfolio_scalping_predictions (
+        prediction_id, symbol, model_name, model_version, input_ended_at, generated_at,
+        status, data_quality, retrospective, payload_json, created_at
+      ) VALUES ('legacy-prediction', 'AAPL', 'model', 'v1', '2026-07-20T13:30:00.000Z',
+        '2026-07-20T13:30:01.000Z', 'available', 'complete', 0, '{}', 1)
+    `);
 
     const runs = new RunRepository(database);
     await runs.initialize();
@@ -156,8 +259,9 @@ describe("versioned portfolio migrations", () => {
       "20260721_005_market_candle_volume",
       "20260721_006_scalping_intraday_storage",
       "20260721_007_scalping_volume_availability",
+      "20260721_008_scalping_market_country",
     ]);
-    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(7);
+    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(8);
     const marketCandleColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_market_candles)");
     expect(marketCandleColumns.map((column) => column.name)).toContain("volume");
     const scalpingTables = await database.query<{ name: string }>(`
@@ -170,7 +274,37 @@ describe("versioned portfolio migrations", () => {
       "portfolio_scalping_predictions",
     ]);
     const intradayColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_intraday_bars)");
-    expect(intradayColumns.map((column) => column.name)).toContain("volume_available");
+    expect(intradayColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "market_country", "volume_available",
+    ]));
+    const intradayPrimaryKey = await database.query<{ name: string; pk: number | string }>(
+      "PRAGMA table_info(portfolio_intraday_bars)",
+    );
+    expect(intradayPrimaryKey
+      .filter((column) => Number(column.pk) > 0)
+      .sort((left, right) => Number(left.pk) - Number(right.pk))
+      .map((column) => column.name)).toEqual([
+      "market_country", "symbol", "interval_minutes", "open_time",
+    ]);
+    const predictionColumns = await database.query<{ name: string }>(
+      "PRAGMA table_info(portfolio_scalping_predictions)",
+    );
+    expect(predictionColumns.map((column) => column.name)).toContain("market_country");
+    expect(await database.query<{ market_country: string }>(
+      "SELECT market_country FROM portfolio_intraday_bars WHERE symbol = 'AAPL'",
+    )).toEqual([{ market_country: "KR" }]);
+    expect(await database.query<{ market_country: string }>(
+      "SELECT market_country FROM portfolio_scalping_predictions WHERE prediction_id = 'legacy-prediction'",
+    )).toEqual([{ market_country: "KR" }]);
+    const intradayIndexes = await database.query<{ name: string }>(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'portfolio_intraday_bars' AND name NOT LIKE 'sqlite_autoindex%'
+      ORDER BY name ASC
+    `);
+    expect(intradayIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+      "idx_portfolio_intraday_market_session",
+      "idx_portfolio_intraday_updated",
+    ]));
 
     const legacy = await runs.get("00000000-0000-4000-8000-000000000001", "owner-a");
     expect(legacy).toMatchObject({ tags: [], input: {}, status: "completed" });

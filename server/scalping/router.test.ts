@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { createScalpingRouter, parseStreamAnalysisOptions, parseStreamSymbols } from "./router.js";
+import {
+  createScalpingRouter,
+  parseStreamAnalysisOptions,
+  parseStreamExchanges,
+  parseStreamSymbols,
+} from "./router.js";
 
 describe("scalping session-only router", () => {
   it("normalizes and bounds SSE symbols", () => {
@@ -13,11 +18,24 @@ describe("scalping session-only router", () => {
 
   it("requires an explicit interval and preset for connection-local Rust analysis", () => {
     expect(parseStreamAnalysisOptions({ interval: "15m", preset: "breakout", accountId: "account-1" })).toEqual({
-      interval: "15m", preset: "breakout", accountId: "account-1",
+      marketCountry: "KR", interval: "15m", preset: "breakout", accountId: "account-1",
+    });
+    expect(parseStreamAnalysisOptions({ marketCountry: "US", interval: "5m", preset: "trend" })).toMatchObject({
+      marketCountry: "US", interval: "5m", preset: "trend",
     });
     expect(() => parseStreamAnalysisOptions({ preset: "trend" })).toThrow();
     expect(() => parseStreamAnalysisOptions({ interval: "2m", preset: "trend" })).toThrow();
     expect(() => parseStreamAnalysisOptions({ interval: "1m", preset: "all" })).toThrow();
+  });
+
+  it("accepts only explicit US exchange mappings and leaves unmapped symbols unavailable", () => {
+    expect(parseStreamExchanges("AAPL:NAS,IBM:NYS", ["AAPL", "IBM"], "US")).toEqual({
+      AAPL: "NAS", IBM: "NYS",
+    });
+    expect(parseStreamExchanges("AAPL:NAS", ["AAPL", "IBM"], "US")).toEqual({ AAPL: "NAS" });
+    expect(parseStreamExchanges(undefined, ["AAPL"], "US")).toEqual({});
+    expect(() => parseStreamExchanges("AAPL:NAS,AAPL:NYS", ["AAPL"], "US")).toThrow("conflicting");
+    expect(() => parseStreamExchanges("AAPL:NAS", ["AAPL"], "KR")).toThrow("only valid for US");
   });
 
   it("registers only dashboard HTTP routes behind the supplied session middleware", () => {
@@ -72,24 +90,34 @@ describe("scalping session-only router", () => {
     });
     response.end = vi.fn();
     await handler(request, response);
-    const event = (id: number, symbol: string, intervalMinutes: number, state: "forming" | "final") => ({
+    const event = (
+      id: number,
+      symbol: string,
+      intervalMinutes: number,
+      state: "forming" | "final",
+      marketCountry: "KR" | "US" = "KR",
+    ) => ({
       schemaVersion: "scalping-live-event/v1",
       id,
       emittedAt: "2026-07-21T03:00:00.000Z",
       type: "bar",
       symbol,
+      marketCountry,
       payload: { intervalMinutes, state },
     });
     listener!(event(1, "005930", 1, "final"));
     listener!(event(2, "005930", 5, "forming"));
     listener!(event(3, "005930", 5, "final"));
     listener!(event(4, "000660", 5, "final"));
+    listener!(event(5, "005930", 5, "final", "US"));
     await vi.waitFor(() => expect(realtimeAnalysis).toHaveBeenCalledTimes(1));
     expect(live.waitForIdle).toHaveBeenCalledTimes(1);
     expect(realtimeAnalysis).toHaveBeenCalledWith({
-      symbols: ["005930", "000660"], interval: "5m", preset: "trend",
+      symbols: ["005930", "000660"], marketCountry: "KR", interval: "5m", preset: "trend",
     });
+    expect(live.retain).toHaveBeenCalledWith(["005930", "000660"], "KR", {});
     expect(writes.join("\n")).not.toContain('"intervalMinutes":1');
+    expect(writes.join("\n")).not.toContain('"id":5');
     expect(writes.join("\n")).toContain("event: analysis");
     request.emit("close");
     expect(release).toHaveBeenCalledTimes(1);

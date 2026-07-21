@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
 import { applyPortfolioMigrations } from "../migrations.js";
 import { canonicalJson } from "../worker/contracts.js";
+import type { MarketCountry } from "../scalping/contracts.js";
 
 export const SCALPING_INTERVALS = [1, 5, 15, 30, 60] as const;
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
@@ -10,6 +11,7 @@ export type IntradayBarSource = "kis_ws" | "kis_rest" | "toss_rest" | "recovered
 export type IntradayQuality = "complete" | "partial" | "recovered" | "stale";
 
 export type IntradayBarRecord = {
+  marketCountry?: MarketCountry;
   symbol: string;
   intervalMinutes: ScalpingInterval;
   openTime: string;
@@ -39,6 +41,7 @@ export type ScalpingPredictionQuality =
 
 export type ScalpingPredictionRecord = {
   id: string;
+  marketCountry?: MarketCountry;
   symbol: string;
   modelName: string;
   modelVersion: string;
@@ -52,6 +55,7 @@ export type ScalpingPredictionRecord = {
 };
 
 type IntradayBarRow = {
+  market_country: MarketCountry;
   symbol: string;
   interval_minutes: number | string;
   open_time: string;
@@ -73,6 +77,7 @@ type IntradayBarRow = {
 
 type PredictionRow = {
   prediction_id: string;
+  market_country: MarketCountry;
   symbol: string;
   model_name: string;
   model_version: string;
@@ -90,6 +95,12 @@ function symbol(value: string): string {
   if (!/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(normalized)) {
     throw new Error("단타 종목 코드는 영문 대문자, 숫자, '.', '_', '-' 조합의 1~32자여야 합니다.");
   }
+  return normalized;
+}
+
+function marketCountry(value: MarketCountry | undefined): MarketCountry {
+  const normalized = value ?? "KR";
+  if (normalized !== "KR" && normalized !== "US") throw new Error("단타 시장은 KR 또는 US여야 합니다.");
   return normalized;
 }
 
@@ -119,6 +130,7 @@ function finite(value: number, field: string, minimum: number, inclusive = true)
 
 function barFromRow(row: IntradayBarRow): IntradayBarRecord {
   return {
+    marketCountry: marketCountry(row.market_country),
     symbol: row.symbol,
     intervalMinutes: Number(row.interval_minutes) as ScalpingInterval,
     openTime: row.open_time,
@@ -149,6 +161,7 @@ function predictionFromRow(row: PredictionRow): ScalpingPredictionRecord {
   }
   return {
     id: row.prediction_id,
+    marketCountry: marketCountry(row.market_country),
     symbol: row.symbol,
     modelName: row.model_name,
     modelVersion: row.model_version,
@@ -173,23 +186,45 @@ export class ScalpingRepository {
     if (input.length > 10_000) throw new Error("한 번에 저장할 분봉은 10,000개 이하여야 합니다.");
     const mysqlPreferred = `(
       CASE VALUES(bar_state) WHEN 'final' THEN 1 ELSE 0 END > CASE bar_state WHEN 'final' THEN 1 ELSE 0 END
-      OR (VALUES(bar_state) = bar_state AND CASE VALUES(source_kind)
+      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
+        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        > CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
+      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
+        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        = CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        AND CASE VALUES(source_kind)
         WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
         > CASE source_kind WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
-      OR (VALUES(bar_state) = bar_state AND VALUES(source_kind) = source_kind AND VALUES(updated_at) >= updated_at)
+      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
+        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        = CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        AND VALUES(source_kind) = source_kind AND VALUES(updated_at) >= updated_at)
     )`;
     const conflictPreferred = `(
       CASE EXCLUDED.bar_state WHEN 'final' THEN 1 ELSE 0 END
         > CASE portfolio_intraday_bars.bar_state WHEN 'final' THEN 1 ELSE 0 END
-      OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state AND CASE EXCLUDED.source_kind
+      OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state AND CASE EXCLUDED.quality_status
+        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        > CASE portfolio_intraday_bars.quality_status
+          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
+      OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state AND CASE EXCLUDED.quality_status
+        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        = CASE portfolio_intraday_bars.quality_status
+          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        AND CASE EXCLUDED.source_kind
         WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
         > CASE portfolio_intraday_bars.source_kind
           WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
       OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state
+        AND CASE EXCLUDED.quality_status
+          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+          = CASE portfolio_intraday_bars.quality_status
+            WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND EXCLUDED.source_kind = portfolio_intraday_bars.source_kind
         AND EXCLUDED.updated_at >= portfolio_intraday_bars.updated_at)
     )`;
     for (const item of input) {
+      const normalizedMarketCountry = marketCountry(item.marketCountry);
       const normalizedSymbol = symbol(item.symbol);
       if (!(SCALPING_INTERVALS as readonly number[]).includes(item.intervalMinutes)) {
         throw new Error("지원하지 않는 분봉 간격입니다.");
@@ -211,7 +246,7 @@ export class ScalpingRepository {
       }
       if (!Number.isSafeInteger(item.updatedAt) || item.updatedAt < 0) throw new Error("updatedAt 값이 올바르지 않습니다.");
       const values = [
-        normalizedSymbol, item.intervalMinutes, openTime, closeTime, date(item.sessionDate), item.source, item.state,
+        normalizedMarketCountry, normalizedSymbol, item.intervalMinutes, openTime, closeTime, date(item.sessionDate), item.source, item.state,
         open, high, low, close, item.volume ?? 0,
         this.database.dialect === "postgres" ? item.volume !== undefined : item.volume === undefined ? 0 : 1,
         item.turnover, item.tradeCount, item.quality, item.updatedAt,
@@ -221,10 +256,10 @@ export class ScalpingRepository {
         // priority predicate until last so every accepted value changes together.
         await this.database.run(`
           INSERT INTO portfolio_intraday_bars (
-            symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
+            market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             close_time = IF(${mysqlPreferred}, VALUES(close_time), close_time),
             session_date = IF(${mysqlPreferred}, VALUES(session_date), session_date),
@@ -236,19 +271,19 @@ export class ScalpingRepository {
             volume_available = IF(${mysqlPreferred}, GREATEST(VALUES(volume_available), volume_available), volume_available),
             turnover = IF(${mysqlPreferred}, COALESCE(VALUES(turnover), turnover), turnover),
             trade_count = IF(${mysqlPreferred}, COALESCE(VALUES(trade_count), trade_count), trade_count),
-            quality_status = IF(${mysqlPreferred}, VALUES(quality_status), quality_status),
             updated_at = IF(${mysqlPreferred}, VALUES(updated_at), updated_at),
             source_kind = IF(${mysqlPreferred}, VALUES(source_kind), source_kind),
+            quality_status = IF(${mysqlPreferred}, VALUES(quality_status), quality_status),
             bar_state = IF(${mysqlPreferred}, VALUES(bar_state), bar_state)
         `, values);
       } else {
         await this.database.run(`
           INSERT INTO portfolio_intraday_bars (
-            symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
+            market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(symbol, interval_minutes, open_time) DO UPDATE SET
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(market_country, symbol, interval_minutes, open_time) DO UPDATE SET
             close_time = EXCLUDED.close_time,
             session_date = EXCLUDED.session_date,
             source_kind = EXCLUDED.source_kind,
@@ -271,6 +306,7 @@ export class ScalpingRepository {
   }
 
   async listBars(input: {
+    marketCountry?: MarketCountry;
     symbol: string;
     intervalMinutes: ScalpingInterval;
     from?: string;
@@ -278,8 +314,8 @@ export class ScalpingRepository {
     includeForming?: boolean;
     limit?: number;
   }): Promise<IntradayBarRecord[]> {
-    const conditions = ["symbol = ?", "interval_minutes = ?"];
-    const parameters: unknown[] = [symbol(input.symbol), input.intervalMinutes];
+    const conditions = ["market_country = ?", "symbol = ?", "interval_minutes = ?"];
+    const parameters: unknown[] = [marketCountry(input.marketCountry), symbol(input.symbol), input.intervalMinutes];
     if (input.from) {
       conditions.push("open_time >= ?");
       parameters.push(isoTimestamp(input.from, "from"));
@@ -306,6 +342,7 @@ export class ScalpingRepository {
     const id = input.id ?? randomUUID();
     if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) throw new Error("prediction id 형식이 올바르지 않습니다.");
     const normalizedSymbol = symbol(input.symbol);
+    const normalizedMarketCountry = marketCountry(input.marketCountry);
     const modelName = input.modelName.trim();
     const modelVersion = input.modelVersion.trim();
     if (!modelName || modelName.length > 128 || !modelVersion || modelVersion.length > 128) {
@@ -319,11 +356,11 @@ export class ScalpingRepository {
     const payload = canonicalJson(input.payload);
     await this.database.run(`
       INSERT INTO portfolio_scalping_predictions (
-        prediction_id, symbol, model_name, model_version, input_ended_at, generated_at,
+        prediction_id, market_country, symbol, model_name, model_version, input_ended_at, generated_at,
         status, data_quality, retrospective, payload_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
-      id, normalizedSymbol, modelName, modelVersion, inputEndedAt, generatedAt,
+      id, normalizedMarketCountry, normalizedSymbol, modelName, modelVersion, inputEndedAt, generatedAt,
       input.status, input.dataQuality,
       this.database.dialect === "postgres" ? input.retrospective : input.retrospective ? 1 : 0,
       payload, createdAt,
@@ -341,21 +378,29 @@ export class ScalpingRepository {
     return row ? predictionFromRow(row) : undefined;
   }
 
-  async latestPredictions(symbols: readonly string[], retrospective = false): Promise<ScalpingPredictionRecord[]> {
+  async latestPredictions(
+    symbols: readonly string[],
+    retrospective = false,
+    requestedMarketCountry: MarketCountry = "KR",
+  ): Promise<ScalpingPredictionRecord[]> {
     const normalized = Array.from(new Set(symbols.map(symbol)));
+    const normalizedMarketCountry = marketCountry(requestedMarketCountry);
     if (!normalized.length) return [];
     if (normalized.length > 50) throw new Error("예측 조회 종목은 50개 이하여야 합니다.");
     const rows = await this.database.query<PredictionRow>(`
       SELECT prediction.* FROM portfolio_scalping_predictions prediction
-      WHERE prediction.symbol IN (${normalized.map(() => "?").join(", ")})
+      WHERE prediction.market_country = ?
+        AND prediction.symbol IN (${normalized.map(() => "?").join(", ")})
         AND prediction.retrospective = ?
         AND prediction.generated_at = (
           SELECT MAX(latest.generated_at)
           FROM portfolio_scalping_predictions latest
-          WHERE latest.symbol = prediction.symbol AND latest.retrospective = prediction.retrospective
+          WHERE latest.market_country = prediction.market_country
+            AND latest.symbol = prediction.symbol AND latest.retrospective = prediction.retrospective
         )
       ORDER BY prediction.symbol ASC
     `, [
+      normalizedMarketCountry,
       ...normalized,
       this.database.dialect === "postgres" ? retrospective : retrospective ? 1 : 0,
     ]);

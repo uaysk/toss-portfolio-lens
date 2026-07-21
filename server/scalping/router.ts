@@ -1,7 +1,13 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
 import { setNoStore } from "../auth.js";
-import { MinuteIntervalSchema } from "./contracts.js";
+import {
+  MarketCountrySchema,
+  MinuteIntervalSchema,
+  UsExchangeSchema,
+  type MarketCountry,
+  type UsExchange,
+} from "./contracts.js";
 import type { ScalpingLiveEvent, ScalpingLiveRuntime } from "./live-runtime.js";
 import type {
   ScalpingEvaluationRequest,
@@ -28,7 +34,9 @@ export type ScalpingRouterDependencies = {
 const SYMBOL = /^[A-Z0-9][A-Z0-9._-]{0,31}$/;
 const StreamPresetSchema = z.enum(["trend", "breakout", "mean_reversion", "risk_management"]);
 
-export type StreamAnalysisOptions = Pick<ScalpingRealtimeAnalysisRequest, "interval" | "preset" | "accountId">;
+export type StreamAnalysisOptions = Pick<ScalpingRealtimeAnalysisRequest, "interval" | "preset" | "accountId"> & {
+  marketCountry: MarketCountry;
+};
 
 export function parseStreamSymbols(value: unknown, maximum: number): string[] {
   if (!Number.isInteger(maximum) || maximum < 1 || maximum > 50) throw new Error("maximum symbols is invalid");
@@ -42,14 +50,41 @@ export function parseStreamSymbols(value: unknown, maximum: number): string[] {
 
 export function parseStreamAnalysisOptions(query: Record<string, unknown>): StreamAnalysisOptions {
   return z.object({
+    marketCountry: MarketCountrySchema.default("KR"),
     interval: MinuteIntervalSchema,
     preset: StreamPresetSchema,
     accountId: z.string().trim().min(1).max(128).optional(),
   }).strict().parse({
+    marketCountry: typeof query.marketCountry === "string" ? query.marketCountry : undefined,
     interval: typeof query.interval === "string" ? query.interval : undefined,
     preset: typeof query.preset === "string" ? query.preset : undefined,
     ...(typeof query.accountId === "string" ? { accountId: query.accountId } : {}),
   });
+}
+
+export function parseStreamExchanges(
+  value: unknown,
+  symbols: readonly string[],
+  marketCountry: MarketCountry,
+): Readonly<Record<string, UsExchange>> {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (marketCountry === "KR") {
+    if (raw) throw new Error("exchanges are only valid for US symbols");
+    return {};
+  }
+  const requested = new Set(symbols);
+  const output: Record<string, UsExchange> = {};
+  for (const entry of raw ? raw.split(",") : []) {
+    const [rawSymbol, rawExchange, extra] = entry.split(":");
+    const symbol = rawSymbol?.trim().toUpperCase() ?? "";
+    if (!symbol || extra !== undefined || !requested.has(symbol)) {
+      throw new Error("exchanges must only contain requested US symbols");
+    }
+    const exchange = UsExchangeSchema.parse(rawExchange?.trim().toUpperCase());
+    if (output[symbol] && output[symbol] !== exchange) throw new Error(`conflicting exchange for ${symbol}`);
+    output[symbol] = exchange;
+  }
+  return output;
 }
 
 function barInterval(event: ScalpingLiveEvent): number | undefined {
@@ -174,9 +209,11 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     if (!dependencies.config.enabled || !dependencies.live || !dependencies.service) return unavailable(response);
     let symbols: string[];
     let analysisOptions: StreamAnalysisOptions;
+    let exchanges: Readonly<Record<string, UsExchange>>;
     try {
       symbols = parseStreamSymbols(request.query.symbols, dependencies.config.maximumSymbols);
       analysisOptions = parseStreamAnalysisOptions(request.query as Record<string, unknown>);
+      exchanges = parseStreamExchanges(request.query.exchanges, symbols, analysisOptions.marketCountry);
     } catch (error) {
       return sendError(response, error);
     }
@@ -246,7 +283,9 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     };
 
     const send = (event: ScalpingLiveEvent) => {
-      if (ended || event.id <= lastSent || (event.symbol && !requested.has(event.symbol))) return;
+      if (ended || event.id <= lastSent
+        || (event.marketCountry !== undefined && event.marketCountry !== analysisOptions.marketCountry)
+        || (event.symbol && !requested.has(event.symbol))) return;
       const interval = barInterval(event);
       if (event.type === "bar" && interval !== requestedInterval) return;
       if (interval === requestedInterval && isFinalBar(event)) scheduleAnalysis();
@@ -283,7 +322,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     request.on("close", cleanup);
     response.on("close", cleanup);
     try {
-      release = await dependencies.live.retain(symbols);
+      release = await dependencies.live.retain(symbols, analysisOptions.marketCountry, exchanges);
       if (ended) release();
     } catch {
       if (!ended) {

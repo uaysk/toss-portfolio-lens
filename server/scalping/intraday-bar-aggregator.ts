@@ -1,13 +1,22 @@
 import { z } from "zod";
-import { isoTimestampSchema, marketSymbolSchema, sessionDateSchema, type MinuteInterval } from "./contracts.js";
+import {
+  MarketCountrySchema,
+  isoTimestampSchema,
+  marketSymbolSchema,
+  sessionDateSchema,
+  type MarketCountry,
+  type MinuteInterval,
+} from "./contracts.js";
 
 const MINUTE_MS = 60_000;
 
 export const IntradayTradeTickSchema = z.object({
   symbol: marketSymbolSchema,
   eventId: z.string().trim().min(1).max(240),
+  marketCountry: MarketCountrySchema.optional(),
   executedAt: isoTimestampSchema,
   sessionDate: sessionDateSchema,
+  sessionStartAt: isoTimestampSchema.optional(),
   price: z.number().finite().positive(),
   quantity: z.number().finite().positive(),
   tradingAmount: z.number().finite().positive().optional(),
@@ -17,6 +26,7 @@ export type IntradayTradeTick = z.infer<typeof IntradayTradeTickSchema>;
 
 export type AggregatedIntradayBar = {
   symbol: string;
+  marketCountry?: MarketCountry;
   interval: MinuteInterval;
   startAt: string;
   endAt: string;
@@ -55,10 +65,12 @@ export type IntradayBarAggregatorConfig = {
 
 type MutableBar = {
   symbol: string;
+  marketCountry: MarketCountry;
   intervalMinutes: 1 | 5 | 15 | 30 | 60;
   startMs: number;
   endMs: number;
   sessionDate: string;
+  sessionStartMs?: number;
   open: number;
   high: number;
   low: number;
@@ -67,6 +79,7 @@ type MutableBar = {
   tradingAmount: number;
   tradeCount: number;
   componentMinuteCount: number;
+  sourcePartial: boolean;
   firstOrderKey: string;
   lastOrderKey: string;
 };
@@ -77,6 +90,7 @@ type SymbolState = {
   openMinutes: Map<string, MutableBar>;
   higher: Map<number, Map<string, MutableBar>>;
   finalized: Map<number, AggregatedIntradayBar[]>;
+  pendingPartialMinuteStartMs?: number;
 };
 
 function assertConfig(config: IntradayBarAggregatorConfig): void {
@@ -95,8 +109,13 @@ function assertConfig(config: IntradayBarAggregatorConfig): void {
   }
 }
 
-function stateFor(states: Map<string, SymbolState>, symbol: string): SymbolState {
-  const existing = states.get(symbol);
+function stateKey(symbol: string, marketCountry: MarketCountry): string {
+  return `${marketCountry}:${symbol}`;
+}
+
+function stateFor(states: Map<string, SymbolState>, symbol: string, marketCountry: MarketCountry): SymbolState {
+  const key = stateKey(symbol, marketCountry);
+  const existing = states.get(key);
   if (existing) return existing;
   const created: SymbolState = {
     maximumEventMs: Number.NEGATIVE_INFINITY,
@@ -105,7 +124,7 @@ function stateFor(states: Map<string, SymbolState>, symbol: string): SymbolState
     higher: new Map(),
     finalized: new Map(),
   };
-  states.set(symbol, created);
+  states.set(key, created);
   return created;
 }
 
@@ -121,6 +140,7 @@ function snapshot(bar: MutableBar, status: "forming" | "final"): AggregatedIntra
   const missingMinuteCount = Math.max(0, bar.intervalMinutes - bar.componentMinuteCount);
   return {
     symbol: bar.symbol,
+    marketCountry: bar.marketCountry,
     interval: toInterval(bar.intervalMinutes),
     startAt: new Date(bar.startMs).toISOString(),
     endAt: new Date(bar.endMs).toISOString(),
@@ -134,7 +154,7 @@ function snapshot(bar: MutableBar, status: "forming" | "final"): AggregatedIntra
     tradingAmount: bar.tradingAmount,
     tradeCount: bar.tradeCount,
     componentMinuteCount: bar.componentMinuteCount,
-    quality: missingMinuteCount === 0 ? "available" : "partial",
+    quality: missingMinuteCount === 0 && !bar.sourcePartial ? "available" : "partial",
     missingMinuteCount,
   };
 }
@@ -147,15 +167,22 @@ function rememberFinal(state: SymbolState, bar: AggregatedIntradayBar, maximum: 
   state.finalized.set(interval, values);
 }
 
+function intervalStart(startMs: number, intervalMs: number, sessionStartMs?: number): number {
+  if (sessionStartMs === undefined) return Math.floor(startMs / intervalMs) * intervalMs;
+  return sessionStartMs + Math.floor((startMs - sessionStartMs) / intervalMs) * intervalMs;
+}
+
 function higherMutable(oneMinute: MutableBar, intervalMinutes: 5 | 15 | 30 | 60): MutableBar {
   const intervalMs = intervalMinutes * MINUTE_MS;
-  const startMs = Math.floor(oneMinute.startMs / intervalMs) * intervalMs;
+  const startMs = intervalStart(oneMinute.startMs, intervalMs, oneMinute.sessionStartMs);
   return {
     symbol: oneMinute.symbol,
+    marketCountry: oneMinute.marketCountry,
     intervalMinutes,
     startMs,
     endMs: startMs + intervalMs,
     sessionDate: oneMinute.sessionDate,
+    ...(oneMinute.sessionStartMs === undefined ? {} : { sessionStartMs: oneMinute.sessionStartMs }),
     open: oneMinute.open,
     high: oneMinute.high,
     low: oneMinute.low,
@@ -164,6 +191,7 @@ function higherMutable(oneMinute: MutableBar, intervalMinutes: 5 | 15 | 30 | 60)
     tradingAmount: oneMinute.tradingAmount,
     tradeCount: oneMinute.tradeCount,
     componentMinuteCount: 1,
+    sourcePartial: oneMinute.sourcePartial,
     firstOrderKey: `${oneMinute.startMs}`,
     lastOrderKey: `${oneMinute.startMs}`,
   };
@@ -185,6 +213,7 @@ function mergeFinalMinute(target: MutableBar, oneMinute: MutableBar): void {
   target.tradingAmount += oneMinute.tradingAmount;
   target.tradeCount += oneMinute.tradeCount;
   target.componentMinuteCount += 1;
+  target.sourcePartial ||= oneMinute.sourcePartial;
 }
 
 export class IntradayBarAggregator {
@@ -194,10 +223,30 @@ export class IntradayBarAggregator {
     assertConfig(config);
   }
 
+  markDiscontinuity(
+    symbol: string,
+    observedAt: string,
+    marketCountry: MarketCountry = "KR",
+  ): void {
+    const normalizedSymbol = marketSymbolSchema.parse(symbol);
+    const normalizedMarket = MarketCountrySchema.parse(marketCountry);
+    const observedMs = Date.parse(isoTimestampSchema.parse(observedAt));
+    const state = stateFor(this.states, normalizedSymbol, normalizedMarket);
+    const active = Array.from(state.openMinutes.values())
+      .find((bar) => bar.startMs <= observedMs && observedMs < bar.endMs);
+    if (active) {
+      active.sourcePartial = true;
+      state.pendingPartialMinuteStartMs = undefined;
+      return;
+    }
+    state.pendingPartialMinuteStartMs = Math.floor(observedMs / MINUTE_MS) * MINUTE_MS;
+  }
+
   ingest(input: IntradayTradeTick): TickIngestResult {
     const tick = IntradayTradeTickSchema.parse(input);
+    const marketCountry = tick.marketCountry ?? "KR";
     const eventMs = Date.parse(tick.executedAt);
-    const state = stateFor(this.states, tick.symbol);
+    const state = stateFor(this.states, tick.symbol, marketCountry);
     if (state.seenEventIds.has(tick.eventId)) return { accepted: false, reason: "duplicate", updates: [] };
     const currentWatermark = state.maximumEventMs - this.config.allowedLatenessMs;
     if (eventMs < currentWatermark) return { accepted: false, reason: "too_late", updates: [] };
@@ -219,10 +268,12 @@ export class IntradayBarAggregator {
     if (!bar) {
       bar = {
         symbol: tick.symbol,
+        marketCountry,
         intervalMinutes: 1,
         startMs,
         endMs: startMs + MINUTE_MS,
         sessionDate: tick.sessionDate,
+        ...(tick.sessionStartAt === undefined ? {} : { sessionStartMs: Date.parse(tick.sessionStartAt) }),
         open: tick.price,
         high: tick.price,
         low: tick.price,
@@ -231,9 +282,13 @@ export class IntradayBarAggregator {
         tradingAmount: amount,
         tradeCount: 1,
         componentMinuteCount: 1,
+        sourcePartial: state.pendingPartialMinuteStartMs === startMs,
         firstOrderKey: orderKey,
         lastOrderKey: orderKey,
       };
+      if (state.pendingPartialMinuteStartMs !== undefined && startMs >= state.pendingPartialMinuteStartMs) {
+        state.pendingPartialMinuteStartMs = undefined;
+      }
       state.openMinutes.set(key, bar);
     } else {
       if (orderKey < bar.firstOrderKey) {
@@ -258,9 +313,13 @@ export class IntradayBarAggregator {
     return { accepted: true, updates: this.sortUpdates(updates) };
   }
 
-  advanceWatermark(symbol: string, observedAt: string): BarUpdate[] {
+  advanceWatermark(symbol: string, observedAt: string, marketCountry: MarketCountry = "KR"): BarUpdate[] {
     const parsed = isoTimestampSchema.parse(observedAt);
-    const state = stateFor(this.states, marketSymbolSchema.parse(symbol));
+    const state = stateFor(
+      this.states,
+      marketSymbolSchema.parse(symbol),
+      MarketCountrySchema.parse(marketCountry),
+    );
     state.maximumEventMs = Math.max(state.maximumEventMs, Date.parse(parsed));
     const watermark = state.maximumEventMs - this.config.allowedLatenessMs;
     const updates = this.finalizeThrough(state, watermark);
@@ -268,9 +327,13 @@ export class IntradayBarAggregator {
     return this.sortUpdates(updates);
   }
 
-  recentFinalBars(symbol: string, interval: MinuteInterval): AggregatedIntradayBar[] {
+  recentFinalBars(
+    symbol: string,
+    interval: MinuteInterval,
+    marketCountry: MarketCountry = "KR",
+  ): AggregatedIntradayBar[] {
     const parsedSymbol = marketSymbolSchema.parse(symbol);
-    const state = this.states.get(parsedSymbol);
+    const state = this.states.get(stateKey(parsedSymbol, MarketCountrySchema.parse(marketCountry)));
     if (!state) return [];
     const minutes = Number.parseInt(interval, 10);
     return [...(state.finalized.get(minutes) ?? [])];
@@ -289,7 +352,7 @@ export class IntradayBarAggregator {
       for (const interval of this.config.higherIntervalsMinutes) {
         const groups = state.higher.get(interval) ?? new Map<string, MutableBar>();
         state.higher.set(interval, groups);
-        const startMs = Math.floor(minute.startMs / (interval * MINUTE_MS)) * interval * MINUTE_MS;
+        const startMs = intervalStart(minute.startMs, interval * MINUTE_MS, minute.sessionStartMs);
         const higherKey = bucketKey(minute.sessionDate, startMs);
         const existing = groups.get(higherKey);
         if (existing) mergeFinalMinute(existing, minute);

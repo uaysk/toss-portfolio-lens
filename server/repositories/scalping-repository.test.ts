@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type RelationalDatabase, SqliteDatabase } from "../database.js";
 import { ScalpingRepository } from "./scalping-repository.js";
 
 describe("ScalpingRepository", () => {
@@ -63,6 +63,78 @@ describe("ScalpingRepository", () => {
       .toMatchObject([{ source: "kis_ws", state: "final", close: 102, updatedAt: 100 }]);
   });
 
+  it("연결 중간부터 수집한 partial WebSocket 봉보다 완전한 REST 복구 봉을 우선한다", async () => {
+    const repository = await setup();
+    const base = {
+      symbol: "AAPL", marketCountry: "US" as const, intervalMinutes: 1 as const,
+      openTime: "2026-07-21T13:30:00.000Z", closeTime: "2026-07-21T13:31:00.000Z",
+      sessionDate: "2026-07-21", state: "final" as const,
+    };
+    await repository.putBars([{
+      ...base,
+      source: "kis_ws",
+      open: 101,
+      high: 102,
+      low: 101,
+      close: 102,
+      volume: 4,
+      quality: "partial",
+      updatedAt: 200,
+    }]);
+    await repository.putBars([{
+      ...base,
+      source: "kis_rest",
+      open: 100,
+      high: 103,
+      low: 99,
+      close: 102,
+      volume: 20,
+      quality: "recovered",
+      updatedAt: 100,
+    }]);
+    expect(await repository.listBars({ marketCountry: "US", symbol: "AAPL", intervalMinutes: 1 }))
+      .toMatchObject([{
+        source: "kis_rest", quality: "recovered", open: 100, high: 103, low: 99, volume: 20,
+      }]);
+  });
+
+  it("MySQL upsert는 우선순위 predicate 의존 필드를 안전한 순서로 마지막에 갱신한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 1, insertId: 0 });
+    const mysql = {
+      dialect: "mysql" as const,
+      run,
+      query: vi.fn(),
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    await new ScalpingRepository(mysql).putBars([{
+      marketCountry: "US",
+      symbol: "AAPL",
+      intervalMinutes: 1,
+      openTime: "2026-07-21T13:30:00.000Z",
+      closeTime: "2026-07-21T13:31:00.000Z",
+      sessionDate: "2026-07-21",
+      source: "kis_rest",
+      state: "final",
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 1,
+      quality: "recovered",
+      updatedAt: 1,
+    }]);
+    const sql = String(run.mock.calls[0]?.[0]);
+    const updateAt = sql.lastIndexOf("updated_at = IF");
+    const sourceKind = sql.lastIndexOf("source_kind = IF");
+    const qualityStatus = sql.lastIndexOf("quality_status = IF");
+    const barState = sql.lastIndexOf("bar_state = IF");
+    expect(updateAt).toBeGreaterThan(0);
+    expect(updateAt).toBeLessThan(sourceKind);
+    expect(sourceKind).toBeLessThan(qualityStatus);
+    expect(qualityStatus).toBeLessThan(barState);
+  });
+
   it("잘못된 OHLC와 지원하지 않는 분봉은 저장하지 않는다", async () => {
     const repository = await setup();
     const input = {
@@ -113,6 +185,60 @@ describe("ScalpingRepository", () => {
     expect(await repository.listBars({ symbol: "005930", intervalMinutes: 1 })).toMatchObject([{
       close: 101, volume: 12, updatedAt: 200,
     }]);
+  });
+
+  it("같은 종목·시각의 국내와 미국 분봉 및 예측을 marketCountry로 완전히 격리한다", async () => {
+    const repository = await setup();
+    const baseBar = {
+      symbol: "AAPL",
+      intervalMinutes: 1 as const,
+      openTime: "2026-07-21T13:30:00.000Z",
+      closeTime: "2026-07-21T13:31:00.000Z",
+      sessionDate: "2026-07-21",
+      source: "kis_rest" as const,
+      state: "final" as const,
+      open: 100,
+      high: 202,
+      low: 99,
+      volume: 10,
+      quality: "complete" as const,
+      updatedAt: 1,
+    };
+    await repository.putBars([
+      { ...baseBar, marketCountry: "KR", close: 101 },
+      { ...baseBar, marketCountry: "US", close: 201 },
+    ]);
+
+    expect(await repository.listBars({ symbol: "AAPL", intervalMinutes: 1 })).toMatchObject([
+      { marketCountry: "KR", close: 101 },
+    ]);
+    expect(await repository.listBars({ marketCountry: "US", symbol: "AAPL", intervalMinutes: 1 })).toMatchObject([
+      { marketCountry: "US", close: 201 },
+    ]);
+
+    const basePrediction = {
+      symbol: "AAPL",
+      modelName: "model",
+      modelVersion: "v1",
+      inputEndedAt: "2026-07-21T13:30:00.000Z",
+      generatedAt: "2026-07-21T13:30:01.000Z",
+      status: "available" as const,
+      dataQuality: "complete" as const,
+      retrospective: false,
+    };
+    await repository.putPrediction({
+      ...basePrediction, id: "kr-prediction", marketCountry: "KR", payload: { p50: 0.01 },
+    });
+    await repository.putPrediction({
+      ...basePrediction, id: "us-prediction", marketCountry: "US", payload: { p50: 0.02 },
+    });
+
+    expect(await repository.latestPredictions(["AAPL"])).toMatchObject([
+      { id: "kr-prediction", marketCountry: "KR", payload: { p50: 0.01 } },
+    ]);
+    expect(await repository.latestPredictions(["AAPL"], false, "US")).toMatchObject([
+      { id: "us-prediction", marketCountry: "US", payload: { p50: 0.02 } },
+    ]);
   });
 
   it("live와 retrospective 예측을 구분하고 모델 provenance를 보존한다", async () => {

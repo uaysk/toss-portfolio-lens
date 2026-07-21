@@ -125,10 +125,149 @@ async function ensureScalpingVolumeAvailabilityColumn(database: RelationalDataba
   });
 }
 
+async function primaryKeyColumns(database: RelationalDatabase, table: string): Promise<string[]> {
+  if (database.dialect === "sqlite") {
+    const rows = await database.query<{ name: string; pk: number | string }>(`PRAGMA table_info(${table})`);
+    return rows
+      .filter((row) => Number(row.pk) > 0)
+      .sort((left, right) => Number(left.pk) - Number(right.pk))
+      .map((row) => row.name.toLowerCase());
+  }
+  if (database.dialect === "mysql") {
+    const rows = await database.query<{ column_name: string; ordinal_position: number | string }>(`
+      SELECT COLUMN_NAME AS column_name, ORDINAL_POSITION AS ordinal_position
+      FROM information_schema.key_column_usage
+      WHERE table_schema = DATABASE() AND table_name = ? AND constraint_name = 'PRIMARY'
+      ORDER BY ORDINAL_POSITION
+    `, [table]);
+    return rows.map((row) => row.column_name.toLowerCase());
+  }
+  const rows = await database.query<{ column_name: string; ordinal_position: number | string }>(`
+    SELECT key_column.column_name, key_column.ordinal_position
+    FROM information_schema.table_constraints constraint_info
+    JOIN information_schema.key_column_usage key_column
+      ON key_column.constraint_schema = constraint_info.constraint_schema
+      AND key_column.constraint_name = constraint_info.constraint_name
+      AND key_column.table_name = constraint_info.table_name
+    WHERE constraint_info.table_schema = current_schema()
+      AND constraint_info.table_name = ?
+      AND constraint_info.constraint_type = 'PRIMARY KEY'
+    ORDER BY key_column.ordinal_position
+  `, [table]);
+  return rows.map((row) => row.column_name.toLowerCase());
+}
+
+export async function ensureScalpingMarketCountry(database: RelationalDatabase): Promise<void> {
+  await addMissingColumns(database, "portfolio_intraday_bars", {
+    market_country: {
+      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      postgres: "TEXT NOT NULL DEFAULT 'KR'",
+    },
+  });
+  await addMissingColumns(database, "portfolio_scalping_predictions", {
+    market_country: {
+      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      postgres: "TEXT NOT NULL DEFAULT 'KR'",
+    },
+  });
+  if (await hasTable(database, "portfolio_intraday_bars")) {
+    await database.run("UPDATE portfolio_intraday_bars SET market_country = 'KR' WHERE market_country IS NULL OR market_country = ''");
+    const expected = ["market_country", "symbol", "interval_minutes", "open_time"];
+    const current = await primaryKeyColumns(database, "portfolio_intraday_bars");
+    if (current.join(",") !== expected.join(",")) {
+      if (database.dialect === "sqlite") {
+        await database.run("ALTER TABLE portfolio_intraday_bars RENAME TO portfolio_intraday_bars_market_legacy");
+        await database.run(`
+          CREATE TABLE portfolio_intraday_bars (
+            market_country TEXT NOT NULL DEFAULT 'KR',
+            symbol TEXT NOT NULL,
+            interval_minutes INTEGER NOT NULL,
+            open_time TEXT NOT NULL,
+            close_time TEXT NOT NULL,
+            session_date TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            bar_state TEXT NOT NULL,
+            open_price REAL NOT NULL,
+            high_price REAL NOT NULL,
+            low_price REAL NOT NULL,
+            close_price REAL NOT NULL,
+            volume REAL NOT NULL,
+            volume_available INTEGER NOT NULL DEFAULT 1,
+            turnover REAL,
+            trade_count INTEGER,
+            quality_status TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
+          )
+        `);
+        await database.run(`
+          INSERT INTO portfolio_intraday_bars (
+            market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind,
+            bar_state, open_price, high_price, low_price, close_price, volume, volume_available,
+            turnover, trade_count, quality_status, updated_at
+          )
+          SELECT COALESCE(NULLIF(market_country, ''), 'KR'), symbol, interval_minutes, open_time, close_time,
+            session_date, source_kind, bar_state, open_price, high_price, low_price, close_price, volume,
+            volume_available, turnover, trade_count, quality_status, updated_at
+          FROM portfolio_intraday_bars_market_legacy
+        `);
+        await database.run("DROP TABLE portfolio_intraday_bars_market_legacy");
+      } else if (database.dialect === "mysql") {
+        await database.run(`
+          ALTER TABLE portfolio_intraday_bars
+          DROP PRIMARY KEY,
+          ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
+        `);
+      } else {
+        const [primary] = await database.query<{ constraint_name: string }>(`
+          SELECT constraint_name
+          FROM information_schema.table_constraints
+          WHERE table_schema = current_schema() AND table_name = 'portfolio_intraday_bars'
+            AND constraint_type = 'PRIMARY KEY'
+        `);
+        if (primary) {
+          if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(primary.constraint_name)) {
+            throw new Error("Unexpected PostgreSQL primary-key identifier.");
+          }
+          await database.run(`ALTER TABLE portfolio_intraday_bars DROP CONSTRAINT "${primary.constraint_name}"`);
+        }
+        await database.run(`
+          ALTER TABLE portfolio_intraday_bars
+          ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
+        `);
+      }
+    }
+  }
+  if (await hasTable(database, "portfolio_scalping_predictions")) {
+    await database.run("UPDATE portfolio_scalping_predictions SET market_country = 'KR' WHERE market_country IS NULL OR market_country = ''");
+  }
+  await createIndex(
+    database,
+    "idx_portfolio_intraday_market_session",
+    "portfolio_intraday_bars",
+    "market_country, symbol, interval_minutes, session_date, open_time",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_intraday_updated",
+    "portfolio_intraday_bars",
+    "updated_at",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_prediction_market_latest",
+    "portfolio_scalping_predictions",
+    "market_country, symbol, retrospective, generated_at",
+  );
+}
+
 async function createScalpingTables(database: RelationalDatabase): Promise<void> {
   if (database.dialect === "mysql") {
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
+        market_country VARCHAR(2) NOT NULL DEFAULT 'KR',
         symbol VARCHAR(32) NOT NULL,
         interval_minutes INT NOT NULL,
         open_time VARCHAR(40) NOT NULL,
@@ -145,7 +284,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
         trade_count INT NULL,
         quality_status VARCHAR(32) NOT NULL,
         updated_at BIGINT NOT NULL,
-        PRIMARY KEY(symbol, interval_minutes, open_time),
+        PRIMARY KEY(market_country, symbol, interval_minutes, open_time),
         KEY idx_portfolio_intraday_session (symbol, interval_minutes, session_date, open_time),
         KEY idx_portfolio_intraday_updated (updated_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -153,6 +292,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
         prediction_id VARCHAR(64) PRIMARY KEY,
+        market_country VARCHAR(2) NOT NULL DEFAULT 'KR',
         symbol VARCHAR(32) NOT NULL,
         model_name VARCHAR(128) NOT NULL,
         model_version VARCHAR(128) NOT NULL,
@@ -173,6 +313,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   const boolean = database.dialect === "postgres" ? "BOOLEAN" : "INTEGER";
   await database.run(`
     CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
+      market_country TEXT NOT NULL DEFAULT 'KR',
       symbol TEXT NOT NULL,
       interval_minutes INTEGER NOT NULL,
       open_time TEXT NOT NULL,
@@ -189,9 +330,16 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
       trade_count INTEGER,
       quality_status TEXT NOT NULL,
       updated_at ${timestamp} NOT NULL,
-      PRIMARY KEY(symbol, interval_minutes, open_time)
+      PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
     )
   `);
+  await addMissingColumns(database, "portfolio_intraday_bars", {
+    market_country: {
+      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      postgres: "TEXT NOT NULL DEFAULT 'KR'",
+    },
+  });
   await database.run(`
     CREATE INDEX IF NOT EXISTS idx_portfolio_intraday_session
     ON portfolio_intraday_bars(symbol, interval_minutes, session_date, open_time)
@@ -203,6 +351,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   await database.run(`
     CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
       prediction_id TEXT PRIMARY KEY,
+      market_country TEXT NOT NULL DEFAULT 'KR',
       symbol TEXT NOT NULL,
       model_name TEXT NOT NULL,
       model_version TEXT NOT NULL,
@@ -215,6 +364,13 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
       created_at ${timestamp} NOT NULL
     )
   `);
+  await addMissingColumns(database, "portfolio_scalping_predictions", {
+    market_country: {
+      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      postgres: "TEXT NOT NULL DEFAULT 'KR'",
+    },
+  });
   await database.run(`
     CREATE INDEX IF NOT EXISTS idx_portfolio_scalping_prediction_latest
     ON portfolio_scalping_predictions(symbol, retrospective, generated_at)
@@ -508,6 +664,11 @@ const migrations: readonly Migration[] = [
     id: "20260721_007_scalping_volume_availability",
     signature: "portfolio_intraday_bars:volume_available-v1;missing-volume-is-not-zero",
     up: ensureScalpingVolumeAvailabilityColumn,
+  },
+  {
+    id: "20260721_008_scalping_market_country",
+    signature: "portfolio_intraday_bars:market-country-composite-pk-v1;portfolio_scalping_predictions:market-country-latest-v1;legacy-default:KR",
+    up: ensureScalpingMarketCountry,
   },
 ];
 

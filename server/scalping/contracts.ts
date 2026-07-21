@@ -8,6 +8,18 @@ export type MarketProvider = z.infer<typeof MarketProviderSchema>;
 export const MarketCountrySchema = z.enum(["KR", "US"]);
 export type MarketCountry = z.infer<typeof MarketCountrySchema>;
 
+export const UsExchangeSchema = z.enum(["NAS", "NYS", "AMS"]);
+export type UsExchange = z.infer<typeof UsExchangeSchema>;
+
+export function normalizeUsExchange(value: unknown): UsExchange | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toUpperCase().replace(/[\s_-]+/g, "");
+  if (["NAS", "NASDAQ", "XNAS"].includes(normalized)) return "NAS";
+  if (["NYS", "NYSE", "XNYS"].includes(normalized)) return "NYS";
+  if (["AMS", "AMEX", "NYSEAMERICAN", "XASE"].includes(normalized)) return "AMS";
+  return undefined;
+}
+
 export const ScannerCriterionSchema = z.enum(["trading_amount", "volume", "volatility"]);
 export type ScannerCriterion = z.infer<typeof ScannerCriterionSchema>;
 
@@ -54,6 +66,7 @@ export const NormalizedRankingSchema = z.object({
   symbol: marketSymbolSchema,
   name: z.string().trim().max(160).optional(),
   marketCountry: MarketCountrySchema,
+  exchange: UsExchangeSchema.optional(),
   currency: z.string().trim().min(3).max(3),
   rank: z.number().int().positive(),
   rankedAt: isoTimestampSchema,
@@ -126,6 +139,7 @@ export const NormalizedOrderbookSchema = z.object({
   provider: z.enum(["toss", "kis"]),
   symbol: marketSymbolSchema,
   observedAt: isoTimestampSchema,
+  depth: z.enum(["top_of_book", "ten_level"]).optional(),
   asks: z.array(OrderbookLevelSchema).min(1),
   bids: z.array(OrderbookLevelSchema).min(1),
   totalAskQuantity: nonNegativeNumberSchema.optional(),
@@ -176,6 +190,7 @@ export function createScannerRequestSchema(limits: ScannerRequestLimits) {
     throw new Error("Scanner request limits are invalid.");
   }
   return z.object({
+    marketCountry: MarketCountrySchema.default("KR"),
     criterion: ScannerCriterionSchema,
     topCount: z.number().int().min(limits.minimumTopCount).max(limits.maximumTopCount),
   }).strict();
@@ -195,6 +210,7 @@ export type VolatilityInputs = z.infer<typeof VolatilityInputsSchema>;
 export type ScannerCandidate = {
   symbol: string;
   name?: string;
+  exchange?: UsExchange;
   currency: string;
   price?: number;
   changeRateRatio?: number;

@@ -30,14 +30,14 @@ class FakeSocket {
   }
 
   subscribe(subscription: KisSubscription) {
-    const key = `${subscription.trId}:${subscription.symbol}`;
+    const key = `${subscription.trId}:${subscription.exchange ?? ""}:${subscription.symbol}`;
     if (this.subscriptions.has(key)) return false;
     this.subscriptions.set(key, subscription);
     return true;
   }
 
   unsubscribe(subscription: KisSubscription) {
-    return this.subscriptions.delete(`${subscription.trId}:${subscription.symbol}`);
+    return this.subscriptions.delete(`${subscription.trId}:${subscription.exchange ?? ""}:${subscription.symbol}`);
   }
 
   async connect() { this.connectionState = "connected"; }
@@ -70,6 +70,44 @@ describe("aggregateRecoveredBars", () => {
     });
     expect(aggregateRecoveredBars(bars.slice(0, 4), 5)[0]).toMatchObject({ state: "forming", quality: "partial" });
   });
+
+  it("anchors US 60-minute recovery bars at the 09:30 New York regular-session open", () => {
+    const bars = Array.from({ length: 60 }, (_, index) => minute({
+      symbol: "AAPL",
+      sessionDate: "2026-07-21",
+      openTime: new Date(Date.parse("2026-07-21T13:30:00.000Z") + index * 60_000).toISOString(),
+      open: 100 + index,
+      high: 101 + index,
+      low: 99 + index,
+      close: 100.5 + index,
+      volume: 1,
+    }));
+    const result = aggregateRecoveredBars(bars, 60, { sessionStartAt: "2026-07-21T13:30:00.000Z" });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      openTime: "2026-07-21T13:30:00.000Z",
+      closeTime: "2026-07-21T14:30:00.000Z",
+      state: "final",
+      quality: "recovered",
+      volume: 60,
+    });
+  });
+
+  it("does not promote stale source minutes to recovered higher-interval quality", () => {
+    const bars = Array.from({ length: 5 }, (_, index) => minute({
+      openTime: new Date(Date.parse("2026-07-21T00:00:00.000Z") + index * 60_000).toISOString(),
+      open: 100 + index,
+      high: 101 + index,
+      low: 99 + index,
+      close: 100.5 + index,
+      volume: 1,
+      ...(index === 2 ? { quality: "stale" as const } : {}),
+    }));
+    expect(aggregateRecoveredBars(bars, 5)[0]).toMatchObject({
+      state: "final",
+      quality: "partial",
+    });
+  });
 });
 
 describe("ScalpingLiveRuntime", () => {
@@ -95,6 +133,157 @@ describe("ScalpingLiveRuntime", () => {
     second();
     expect(socket.subscriptionCount).toBe(0);
     expect(runtime.state.connection).toBe("idle");
+    runtime.close();
+  });
+
+  it("requires explicit US exchanges and creates HDFS subscriptions without guessing", async () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T14:00:00.000Z"),
+    });
+    const releaseMissing = await runtime.retain(["AAPL"], "US");
+    expect(socket.subscriptionCount).toBe(0);
+    expect(runtime.eventsAfter(0).at(-1)).toMatchObject({
+      type: "diagnostic", symbol: "AAPL", marketCountry: "US",
+      payload: { code: "us-exchange-unavailable", status: "source_unavailable" },
+    });
+    releaseMissing();
+
+    const release = await runtime.retain(["AAPL"], "US", { AAPL: "NAS" });
+    expect(Array.from(socket.subscriptions.values())).toEqual(expect.arrayContaining([
+      { trId: "HDFSCNT0", symbol: "AAPL", exchange: "NAS" },
+      { trId: "HDFSASP0", symbol: "AAPL", exchange: "NAS" },
+    ]));
+    release();
+    expect(socket.subscriptionCount).toBe(0);
+    runtime.close();
+  });
+
+  it("degrades a per-symbol subscription failure and keeps other US symbols live", async () => {
+    const socket = new FakeSocket();
+    const originalSubscribe = socket.subscribe.bind(socket);
+    vi.spyOn(socket, "subscribe").mockImplementation((subscription) => {
+      if (subscription.symbol === "AAPL" && subscription.trId === "HDFSASP0") {
+        throw new Error("configured capacity reached");
+      }
+      return originalSubscribe(subscription);
+    });
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T14:00:00.000Z"),
+    });
+    const release = await runtime.retain(["AAPL", "MSFT"], "US", { AAPL: "NAS", MSFT: "NAS" });
+    expect(Array.from(socket.subscriptions.values())).toEqual(expect.arrayContaining([
+      { trId: "HDFSCNT0", symbol: "MSFT", exchange: "NAS" },
+      { trId: "HDFSASP0", symbol: "MSFT", exchange: "NAS" },
+    ]));
+    expect(Array.from(socket.subscriptions.values()).some(({ symbol }) => symbol === "AAPL")).toBe(false);
+    expect(runtime.eventsAfter(0)).toContainEqual(expect.objectContaining({
+      type: "diagnostic", symbol: "AAPL", marketCountry: "US",
+      payload: expect.objectContaining({ code: "subscription-unavailable", status: "source_unavailable" }),
+    }));
+    release();
+    expect(socket.subscriptionCount).toBe(0);
+    runtime.close();
+  });
+
+  it("removes both feeds and emits provider details when one subscription acknowledgement is rejected", async () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+    });
+    const release = await runtime.retain(["AAPL"], "US", { AAPL: "NAS" });
+    socket.emit({
+      type: "subscription",
+      trId: "HDFSASP0",
+      market: "US",
+      marketCountry: "US",
+      exchange: "NAS",
+      symbol: "AAPL",
+      providerTimestamp: "2026-07-21T14:00:00.000Z",
+      action: "subscribe",
+      accepted: false,
+      code: "OPSP8999",
+      message: "SUBSCRIPTION LIMIT",
+    });
+    expect(socket.subscriptionCount).toBe(0);
+    expect(runtime.state.symbols).toEqual([]);
+    expect(runtime.eventsAfter(0)).toContainEqual(expect.objectContaining({
+      type: "diagnostic",
+      symbol: "AAPL",
+      marketCountry: "US",
+      payload: {
+        code: "subscription-rejected",
+        status: "source_unavailable",
+        trId: "HDFSASP0",
+        providerCode: "OPSP8999",
+        message: "SUBSCRIPTION LIMIT",
+      },
+    }));
+    release();
+    runtime.close();
+  });
+
+  it("ignores a rejected acknowledgement that arrives after the reference was released", async () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")), getOverseasMinutes: vi.fn(),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+    });
+    const release = await runtime.retain(["005930"]);
+    release();
+    const before = runtime.eventsAfter(0).length;
+    socket.emit({
+      type: "subscription",
+      trId: "H0UNCNT0",
+      market: "INTEGRATED",
+      marketCountry: "KR",
+      symbol: "005930",
+      providerTimestamp: "2026-07-21T00:00:00.000Z",
+      action: "subscribe",
+      accepted: false,
+      code: "LATE",
+      message: "late acknowledgement",
+    });
+    expect(runtime.eventsAfter(0)).toHaveLength(before);
+    runtime.close();
+  });
+
+  it("rolls back all subscriptions acquired by a retain when the socket connection fails", async () => {
+    const socket = new FakeSocket();
+    socket.connect = vi.fn().mockRejectedValue(new Error("approval failed"));
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn(),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+    });
+    await expect(runtime.retain(["AAPL", "MSFT"], "US", { AAPL: "NAS", MSFT: "NAS" }))
+      .rejects.toThrow("approval failed");
+    expect(socket.subscriptionCount).toBe(0);
+    expect(runtime.state.symbols).toEqual([]);
     runtime.close();
   });
 
@@ -127,7 +316,7 @@ describe("ScalpingLiveRuntime", () => {
     const received: string[] = [];
     runtime.onEvent((event) => received.push(event.type));
     socket.emit({
-      type: "execution", trId: "H0UNCNT0", market: "INTEGRATED", symbol: "005930",
+      type: "execution", trId: "H0UNCNT0", market: "INTEGRATED", marketCountry: "KR", symbol: "005930",
       eventId: "trade-1", providerTimestamp: "2026-07-21T09:00:10+09:00", receivedAt: "2026-07-21T00:00:10Z",
       sessionDate: "20260721", tradeTime: "090010", price: 100, executionVolume: 2,
       accumulatedVolume: 2, accumulatedTradingAmount: 200, askPrice1: 101, bidPrice1: 99,
@@ -187,16 +376,17 @@ describe("ScalpingLiveRuntime", () => {
     runtime.close();
   });
 
-  it("REST 복구 거래량이 없으면 0을 만들지 않는다", async () => {
+  it("keeps accepted KIS OHLCV rows recovered when a peer provider row is malformed", async () => {
     const socket = new FakeSocket();
     const putBars = vi.fn().mockResolvedValue(undefined);
     const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockResolvedValue({
       items: [{
         symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:00:00+09:00",
-        open: 100, high: 101, low: 99, close: 100, status: "final", source: "kis_rest_recovery",
+        open: 100, high: 101, low: 99, close: 100, volume: 10,
+        status: "final", source: "kis_rest_recovery",
       }],
       quality: "partial",
-      diagnostics: [{ index: 0, code: "malformed-row", fields: ["volume"], message: "volume missing" }],
+      diagnostics: [{ index: 1, code: "malformed-row", fields: ["volume"], message: "peer row excluded" }],
       providerTimestamp: "2026-07-21T00:10:00Z",
     }) }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
@@ -207,8 +397,39 @@ describe("ScalpingLiveRuntime", () => {
     });
     await runtime.recover("005930");
     const stored = putBars.mock.calls[0]![0] as IntradayBarRecord[];
-    expect(stored[0]).not.toHaveProperty("volume");
-    expect(stored[0]).toMatchObject({ close: 100, quality: "partial" });
+    expect(stored[0]).toMatchObject({ close: 100, volume: 10, quality: "recovered" });
+    const higher = putBars.mock.calls[1]![0] as IntradayBarRecord[];
+    expect(higher).toHaveLength(4);
+    expect(higher.every((bar) => bar.quality === "partial")).toBe(true);
+    expect(runtime.eventsAfter(0).at(-1)).toMatchObject({
+      type: "recovery", payload: { status: "partial", recoveredOneMinuteBars: 1 },
+    });
+    runtime.close();
+  });
+
+  it("keeps an accepted but still-forming KIS minute partial", async () => {
+    const socket = new FakeSocket();
+    const putBars = vi.fn().mockResolvedValue(undefined);
+    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockResolvedValue({
+      items: [{
+        symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:10:00+09:00",
+        open: 100, high: 101, low: 99, close: 100, volume: 10,
+        status: "forming", source: "kis_rest_recovery",
+      }],
+      quality: "available",
+      diagnostics: [],
+      providerTimestamp: "2026-07-21T00:10:30Z",
+    }) }, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars, listBars: vi.fn() } as never, {
+      replayEventLimit: 10, disconnectWhenIdle: false, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T00:10:30Z"),
+    });
+    await runtime.recover("005930");
+    expect((putBars.mock.calls[0]![0] as IntradayBarRecord[])[0]).toMatchObject({
+      state: "forming", quality: "partial",
+    });
     runtime.close();
   });
 
@@ -294,7 +515,7 @@ describe("ScalpingLiveRuntime", () => {
     });
     const release = await runtime.retain(["005930"]);
     await vi.advanceTimersByTimeAsync(250);
-    expect(aggregator.advanceWatermark).toHaveBeenCalledWith("005930", "2026-07-21T00:02:00.000Z");
+    expect(aggregator.advanceWatermark).toHaveBeenCalledWith("005930", "2026-07-21T00:02:00.000Z", "KR");
     release();
     await vi.advanceTimersByTimeAsync(250);
     expect(aggregator.advanceWatermark).toHaveBeenCalledTimes(1);

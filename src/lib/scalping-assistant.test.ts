@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SCALPING_MARKET_COUNTRIES,
   SCALPING_PRESETS,
   mergeScalpingStreamEvent,
   normalizeScalpingEvaluationMetrics,
@@ -14,6 +15,7 @@ import {
 } from "./scalping-assistant";
 
 const request: ScalpingRequest = {
+  marketCountry: "KR",
   criterion: "trading_amount",
   topCount: 10,
   interval: "1m",
@@ -22,6 +24,14 @@ const request: ScalpingRequest = {
 };
 
 describe("scalping assistant request validation", () => {
+  it("accepts both supported scan markets and rejects an unknown market", () => {
+    expect(SCALPING_MARKET_COUNTRIES).toEqual(["KR", "US"]);
+    for (const marketCountry of SCALPING_MARKET_COUNTRIES) {
+      expect(validateScalpingRequest({ ...request, marketCountry })).toEqual([]);
+    }
+    expect(validateScalpingRequest({ ...request, marketCountry: "JP" as "KR" })).toContain("스캔 시장이 올바르지 않습니다.");
+  });
+
   it("accepts the complete 5-50 boundary and all four presets", () => {
     expect(SCALPING_PRESETS).toEqual(["trend", "breakout", "mean_reversion", "risk_management"]);
     for (const topCount of [5, 50]) {
@@ -101,12 +111,32 @@ describe("scalping assistant response normalization", () => {
       },
     }, request);
 
-    expect(workspace).toMatchObject({ criterion: "volatility", interval: "5m", layoutColumns: 3, preset: "breakout" });
+    expect(workspace).toMatchObject({ marketCountry: "KR", criterion: "volatility", interval: "5m", layoutColumns: 3, preset: "breakout" });
     expect(workspace.candidates[0]?.bars).toHaveLength(1);
     expect(workspace.candidates[0]?.bars[0]?.sessionVwap).toBe(70020);
     expect(workspace.candidates[0]?.orderbook).toBeUndefined();
     expect(workspace.candidates[0]?.orderbookUnavailableReason).toBe("historical orderbook is not retained");
     expect(workspace.candidates[0]?.forecast).toBeUndefined();
+  });
+
+  it("normalizes an applied US market from either response casing and falls back to the request", () => {
+    const usRequest: ScalpingRequest = { ...request, marketCountry: "US" };
+    expect(normalizeScalpingWorkspace({ workspace: { market_country: "US" } }, request).marketCountry).toBe("US");
+    expect(normalizeScalpingWorkspace({ workspace: { marketCountry: "KR" } }, usRequest).marketCountry).toBe("KR");
+    expect(normalizeScalpingWorkspace({ workspace: {} }, usRequest).marketCountry).toBe("US");
+  });
+
+  it("keeps only canonical US exchange codes from candidate metadata", () => {
+    const usRequest: ScalpingRequest = { ...request, marketCountry: "US" };
+    const workspace = normalizeScalpingWorkspace({ workspace: {
+      marketCountry: "US",
+      candidates: [
+        { symbol: "AAPL", name: "Apple", currency: "USD", exchange: "nas", quality: { status: "available", sources: ["toss"] } },
+        { symbol: "BRK.B", name: "Berkshire", currency: "USD", exchange: "NYSE", quality: { status: "available", sources: ["toss"] } },
+      ],
+    } }, usRequest);
+    expect(workspace.candidates[0]?.exchange).toBe("NAS");
+    expect(workspace.candidates[1]?.exchange).toBeUndefined();
   });
 
   it("normalizes the concrete server bars, Rust technical result, realtime snapshot, and stored prediction", () => {
@@ -176,6 +206,32 @@ describe("scalping assistant response normalization", () => {
     expect(candidate.indicators[0]).toMatchObject({ id: "trend-ema-fast", kind: "ema", status: "available", values: { value: 100.4 } });
   });
 
+  it("never lets available technical data hide scanner or finalized-bar degradation", () => {
+    const workspace = normalizeScalpingWorkspace({ workspace: {
+      candidates: [{
+        symbol: "AAPL", currency: "USD",
+        quality: { status: "partial", reasons: ["warning_status_unavailable"], missing: ["spread"], sources: ["toss"] },
+      }],
+      instruments: [{
+        symbol: "AAPL",
+        bars: [{
+          intervalMinutes: 1, closeTime: "2026-07-21T13:31:00.000Z", state: "final",
+          open: 210, high: 211, low: 209, close: 210.5, quality: "partial",
+        }],
+        technical: { data_quality: { status: "available", reasons: ["indicator_available"], sources: ["rust"] } },
+      }],
+      quality: { status: "partial", sources: ["toss"] },
+    } }, { ...request, marketCountry: "US" });
+
+    expect(workspace.candidates[0]?.bars[0]?.quality).toBe("partial");
+    expect(workspace.candidates[0]?.quality).toMatchObject({
+      status: "partial",
+      reasons: expect.arrayContaining(["warning_status_unavailable", "partial_final_intraday_bar", "indicator_available"]),
+      missing: expect.arrayContaining(["spread", "complete_intraday_bar"]),
+      sources: expect.arrayContaining(["toss", "rust", "derived"]),
+    });
+  });
+
   it("does not invent horizons for an unavailable or missing AI response", () => {
     expect(normalizeScalpingForecasts({ forecast: { status: "unavailable" }, predictions: [] }).size).toBe(0);
     const forecasts = normalizeScalpingForecasts({
@@ -205,6 +261,60 @@ describe("scalping assistant response normalization", () => {
     const merged = mergeScalpingStreamEvent(initial, parsed!);
     expect(merged.candidates[0]?.bars).toEqual([expect.objectContaining({ intervalMinutes: 1, close: 101, status: "forming" })]);
     expect(merged.candidates[0]?.price).toBe(101);
+  });
+
+  it("keeps realtime quality monotone-worst and applies per-symbol provider diagnostics", () => {
+    const initial = normalizeScalpingWorkspace({ workspace: {
+      marketCountry: "US",
+      interval: "1m",
+      preset: "trend",
+      candidates: [{
+        symbol: "AAPL", exchange: "NAS", currency: "USD",
+        quality: { status: "partial", reasons: ["spread_unavailable"], missing: ["spread"], sources: ["toss"] },
+      }],
+      quality: { status: "partial", sources: ["toss"] },
+    } }, { ...request, marketCountry: "US" });
+    const analysis = parseScalpingStreamEvent({
+      type: "analysis",
+      data: {
+        schemaVersion: "scalping-realtime-analysis/v1", interval: "1m", preset: "trend",
+        technical: { instruments: [{ instrument_key: "AAPL", data_quality: { status: "available", sources: ["rust"] } }] },
+      },
+    });
+    const afterAnalysis = mergeScalpingStreamEvent(initial, analysis!);
+    expect(afterAnalysis.candidates[0]?.quality.status).toBe("partial");
+
+    const diagnostic = parseScalpingStreamEvent({
+      type: "diagnostic", symbol: "AAPL",
+      data: { status: "source_unavailable", code: "subscription-rejected", message: "provider rejected subscription" },
+    });
+    const degraded = mergeScalpingStreamEvent(afterAnalysis, diagnostic!);
+    expect(degraded.candidates[0]?.quality).toMatchObject({
+      status: "source_unavailable",
+      reasons: expect.arrayContaining(["subscription-rejected", "provider rejected subscription"]),
+      sources: expect.arrayContaining(["toss", "rust", "kis"]),
+    });
+  });
+
+  it("preserves a final partial stream bar and degrades only its candidate", () => {
+    const initial = normalizeScalpingWorkspace({ workspace: {
+      candidates: [
+        { symbol: "AAPL", currency: "USD", quality: { status: "available", sources: ["toss"] } },
+        { symbol: "MSFT", currency: "USD", quality: { status: "available", sources: ["toss"] } },
+      ],
+      quality: { status: "available", sources: ["toss"] },
+    } }, { ...request, marketCountry: "US" });
+    const event = parseScalpingStreamEvent({
+      type: "bar", symbol: "AAPL",
+      data: {
+        intervalMinutes: 1, closeTime: "2026-07-21T13:31:00.000Z", state: "final",
+        open: 210, high: 211, low: 209, close: 210.5, quality: "partial",
+      },
+    });
+    const merged = mergeScalpingStreamEvent(initial, event!);
+    expect(merged.candidates[0]?.bars[0]).toMatchObject({ status: "final", quality: "partial" });
+    expect(merged.candidates[0]?.quality.status).toBe("partial");
+    expect(merged.candidates[1]?.quality.status).toBe("available");
   });
 
   it.each([
@@ -299,11 +409,20 @@ describe("scalping assistant response normalization", () => {
   });
 
   it("builds the authenticated UI stream route with the applied interval and preset", () => {
-    const url = new URL(scalpingStreamUrl(["005930", "000660"], "30m", "breakout"), "http://localhost");
+    const url = new URL(scalpingStreamUrl(["AAPL", "spy"], "30m", "breakout", "US", { AAPL: "NAS", SPY: "NYS" }), "http://localhost");
     expect(url.pathname).toBe("/api/portfolio/scalping/stream");
-    expect(url.searchParams.get("symbols")).toBe("005930,000660");
+    expect(url.searchParams.get("symbols")).toBe("AAPL,SPY");
     expect(url.searchParams.get("interval")).toBe("30m");
     expect(url.searchParams.get("preset")).toBe("breakout");
+    expect(url.searchParams.get("marketCountry")).toBe("US");
+    expect(url.searchParams.get("exchanges")).toBe("AAPL:NAS,SPY:NYS");
+  });
+
+  it("does not send US exchange routing for a domestic stream or invalid runtime exchange", () => {
+    const domestic = new URL(scalpingStreamUrl(["005930"], "1m", "trend", "KR", { "005930": "NAS" }), "http://localhost");
+    const invalid = new URL(scalpingStreamUrl(["AAPL"], "1m", "trend", "US", { AAPL: "NASDAQ" as "NAS" }), "http://localhost");
+    expect(domestic.searchParams.has("exchanges")).toBe(false);
+    expect(invalid.searchParams.has("exchanges")).toBe(false);
   });
 });
 

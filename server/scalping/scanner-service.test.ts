@@ -136,6 +136,53 @@ describe("ScalpingScanner", () => {
     });
   });
 
+  it("preserves a canonical US exchange while merging providers", () => {
+    const scanner = new ScalpingScanner(config());
+    const result = scanner.scan({ criterion: "volume", topCount: 1 }, snapshot({
+      rankings: [
+        ranking("toss", "AAPL", 1, { marketCountry: "US", currency: "USD", exchange: "NAS" }),
+        ranking("kis", "AAPL", 2, { marketCountry: "US", currency: "USD" }),
+      ],
+      orderbooks: [book("AAPL", 201, 200)],
+    }));
+    expect(result.candidates[0]).toMatchObject({ symbol: "AAPL", currency: "USD", exchange: "NAS" });
+  });
+
+  it("uses the USD trading-amount threshold for US scans", () => {
+    const scanner = new ScalpingScanner(config({
+      minimumTradingAmount: 100_000_000,
+      usMinimumTradingAmount: 1_000_000,
+    }));
+    const baseSnapshot = snapshot({
+      rankings: [ranking("toss", "AAPL", 1, {
+        marketCountry: "US", currency: "USD", exchange: "NAS", tradingAmount: 2_000_000,
+      })],
+      orderbooks: [book("AAPL", 201, 200)],
+    });
+    expect(scanner.scan({ marketCountry: "US", criterion: "trading_amount", topCount: 1 }, baseSnapshot)
+      .candidates.map(({ symbol }) => symbol)).toEqual(["AAPL"]);
+    expect(scanner.scan({ marketCountry: "KR", criterion: "trading_amount", topCount: 1 }, baseSnapshot)
+      .excluded[0]?.filterReasons).toContain("low_trading_amount");
+  });
+
+  it("keeps candidates when investment-warning status is unavailable and marks quality partial", () => {
+    const scanner = new ScalpingScanner(config());
+    const result = scanner.scan({ marketCountry: "US", criterion: "volume", topCount: 1 }, snapshot({
+      rankings: [ranking("toss", "AAPL", 1, { marketCountry: "US", currency: "USD", exchange: "NAS" })],
+      orderbooks: [book("AAPL", 201, 200)],
+      instrumentStates: [state("AAPL", { reasons: ["investment_warning_status_unavailable"] })],
+    }));
+    expect(result.excluded).toEqual([]);
+    expect(result.candidates[0]).toMatchObject({
+      symbol: "AAPL",
+      quality: {
+        status: "partial",
+        missing: expect.arrayContaining(["investment_warning_status"]),
+        reasons: expect.arrayContaining(["investment_warning_status_unavailable"]),
+      },
+    });
+  });
+
   it("filters halted, low-liquidity and excessive-spread candidates without fabricating missing values", () => {
     const scanner = new ScalpingScanner(config({
       minimumVolume: 50,

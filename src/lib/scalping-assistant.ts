@@ -1,10 +1,14 @@
 export const SCALPING_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
+export const SCALPING_MARKET_COUNTRIES = ["KR", "US"] as const;
+export const SCALPING_US_EXCHANGES = ["NAS", "NYS", "AMS"] as const;
 export const SCALPING_INTERVALS = ["1m", "5m", "15m", "30m", "60m"] as const;
 export const SCALPING_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
 const SCALPING_INTERVAL_MINUTES = [1, 5, 15, 30, 60] as const;
 
 export type ScalpingCriterion = typeof SCALPING_CRITERIA[number];
+export type ScalpingMarketCountry = typeof SCALPING_MARKET_COUNTRIES[number];
+export type ScalpingUsExchange = typeof SCALPING_US_EXCHANGES[number];
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
 export type ScalpingIntervalMinutes = typeof SCALPING_INTERVAL_MINUTES[number];
 export type ScalpingPreset = typeof SCALPING_PRESETS[number];
@@ -12,6 +16,7 @@ export type ScalpingSignalState = "watch" | "entry_candidate" | "hold" | "exit_c
 export type ScalpingAvailability = "available" | "partial" | "insufficient_history" | "source_unavailable" | "stale" | "unavailable" | "volume_unavailable" | "unsupported_instrument";
 
 export type ScalpingRequest = {
+  marketCountry: ScalpingMarketCountry;
   criterion: ScalpingCriterion;
   topCount: number;
   interval: ScalpingInterval;
@@ -51,6 +56,7 @@ export type ScalpingBar = {
   volume?: number;
   tradingAmount?: number;
   status: "forming" | "final" | "unknown";
+  quality?: "complete" | "partial" | "recovered" | "stale";
   sessionVwap?: number;
   anchoredVwap?: number;
   indicatorValues: Record<string, number>;
@@ -175,6 +181,7 @@ export type ScalpingIndicatorSummary = {
 
 export type ScalpingCandidate = {
   symbol: string;
+  exchange?: ScalpingUsExchange;
   name: string;
   currency: string;
   rank?: number;
@@ -203,6 +210,7 @@ export type ScalpingCandidate = {
 
 export type ScalpingWorkspace = {
   generatedAt?: string;
+  marketCountry: ScalpingMarketCountry;
   criterion: ScalpingCriterion;
   requestedTopCount: number;
   interval: ScalpingInterval;
@@ -292,6 +300,10 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
   return typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
 }
 
+function optionalOneOf<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === "string" && allowed.includes(value as T) ? value as T : undefined;
+}
+
 function timestamp(value: unknown): string | undefined {
   const candidate = string(value);
   return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
@@ -325,6 +337,44 @@ function quality(value: unknown, fallback: ScalpingAvailability = "unavailable")
   };
 }
 
+const QUALITY_SEVERITY: Record<ScalpingAvailability, number> = {
+  available: 0,
+  partial: 1,
+  stale: 2,
+  insufficient_history: 3,
+  volume_unavailable: 3,
+  unavailable: 4,
+  source_unavailable: 4,
+  unsupported_instrument: 4,
+};
+
+function mergeQualities(...values: readonly (ScalpingQuality | undefined)[]): ScalpingQuality {
+  const present = values.filter((value): value is ScalpingQuality => value !== undefined);
+  if (!present.length) return quality(undefined);
+  const worst = present.reduce((selected, candidate) => (
+    QUALITY_SEVERITY[candidate.status] > QUALITY_SEVERITY[selected.status] ? candidate : selected
+  ));
+  return {
+    status: worst.status,
+    reasons: Array.from(new Set(present.flatMap((item) => item.reasons))),
+    missing: Array.from(new Set(present.flatMap((item) => item.missing))),
+    sources: Array.from(new Set(present.flatMap((item) => item.sources))),
+    observedAt: present.map((item) => item.observedAt).filter((item): item is string => Boolean(item)).sort().at(-1),
+  };
+}
+
+function incompleteBarQuality(bars: readonly ScalpingBar[]): ScalpingQuality | undefined {
+  const incomplete = bars.filter((bar) => bar.status === "final" && (bar.quality === "partial" || bar.quality === "stale"));
+  if (!incomplete.length) return undefined;
+  const stale = incomplete.some((bar) => bar.quality === "stale");
+  return {
+    status: stale ? "stale" : "partial",
+    reasons: [stale ? "stale_final_intraday_bar" : "partial_final_intraday_bar"],
+    missing: ["complete_intraday_bar"],
+    sources: ["derived"],
+  };
+}
+
 function normalizeBar(value: unknown): ScalpingBar | undefined {
   const source = record(value);
   const rawInterval = valueOf(source, "intervalMinutes", "interval_minutes");
@@ -347,6 +397,10 @@ function normalizeBar(value: unknown): ScalpingBar | undefined {
     volume: number(valueOf(source, "volume"), 0),
     tradingAmount: number(valueOf(source, "tradingAmount", "trading_amount", "turnover", "amount"), 0),
     status: oneOf(valueOf(source, "status", "state"), ["forming", "final", "unknown"] as const, boolean(valueOf(source, "complete")) === true ? "final" : "unknown"),
+    quality: optionalOneOf(
+      valueOf(source, "quality", "qualityStatus", "quality_status"),
+      ["complete", "partial", "recovered", "stale"] as const,
+    ),
     sessionVwap: number(valueOf(source, "sessionVwap", "session_vwap"), 0),
     anchoredVwap: number(valueOf(source, "anchoredVwap", "anchored_vwap"), 0),
     indicatorValues: {},
@@ -731,15 +785,16 @@ function normalizeCandidate(value: unknown, instrumentValue?: unknown): Scalping
   if (normalizedBook && technical.orderbookImbalance !== undefined) normalizedBook.imbalance = technical.orderbookImbalance;
   const scannerQuality = quality(valueOf(instrument, "quality", "dataQuality", "data_quality")
     ?? valueOf(source, "quality", "dataQuality", "data_quality"), "partial");
-  const combinedQuality = technical.quality ? {
-    status: technical.quality.status,
-    reasons: Array.from(new Set([...scannerQuality.reasons, ...technical.quality.reasons])),
-    missing: Array.from(new Set([...scannerQuality.missing, ...technical.quality.missing])),
-    sources: scannerQuality.sources,
-    observedAt: scannerQuality.observedAt,
-  } : scannerQuality;
+  const combinedQuality = mergeQualities(scannerQuality, technical.quality, incompleteBarQuality(dedupedBars));
+  const rawExchange = string(valueOf(source, "exchange", "exchangeCode", "exchange_code"))
+    ?? string(valueOf(instrument, "exchange", "exchangeCode", "exchange_code"))
+    ?? string(valueOf(metadata, "exchange", "exchangeCode", "exchange_code"));
+  const exchange = rawExchange
+    ? SCALPING_US_EXCHANGES.find((candidate) => candidate === rawExchange.toUpperCase())
+    : undefined;
   return {
     symbol: symbol.toUpperCase(),
+    exchange,
     name: string(valueOf(source, "name")) ?? string(valueOf(instrument, "name")) ?? string(valueOf(metadata, "name")) ?? symbol.toUpperCase(),
     currency: string(valueOf(source, "currency")) ?? string(valueOf(instrument, "currency")) ?? string(valueOf(metadata, "currency")) ?? "KRW",
     rank,
@@ -851,6 +906,7 @@ export function normalizeScalpingWorkspace(value: unknown, request: ScalpingRequ
     : request.layoutColumns;
   return {
     generatedAt: timestamp(valueOf(workspace, "generatedAt", "generated_at")),
+    marketCountry: oneOf(valueOf(workspace, "marketCountry", "market_country"), SCALPING_MARKET_COUNTRIES, request.marketCountry),
     criterion: oneOf(valueOf(workspace, "criterion"), SCALPING_CRITERIA, request.criterion),
     requestedTopCount: number(valueOf(workspace, "requestedTopCount", "requested_top_count"), 1) ?? request.topCount,
     interval: oneOf(valueOf(workspace, "interval"), SCALPING_INTERVALS, request.interval),
@@ -980,12 +1036,23 @@ export function scalpingStreamUrl(
   symbols: string[],
   interval: ScalpingInterval,
   preset: ScalpingPreset,
+  marketCountry: ScalpingMarketCountry,
+  exchangeBySymbol: Readonly<Record<string, ScalpingUsExchange | undefined>> = {},
 ): string {
+  const normalizedSymbols = symbols.map((symbol) => symbol.toUpperCase());
   const query = new URLSearchParams({
-    symbols: symbols.map((symbol) => symbol.toUpperCase()).join(","),
+    symbols: normalizedSymbols.join(","),
     interval,
     preset,
+    marketCountry,
   });
+  if (marketCountry === "US") {
+    const exchanges = normalizedSymbols.flatMap((symbol) => {
+      const exchange = exchangeBySymbol[symbol] ?? exchangeBySymbol[symbol.toLowerCase()];
+      return exchange && SCALPING_US_EXCHANGES.includes(exchange) ? [`${symbol}:${exchange}`] : [];
+    });
+    if (exchanges.length) query.set("exchanges", exchanges.join(","));
+  }
   return `/api/portfolio/scalping/stream?${query.toString()}`;
 }
 
@@ -1023,13 +1090,7 @@ function mergeRealtimeAnalysis(workspace: ScalpingWorkspace, event: ScalpingStre
     const orderbook = candidate.orderbook && normalized.orderbookImbalance !== undefined
       ? { ...candidate.orderbook, imbalance: normalized.orderbookImbalance }
       : candidate.orderbook;
-    const nextQuality = normalized.quality ? {
-      status: normalized.quality.status,
-      reasons: Array.from(new Set([...candidate.quality.reasons, ...normalized.quality.reasons])),
-      missing: Array.from(new Set([...candidate.quality.missing, ...normalized.quality.missing])),
-      sources: Array.from(new Set([...candidate.quality.sources, ...normalized.quality.sources])),
-      observedAt: normalized.quality.observedAt ?? candidate.quality.observedAt,
-    } : candidate.quality;
+    const nextQuality = mergeQualities(candidate.quality, normalized.quality, incompleteBarQuality(normalized.bars));
     return {
       ...candidate,
       bars: normalized.bars,
@@ -1047,8 +1108,30 @@ function mergeRealtimeAnalysis(workspace: ScalpingWorkspace, event: ScalpingStre
 }
 
 export function mergeScalpingStreamEvent(workspace: ScalpingWorkspace, event: ScalpingStreamEvent): ScalpingWorkspace {
-  if (event.type === "heartbeat" || event.type === "connection" || event.type === "recovery" || event.type === "diagnostic") return workspace;
+  if (event.type === "heartbeat" || event.type === "connection") return workspace;
+  if (event.type === "recovery" || event.type === "diagnostic") {
+    if (!event.symbol) return workspace;
+    const source = record(event.value);
+    const fallback: ScalpingAvailability = event.type === "diagnostic" ? "source_unavailable" : "partial";
+    const eventQuality = quality({
+      status: valueOf(source, "status") ?? fallback,
+      reasons: [
+        string(valueOf(source, "code")),
+        string(valueOf(source, "message", "reason")),
+      ].filter((item): item is string => Boolean(item)),
+      sources: ["kis"],
+      observedAt: valueOf(source, "observedAt", "observed_at"),
+    }, fallback);
+    let changed = false;
+    const candidates = workspace.candidates.map((candidate) => {
+      if (candidate.symbol !== event.symbol) return candidate;
+      changed = true;
+      return { ...candidate, quality: mergeQualities(candidate.quality, eventQuality) };
+    });
+    return changed ? { ...workspace, candidates } : workspace;
+  }
   if (event.type === "snapshot") return normalizeScalpingWorkspace({ workspace: event.value }, {
+    marketCountry: workspace.marketCountry,
     criterion: workspace.criterion,
     topCount: workspace.requestedTopCount,
     interval: workspace.interval,
@@ -1068,7 +1151,12 @@ export function mergeScalpingStreamEvent(workspace: ScalpingWorkspace, event: Sc
       changed = true;
       const bars = [...candidate.bars.filter((item) => item.timestamp !== bar.timestamp), bar]
         .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
-      return { ...candidate, bars, price: bar.close };
+      return {
+        ...candidate,
+        bars,
+        price: bar.close,
+        quality: mergeQualities(candidate.quality, incompleteBarQuality(bars)),
+      };
     }
     changed = true;
     if (event.type === "candidate") return normalizeCandidate({ ...candidate, ...source }, source) ?? candidate;
@@ -1094,6 +1182,7 @@ export function mergeScalpingStreamEvent(workspace: ScalpingWorkspace, event: Sc
 
 export function validateScalpingRequest(value: ScalpingRequest): string[] {
   const issues: string[] = [];
+  if (!SCALPING_MARKET_COUNTRIES.includes(value.marketCountry)) issues.push("스캔 시장이 올바르지 않습니다.");
   if (!SCALPING_CRITERIA.includes(value.criterion)) issues.push("스캐너 기준이 올바르지 않습니다.");
   if (!Number.isInteger(value.topCount) || value.topCount < 5 || value.topCount > 50) issues.push("표시 종목 수는 5~50의 정수여야 합니다.");
   if (!SCALPING_INTERVALS.includes(value.interval)) issues.push("분봉 간격이 올바르지 않습니다.");

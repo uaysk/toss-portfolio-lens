@@ -39,6 +39,7 @@ import { formatMoney, formatQuantity } from "@/lib/format";
 import {
   SCALPING_CRITERIA,
   SCALPING_INTERVALS,
+  SCALPING_MARKET_COUNTRIES,
   SCALPING_PRESETS,
   mergeScalpingStreamEvent,
   normalizeScalpingEvaluationMetrics,
@@ -57,12 +58,14 @@ import {
   type ScalpingEvaluationMetric,
   type ScalpingForecast,
   type ScalpingInterval,
+  type ScalpingMarketCountry,
   type ScalpingPreset,
   type ScalpingRequest,
   type ScalpingSignal,
   type ScalpingStatus,
   type ScalpingTradeMarker,
   type ScalpingWorkspace,
+  type ScalpingUsExchange,
 } from "@/lib/scalping-assistant";
 import { loadAdvancedArtifact, loadAdvancedRunSnapshot } from "@/lib/advanced-analysis";
 import { cn } from "@/lib/utils";
@@ -70,6 +73,7 @@ import type { Portfolio, Theme } from "@/types";
 
 const SCALPING_CHART_SYNC_ID = "scalping-assistant-shared-time";
 const DEFAULT_REQUEST: ScalpingRequest = {
+  marketCountry: "KR",
   criterion: "trading_amount",
   topCount: 10,
   interval: "1m",
@@ -81,6 +85,11 @@ const CRITERION_LABELS: Record<ScalpingCriterion, string> = {
   trading_amount: "거래대금",
   volume: "거래량",
   volatility: "변동성",
+};
+
+const MARKET_LABELS: Record<ScalpingMarketCountry, { label: string; detail: string }> = {
+  KR: { label: "국내", detail: "KRW · 한국 장" },
+  US: { label: "미국", detail: "USD · 미국 정규장" },
 };
 
 const PRESET_LABELS: Record<ScalpingPreset, { label: string; description: string }> = {
@@ -235,6 +244,34 @@ function Metric({ label, value }: { label: string; value: string }) {
       <dt className="truncate text-[9px] font-black text-muted-foreground">{label}</dt>
       <dd className="mt-1 truncate text-xs font-black" title={value}>{value}</dd>
     </div>
+  );
+}
+
+export function ScalpingMarketSelector({
+  value,
+  onChange,
+}: {
+  value: ScalpingMarketCountry;
+  onChange: (marketCountry: ScalpingMarketCountry) => void;
+}) {
+  return (
+    <fieldset className="min-w-0 rounded-[20px] bg-card p-3" data-scalping-market-selector>
+      <legend className="px-1 text-[9px] font-black text-muted-foreground">스캔 시장</legend>
+      <div className="mt-1 grid grid-cols-2 gap-1">
+        {SCALPING_MARKET_COUNTRIES.map((marketCountry) => (
+          <button
+            key={marketCountry}
+            type="button"
+            aria-label={`${MARKET_LABELS[marketCountry].label} 상장 종목 스캔`}
+            aria-pressed={value === marketCountry}
+            onClick={() => onChange(marketCountry)}
+            className={cn("min-w-0 rounded-full px-2 py-2 text-[10px] font-black", value === marketCountry ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground")}
+          >
+            {MARKET_LABELS[marketCountry].label}
+          </button>
+        ))}
+      </div>
+    </fieldset>
   );
 }
 
@@ -455,7 +492,7 @@ const ScalpingCandidateCard = memo(function ScalpingCandidateCard({ candidate, t
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <span className="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-[10px] font-black text-primary-foreground">{candidate.rank ?? "–"}</span>
-            <div className="min-w-0"><h3 className="truncate text-base font-black">{candidate.name}</h3><p className="truncate text-[9px] font-bold text-muted-foreground">{candidate.symbol} · {candidate.currency}</p></div>
+            <div className="min-w-0"><h3 className="truncate text-base font-black">{candidate.name}</h3><p className="truncate text-[9px] font-bold text-muted-foreground">{candidate.symbol}{candidate.exchange ? ` · ${candidate.exchange}` : ""} · {candidate.currency}</p></div>
             {latest?.status === "forming" ? <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/12 px-2 py-1 text-[8px] font-black text-rose-600"><Radio className="size-2.5" />진행 중 봉</span> : null}
           </div>
         </div>
@@ -578,11 +615,13 @@ function StatusBanner({ status }: { status: ScalpingStatus }) {
 function EvaluationPanel({
   candidates,
   interval,
+  marketCountry,
   disabled,
   onUnauthorized,
 }: {
   candidates: ScalpingCandidate[];
   interval: ScalpingInterval;
+  marketCountry: ScalpingMarketCountry;
   disabled: boolean;
   onUnauthorized: () => void;
 }) {
@@ -602,6 +641,7 @@ function EvaluationPanel({
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({
+          marketCountry,
           symbols: candidates.map(({ symbol }) => symbol),
           interval,
           evaluation: { walkForward: true, retrospective: true, ...costs },
@@ -788,15 +828,21 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   const workspaceInterval = workspace?.interval;
   const workspacePreset = workspace?.preset;
   const workspaceCriterion = workspace?.criterion;
+  const workspaceMarketCountry = workspace?.marketCountry;
   const workspaceTopCount = workspace?.requestedTopCount;
   const workspaceLayoutColumns = workspace?.layoutColumns;
+  const workspaceExchangeKey = workspace?.candidates.flatMap((candidate) => candidate.exchange ? [`${candidate.symbol}:${candidate.exchange}`] : []).join(",") ?? "";
+  const workspaceExchanges = Object.fromEntries(workspaceExchangeKey.split(",").flatMap((entry) => {
+    const [symbol, exchange] = entry.split(":");
+    return symbol && exchange ? [[symbol, exchange as ScalpingUsExchange] as const] : [];
+  }));
   useEffect(() => {
-    if (!status?.enabled || !symbolsKey || !workspaceInterval || !workspacePreset || !workspaceCriterion
+    if (!status?.enabled || !symbolsKey || !workspaceInterval || !workspacePreset || !workspaceCriterion || !workspaceMarketCountry
       || !workspaceTopCount || !workspaceLayoutColumns || typeof EventSource === "undefined") {
       setStreamState(status?.enabled && symbolsKey ? "unavailable" : "idle");
       return;
     }
-    const stream = new EventSource(scalpingStreamUrl(symbolsKey.split(","), workspaceInterval, workspacePreset));
+    const stream = new EventSource(scalpingStreamUrl(symbolsKey.split(","), workspaceInterval, workspacePreset, workspaceMarketCountry, workspaceExchanges));
     let recoveryRefresh: number | undefined;
     setStreamState("reconnecting");
     stream.onopen = () => setStreamState("connected");
@@ -815,6 +861,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
             if (payload.status === "available" || payload.status === "partial") {
               if (recoveryRefresh !== undefined) window.clearTimeout(recoveryRefresh);
               recoveryRefresh = window.setTimeout(() => void runWorkspace({
+                marketCountry: workspaceMarketCountry,
                 criterion: workspaceCriterion,
                 topCount: workspaceTopCount,
                 interval: workspaceInterval,
@@ -844,8 +891,10 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     status?.enabled,
     symbolsKey,
     workspaceCriterion,
+    workspaceExchangeKey,
     workspaceInterval,
     workspaceLayoutColumns,
+    workspaceMarketCountry,
     workspacePreset,
     workspaceTopCount,
   ]);
@@ -858,7 +907,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       const response = await fetch("/api/portfolio/scalping/forecast", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: workspace.candidates.map(({ symbol }) => symbol), interval: request.interval }),
+        body: JSON.stringify({ marketCountry: workspace.marketCountry, symbols: workspace.candidates.map(({ symbol }) => symbol), interval: workspace.interval }),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -880,6 +929,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   };
 
   const setCriterion = (criterion: ScalpingCriterion) => setRequest((current) => ({ ...current, criterion }));
+  const setMarketCountry = (marketCountry: ScalpingMarketCountry) => setRequest((current) => ({ ...current, marketCountry }));
   const setInterval = (interval: ScalpingInterval) => setRequest((current) => ({ ...current, interval }));
   const setPreset = (preset: ScalpingPreset) => setRequest((current) => ({ ...current, preset }));
 
@@ -890,7 +940,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
           <div className="max-w-3xl">
             <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5 text-[10px] font-black"><Activity className="size-3.5" />INTRADAY DECISION SUPPORT</div>
             <h2 id="scalping-assistant-title" className="text-[clamp(1.7rem,4vw,3rem)] font-black tracking-[-0.055em]">실시간 후보와 위험을 한눈에.</h2>
-            <p className="mt-3 max-w-2xl text-xs leading-5 text-primary-foreground/65">토스증권 랭킹과 한국투자증권 체결·호가를 결합하고, Rust 지표와 공개 AI 전망을 보조 정보로 보여줍니다.</p>
+            <p className="mt-3 max-w-2xl text-xs leading-5 text-primary-foreground/65">선택한 국내·미국 시장의 토스증권·한국투자증권 공급 데이터를 사용하고, Rust 지표와 공개 AI 전망을 보조 정보로 보여줍니다.</p>
           </div>
           <div className="rounded-[20px] bg-white/10 p-4 text-[10px] leading-5 text-primary-foreground/75" role="note">
             <p className="font-black text-primary-foreground">주문 기능 없음 · 수익 보장 아님</p>
@@ -910,11 +960,20 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
           </div>
         </div>
 
-        <div className="mt-4 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="mt-4 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          <ScalpingMarketSelector value={request.marketCountry} onChange={setMarketCountry} />
           <fieldset className="min-w-0 rounded-[20px] bg-card p-3 sm:col-span-2"><legend className="px-1 text-[9px] font-black text-muted-foreground">순위 기준</legend><div className="mt-1 grid grid-cols-3 gap-1">{SCALPING_CRITERIA.map((criterion) => <button key={criterion} type="button" aria-pressed={request.criterion === criterion} onClick={() => setCriterion(criterion)} className={cn("min-w-0 rounded-full px-2 py-2 text-[10px] font-black", request.criterion === criterion ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground")}>{CRITERION_LABELS[criterion]}</button>)}</div></fieldset>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">표시 종목 수 (5~50)</span><Input aria-label="표시 종목 수" type="number" min={5} max={50} step={1} value={request.topCount} onChange={(event) => setRequest((current) => ({ ...current, topCount: Number(event.target.value) }))} aria-invalid={request.topCount < 5 || request.topCount > 50 || !Number.isInteger(request.topCount)} className="h-10 bg-secondary text-xs" /></label>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">분봉</span><Select value={request.interval} onValueChange={(value) => setInterval(value as ScalpingInterval)}><SelectTrigger aria-label="분봉 간격" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{SCALPING_INTERVALS.map((interval) => <SelectItem key={interval} value={interval}>{interval.replace("m", "분봉")}</SelectItem>)}</SelectContent></Select></label>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">차트 열</span><Select value={String(request.layoutColumns)} onValueChange={(value) => setRequest((current) => ({ ...current, layoutColumns: Number(value) as 1 | 2 | 3 | 4 }))}><SelectTrigger aria-label="차트 열 수" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{([1, 2, 3, 4] as const).map((columns) => <SelectItem key={columns} value={String(columns)}>{columns}열</SelectItem>)}</SelectContent></Select></label>
+        </div>
+
+        <div className="mt-3 rounded-2xl bg-card px-4 py-3 text-[9px] leading-4 text-muted-foreground" data-scalping-market-guidance={request.marketCountry} role="note">
+          {request.marketCountry === "US" ? (
+            <><strong className="text-foreground">미국 상장 종목 · USD · 미국 정규장(09:30–16:00 ET)</strong><span> — 현재 분석은 정규장 기준이며 프리·애프터마켓은 분석 범위 밖입니다. 실시간 호가는 제공 범위 내 최우선 매수·매도(1호가)일 수 있으며, 확장 세션·전체 호가 깊이·보존되지 않은 과거 호가는 partial 또는 unavailable로 표시합니다.</span></>
+          ) : (
+            <><strong className="text-foreground">국내 상장 종목 · KRW · 한국 장</strong><span> — 장 세션과 체결·호가 품질은 공급자 응답 기준으로 표시합니다.</span></>
+          )}
         </div>
 
         <fieldset className="mt-3 min-w-0"><legend className="text-[9px] font-black text-muted-foreground">지표 프리셋</legend><div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">{SCALPING_PRESETS.map((preset) => <button key={preset} type="button" aria-pressed={request.preset === preset} onClick={() => setPreset(preset)} className={cn("min-w-0 rounded-[18px] p-3 text-left transition-colors", request.preset === preset ? "bg-primary text-primary-foreground" : "bg-card")}><span className="block text-[11px] font-black">{PRESET_LABELS[preset].label}</span><span className={cn("mt-1 block truncate text-[9px]", request.preset === preset ? "text-primary-foreground/60" : "text-muted-foreground")}>{PRESET_LABELS[preset].description}</span></button>)}</div></fieldset>
@@ -931,7 +990,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       {workspace ? (
         <Card className="min-w-0 bg-secondary p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">LIVE BOARD</p><h2 className="mt-1 text-lg font-black">{CRITERION_LABELS[workspace.criterion]} 상위 {workspace.candidates.length}종목</h2><p className="mt-1 text-[9px] text-muted-foreground">생성 {formatTimestamp(workspace.generatedAt, true)} · {workspace.interval} · {PRESET_LABELS[workspace.preset].label}</p></div>
+            <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">LIVE BOARD</p><h2 className="mt-1 text-lg font-black">{MARKET_LABELS[workspace.marketCountry].label} · {CRITERION_LABELS[workspace.criterion]} 상위 {workspace.candidates.length}종목</h2><p className="mt-1 text-[9px] text-muted-foreground">생성 {formatTimestamp(workspace.generatedAt, true)} · {workspace.interval} · {PRESET_LABELS[workspace.preset].label} · {MARKET_LABELS[workspace.marketCountry].detail}</p></div>
             <span className={cn("rounded-full px-3 py-1.5 text-[9px] font-black", availabilityClass(workspace.quality.status))}>batch {workspace.quality.status}</span>
           </div>
           {!workspace.candidates.length ? <div className="mt-4 grid min-h-[260px] place-items-center rounded-[24px] bg-card px-5 text-center"><div><ShieldAlert className="mx-auto size-6 text-muted-foreground" /><p className="mt-3 font-black">표시 가능한 후보가 없습니다.</p><p className="mt-1 text-xs text-muted-foreground">필터, 공급자 상태와 데이터 품질 사유를 확인해 주세요.</p></div></div> : (
@@ -942,7 +1001,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         </Card>
       ) : loading ? <Card className="grid min-h-[360px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">후보와 분봉을 batch로 불러오는 중</p></div></Card> : null}
 
-      <EvaluationPanel candidates={workspace?.candidates ?? []} interval={request.interval} disabled={!status?.enabled || loading} onUnauthorized={onUnauthorized} />
+      <EvaluationPanel candidates={workspace?.candidates ?? []} interval={workspace?.interval ?? request.interval} marketCountry={workspace?.marketCountry ?? request.marketCountry} disabled={!status?.enabled || loading} onUnauthorized={onUnauthorized} />
 
       <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" role="note">
         <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><p><strong className="text-foreground">안내:</strong> 이 화면은 매수·매도 주문 지시가 아닌 의사결정 보조입니다. AI는 거래 결정을 내리지 않으며, 예측이 없거나 과거 호가가 보존되지 않은 경우 unavailable로 표시합니다. 투자 결과와 손실은 사용자에게 귀속됩니다.</p></div>

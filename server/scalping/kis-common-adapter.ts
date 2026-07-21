@@ -13,6 +13,7 @@ import {
 import type {
   KisFluctuationRankItem,
   KisMinuteBar,
+  KisOverseasRankItem,
   KisRestResult,
   KisVolumeRankItem,
 } from "./kis-rest-client.js";
@@ -81,6 +82,28 @@ export function adaptKisFluctuationRankings(
   };
 }
 
+export function adaptKisOverseasRankings(
+  result: KisRestResult<KisOverseasRankItem>,
+): KisCommonResult<NormalizedRanking> {
+  return {
+    items: result.items.map((item) => NormalizedRankingSchema.parse({
+      provider: "kis",
+      symbol: item.symbol,
+      name: item.name,
+      marketCountry: "US",
+      exchange: item.exchange,
+      currency: "USD",
+      rank: item.rank,
+      rankedAt: result.providerTimestamp,
+      price: item.price,
+      changeRateRatio: item.changeRate / 100,
+      volume: item.accumulatedVolume,
+      tradingAmount: item.accumulatedTradingAmount,
+    })),
+    quality: quality(result),
+  };
+}
+
 export function adaptKisMinuteBars(result: KisRestResult<KisMinuteBar>): KisCommonResult<NormalizedMinuteCandle> {
   return {
     items: result.items.map((bar) => NormalizedMinuteCandleSchema.parse({
@@ -95,6 +118,7 @@ export function adaptKisMinuteBars(result: KisRestResult<KisMinuteBar>): KisComm
       low: bar.low,
       close: bar.close,
       volume: bar.volume,
+      ...(bar.tradingAmount === undefined ? {} : { tradingAmount: bar.tradingAmount }),
     })),
     quality: quality(result),
   };
@@ -121,6 +145,7 @@ export function adaptKisOrderbook(event: KisOrderbookEvent): NormalizedOrderbook
     provider: "kis",
     symbol: event.symbol,
     observedAt: event.providerTimestamp,
+    depth: event.depth,
     asks: event.asks.map(({ price, quantity }) => ({ price, quantity })).sort((left, right) => left.price - right.price),
     bids: event.bids.map(({ price, quantity }) => ({ price, quantity })).sort((left, right) => right.price - left.price),
     totalAskQuantity: event.totalAskQuantity,

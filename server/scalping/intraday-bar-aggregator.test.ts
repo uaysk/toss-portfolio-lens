@@ -64,6 +64,63 @@ describe("IntradayBarAggregator", () => {
     expect(aggregator.recentFinalBars("005930", "1m")[0]).toMatchObject({ low: 100, close: 100 });
   });
 
+  it("marks the first minute after a connection discontinuity partial", () => {
+    const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
+    aggregator.markDiscontinuity("AAPL", "2026-07-21T13:30:30.000Z", "US");
+    aggregator.ingest({
+      symbol: "AAPL",
+      marketCountry: "US",
+      eventId: "first-after-connect",
+      executedAt: "2026-07-21T13:30:30.000Z",
+      sessionDate: "2026-07-21",
+      sessionStartAt: "2026-07-21T13:30:00.000Z",
+      price: 200,
+      quantity: 1,
+    });
+    aggregator.advanceWatermark("AAPL", "2026-07-21T13:31:00.000Z", "US");
+    expect(aggregator.recentFinalBars("AAPL", "1m", "US")[0]).toMatchObject({
+      startAt: "2026-07-21T13:30:00.000Z",
+      quality: "partial",
+      missingMinuteCount: 0,
+    });
+  });
+
+  it("does not carry a discontinuity marker across hours without trades", () => {
+    const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
+    aggregator.markDiscontinuity("AAPL", "2026-07-21T09:30:10.000Z", "US");
+    aggregator.ingest({
+      symbol: "AAPL",
+      marketCountry: "US",
+      eventId: "hours-after-connect",
+      executedAt: "2026-07-21T13:30:01.000Z",
+      sessionDate: "2026-07-21",
+      sessionStartAt: "2026-07-21T13:30:00.000Z",
+      price: 200,
+      quantity: 1,
+    });
+    aggregator.advanceWatermark("AAPL", "2026-07-21T13:31:00.000Z", "US");
+    expect(aggregator.recentFinalBars("AAPL", "1m", "US")[0]).toMatchObject({
+      startAt: "2026-07-21T13:30:00.000Z",
+      quality: "available",
+    });
+  });
+
+  it("marks an already forming minute partial when the feed disconnects", () => {
+    const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
+    aggregator.ingest({
+      symbol: "AAPL",
+      marketCountry: "US",
+      eventId: "before-disconnect",
+      executedAt: "2026-07-21T13:30:01.000Z",
+      sessionDate: "2026-07-21",
+      price: 200,
+      quantity: 1,
+    });
+    aggregator.markDiscontinuity("AAPL", "2026-07-21T13:30:30.000Z", "US");
+    aggregator.advanceWatermark("AAPL", "2026-07-21T13:31:00.000Z", "US");
+    expect(aggregator.recentFinalBars("AAPL", "1m", "US")[0]).toMatchObject({ quality: "partial" });
+  });
+
   it("aggregates exactly five finalized minutes and never creates empty minute bars", () => {
     const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
     for (let minute = 0; minute < 5; minute += 1) {
@@ -126,6 +183,39 @@ describe("IntradayBarAggregator", () => {
       componentMinuteCount: 60,
       quality: "available",
     });
+  });
+
+  it("anchors US 60-minute bars to 09:30 ET instead of epoch-aligned 09:00", () => {
+    const aggregator = new IntradayBarAggregator(config({
+      allowedLatenessMs: 0,
+      finalizedBarRetentionPerInterval: 100,
+    }));
+    for (let minute = 0; minute < 60; minute += 1) {
+      const executedAt = new Date(Date.parse("2026-07-21T13:30:00.000Z") + minute * 60_000 + 1_000).toISOString();
+      aggregator.ingest({
+        symbol: "AAPL",
+        marketCountry: "US",
+        eventId: `us-${minute}`,
+        executedAt,
+        sessionDate: "2026-07-21",
+        sessionStartAt: "2026-07-21T13:30:00.000Z",
+        price: 200 + minute,
+        quantity: 1,
+      });
+    }
+    aggregator.advanceWatermark("AAPL", "2026-07-21T14:30:00.000Z", "US");
+    expect(aggregator.recentFinalBars("AAPL", "60m", "US")).toEqual([
+      expect.objectContaining({
+        marketCountry: "US",
+        startAt: "2026-07-21T13:30:00.000Z",
+        endAt: "2026-07-21T14:30:00.000Z",
+        open: 200,
+        close: 259,
+        componentMinuteCount: 60,
+        quality: "available",
+      }),
+    ]);
+    expect(aggregator.recentFinalBars("AAPL", "60m", "KR")).toEqual([]);
   });
 
   it("honors configured retention and capacity guards", () => {

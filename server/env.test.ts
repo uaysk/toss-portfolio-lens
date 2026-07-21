@@ -75,6 +75,7 @@ describe("database environment configuration", () => {
       TOSS_SCALPING_MARKET_DATA_MIN_INTERVAL_MS: "100",
       TOSS_SCALPING_CHART_MIN_INTERVAL_MS: "200",
       TOSS_SCALPING_STOCK_MIN_INTERVAL_MS: "200",
+      TOSS_SCALPING_MARKET_INFO_MIN_INTERVAL_MS: "500",
       TOSS_SCALPING_RANKING_MAX_COUNT: "100",
       TOSS_SCALPING_PRICE_BATCH_SIZE: "200",
       TOSS_SCALPING_CANDLE_MAX_COUNT: "200",
@@ -84,6 +85,7 @@ describe("database environment configuration", () => {
       KI_SCALPING_WS_SUBSCRIBE_INTERVAL_MS: "100",
       SCALPING_MINIMUM_VOLUME: "10000",
       SCALPING_MINIMUM_TRADING_AMOUNT: "100000000",
+      SCALPING_US_MINIMUM_TRADING_AMOUNT: "2000000",
       SCALPING_MAXIMUM_SPREAD_BPS: "50",
       SCALPING_WEIGHT_REALIZED_VOLATILITY: "25",
       SCALPING_WEIGHT_NORMALIZED_ATR: "20",
@@ -101,12 +103,20 @@ describe("database environment configuration", () => {
       toss: {
         rankingMaximumCount: 100,
         pricesBatchSize: 200,
-        rateLimits: { ranking: { minimumIntervalMs: 100 }, chart: { minimumIntervalMs: 200 } },
+        rateLimits: {
+          ranking: { minimumIntervalMs: 100 }, chart: { minimumIntervalMs: 200 },
+          market_info: { minimumIntervalMs: 500 },
+        },
       },
       kisRest: { requestIntervalMs: 600 },
       kisWebSocket: { maxSubscriptions: 100, subscribeIntervalMs: 100 },
       realtimeAnalysisDebounceMs: 250,
-      scanner: { minimumVolume: 10_000, maximumSpreadBps: 50 },
+      scanner: {
+        minimumVolume: 10_000,
+        minimumTradingAmount: 100_000_000,
+        usMinimumTradingAmount: 2_000_000,
+        maximumSpreadBps: 50,
+      },
       service: {
         workspaceBarLimit: 2_000,
         candlePageSize: 200,

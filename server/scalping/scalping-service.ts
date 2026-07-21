@@ -21,10 +21,13 @@ import type {
 } from "../repositories/scalping-repository.js";
 import {
   DataQualitySchema,
+  MarketCountrySchema,
   MinuteIntervalSchema,
   ScannerCriterionSchema,
   createScannerRequestSchema,
+  normalizeUsExchange,
   type DataQuality,
+  type MarketCountry,
   type NormalizedMinuteCandle,
   type NormalizedOrderbook,
   type NormalizedPrice,
@@ -35,11 +38,16 @@ import {
   type ScannerCriterion,
   type VolatilityInputs,
 } from "./contracts.js";
-import { adaptKisFluctuationRankings, adaptKisVolumeRankings } from "./kis-common-adapter.js";
-import type { KisRestClient } from "./kis-rest-client.js";
+import {
+  adaptKisFluctuationRankings,
+  adaptKisOverseasRankings,
+  adaptKisVolumeRankings,
+} from "./kis-common-adapter.js";
+import type { KisRestClient, KisUsExchangeCode } from "./kis-rest-client.js";
 import { aggregateRecoveredBars, type ScalpingLiveRuntime } from "./live-runtime.js";
 import type { ScalpingScanner, ScannerResult } from "./scanner-service.js";
-import type { TossScalpingProvider } from "./toss-provider.js";
+import type { TossMarketCalendarDay, TossScalpingProvider } from "./toss-provider.js";
+import { marketSessionAnchor, marketTimeZone } from "./market-time.js";
 
 export const SCALPING_WORKSPACE_SCHEMA_VERSION = "scalping-workspace/v1" as const;
 export const SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION = "scalping-realtime-analysis/v1" as const;
@@ -73,9 +81,22 @@ export type ScalpingServiceConfig = {
 type Repository = Pick<ScalpingRepository, "listBars" | "putBars" | "latestPredictions">;
 type TossMarket = Pick<
   TossScalpingProvider,
-  "getRankings" | "getPrices" | "getMinuteCandles" | "getOrderbook" | "getTrades" | "getWarnings" | "rateLimitSnapshot"
+  | "getRankings"
+  | "getPrices"
+  | "getMinuteCandles"
+  | "getOrderbook"
+  | "getTrades"
+  | "getWarnings"
+  | "getMarketCalendar"
+  | "rateLimitSnapshot"
 >;
-type KisMarket = Pick<KisRestClient, "getVolumeRanking" | "getFluctuationRanking">;
+type KisMarket = Pick<
+  KisRestClient,
+  | "getVolumeRanking"
+  | "getFluctuationRanking"
+  | "getOverseasVolumeRanking"
+  | "getOverseasTradingAmountRanking"
+>;
 type RustCompute = Pick<RustComputeClient, "compute">;
 type AiService = Pick<ScalpingAiService, "forecast" | "evaluate">;
 type PortfolioSource = {
@@ -86,6 +107,7 @@ type TradeMarkerSource = Pick<TechnicalTradeMarkerService, "getMarkers">;
 type CausalPosition = Portfolio["holdings"][number] & { asOf: string };
 
 export type ScalpingWorkspaceRequest = {
+  marketCountry?: MarketCountry;
   criterion: ScannerCriterion;
   topCount: number;
   interval: "1m" | "5m" | "15m" | "30m" | "60m";
@@ -96,11 +118,13 @@ export type ScalpingWorkspaceRequest = {
 };
 
 export type ScalpingForecastRequest = {
+  marketCountry?: MarketCountry;
   symbols: string[];
   interval: "1m" | "5m" | "15m" | "30m" | "60m";
 };
 
 export type ScalpingRealtimeAnalysisRequest = {
+  marketCountry?: MarketCountry;
   symbols: string[];
   interval: "1m" | "5m" | "15m" | "30m" | "60m";
   preset: WorkspacePreset;
@@ -187,10 +211,15 @@ function instrumentType(item: InstrumentInfo | undefined): "stock" | "etf" | "fu
   return type && !type.includes("stock") && !type.includes("equity") ? "other" : "stock";
 }
 
-function storeRecord(candle: NormalizedMinuteCandle, now: number): IntradayBarRecord {
+function storeRecord(
+  candle: NormalizedMinuteCandle,
+  now: number,
+  marketCountry: MarketCountry = "KR",
+): IntradayBarRecord {
   const openMs = Date.parse(candle.timestamp);
   const currentMinute = Math.floor(now / MINUTE_MS) * MINUTE_MS;
   return {
+    marketCountry,
     symbol: candle.symbol,
     intervalMinutes: 1,
     openTime: new Date(openMs).toISOString(),
@@ -204,7 +233,7 @@ function storeRecord(candle: NormalizedMinuteCandle, now: number): IntradayBarRe
     close: candle.close,
     ...(candle.volume === undefined ? {} : { volume: candle.volume }),
     ...(candle.tradingAmount === undefined ? {} : { turnover: candle.tradingAmount }),
-    quality: candle.status === "unknown" || candle.volume === undefined ? "partial" : "complete",
+    quality: "complete",
     updatedAt: now,
   };
 }
@@ -312,9 +341,56 @@ function scannerMetrics(analysis: unknown): Record<string, VolatilityInputs> {
   return output;
 }
 
-function seoulMinute(timestamp: string): { date: string; minute: number } {
+function rerankUsKisRankings(
+  values: readonly NormalizedRanking[],
+  criterion: ScannerCriterion,
+): NormalizedRanking[] {
+  const bySymbol = new Map<string, NormalizedRanking>();
+  for (const value of values) {
+    const current = bySymbol.get(value.symbol);
+    if (!current) {
+      bySymbol.set(value.symbol, { ...value });
+      continue;
+    }
+    const exchange = current.exchange === value.exchange
+      ? current.exchange
+      : current.exchange === undefined ? value.exchange
+        : value.exchange === undefined ? current.exchange : undefined;
+    const merged: NormalizedRanking = {
+      ...current,
+      rankedAt: current.rankedAt > value.rankedAt ? current.rankedAt : value.rankedAt,
+      volume: current.volume === undefined ? value.volume
+        : value.volume === undefined ? current.volume : Math.max(current.volume, value.volume),
+      tradingAmount: current.tradingAmount === undefined ? value.tradingAmount
+        : value.tradingAmount === undefined ? current.tradingAmount : Math.max(current.tradingAmount, value.tradingAmount),
+    };
+    if (exchange) merged.exchange = exchange;
+    else delete merged.exchange;
+    bySymbol.set(value.symbol, merged);
+  }
+  const items = [...bySymbol.values()];
+  const descendingRanks = (field: "volume" | "tradingAmount") => new Map(
+    [...items]
+      .sort((left, right) => (right[field] ?? -1) - (left[field] ?? -1) || left.symbol.localeCompare(right.symbol))
+      .map((item, index) => [item.symbol, index + 1]),
+  );
+  const volumeRanks = descendingRanks("volume");
+  const amountRanks = descendingRanks("tradingAmount");
+  const score = (item: NormalizedRanking) => criterion === "volume"
+    ? volumeRanks.get(item.symbol)!
+    : criterion === "trading_amount" ? amountRanks.get(item.symbol)!
+      : Math.min(volumeRanks.get(item.symbol)!, amountRanks.get(item.symbol)!);
+  return items
+    .sort((left, right) => score(left) - score(right)
+      || (right.tradingAmount ?? -1) - (left.tradingAmount ?? -1)
+      || (right.volume ?? -1) - (left.volume ?? -1)
+      || left.symbol.localeCompare(right.symbol))
+    .map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
+function marketMinute(timestamp: string, marketCountry: MarketCountry): { date: string; minute: number } {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul",
+    timeZone: marketCountry === "US" ? "America/New_York" : "Asia/Seoul",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -329,12 +405,22 @@ function seoulMinute(timestamp: string): { date: string; minute: number } {
   };
 }
 
+function regularSessionMinutes(
+  marketCountry: MarketCountry,
+  config: Pick<ScalpingServiceConfig, "sessionOpenMinuteKst" | "sessionCloseMinuteKst">,
+): { open: number; close: number } {
+  return marketCountry === "US"
+    ? { open: 9 * 60 + 30, close: 16 * 60 }
+    : { open: config.sessionOpenMinuteKst, close: config.sessionCloseMinuteKst };
+}
+
 export class ScalpingService {
   private readonly now: () => number;
   private readonly workspaceSchema: z.ZodType<ScalpingWorkspaceRequest>;
   private readonly realtimeAnalysisInFlight = new Map<string, Promise<unknown>>();
   private latestWorkspaceContext?: {
     accountId?: string;
+    marketCountry: MarketCountry;
     metadata: Map<string, InstrumentInfo>;
     holdings: Map<string, CausalPosition>;
   };
@@ -385,6 +471,7 @@ export class ScalpingService {
           ranking: this.toss.rateLimitSnapshot("ranking"),
           marketData: this.toss.rateLimitSnapshot("market_data"),
           chart: this.toss.rateLimitSnapshot("chart"),
+          marketInfo: this.toss.rateLimitSnapshot("market_info"),
         } },
         kis: { status: this.live.state.connection, configured: true, websocket: this.live.state },
         ai: { status: this.ai ? "configured" : "unavailable", configured: Boolean(this.ai) },
@@ -395,9 +482,11 @@ export class ScalpingService {
         mcp: false,
         historicalOrderbook: false,
         retrospectiveEvaluation: Boolean(this.ai),
+        scannerMarkets: ["KR", "US"],
       },
       limitations: [
         "과거 호가 이력은 공급자가 제공하지 않아 unavailable입니다.",
+        "저유동성 거래대금 필터 단위는 국내 KRW, 미국 USD입니다.",
         "신호는 주문 지시나 수익 보장이 아니며 실제 주문을 실행하지 않습니다.",
       ],
     };
@@ -405,15 +494,16 @@ export class ScalpingService {
 
   async workspace(input: ScalpingWorkspaceRequest) {
     const request = this.workspaceSchema.parse(input);
+    const marketCountry = request.marketCountry ?? "KR";
     const requestedSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
-    const rankingsResult = await this.collectRankings(request.criterion, request.topCount);
+    const rankingsResult = await this.collectRankings(request.criterion, request.topCount, marketCountry);
     const universe = this.universe(
       rankingsResult.rankings,
       requestedSymbols,
       request.topCount,
       request.criterion,
     );
-    const [pricesResult, instrumentsResult, portfolioResult] = await Promise.all([
+    const [pricesResult, instrumentsResult, portfolioResult, barsBySymbol, bookAndWarnings] = await Promise.all([
       this.safe(() => this.toss.getPrices(universe), "toss_prices"),
       this.portfolio
         ? this.safe(() => this.portfolio!.getInstruments(universe), "toss_instruments")
@@ -421,18 +511,21 @@ export class ScalpingService {
       this.portfolio
         ? this.safe(() => this.portfolio!.getPortfolio(request.accountId, false, false), "portfolio")
         : Promise.resolve<{ value?: Portfolio; error?: string }>({}),
+      this.loadBars(universe, intervalMinutes(request.interval), marketCountry),
+      this.enrich(universe, marketCountry),
     ]);
-    const barsBySymbol = await this.loadBars(universe, intervalMinutes(request.interval));
     const priceBySymbol = new Map((pricesResult.value ?? []).map((value) => [value.symbol, value]));
-    const bookAndWarnings = await this.enrich(universe);
     const metadata = new Map((instrumentsResult.value ?? []).map((item) => [item.symbol, item]));
     const portfolioValue = portfolioResult.value;
-    const holdings = new Map<string, CausalPosition>(portfolioValue?.holdings.map((item) => [
-      item.symbol.toUpperCase(),
-      { ...item, asOf: portfolioValue.asOf },
-    ]) ?? []);
+    const holdings = new Map<string, CausalPosition>((portfolioValue?.holdings ?? [])
+      .filter((item) => !item.currency || item.currency === (marketCountry === "US" ? "USD" : "KRW"))
+      .map((item): [string, CausalPosition] => [
+        item.symbol.toUpperCase(),
+        { ...item, asOf: portfolioValue!.asOf },
+      ]));
     this.latestWorkspaceContext = {
       ...(request.accountId ? { accountId: request.accountId } : {}),
+      marketCountry,
       metadata: new Map(metadata),
       holdings: new Map(holdings),
     };
@@ -445,16 +538,17 @@ export class ScalpingService {
       holdings,
       books: bookAndWarnings.books,
       trades: bookAndWarnings.trades,
+      marketCountry,
       responseMode: "full_series",
       includeVolumeProfile: true,
     });
-    const scan = this.scanner.scan({ criterion: request.criterion, topCount: request.topCount }, {
+    const scan = this.scanner.scan({ marketCountry, criterion: request.criterion, topCount: request.topCount }, {
       rankings: rankingsResult.rankings,
       prices: pricesResult.value ?? [],
       orderbooks: [...bookAndWarnings.books.values()],
       warnings: bookAndWarnings.warnings,
       instrumentStates: universe.map((symbol) => {
-        const suspended = this.live.snapshot(symbol).tradingHalted === true;
+        const suspended = this.live.snapshot(symbol, marketCountry).tradingHalted === true;
         const warningUnavailable = bookAndWarnings.warningUnavailable.has(symbol);
         return {
         symbol,
@@ -479,8 +573,14 @@ export class ScalpingService {
       ...scan.candidates.map(({ symbol }) => symbol),
       ...requestedSymbols,
     ])).slice(0, this.config.maximumTopCount);
-    const candidates = this.withRequestedCandidates(scan, requestedSymbols, priceBySymbol);
-    const predictions = await this.repository.latestPredictions(selectedSymbols, false).catch(() => []);
+    const candidates = this.withRequestedCandidates(
+      scan,
+      requestedSymbols,
+      priceBySymbol,
+      marketCountry,
+      metadata,
+    );
+    const predictions = await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => []);
     const predictionBySymbol = new Map(predictions.map((prediction) => [prediction.symbol, prediction]));
     const markerFromDate = Array.from(barsBySymbol.values()).flat().map((bar) => bar.sessionDate).sort()[0];
     const markerResult = portfolioValue && this.tradeMarkers
@@ -510,6 +610,7 @@ export class ScalpingService {
       workspace: {
         schemaVersion: SCALPING_WORKSPACE_SCHEMA_VERSION,
         generatedAt: new Date(this.now()).toISOString(),
+        marketCountry,
         criterion: request.criterion,
         requestedTopCount: request.topCount,
         interval: request.interval,
@@ -525,7 +626,7 @@ export class ScalpingService {
             status: "unavailable", reason: this.rust ? "insufficient_final_bars" : "rust_worker_unavailable",
           },
           realtime: {
-            ...this.live.snapshot(symbol),
+            ...this.live.snapshot(symbol, marketCountry),
             historicalOrderbook: { status: "unavailable", reason: "historical_orderbook_not_supplied" },
           },
           position: holdings.get(symbol) ?? { status: "unavailable", reason: "not_held_or_portfolio_unavailable" },
@@ -547,6 +648,7 @@ export class ScalpingService {
           analysisBatchInstrumentCount: universe.length,
           analysisBatchRequestCount: this.rust && analysis ? 1 : 0,
           browserIndicatorCalculation: false,
+          tradingAmountUnit: marketCountry === "US" ? "USD" : "KRW",
         },
       },
     };
@@ -557,28 +659,42 @@ export class ScalpingService {
     if (!this.ai || !this.rust) {
       return { forecast: { status: "unavailable", code: !this.ai ? "ai_worker_unavailable" : "rust_worker_unavailable" }, predictions: [] };
     }
-    const barsBySymbol = await this.loadBars(request.symbols, 1);
+    const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
     const metadata = await this.instrumentMetadata(request.symbols);
     const analysis = await this.computeAnalysis({
       symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
       holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "latest_summary", includeVolumeProfile: false,
+      marketCountry: request.marketCountry,
     });
     const unavailable: Array<{ symbol: string; code: string }> = [];
     const series: AiForecastRequest["series"] = [];
     for (const symbol of request.symbols) {
-      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? []).slice(-this.config.forecastMaximumBars);
+      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry)
+        .slice(-this.config.forecastMaximumBars);
       if (finalBars.length < this.config.forecastMinimumBars) {
         unavailable.push({ symbol, code: "insufficient_history" });
         continue;
       }
-      const future = this.liveFutureTimestamps(finalBars.at(-1)!);
+      let regularMarket: NonNullable<TossMarketCalendarDay["regularMarket"]> | undefined;
+      if (request.marketCountry === "US") {
+        const calendar = await this.safe(
+          () => this.toss.getMarketCalendar("US", finalBars.at(-1)!.sessionDate),
+          "toss_market_calendar",
+        );
+        regularMarket = calendar.value?.regularMarket ?? undefined;
+        if (!regularMarket) {
+          unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
+          continue;
+        }
+      }
+      const future = this.liveFutureTimestamps(finalBars.at(-1)!, request.marketCountry, regularMarket);
       if (!future) {
         unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
         continue;
       }
       series.push({
         instrument_key: symbol,
-        timezone: "Asia/Seoul",
+        timezone: marketTimeZone(request.marketCountry),
         input_end_at: finalBars.at(-1)!.closeTime,
         future_timestamps: future,
         bars: finalBars.map((bar) => this.aiBar(bar)),
@@ -601,7 +717,7 @@ export class ScalpingService {
       quantiles: [...SCALPING_AI_QUANTILES],
       seed: 0,
       series,
-    });
+    }, undefined, request.marketCountry);
     return {
       forecast: output.response,
       predictions: [
@@ -618,6 +734,7 @@ export class ScalpingService {
 
   async realtimeAnalysis(input: ScalpingRealtimeAnalysisRequest): Promise<unknown> {
     const parsed = z.object({
+      marketCountry: MarketCountrySchema.default("KR"),
       symbols: z.array(z.string()),
       interval: MinuteIntervalSchema,
       preset: WorkspacePresetSchema,
@@ -628,6 +745,7 @@ export class ScalpingService {
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
     await Promise.all(symbols.map(async (symbol) => {
       barsBySymbol.set(symbol, await this.repository.listBars({
+        marketCountry: parsed.marketCountry,
         symbol,
         intervalMinutes: interval,
         includeForming: true,
@@ -635,21 +753,22 @@ export class ScalpingService {
       }));
     }));
     const revision = symbols.map((symbol) => {
-      const latest = this.configuredSessionBars(barsBySymbol.get(symbol) ?? []).at(-1);
+      const latest = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], parsed.marketCountry).at(-1);
       return `${symbol}:${latest?.closeTime ?? "unavailable"}:${latest?.updatedAt ?? 0}`;
     }).join("|");
-    const key = `${parsed.interval}:${parsed.preset}:${parsed.accountId ?? "default"}:${revision}`;
+    const key = `${parsed.marketCountry}:${parsed.interval}:${parsed.preset}:${parsed.accountId ?? "default"}:${revision}`;
     const existing = this.realtimeAnalysisInFlight.get(key);
     if (existing) return existing;
     const task = (async () => {
       const context = this.latestWorkspaceContext
         && this.latestWorkspaceContext.accountId === parsed.accountId
+        && this.latestWorkspaceContext.marketCountry === parsed.marketCountry
         ? this.latestWorkspaceContext
         : undefined;
       const books = new Map<string, NormalizedOrderbook>();
       const trades = new Map<string, NormalizedTrade[]>();
       for (const symbol of symbols) {
-        const snapshot = this.live.snapshot(symbol);
+        const snapshot = this.live.snapshot(symbol, parsed.marketCountry);
         if (snapshot.orderbook) books.set(symbol, snapshot.orderbook);
         if (snapshot.trade) trades.set(symbol, [snapshot.trade]);
       }
@@ -662,12 +781,14 @@ export class ScalpingService {
         holdings: context?.holdings ?? new Map(),
         books,
         trades,
+        marketCountry: parsed.marketCountry,
         responseMode: "latest_summary",
         includeVolumeProfile: false,
       });
       return {
         schemaVersion: SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
         generatedAt: new Date(this.now()).toISOString(),
+        marketCountry: parsed.marketCountry,
         interval: parsed.interval,
         preset: parsed.preset,
         barRevision: revision,
@@ -695,17 +816,18 @@ export class ScalpingService {
   async evaluate(input: ScalpingEvaluationRequest, ownerSubject = "owner") {
     const request = this.evaluationSchema(input);
     if (!this.ai || !this.rust) throw new Error(!this.ai ? "AI worker is unavailable." : "Rust worker is unavailable.");
-    const barsBySymbol = await this.loadBars(request.symbols, 1);
+    const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
     const metadata = await this.instrumentMetadata(request.symbols);
     const analysis = await this.computeAnalysis({
       symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
       holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "full_series", includeVolumeProfile: false,
+      marketCountry: request.marketCountry,
     });
     const series: AiEvaluateRequest["series"] = [];
     const baseOriginQuota = Math.floor(this.config.evaluationMaximumOrigins / request.symbols.length);
     const originRemainder = this.config.evaluationMaximumOrigins % request.symbols.length;
     for (const [symbolIndex, symbol] of request.symbols.entries()) {
-      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? []);
+      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
       const signals = signalByTimestamp(analysis, symbol);
       const regimes = regimeByTimestamp(analysis, symbol);
       const targetStops = targetStopsByTimestamp(analysis, symbol);
@@ -722,7 +844,7 @@ export class ScalpingService {
       if (!indexes.length) continue;
       series.push({
         instrument_key: symbol,
-        timezone: "Asia/Seoul",
+        timezone: marketTimeZone(request.marketCountry),
         bars: finalBars.map((bar) => this.aiBar(bar)),
         origins: indexes.map((index) => ({
           origin: finalBars[index]!.closeTime,
@@ -748,17 +870,30 @@ export class ScalpingService {
         spread_bps_round_trip: request.evaluation.spreadBpsRoundTrip,
         slippage_bps_per_side: request.evaluation.slippageBpsPerSide,
       },
-    }, ownerSubject);
+    }, ownerSubject, request.marketCountry);
     return { ...queued, retrospective: true, walkForward: true, randomSplit: false };
   }
 
-  private forecastSchema(input: ScalpingForecastRequest): ScalpingForecastRequest {
-    const parsed = z.object({ symbols: z.array(z.string()), interval: MinuteIntervalSchema }).strict().parse(input);
-    return { symbols: normalizedSymbols(parsed.symbols, this.config.maximumTopCount), interval: parsed.interval };
+  private forecastSchema(
+    input: ScalpingForecastRequest,
+  ): ScalpingForecastRequest & { marketCountry: MarketCountry } {
+    const parsed = z.object({
+      marketCountry: MarketCountrySchema.default("KR"),
+      symbols: z.array(z.string()),
+      interval: MinuteIntervalSchema,
+    }).strict().parse(input);
+    return {
+      marketCountry: parsed.marketCountry,
+      symbols: normalizedSymbols(parsed.symbols, this.config.maximumTopCount),
+      interval: parsed.interval,
+    };
   }
 
-  private evaluationSchema(input: ScalpingEvaluationRequest): ScalpingEvaluationRequest {
+  private evaluationSchema(
+    input: ScalpingEvaluationRequest,
+  ): ScalpingEvaluationRequest & { marketCountry: MarketCountry } {
     const parsed = z.object({
+      marketCountry: MarketCountrySchema.default("KR"),
       symbols: z.array(z.string()),
       interval: MinuteIntervalSchema,
       evaluation: z.object({
@@ -772,18 +907,52 @@ export class ScalpingService {
     return { ...parsed, symbols: normalizedSymbols(parsed.symbols, this.config.maximumTopCount) };
   }
 
-  private async collectRankings(criterion: ScannerCriterion, count: number): Promise<{
+  private async collectRankings(
+    criterion: ScannerCriterion,
+    count: number,
+    marketCountry: MarketCountry,
+  ): Promise<{
     rankings: NormalizedRanking[];
     errors: Partial<Record<"toss" | "kis", string>>;
   }> {
     const errors: Partial<Record<"toss" | "kis", string>> = {};
     const tossCriteria: Array<"trading_amount" | "volume" | "change_rate"> = criterion === "volatility"
       ? ["trading_amount", "volume", "change_rate"] : [criterion];
-    const tossSettled = await Promise.allSettled(tossCriteria.map((value) => this.toss.getRankings(value, count, "KR")));
+    const tossSettled = await Promise.allSettled(
+      tossCriteria.map((value) => this.toss.getRankings(value, count, marketCountry)),
+    );
     const rankings: NormalizedRanking[] = [];
     for (const result of tossSettled) {
       if (result.status === "fulfilled") rankings.push(...result.value);
       else errors.toss = "toss_ranking_unavailable";
+    }
+    if (marketCountry === "US") {
+      const exchanges: readonly KisUsExchangeCode[] = ["NAS", "NYS", "AMS"];
+      const overseasRequests = exchanges.flatMap((exchange) => [
+        ...(criterion === "volume" || criterion === "volatility"
+          ? [this.kis.getOverseasVolumeRanking({ exchange })] : []),
+        ...(criterion === "trading_amount" || criterion === "volatility"
+          ? [this.kis.getOverseasTradingAmountRanking({ exchange })] : []),
+      ]);
+      const overseasSettled = await Promise.allSettled(overseasRequests);
+      const kisRankings: NormalizedRanking[] = [];
+      let rejected = 0;
+      let partial = 0;
+      for (const result of overseasSettled) {
+        if (result.status === "fulfilled") {
+          kisRankings.push(...adaptKisOverseasRankings(result.value).items);
+          if (result.value.quality !== "available") partial += 1;
+        } else {
+          rejected += 1;
+        }
+      }
+      const globallyRanked = rerankUsKisRankings(kisRankings, criterion);
+      rankings.push(...globallyRanked);
+      const kisRankingCount = globallyRanked.length;
+      if (rejected > 0 || partial > 0) {
+        errors.kis = kisRankingCount > 0 ? "kis_ranking_partial" : "kis_ranking_unavailable";
+      }
+      return { rankings, errors };
     }
     const [volumeResult, fluctuationResult] = await Promise.allSettled([
       // Domestic ranking rejects the integrated quote code `UN` (OPSQ2001).
@@ -830,14 +999,14 @@ export class ScalpingService {
       .slice(0, universeLimit);
   }
 
-  private async enrich(symbols: readonly string[]) {
+  private async enrich(symbols: readonly string[], marketCountry: MarketCountry) {
     const books = new Map<string, NormalizedOrderbook>();
     const warnings: NormalizedWarning[] = [];
     const trades = new Map<string, NormalizedTrade[]>();
     const warningUnavailable = new Set<string>();
     const errors: string[] = [];
     await Promise.all(symbols.map(async (symbol) => {
-      const liveBook = this.live.snapshot(symbol).orderbook;
+      const liveBook = this.live.snapshot(symbol, marketCountry).orderbook;
       const [book, warning, trade] = await Promise.allSettled([
         liveBook ? Promise.resolve(liveBook) : this.toss.getOrderbook(symbol),
         this.toss.getWarnings(symbol),
@@ -856,29 +1025,45 @@ export class ScalpingService {
     return { books, warnings, trades, warningUnavailable, errors };
   }
 
-  private async loadBars(symbols: readonly string[], interval: ScalpingInterval): Promise<Map<string, IntradayBarRecord[]>> {
+  private async loadBars(
+    symbols: readonly string[],
+    interval: ScalpingInterval,
+    marketCountry: MarketCountry = "KR",
+  ): Promise<Map<string, IntradayBarRecord[]>> {
     const output = new Map<string, IntradayBarRecord[]>();
     await Promise.all(symbols.map(async (symbol) => {
-      let oneMinute = await this.repository.listBars({ symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit });
+      let oneMinute = await this.repository.listBars({
+        marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit,
+      });
       const latest = oneMinute.at(-1);
       if (!latest || this.now() - Date.parse(latest.openTime) > this.config.barRefreshAfterMs) {
-        const normalized = await this.fetchMinuteHistory(symbol, oneMinute);
+        const normalized = await this.fetchMinuteHistory(symbol, oneMinute, marketCountry);
         if (normalized.length) {
+          const sessions = new Map<string, IntradayBarRecord[]>();
+          for (const bar of normalized) {
+            sessions.set(bar.sessionDate, [...(sessions.get(bar.sessionDate) ?? []), bar]);
+          }
           const aggregated = [
             ...normalized,
-            ...([5, 15, 30, 60] as const).flatMap((minutes) => aggregateRecoveredBars(normalized, minutes).map((bar) => ({
-              ...bar,
-              source: "toss_rest" as const,
-              quality: bar.quality === "recovered" ? "complete" as const : bar.quality,
-            }))),
+            ...([5, 15, 30, 60] as const).flatMap((minutes) => [...sessions.entries()].flatMap(
+              ([sessionDate, sessionBars]) => aggregateRecoveredBars(sessionBars, minutes, {
+                sessionStartAt: marketSessionAnchor(sessionDate, marketCountry),
+              }).map((bar) => ({
+                ...bar,
+                source: "toss_rest" as const,
+                quality: bar.quality === "recovered" ? "complete" as const : bar.quality,
+              })),
+            )),
           ];
           await this.repository.putBars(aggregated);
-          oneMinute = await this.repository.listBars({ symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit });
+          oneMinute = await this.repository.listBars({
+            marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit,
+          });
         }
       }
       if (interval === 1) output.set(symbol, oneMinute);
       else output.set(symbol, await this.repository.listBars({
-        symbol, intervalMinutes: interval, includeForming: true, limit: this.config.workspaceBarLimit,
+        marketCountry, symbol, intervalMinutes: interval, includeForming: true, limit: this.config.workspaceBarLimit,
       }));
     }));
     return output;
@@ -887,19 +1072,20 @@ export class ScalpingService {
   private async fetchMinuteHistory(
     symbol: string,
     existing: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry = "KR",
   ): Promise<IntradayBarRecord[]> {
     const known = new Map(existing.map((bar) => [bar.openTime, bar]));
     const fetched = new Map<string, IntradayBarRecord>();
     let before: string | undefined;
     while (known.size < this.config.workspaceBarLimit || before === undefined) {
       const page = await this.safe(
-        () => this.toss.getMinuteCandles(symbol, this.config.candlePageSize, before),
+        () => this.toss.getMinuteCandles(symbol, this.config.candlePageSize, before, marketCountry),
         "toss_candles",
       );
       if (!page.value?.length) break;
       let added = 0;
       for (const candle of page.value) {
-        const normalized = storeRecord(candle, this.now());
+        const normalized = storeRecord(candle, this.now(), marketCountry);
         if (!known.has(normalized.openTime)) added += 1;
         known.set(normalized.openTime, normalized);
         fetched.set(normalized.openTime, normalized);
@@ -923,12 +1109,13 @@ export class ScalpingService {
     holdings: ReadonlyMap<string, CausalPosition>;
     books: ReadonlyMap<string, NormalizedOrderbook>;
     trades: ReadonlyMap<string, NormalizedTrade[]>;
+    marketCountry: MarketCountry;
     responseMode: "full_series" | "latest_summary";
     includeVolumeProfile: boolean;
   }): Promise<unknown> {
     if (!this.rust) return undefined;
     const instruments = input.symbols.flatMap((symbol) => {
-      const bars = this.configuredSessionBars(input.barsBySymbol.get(symbol) ?? []);
+      const bars = this.configuredSessionBars(input.barsBySymbol.get(symbol) ?? [], input.marketCountry);
       if (bars.length < this.config.minimumAnalysisBars) return [];
       const last = bars.at(-1)!;
       const item = input.metadata.get(symbol);
@@ -941,8 +1128,8 @@ export class ScalpingService {
       return [{
         key: symbol,
         symbol,
-        market: item?.market ?? "KR",
-        currency: item?.currency ?? "KRW",
+        market: item?.market ?? input.marketCountry,
+        currency: item?.currency ?? (input.marketCountry === "US" ? "USD" : "KRW"),
         instrument_type: instrumentType(item),
         bars: bars.map((bar) => ({
           timestamp: bar.closeTime,
@@ -951,12 +1138,12 @@ export class ScalpingService {
           high: bar.high,
           low: bar.low,
           close: bar.close,
-          volume: bar.volume,
+          ...(bar.volume === undefined ? {} : { volume: bar.volume }),
           ...(bar.turnover === undefined ? {} : { amount: bar.turnover }),
           complete: true,
         })),
-        session_start_confirmed_dates: this.confirmedSessionDates(bars, input.interval).started,
-        complete_session_dates: this.confirmedSessionDates(bars, input.interval).complete,
+        session_start_confirmed_dates: this.confirmedSessionDates(bars, input.interval, input.marketCountry).started,
+        complete_session_dates: this.confirmedSessionDates(bars, input.interval, input.marketCountry).complete,
         anchored_vwap_timestamp: bars.find((bar) => bar.sessionDate === last.sessionDate)?.closeTime,
         ...(nextQuote ? { next_valid_quote_timestamp: nextQuote } : {}),
         ...(book ? {
@@ -1011,14 +1198,18 @@ export class ScalpingService {
     scan: ScannerResult,
     requested: readonly string[],
     prices: ReadonlyMap<string, NormalizedPrice>,
+    marketCountry: MarketCountry,
+    metadata: ReadonlyMap<string, InstrumentInfo>,
   ): ScannerCandidate[] {
     const output = [...scan.candidates];
     for (const symbol of requested) {
       if (output.some((candidate) => candidate.symbol === symbol)) continue;
       const price = prices.get(symbol);
+      const exchange = marketCountry === "US" ? normalizeUsExchange(metadata.get(symbol)?.market) : undefined;
       output.push({
         symbol,
-        currency: price?.currency ?? "KRW",
+        ...(exchange ? { exchange } : {}),
+        currency: price?.currency ?? (marketCountry === "US" ? "USD" : "KRW"),
         ...(price?.price === undefined ? {} : { price: price.price }),
         ...(price?.volume === undefined ? {} : { volume: price.volume }),
         ...(price?.tradingAmount === undefined ? {} : { tradingAmount: price.tradingAmount }),
@@ -1042,41 +1233,48 @@ export class ScalpingService {
       high: bar.high,
       low: bar.low,
       close: bar.close,
-      volume: bar.volume,
+      ...(bar.volume === undefined ? {} : { volume: bar.volume }),
       amount: bar.turnover ?? null,
       complete: true,
     };
   }
 
-  private configuredSessionBars(bars: readonly IntradayBarRecord[]): IntradayBarRecord[] {
+  private configuredSessionBars(
+    bars: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry = "KR",
+  ): IntradayBarRecord[] {
+    const session = regularSessionMinutes(marketCountry, this.config);
     return bars.filter((bar) => {
       if (bar.state !== "final") return false;
-      const local = seoulMinute(bar.closeTime);
+      if (bar.quality === "partial" || bar.quality === "stale") return false;
+      const local = marketMinute(bar.closeTime, marketCountry);
       return local.date === bar.sessionDate
-        && local.minute > this.config.sessionOpenMinuteKst
-        && local.minute <= this.config.sessionCloseMinuteKst;
+        && local.minute > session.open
+        && local.minute <= session.close;
     });
   }
 
   private confirmedSessionDates(
     bars: readonly IntradayBarRecord[],
     interval: ScalpingInterval,
+    marketCountry: MarketCountry = "KR",
   ): { started: string[]; complete: string[] } {
+    const session = regularSessionMinutes(marketCountry, this.config);
     const sessions = new Map<string, IntradayBarRecord[]>();
     for (const bar of bars) sessions.set(bar.sessionDate, [...(sessions.get(bar.sessionDate) ?? []), bar]);
     const started: string[] = [];
     const complete: string[] = [];
     for (const [date, sessionBars] of sessions) {
       const sorted = [...sessionBars].sort((left, right) => left.closeTime.localeCompare(right.closeTime));
-      const first = seoulMinute(sorted[0]!.closeTime);
-      const last = seoulMinute(sorted.at(-1)!.closeTime);
-      if (first.date !== date || first.minute !== this.config.sessionOpenMinuteKst + interval) continue;
+      const first = marketMinute(sorted[0]!.closeTime, marketCountry);
+      const last = marketMinute(sorted.at(-1)!.closeTime, marketCountry);
+      if (first.date !== date || first.minute !== session.open + interval) continue;
       started.push(date);
-      const expectedCount = (this.config.sessionCloseMinuteKst - this.config.sessionOpenMinuteKst) / interval;
-      if (last.date === date && last.minute === this.config.sessionCloseMinuteKst
+      const expectedCount = (session.close - session.open) / interval;
+      if (last.date === date && last.minute === session.close
         && Number.isInteger(expectedCount) && sorted.length === expectedCount
         && sorted.every((bar, index) => (
-          seoulMinute(bar.closeTime).minute === this.config.sessionOpenMinuteKst + interval * (index + 1)
+          marketMinute(bar.closeTime, marketCountry).minute === session.open + interval * (index + 1)
         ))) {
         complete.push(date);
       }
@@ -1084,12 +1282,26 @@ export class ScalpingService {
     return { started, complete };
   }
 
-  private liveFutureTimestamps(last: IntradayBarRecord): AiForecastRequest["series"][number]["future_timestamps"] | undefined {
-    const local = seoulMinute(last.closeTime);
+  private liveFutureTimestamps(
+    last: IntradayBarRecord,
+    marketCountry: MarketCountry = "KR",
+    confirmedRegularMarket?: NonNullable<TossMarketCalendarDay["regularMarket"]>,
+  ): AiForecastRequest["series"][number]["future_timestamps"] | undefined {
     const output = Array.from({ length: 60 }, (_, index) => new Date(Date.parse(last.closeTime) + (index + 1) * MINUTE_MS).toISOString());
-    const final = seoulMinute(output.at(-1)!);
-    if (local.date !== final.date || local.minute < this.config.sessionOpenMinuteKst
-      || final.minute > this.config.sessionCloseMinuteKst) return undefined;
+    if (Date.parse(output[0]!) <= this.now()) return undefined;
+    if (marketCountry === "US") {
+      if (!confirmedRegularMarket) return undefined;
+      const inputEnd = Date.parse(last.closeTime);
+      const sessionStart = Date.parse(confirmedRegularMarket.startAt);
+      const sessionEnd = Date.parse(confirmedRegularMarket.endAt);
+      if (inputEnd < sessionStart || Date.parse(output.at(-1)!) > sessionEnd) return undefined;
+      return output as AiForecastRequest["series"][number]["future_timestamps"];
+    }
+    const session = regularSessionMinutes(marketCountry, this.config);
+    const local = marketMinute(last.closeTime, marketCountry);
+    const final = marketMinute(output.at(-1)!, marketCountry);
+    if (local.date !== last.sessionDate || local.date !== final.date || local.minute < session.open
+      || final.minute > session.close) return undefined;
     return output as AiForecastRequest["series"][number]["future_timestamps"];
   }
 

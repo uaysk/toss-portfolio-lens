@@ -1,8 +1,9 @@
 type UnknownRecord = Record<string, unknown>;
 
 export type KisEnvironment = "real" | "demo";
-export type KisMarketSource = "KRX" | "NXT" | "INTEGRATED";
+export type KisMarketSource = "KRX" | "NXT" | "INTEGRATED" | "US";
 export type KisMarketDivisionCode = "J" | "NX" | "UN";
+export type KisUsExchangeCode = "NAS" | "NYS" | "AMS";
 export type KisDataQuality = "available" | "partial" | "unavailable";
 
 export type KisRestClientConfig = {
@@ -104,10 +105,42 @@ export type KisMinuteBar = {
   low: number;
   close: number;
   volume: number;
+  tradingAmount?: number;
   accumulatedVolume?: number;
   accumulatedTradingAmount?: number;
   status: "forming" | "final";
   source: "kis_rest_recovery";
+};
+
+export type KisOverseasRankRequest = {
+  exchange: KisUsExchangeCode;
+  periodCode?: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+  volumeRangeCode?: "0" | "1" | "2" | "3" | "4" | "5" | "6";
+  minPrice?: number;
+  maxPrice?: number;
+};
+
+export type KisOverseasRankItem = {
+  symbol: string;
+  name: string;
+  exchange: KisUsExchangeCode;
+  rank: number;
+  price: number;
+  changeAmount: number;
+  changeRate: number;
+  accumulatedVolume: number;
+  accumulatedTradingAmount: number;
+  averageVolume?: number;
+  averageTradingAmount?: number;
+  realtimeSymbol?: string;
+};
+
+export type KisOverseasMinuteRequest = {
+  symbol: string;
+  exchange: KisUsExchangeCode;
+  sessionDate: string;
+  cursor?: string;
+  recordCount?: number;
 };
 
 export class KisRestError extends Error {
@@ -149,8 +182,17 @@ const MINUTE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartpr
 const VOLUME_RANK_TR_ID = "FHPST01710000";
 const FLUCTUATION_RANK_TR_ID = "FHPST01700000";
 const MINUTE_TR_ID = "FHKST03010200";
+const OVERSEAS_VOLUME_RANK_PATH = "/uapi/overseas-stock/v1/ranking/trade-vol";
+const OVERSEAS_TRADING_AMOUNT_RANK_PATH = "/uapi/overseas-stock/v1/ranking/trade-pbmn";
+const OVERSEAS_MINUTE_PATH = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice";
+const OVERSEAS_VOLUME_RANK_TR_ID = "HHDFS76310010";
+const OVERSEAS_TRADING_AMOUNT_RANK_TR_ID = "HHDFS76320010";
+const OVERSEAS_MINUTE_TR_ID = "HHDFS76950200";
 const MARKET_CODES = new Set<KisMarketDivisionCode>(["J", "NX", "UN"]);
+const US_EXCHANGE_CODES = new Set<KisUsExchangeCode>(["NAS", "NYS", "AMS"]);
 const VOLUME_BASIS_CODES = new Set(["0", "1", "2", "3", "4"]);
+const OVERSEAS_PERIOD_CODES = new Set(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+const OVERSEAS_VOLUME_RANGE_CODES = new Set(["0", "1", "2", "3", "4", "5", "6"]);
 
 function isRecord(value: unknown): value is UnknownRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -212,6 +254,52 @@ function seoulCompactDate(timestamp: number): string {
 
 function minuteTimestamp(date: string, time: string): string {
   return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:00+09:00`;
+}
+
+function localParts(timestamp: number, timeZone: string): { date: string; time: string } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    date: `${values.year}${values.month}${values.day}`,
+    time: `${values.hour}${values.minute}${values.second}`,
+  };
+}
+
+function zonedTimestamp(date: string, time: string, timeZone: string): string | undefined {
+  if (!isCompactDate(date) || !isCompactTime(time)) return undefined;
+  const targetAsUtc = Date.UTC(
+    Number(date.slice(0, 4)),
+    Number(date.slice(4, 6)) - 1,
+    Number(date.slice(6, 8)),
+    Number(time.slice(0, 2)),
+    Number(time.slice(2, 4)),
+    Number(time.slice(4, 6)),
+  );
+  let candidate = targetAsUtc;
+  for (let index = 0; index < 3; index += 1) {
+    const observed = localParts(candidate, timeZone);
+    const observedAsUtc = Date.UTC(
+      Number(observed.date.slice(0, 4)),
+      Number(observed.date.slice(4, 6)) - 1,
+      Number(observed.date.slice(6, 8)),
+      Number(observed.time.slice(0, 2)),
+      Number(observed.time.slice(2, 4)),
+      Number(observed.time.slice(4, 6)),
+    );
+    candidate += targetAsUtc - observedAsUtc;
+  }
+  const resolved = localParts(candidate, timeZone);
+  if (resolved.date !== date || resolved.time !== time) return undefined;
+  return new Date(candidate).toISOString();
 }
 
 function marketSource(code: KisMarketDivisionCode): KisMarketSource {
@@ -627,6 +715,222 @@ export class KisRestClient {
     };
   }
 
+  async getOverseasVolumeRanking(
+    request: KisOverseasRankRequest,
+  ): Promise<KisRestResult<KisOverseasRankItem>> {
+    return this.getOverseasRanking(request, "volume");
+  }
+
+  async getOverseasTradingAmountRanking(
+    request: KisOverseasRankRequest,
+  ): Promise<KisRestResult<KisOverseasRankItem>> {
+    return this.getOverseasRanking(request, "trading_amount");
+  }
+
+  private async getOverseasRanking(
+    request: KisOverseasRankRequest,
+    criterion: "volume" | "trading_amount",
+  ): Promise<KisRestResult<KisOverseasRankItem>> {
+    this.validateOverseasExchange(request.exchange);
+    const periodCode = request.periodCode ?? "0";
+    const volumeRangeCode = request.volumeRangeCode ?? "0";
+    if (!OVERSEAS_PERIOD_CODES.has(periodCode)) {
+      throw new KisRestValidationError("periodCode must be one of 0 through 9.");
+    }
+    if (!OVERSEAS_VOLUME_RANGE_CODES.has(volumeRangeCode)) {
+      throw new KisRestValidationError("volumeRangeCode must be one of 0 through 6.");
+    }
+    for (const [name, value] of [["minPrice", request.minPrice], ["maxPrice", request.maxPrice]] as const) {
+      if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+        throw new KisRestValidationError(`${name} must be a non-negative finite number.`);
+      }
+    }
+    if (request.minPrice !== undefined && request.maxPrice !== undefined && request.minPrice > request.maxPrice) {
+      throw new KisRestValidationError("minPrice must not exceed maxPrice.");
+    }
+    const params = new URLSearchParams({
+      EXCD: request.exchange,
+      NDAY: periodCode,
+      VOL_RANG: volumeRangeCode,
+      AUTH: "",
+      KEYB: "",
+      PRC1: request.minPrice === undefined ? "" : String(request.minPrice),
+      PRC2: request.maxPrice === undefined ? "" : String(request.maxPrice),
+    });
+    const path = criterion === "volume" ? OVERSEAS_VOLUME_RANK_PATH : OVERSEAS_TRADING_AMOUNT_RANK_PATH;
+    const trId = criterion === "volume" ? OVERSEAS_VOLUME_RANK_TR_ID : OVERSEAS_TRADING_AMOUNT_RANK_TR_ID;
+    const body = await this.request(path, trId, params);
+    const diagnostics: KisRestDiagnostic[] = [];
+    const items: KisOverseasRankItem[] = [];
+    this.outputRows(body, "output2").forEach((value, index) => {
+      if (!isRecord(value)) {
+        diagnostics.push(diagnostic(index, ["row"], "KIS overseas ranking row was not an object."));
+        return;
+      }
+      const symbol = stringValue(value.symb).toUpperCase();
+      const name = stringValue(value.name) || stringValue(value.ename) || symbol;
+      const rowExchange = stringValue(value.excd).toUpperCase() || request.exchange;
+      const rank = finiteNumber(value.rank);
+      const price = finiteNumber(value.last);
+      const changeAmount = finiteNumber(value.diff);
+      const changeRate = finiteNumber(value.rate);
+      const accumulatedVolume = finiteNumber(value.tvol);
+      const accumulatedTradingAmount = finiteNumber(value.tamt);
+      const invalid = [
+        !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(symbol) ? "symbol" : "",
+        !US_EXCHANGE_CODES.has(rowExchange as KisUsExchangeCode) || rowExchange !== request.exchange ? "exchange" : "",
+        rank === undefined || !Number.isInteger(rank) || rank < 1 ? "rank" : "",
+        price === undefined || price <= 0 ? "price" : "",
+        changeAmount === undefined ? "changeAmount" : "",
+        changeRate === undefined ? "changeRate" : "",
+        accumulatedVolume === undefined || accumulatedVolume < 0 ? "accumulatedVolume" : "",
+        accumulatedTradingAmount === undefined || accumulatedTradingAmount < 0 ? "accumulatedTradingAmount" : "",
+      ].filter(Boolean);
+      if (invalid.length > 0 || rank === undefined || price === undefined || changeAmount === undefined
+        || changeRate === undefined || accumulatedVolume === undefined || accumulatedTradingAmount === undefined) {
+        diagnostics.push(diagnostic(index, invalid, "KIS overseas ranking row was excluded because required fields are invalid."));
+        return;
+      }
+      const averageVolume = optionalFiniteNumber(value.a_tvol);
+      const averageTradingAmount = optionalFiniteNumber(value.a_tamt);
+      const invalidOptional = [
+        invalidOptionalNumber(value.a_tvol, averageVolume) || (averageVolume !== undefined && averageVolume < 0)
+          ? "averageVolume" : "",
+        invalidOptionalNumber(value.a_tamt, averageTradingAmount)
+          || (averageTradingAmount !== undefined && averageTradingAmount < 0) ? "averageTradingAmount" : "",
+      ].filter(Boolean);
+      if (invalidOptional.length > 0) {
+        diagnostics.push(diagnostic(index, invalidOptional, "KIS overseas ranking row was excluded because optional fields are invalid."));
+        return;
+      }
+      items.push({
+        symbol,
+        name,
+        exchange: request.exchange,
+        rank,
+        price,
+        changeAmount,
+        changeRate,
+        accumulatedVolume,
+        accumulatedTradingAmount,
+        ...(averageVolume === undefined ? {} : { averageVolume }),
+        ...(averageTradingAmount === undefined ? {} : { averageTradingAmount }),
+        ...(stringValue(value.rsym) ? { realtimeSymbol: stringValue(value.rsym) } : {}),
+      });
+    });
+    return {
+      items,
+      quality: resultQuality(items.length, diagnostics),
+      diagnostics,
+      providerTimestamp: new Date(this.now()).toISOString(),
+    };
+  }
+
+  async getOverseasMinutes(request: KisOverseasMinuteRequest): Promise<KisRestResult<KisMinuteBar>> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(request.symbol)) {
+      throw new KisRestValidationError("symbol must contain 1 to 32 ASCII letters, digits, dot, underscore, or hyphen.");
+    }
+    this.validateOverseasExchange(request.exchange);
+    if (!isCompactDate(request.sessionDate)) {
+      throw new KisRestValidationError("sessionDate must be a valid YYYYMMDD date.");
+    }
+    const currentNewYorkDate = localParts(this.now(), "America/New_York").date;
+    if (request.sessionDate !== currentNewYorkDate) {
+      throw new KisRestValidationError("KIS overseas minute recovery only supports the current New York trading date.");
+    }
+    if (request.cursor !== undefined && !/^\d{14}$/.test(request.cursor)) {
+      throw new KisRestValidationError("cursor must be YYYYMMDDHHMMSS.");
+    }
+    if (request.cursor !== undefined
+      && (!isCompactDate(request.cursor.slice(0, 8)) || !isCompactTime(request.cursor.slice(8, 14)))) {
+      throw new KisRestValidationError("cursor must contain a valid local date and time.");
+    }
+    const recordCount = request.recordCount ?? 120;
+    if (!Number.isInteger(recordCount) || recordCount < 1 || recordCount > 120) {
+      throw new KisRestValidationError("recordCount must be in 1..=120.");
+    }
+    const paged = Boolean(request.cursor);
+    const params = new URLSearchParams({
+      AUTH: "",
+      EXCD: request.exchange,
+      SYMB: request.symbol.toUpperCase(),
+      NMIN: "1",
+      PINC: paged ? "1" : "0",
+      NEXT: paged ? "1" : "",
+      NREC: String(recordCount),
+      FILL: "",
+      KEYB: request.cursor ?? "",
+    });
+    const body = await this.request(OVERSEAS_MINUTE_PATH, OVERSEAS_MINUTE_TR_ID, params);
+    const diagnostics: KisRestDiagnostic[] = [];
+    const byTimestamp = new Map<string, KisMinuteBar>();
+    const nowMinute = Math.floor(this.now() / 60_000) * 60_000;
+    this.outputRows(body, "output2").forEach((value, index) => {
+      if (!isRecord(value)) {
+        diagnostics.push(diagnostic(index, ["row"], "KIS overseas minute row was not an object."));
+        return;
+      }
+      const date = stringValue(value.xymd);
+      const time = stringValue(value.xhms);
+      const close = finiteNumber(value.last);
+      const open = finiteNumber(value.open);
+      const high = finiteNumber(value.high);
+      const low = finiteNumber(value.low);
+      const volume = finiteNumber(value.evol);
+      const tradingAmount = optionalFiniteNumber(value.eamt);
+      const timestamp = zonedTimestamp(date, time, "America/New_York") ?? "";
+      const timestampMs = timestamp ? Date.parse(timestamp) : Number.NaN;
+      const invalid = [
+        date !== request.sessionDate ? "sessionDate" : "",
+        !isCompactTime(time) ? "time" : "",
+        close === undefined || close <= 0 ? "close" : "",
+        open === undefined || open <= 0 ? "open" : "",
+        high === undefined || high <= 0 ? "high" : "",
+        low === undefined || low <= 0 ? "low" : "",
+        high !== undefined && open !== undefined && close !== undefined && low !== undefined
+          && (high < Math.max(open, close, low) || low > Math.min(open, close, high)) ? "ohlc" : "",
+        volume === undefined || volume < 0 ? "volume" : "",
+        invalidOptionalNumber(value.eamt, tradingAmount) || (tradingAmount !== undefined && tradingAmount < 0)
+          ? "tradingAmount" : "",
+        !Number.isFinite(timestampMs) || timestampMs > this.now() + 60_000 ? "timestamp" : "",
+      ].filter(Boolean);
+      if (invalid.length > 0 || close === undefined || open === undefined || high === undefined
+        || low === undefined || volume === undefined || !timestamp) {
+        diagnostics.push(diagnostic(index, invalid, "KIS overseas minute row was excluded because required fields are invalid."));
+        return;
+      }
+      if (byTimestamp.has(timestamp)) {
+        diagnostics.push({
+          index,
+          code: "duplicate-row",
+          fields: ["timestamp"],
+          message: "Duplicate KIS overseas minute row was excluded.",
+        });
+        return;
+      }
+      byTimestamp.set(timestamp, {
+        symbol: request.symbol.toUpperCase(),
+        sessionDate: request.sessionDate,
+        timestamp,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        ...(tradingAmount === undefined ? {} : { tradingAmount }),
+        status: timestampMs >= nowMinute ? "forming" : "final",
+        source: "kis_rest_recovery",
+      });
+    });
+    const items = Array.from(byTimestamp.values()).sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+    return {
+      items,
+      quality: resultQuality(items.length, diagnostics),
+      diagnostics,
+      providerTimestamp: new Date(this.now()).toISOString(),
+    };
+  }
+
   async getCurrentDayMinutes(request: KisMinuteRequest): Promise<KisRestResult<KisMinuteBar>> {
     if (!/^[A-Za-z0-9]{1,12}$/.test(request.symbol)) {
       throw new KisRestValidationError("symbol must contain 1 to 12 ASCII letters or digits.");
@@ -746,6 +1050,12 @@ export class KisRestClient {
     }
     if (minPrice !== undefined && maxPrice !== undefined && minPrice > maxPrice) {
       throw new KisRestValidationError("minPrice must not exceed maxPrice.");
+    }
+  }
+
+  private validateOverseasExchange(exchange: string): asserts exchange is KisUsExchangeCode {
+    if (!US_EXCHANGE_CODES.has(exchange as KisUsExchangeCode)) {
+      throw new KisRestValidationError("exchange must be NAS, NYS, or AMS.");
     }
   }
 

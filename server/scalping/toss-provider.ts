@@ -7,6 +7,8 @@ import {
   NormalizedTradeSchema,
   NormalizedWarningSchema,
   isoTimestampSchema,
+  normalizeUsExchange,
+  sessionDateSchema,
   type MarketCountry,
   type NormalizedMinuteCandle,
   type NormalizedOrderbook,
@@ -40,8 +42,14 @@ export type TossRawMarketClient = {
   getReadOnlyMarketData(feature: ReadOnlyMarketFeature, query: MarketQuery): Promise<TossRawMarketResponse>;
 };
 
-export type TossRateLimitGroup = "ranking" | "market_data" | "chart" | "stock";
+export type TossRateLimitGroup = "ranking" | "market_data" | "chart" | "stock" | "market_info";
 export type TossRankingCriterion = Extract<ScannerCriterion, "trading_amount" | "volume"> | "change_rate";
+
+export type TossMarketCalendarDay = {
+  marketCountry: MarketCountry;
+  sessionDate: string;
+  regularMarket: { startAt: string; endAt: string } | null;
+};
 
 export type TossProviderConfig = {
   rankingMaximumCount: number;
@@ -56,6 +64,7 @@ export type TossProviderConfig = {
     orderbook: number;
     trades: number;
     warnings: number;
+    calendar: number;
   };
   retry: RetryConfig;
   rateLimits: Record<TossRateLimitGroup, AdaptiveRateLimiterConfig>;
@@ -145,9 +154,9 @@ function timestamp(value: unknown, feature: string, field: string): string {
   return parsed.data;
 }
 
-function sessionDateAt(value: string): string {
+function sessionDateAt(value: string, marketCountry: MarketCountry): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul",
+    timeZone: marketCountry === "US" ? "America/New_York" : "Asia/Seoul",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -194,11 +203,15 @@ export function normalizeTossRankings(
       ?? numberValue(row, ["changeRate", "changeRateRatio"]);
     const volume = numberValue(row, ["tradingVolume", "volume", "accumulatedVolume"]);
     const tradingAmount = numberValue(row, ["tradingAmount", "accumulatedTradingAmount"]);
+    const exchange = marketCountry === "US"
+      ? normalizeUsExchange(pick(row, ["exchange", "exchangeCode", "market", "marketCode"]))
+      : undefined;
     return parseWithContract(feature, NormalizedRankingSchema, {
       provider: "toss",
       symbol: requiredText(row, ["symbol", "stockCode", "code"], feature, "symbol"),
       ...(text(row, ["name", "stockName", "symbolName"]) ? { name: text(row, ["name", "stockName", "symbolName"]) } : {}),
       marketCountry,
+      ...(exchange ? { exchange } : {}),
       currency: currency(row, marketCountry, feature),
       rank: requiredNumber(row, ["rank", "ranking"], feature, "rank"),
       rankedAt,
@@ -237,7 +250,11 @@ export function normalizeTossPrices(payload: unknown, fetchedAt: string): Normal
   });
 }
 
-export function normalizeTossMinuteCandles(payload: unknown, symbol: string): NormalizedMinuteCandle[] {
+export function normalizeTossMinuteCandles(
+  payload: unknown,
+  symbol: string,
+  marketCountry: MarketCountry = "KR",
+): NormalizedMinuteCandle[] {
   const feature = "candles";
   return rows(payload, feature, ["candles", "items"]).map((row) => {
     const observedAt = timestamp(pick(row, ["timestamp", "dateTime", "time"]), feature, "timestamp");
@@ -245,7 +262,7 @@ export function normalizeTossMinuteCandles(payload: unknown, symbol: string): No
       provider: "toss",
       symbol,
       timestamp: observedAt,
-      sessionDate: text(row, ["date", "businessDate", "tradeDate"]) ?? sessionDateAt(observedAt),
+      sessionDate: text(row, ["date", "businessDate", "tradeDate"]) ?? sessionDateAt(observedAt, marketCountry),
       interval: "1m",
       status: "unknown",
       open: requiredNumber(row, ["open", "openPrice", "openingPrice"], feature, "open"),
@@ -390,6 +407,7 @@ export class TossScalpingProvider {
       market_data: new AdaptiveRateLimiter(config.rateLimits.market_data),
       chart: new AdaptiveRateLimiter(config.rateLimits.chart),
       stock: new AdaptiveRateLimiter(config.rateLimits.stock),
+      market_info: new AdaptiveRateLimiter(config.rateLimits.market_info),
     };
     this.cache = new TtlCache({ maximumEntries: config.cacheMaximumEntries, now: config.now });
   }
@@ -454,7 +472,12 @@ export class TossScalpingProvider {
     return output;
   }
 
-  async getMinuteCandles(symbol: string, count: number, before?: string): Promise<NormalizedMinuteCandle[]> {
+  async getMinuteCandles(
+    symbol: string,
+    count: number,
+    before?: string,
+    marketCountry: MarketCountry = "KR",
+  ): Promise<NormalizedMinuteCandle[]> {
     if (!Number.isInteger(count) || count <= 0 || count > this.config.candlesMaximumCount) {
       throw new Error(`Candle count must be between 1 and ${this.config.candlesMaximumCount}.`);
     }
@@ -466,7 +489,7 @@ export class TossScalpingProvider {
       adjusted: "false",
       ...(before ? { before } : {}),
     }, "chart", this.config.cacheTtlMs.candles);
-    return normalizeTossMinuteCandles(response.data, symbol);
+    return normalizeTossMinuteCandles(response.data, symbol, marketCountry);
   }
 
   async getOrderbook(symbol: string): Promise<NormalizedOrderbook> {
@@ -485,6 +508,38 @@ export class TossScalpingProvider {
   async getWarnings(symbol: string): Promise<NormalizedWarning[]> {
     const response = await this.request("warnings", { symbol }, "stock", this.config.cacheTtlMs.warnings);
     return normalizeTossWarnings(response.data, symbol, response.fetchedAt);
+  }
+
+  async getMarketCalendar(
+    marketCountry: MarketCountry,
+    sessionDate: string,
+  ): Promise<TossMarketCalendarDay> {
+    const parsedDate = sessionDateSchema.safeParse(sessionDate);
+    if (!parsedDate.success) throw new Error("Market calendar date must be YYYY-MM-DD.");
+    const response = await this.request("market-calendar", {
+      country: marketCountry,
+      date: parsedDate.data,
+    }, "market_info", this.config.cacheTtlMs.calendar);
+    const feature = "market-calendar";
+    const result = resultRecord(response.data, feature);
+    const today = result.today;
+    if (!isRecord(today)) throw new TossProviderContractError(feature, "today must be an object");
+    const providerDate = requiredText(today, ["date"], feature, "today.date");
+    if (providerDate !== parsedDate.data || !sessionDateSchema.safeParse(providerDate).success) {
+      throw new TossProviderContractError(feature, "today.date does not match the requested date");
+    }
+    if (today.regularMarket === null) {
+      return { marketCountry, sessionDate: providerDate, regularMarket: null };
+    }
+    if (!isRecord(today.regularMarket)) {
+      throw new TossProviderContractError(feature, "today.regularMarket must be an object or null");
+    }
+    const startAt = timestamp(today.regularMarket.startTime, feature, "today.regularMarket.startTime");
+    const endAt = timestamp(today.regularMarket.endTime, feature, "today.regularMarket.endTime");
+    if (Date.parse(startAt) >= Date.parse(endAt)) {
+      throw new TossProviderContractError(feature, "regular market start must precede end");
+    }
+    return { marketCountry, sessionDate: providerDate, regularMarket: { startAt, endAt } };
   }
 
   rateLimitSnapshot(group: TossRateLimitGroup) {

@@ -15,6 +15,7 @@ import {
   type AiResponse,
 } from "../worker/ai-contract.js";
 import type { AiComputeClient } from "../worker/ai-client.js";
+import type { MarketCountry } from "../scalping/contracts.js";
 
 export const SCALPING_AI_SERVICE_VERSION = "scalping-ai-service/v1";
 
@@ -22,8 +23,9 @@ type AiClient = Pick<AiComputeClient, "request">;
 type PredictionStore = Pick<ScalpingRepository, "putPrediction">;
 type RunScheduler = Pick<RunService, "enqueue">;
 
-function dataRevision(request: AiEvaluateRequest): string {
+function dataRevision(request: AiEvaluateRequest, marketCountry: MarketCountry): string {
   const source = request.series.map((series) => ({
+    market_country: marketCountry,
     instrument_key: series.instrument_key,
     first_bar: series.bars[0]?.timestamp,
     last_bar: series.bars.at(-1)?.timestamp,
@@ -64,7 +66,11 @@ export class ScalpingAiService {
     }
   }
 
-  async forecast(input: AiForecastRequest, signal?: AbortSignal): Promise<{
+  async forecast(
+    input: AiForecastRequest,
+    signal?: AbortSignal,
+    marketCountry: MarketCountry = "KR",
+  ): Promise<{
     response: AiResponse;
     predictions: ScalpingPredictionRecord[];
   }> {
@@ -77,6 +83,7 @@ export class ScalpingAiService {
     for (const series of response.series) {
       const unavailableCode = series.unavailable?.code;
       stored.push(await this.predictions.putPrediction({
+        marketCountry,
         symbol: series.instrument_key,
         modelName: response.model.model_id,
         modelVersion: response.model.model_revision,
@@ -99,7 +106,11 @@ export class ScalpingAiService {
     return { response, predictions: stored };
   }
 
-  async evaluate(input: AiEvaluateRequest, ownerSubject = "owner"): Promise<{
+  async evaluate(
+    input: AiEvaluateRequest,
+    ownerSubject = "owner",
+    marketCountry: MarketCountry = "KR",
+  ): Promise<{
     run: Awaited<ReturnType<RunScheduler["enqueue"]>>["run"];
     reused: boolean;
   }> {
@@ -108,12 +119,13 @@ export class ScalpingAiService {
       throw new Error(`AI 예측 검증은 한 번에 ${this.maximumBatchSize}종목 이하여야 합니다.`);
     }
     const totalOrigins = request.series.reduce((sum, series) => sum + series.origins.length, 0);
-    const revision = dataRevision(request);
+    const revision = dataRevision(request, marketCountry);
     const queued = await this.runs.enqueue({
       ownerSubject,
       kind: "scalping_prediction_evaluation",
       config: {
         schema_version: request.schema_version,
+        market_country: marketCountry,
         mode: request.mode,
         horizons_minutes: request.horizons_minutes,
         quantiles: request.quantiles,

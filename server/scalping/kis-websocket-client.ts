@@ -1,9 +1,11 @@
-import type { KisEnvironment, KisMarketSource } from "./kis-rest-client.js";
+import type { MarketCountry } from "./contracts.js";
+import type { KisEnvironment, KisMarketSource, KisUsExchangeCode } from "./kis-rest-client.js";
+import { zonedTimestamp } from "./market-time.js";
 
 type UnknownRecord = Record<string, unknown>;
 
-export type KisExecutionTrId = "H0STCNT0" | "H0NXCNT0" | "H0UNCNT0";
-export type KisOrderbookTrId = "H0STASP0" | "H0NXASP0" | "H0UNASP0";
+export type KisExecutionTrId = "H0STCNT0" | "H0NXCNT0" | "H0UNCNT0" | "HDFSCNT0";
+export type KisOrderbookTrId = "H0STASP0" | "H0NXASP0" | "H0UNASP0" | "HDFSASP0";
 export type KisMarketTrId = KisExecutionTrId | KisOrderbookTrId;
 
 export type KisWebSocketConfig = {
@@ -26,6 +28,7 @@ export type KisWebSocketConfig = {
 export type KisSubscription = {
   trId: KisMarketTrId;
   symbol: string;
+  exchange?: KisUsExchangeCode;
 };
 
 export type KisConnectionState =
@@ -51,6 +54,8 @@ export type KisExecutionEvent = {
   type: "execution";
   trId: KisExecutionTrId;
   market: KisMarketSource;
+  marketCountry: MarketCountry;
+  exchange?: KisUsExchangeCode;
   symbol: string;
   eventId: string;
   providerTimestamp: string;
@@ -65,7 +70,7 @@ export type KisExecutionEvent = {
   bidPrice1: number;
   executionStrength?: number;
   executionClassCode?: string;
-  tradingHalted: boolean;
+  tradingHalted?: boolean;
 };
 
 export type KisOrderbookLevel = {
@@ -78,12 +83,15 @@ export type KisOrderbookEvent = {
   type: "orderbook";
   trId: KisOrderbookTrId;
   market: KisMarketSource;
+  marketCountry: MarketCountry;
+  exchange?: KisUsExchangeCode;
   symbol: string;
   providerTimestamp: string;
   receivedAt: string;
   sessionDate: string;
   quoteTime: string;
-  timestampDateSource: "received-session-date";
+  timestampDateSource: "received-session-date" | "provider-local-date";
+  depth: "ten_level" | "top_of_book";
   asks: KisOrderbookLevel[];
   bids: KisOrderbookLevel[];
   totalAskQuantity: number;
@@ -94,6 +102,8 @@ export type KisSubscriptionEvent = {
   type: "subscription";
   trId: KisMarketTrId;
   market: KisMarketSource;
+  marketCountry: MarketCountry;
+  exchange?: KisUsExchangeCode;
   symbol: string;
   providerTimestamp: string;
   action: "subscribe" | "unsubscribe" | "unknown";
@@ -177,8 +187,9 @@ const WEB_SOCKET_URLS: Record<KisEnvironment, string> = {
 const APPROVAL_PATH = "/oauth2/Approval";
 const OPEN_READY_STATE = 1;
 
-const EXECUTION_TR_IDS = new Set<KisExecutionTrId>(["H0STCNT0", "H0NXCNT0", "H0UNCNT0"]);
-const ORDERBOOK_TR_IDS = new Set<KisOrderbookTrId>(["H0STASP0", "H0NXASP0", "H0UNASP0"]);
+const EXECUTION_TR_IDS = new Set<KisExecutionTrId>(["H0STCNT0", "H0NXCNT0", "H0UNCNT0", "HDFSCNT0"]);
+const ORDERBOOK_TR_IDS = new Set<KisOrderbookTrId>(["H0STASP0", "H0NXASP0", "H0UNASP0", "HDFSASP0"]);
+const US_EXCHANGES = new Set<KisUsExchangeCode>(["NAS", "NYS", "AMS"]);
 
 type ControlMessage = {
   action: "subscribe" | "unsubscribe";
@@ -238,10 +249,15 @@ function nowIso(now: () => number): string {
 }
 
 function marketForTrId(trId: string): KisMarketSource | undefined {
+  if (trId === "HDFSCNT0" || trId === "HDFSASP0") return "US";
   if (trId.startsWith("H0ST")) return "KRX";
   if (trId.startsWith("H0NX")) return "NXT";
   if (trId.startsWith("H0UN")) return "INTEGRATED";
   return undefined;
+}
+
+function marketCountryForTrId(trId: string): MarketCountry | undefined {
+  return trId === "HDFSCNT0" || trId === "HDFSASP0" ? "US" : marketForTrId(trId) ? "KR" : undefined;
 }
 
 function isExecutionTrId(value: string): value is KisExecutionTrId {
@@ -257,7 +273,28 @@ function isMarketTrId(value: string): value is KisMarketTrId {
 }
 
 function subscriptionKey(subscription: KisSubscription): string {
-  return `${subscription.trId}:${subscription.symbol}`;
+  return `${subscription.trId}:${subscription.exchange ?? ""}:${subscription.symbol}`;
+}
+
+function providerSubscriptionKey(subscription: KisSubscription): string {
+  if (subscription.trId === "HDFSCNT0" || subscription.trId === "HDFSASP0") {
+    return `D${subscription.exchange}${subscription.symbol}`;
+  }
+  return subscription.symbol;
+}
+
+function overseasSymbol(value: string): { symbol: string; exchange?: KisUsExchangeCode } {
+  const normalized = value.trim().toUpperCase();
+  const prefixed = /^[DR]([A-Z]{3})([A-Z0-9._-]{1,32})$/.exec(normalized);
+  if (!prefixed) return { symbol: normalized };
+  const providerExchange = prefixed[1]!;
+  const exchange = providerExchange === "BAQ" ? "NAS"
+    : providerExchange === "BAY" ? "NYS"
+      : providerExchange === "BAA" ? "AMS"
+        : US_EXCHANGES.has(providerExchange as KisUsExchangeCode)
+          ? providerExchange as KisUsExchangeCode
+          : undefined;
+  return { symbol: prefixed[2]!, ...(exchange ? { exchange } : {}) };
 }
 
 function assertPositive(value: number, name: string): void {
@@ -445,8 +482,15 @@ export class KisWebSocketClient {
 
   private validateSubscription(subscription: KisSubscription): void {
     if (!isMarketTrId(subscription.trId)) throw new KisWebSocketValidationError("Unsupported KIS market TR ID.");
-    if (!/^[A-Za-z0-9]{1,12}$/.test(subscription.symbol)) {
-      throw new KisWebSocketValidationError("symbol must contain 1 to 12 ASCII letters or digits.");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(subscription.symbol)) {
+      throw new KisWebSocketValidationError("symbol must contain 1 to 32 supported ASCII characters.");
+    }
+    const overseas = subscription.trId === "HDFSCNT0" || subscription.trId === "HDFSASP0";
+    if (overseas && !US_EXCHANGES.has(subscription.exchange as KisUsExchangeCode)) {
+      throw new KisWebSocketValidationError("US subscriptions require exchange NAS, NYS, or AMS.");
+    }
+    if (!overseas && subscription.exchange !== undefined) {
+      throw new KisWebSocketValidationError("exchange is only valid for US subscriptions.");
     }
   }
 
@@ -707,8 +751,10 @@ export class KisWebSocketClient {
 
   private sendControl(socket: WebSocketLike, message: ControlMessage): void {
     if (!this.approvalKey || socket.readyState !== OPEN_READY_STATE) return;
+    const providerKey = providerSubscriptionKey(message.subscription);
+    const pendingKey = `${message.subscription.trId}:${providerKey}`;
     try {
-      this.pendingControlActions.set(subscriptionKey(message.subscription), message.action);
+      this.pendingControlActions.set(pendingKey, message.action);
       socket.send(JSON.stringify({
         header: {
           approval_key: this.approvalKey,
@@ -719,12 +765,12 @@ export class KisWebSocketClient {
         body: {
           input: {
             tr_id: message.subscription.trId,
-            tr_key: message.subscription.symbol,
+            tr_key: providerKey,
           },
         },
       }));
     } catch {
-      this.pendingControlActions.delete(subscriptionKey(message.subscription));
+      this.pendingControlActions.delete(pendingKey);
       this.emit({
         type: "parse_error",
         providerTimestamp: nowIso(this.now),
@@ -782,19 +828,25 @@ export class KisWebSocketClient {
     const responseBody = isRecord(body.body) ? body.body : {};
     const code = stringValue(responseBody.msg_cd) || stringValue(responseBody.rt_cd) || "unknown";
     const accepted = stringValue(responseBody.rt_cd) === "0";
-    const symbol = stringValue(header.tr_key);
-    if (!/^[A-Za-z0-9]{1,12}$/.test(symbol)) {
+    const providerKey = stringValue(header.tr_key).toUpperCase();
+    const decoded = trId === "HDFSCNT0" || trId === "HDFSASP0"
+      ? overseasSymbol(providerKey)
+      : { symbol: providerKey };
+    if (!/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(decoded.symbol)
+      || ((trId === "HDFSCNT0" || trId === "HDFSASP0") && decoded.exchange === undefined)) {
       this.emitParseError("KIS subscription acknowledgement did not include a valid symbol.", trId, marketForTrId(trId));
       return;
     }
     const trType = stringValue(header.tr_type);
-    const pendingAction = this.pendingControlActions.get(`${trId}:${symbol}`);
-    if (symbol) this.pendingControlActions.delete(`${trId}:${symbol}`);
+    const pendingAction = this.pendingControlActions.get(`${trId}:${providerKey}`);
+    this.pendingControlActions.delete(`${trId}:${providerKey}`);
     this.emit({
       type: "subscription",
       trId,
       market: marketForTrId(trId)!,
-      symbol,
+      marketCountry: marketCountryForTrId(trId)!,
+      ...(decoded.exchange ? { exchange: decoded.exchange } : {}),
+      symbol: decoded.symbol,
       providerTimestamp: this.systemTimestamp(header.datetime),
       action: trType === "1" ? "subscribe" : trType === "2" ? "unsubscribe" : pendingAction ?? "unknown",
       accepted,
@@ -829,7 +881,8 @@ export class KisWebSocketClient {
       return;
     }
     const fields = payloadParts.join("|").split("^");
-    const minimumWidth = isExecutionTrId(trId) ? 46 : 59;
+    const minimumWidth = trId === "HDFSCNT0" ? 26 : trId === "HDFSASP0" ? 17
+      : isExecutionTrId(trId) ? 46 : 59;
     if (fields.length < minimumWidth * recordCount || fields.length % recordCount !== 0) {
       this.emitParseError("KIS market-data frame length did not match its record count.", trId);
       return;
@@ -837,7 +890,9 @@ export class KisWebSocketClient {
     const width = fields.length / recordCount;
     for (let index = 0; index < recordCount; index += 1) {
       const values = fields.slice(index * width, (index + 1) * width);
-      if (isExecutionTrId(trId)) this.parseExecution(trId, values);
+      if (trId === "HDFSCNT0") this.parseOverseasExecution(values);
+      else if (trId === "HDFSASP0") this.parseOverseasOrderbook(values);
+      else if (isExecutionTrId(trId)) this.parseExecution(trId, values);
       else this.parseOrderbook(trId, values);
     }
   }
@@ -881,6 +936,7 @@ export class KisWebSocketClient {
       type: "execution",
       trId,
       market,
+      marketCountry: "KR",
       symbol,
       eventId: `kis:${trId}:${symbol}:${sessionDate}:${time}:${accumulatedVolume}:${price}:${executionVolume}`,
       providerTimestamp: compactTimestamp(sessionDate, time),
@@ -896,6 +952,127 @@ export class KisWebSocketClient {
       ...(executionStrength === undefined ? {} : { executionStrength }),
       ...(stringValue(values[21]) ? { executionClassCode: stringValue(values[21]) } : {}),
       tradingHalted: stringValue(values[35]).toUpperCase() === "Y",
+    });
+  }
+
+  private parseOverseasExecution(values: string[]): void {
+    const decoded = overseasSymbol(stringValue(values[0]));
+    const providerSymbol = stringValue(values[1]).toUpperCase();
+    const sessionDate = stringValue(values[4]);
+    const time = stringValue(values[5]);
+    const price = finiteNumber(values[11]);
+    const bidPrice1 = finiteNumber(values[15]);
+    const askPrice1 = finiteNumber(values[16]);
+    const executionVolume = finiteNumber(values[19]);
+    const accumulatedVolume = finiteNumber(values[20]);
+    const accumulatedTradingAmount = finiteNumber(values[21]);
+    const executionStrength = optionalFiniteNumber(values[24]);
+    const providerTimestamp = zonedTimestamp(sessionDate, time, "America/New_York");
+    const invalid = [
+      !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(decoded.symbol) ? "symbol" : "",
+      providerSymbol !== decoded.symbol ? "providerSymbol" : "",
+      decoded.exchange === undefined ? "exchange" : "",
+      !isCompactDate(sessionDate) ? "sessionDate" : "",
+      !isCompactTime(time) ? "time" : "",
+      !providerTimestamp ? "timestamp" : "",
+      price === undefined || price <= 0 ? "price" : "",
+      askPrice1 === undefined || askPrice1 < 0 ? "askPrice1" : "",
+      bidPrice1 === undefined || bidPrice1 < 0 ? "bidPrice1" : "",
+      executionVolume === undefined || executionVolume <= 0 ? "executionVolume" : "",
+      accumulatedVolume === undefined || accumulatedVolume < 0 ? "accumulatedVolume" : "",
+      accumulatedTradingAmount === undefined || accumulatedTradingAmount < 0 ? "accumulatedTradingAmount" : "",
+      stringValue(values[24]) !== "" && executionStrength === undefined ? "executionStrength" : "",
+    ].filter(Boolean);
+    if (invalid.length > 0 || !providerTimestamp || decoded.exchange === undefined || price === undefined
+      || askPrice1 === undefined || bidPrice1 === undefined || executionVolume === undefined
+      || accumulatedVolume === undefined || accumulatedTradingAmount === undefined) {
+      this.emitParseError(
+        `KIS overseas execution record was excluded because fields were invalid: ${invalid.join(", ")}.`,
+        "HDFSCNT0",
+        "US",
+        decoded.symbol || undefined,
+      );
+      return;
+    }
+    const receivedAt = nowIso(this.now);
+    this.emit({
+      type: "execution",
+      trId: "HDFSCNT0",
+      market: "US",
+      marketCountry: "US",
+      exchange: decoded.exchange,
+      symbol: decoded.symbol,
+      eventId: `kis:HDFSCNT0:${decoded.exchange}:${decoded.symbol}:${sessionDate}:${time}:${accumulatedVolume}:${price}:${executionVolume}`,
+      providerTimestamp,
+      receivedAt,
+      sessionDate,
+      tradeTime: time,
+      price,
+      executionVolume,
+      accumulatedVolume,
+      accumulatedTradingAmount,
+      askPrice1,
+      bidPrice1,
+      ...(executionStrength === undefined ? {} : { executionStrength }),
+      ...(stringValue(values[25]) ? { executionClassCode: stringValue(values[25]) } : {}),
+    });
+  }
+
+  private parseOverseasOrderbook(values: string[]): void {
+    const decoded = overseasSymbol(stringValue(values[0]));
+    const providerSymbol = stringValue(values[1]).toUpperCase();
+    const sessionDate = stringValue(values[3]);
+    const time = stringValue(values[4]);
+    const totalBidQuantity = finiteNumber(values[7]);
+    const totalAskQuantity = finiteNumber(values[8]);
+    const bidPrice = finiteNumber(values[11]);
+    const askPrice = finiteNumber(values[12]);
+    const bidQuantity = finiteNumber(values[13]);
+    const askQuantity = finiteNumber(values[14]);
+    const providerTimestamp = zonedTimestamp(sessionDate, time, "America/New_York");
+    const invalid = [
+      !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(decoded.symbol) ? "symbol" : "",
+      providerSymbol !== decoded.symbol ? "providerSymbol" : "",
+      decoded.exchange === undefined ? "exchange" : "",
+      !isCompactDate(sessionDate) ? "sessionDate" : "",
+      !isCompactTime(time) ? "time" : "",
+      !providerTimestamp ? "timestamp" : "",
+      bidPrice === undefined || bidPrice <= 0 ? "bidPrice1" : "",
+      askPrice === undefined || askPrice <= 0 ? "askPrice1" : "",
+      bidQuantity === undefined || bidQuantity < 0 ? "bidQuantity1" : "",
+      askQuantity === undefined || askQuantity < 0 ? "askQuantity1" : "",
+      totalBidQuantity === undefined || totalBidQuantity < 0 ? "totalBidQuantity" : "",
+      totalAskQuantity === undefined || totalAskQuantity < 0 ? "totalAskQuantity" : "",
+    ].filter(Boolean);
+    if (invalid.length > 0 || !providerTimestamp || decoded.exchange === undefined
+      || bidPrice === undefined || askPrice === undefined || bidQuantity === undefined || askQuantity === undefined
+      || totalBidQuantity === undefined || totalAskQuantity === undefined) {
+      this.emitParseError(
+        `KIS overseas orderbook record was excluded because fields were invalid: ${invalid.join(", ")}.`,
+        "HDFSASP0",
+        "US",
+        decoded.symbol || undefined,
+      );
+      return;
+    }
+    const receivedAt = nowIso(this.now);
+    this.emit({
+      type: "orderbook",
+      trId: "HDFSASP0",
+      market: "US",
+      marketCountry: "US",
+      exchange: decoded.exchange,
+      symbol: decoded.symbol,
+      providerTimestamp,
+      receivedAt,
+      sessionDate,
+      quoteTime: time,
+      timestampDateSource: "provider-local-date",
+      depth: "top_of_book",
+      asks: [{ level: 1, price: askPrice, quantity: askQuantity }],
+      bids: [{ level: 1, price: bidPrice, quantity: bidQuantity }],
+      totalAskQuantity,
+      totalBidQuantity,
     });
   }
 
@@ -932,12 +1109,14 @@ export class KisWebSocketClient {
       type: "orderbook",
       trId,
       market,
+      marketCountry: "KR",
       symbol,
       providerTimestamp: compactTimestamp(sessionDate, time),
       receivedAt,
       sessionDate,
       quoteTime: time,
       timestampDateSource: "received-session-date",
+      depth: "ten_level",
       asks,
       bids,
       totalAskQuantity,

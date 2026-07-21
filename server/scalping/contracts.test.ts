@@ -48,7 +48,13 @@ describe("scalping contracts", () => {
 
   it("uses configured scanner count limits", () => {
     const schema = createScannerRequestSchema({ minimumTopCount: 3, maximumTopCount: 17 });
-    expect(schema.parse({ criterion: "volume", topCount: 3 })).toEqual({ criterion: "volume", topCount: 3 });
+    expect(schema.parse({ criterion: "volume", topCount: 3 })).toEqual({
+      marketCountry: "KR", criterion: "volume", topCount: 3,
+    });
+    expect(schema.parse({ marketCountry: "US", criterion: "volume", topCount: 3 })).toEqual({
+      marketCountry: "US", criterion: "volume", topCount: 3,
+    });
+    expect(() => schema.parse({ marketCountry: "JP", criterion: "volume", topCount: 3 })).toThrow();
     expect(() => schema.parse({ criterion: "volume", topCount: 2 })).toThrow();
     expect(() => schema.parse({ criterion: "volume", topCount: 18 })).toThrow();
     expect(() => createScannerRequestSchema({ minimumTopCount: 10, maximumTopCount: 5 })).toThrow();

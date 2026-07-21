@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ScalpingVirtualizedCandidateCard } from "./scalping-assistant";
+import { ScalpingMarketSelector, ScalpingVirtualizedCandidateCard } from "./scalping-assistant";
 import type { ScalpingCandidate } from "@/lib/scalping-assistant";
 
 const candidate: ScalpingCandidate = {
@@ -21,5 +21,15 @@ describe("ScalpingVirtualizedCandidateCard", () => {
     expect(markup).toContain('data-scalping-card-state="placeholder"');
     expect(markup).toContain("화면에 가까워지면 차트를 렌더링합니다.");
     expect(markup).not.toContain("data-scalping-price-chart");
+  });
+});
+
+describe("ScalpingMarketSelector", () => {
+  it("exposes domestic and US targets and marks the selected market", () => {
+    const markup = renderToStaticMarkup(<ScalpingMarketSelector value="US" onChange={() => undefined} />);
+    expect(markup).toContain('data-scalping-market-selector="true"');
+    expect(markup).toContain('aria-label="국내 상장 종목 스캔"');
+    expect(markup).toContain('aria-label="미국 상장 종목 스캔"');
+    expect(markup).toMatch(/aria-label="미국 상장 종목 스캔"[^>]*aria-pressed="true"/);
   });
 });

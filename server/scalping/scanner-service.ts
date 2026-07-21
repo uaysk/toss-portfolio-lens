@@ -25,6 +25,7 @@ export type ScannerConfig = {
   maximumTopCount: number;
   minimumVolume: number;
   minimumTradingAmount: number;
+  usMinimumTradingAmount?: number;
   maximumSpreadBps: number;
   filterLowLiquidity: boolean;
   filterWideSpread: boolean;
@@ -81,6 +82,7 @@ function validateConfig(config: ScannerConfig): void {
   for (const [name, value] of [
     ["minimumVolume", config.minimumVolume],
     ["minimumTradingAmount", config.minimumTradingAmount],
+    ["usMinimumTradingAmount", config.usMinimumTradingAmount ?? config.minimumTradingAmount],
     ["maximumSpreadBps", config.maximumSpreadBps],
     ["staleAfterMs", config.staleAfterMs],
   ] as const) {
@@ -158,7 +160,10 @@ export class ScalpingScanner {
     this.cautionWarningCodes = new Set(config.cautionWarningCodes.map((value) => value.trim().toUpperCase()).filter(Boolean));
   }
 
-  scan(request: { criterion: ScannerCriterion; topCount: number }, snapshot: ScannerSnapshot): ScannerResult {
+  scan(
+    request: { marketCountry?: "KR" | "US"; criterion: ScannerCriterion; topCount: number },
+    snapshot: ScannerSnapshot,
+  ): ScannerResult {
     const parsedRequest = this.requestSchema.parse(request);
     const generatedAtMs = this.now();
     const generatedAt = new Date(generatedAtMs).toISOString();
@@ -188,6 +193,7 @@ export class ScalpingScanner {
         bySymbol.set(ranking.symbol, {
           symbol: ranking.symbol,
           ...(ranking.name ? { name: ranking.name } : {}),
+          ...(ranking.exchange ? { exchange: ranking.exchange } : {}),
           currency: ranking.currency,
           price: ranking.price,
           ...(ranking.changeRateRatio === undefined ? {} : { changeRateRatio: ranking.changeRateRatio }),
@@ -215,6 +221,7 @@ export class ScalpingScanner {
       if (ranking.rankedAt > current.rankedAt) current.rankedAt = ranking.rankedAt;
       if (current.volume === undefined && ranking.volume !== undefined) current.volume = ranking.volume;
       if (current.tradingAmount === undefined && ranking.tradingAmount !== undefined) current.tradingAmount = ranking.tradingAmount;
+      if (current.exchange === undefined && ranking.exchange !== undefined) current.exchange = ranking.exchange;
     }
 
     const candidates = Array.from(bySymbol.values());
@@ -241,7 +248,13 @@ export class ScalpingScanner {
         ...(candidate.tradingAmount === undefined ? {} : { tradingAmount: candidate.tradingAmount }),
         ...(candidate.spreadBps === undefined ? {} : { spreadBps: candidate.spreadBps }),
       };
-      this.applyFiltersAndQuality(candidate, states.get(candidate.symbol), parsedRequest.criterion, generatedAtMs);
+      this.applyFiltersAndQuality(
+        candidate,
+        states.get(candidate.symbol),
+        parsedRequest.marketCountry,
+        parsedRequest.criterion,
+        generatedAtMs,
+      );
     }
 
     const scoringUniverse = candidates.filter((candidate) => !candidate.filtered);
@@ -301,6 +314,7 @@ export class ScalpingScanner {
   private applyFiltersAndQuality(
     candidate: WorkingCandidate,
     state: InstrumentState | undefined,
+    marketCountry: "KR" | "US",
     criterion: ScannerCriterion,
     generatedAtMs: number,
   ): void {
@@ -311,7 +325,14 @@ export class ScalpingScanner {
     if (state?.liquidationTrading) reasons.push("liquidation_trading");
     if (state?.investmentCaution) reasons.push("investment_caution");
     if (state?.unsupported) reasons.push("unsupported_instrument");
-    reasons.push(...(state?.reasons ?? []));
+    for (const reason of state?.reasons ?? []) {
+      if (reason === "investment_warning_status_unavailable") {
+        missing.push("investment_warning_status");
+        candidate.quality.reasons.push(reason);
+      } else {
+        reasons.push(reason);
+      }
+    }
     for (const warning of candidate.warnings) {
       const code = warning.code.toUpperCase();
       if (warning.severity === "blocking" || this.blockingWarningCodes.has(code)) reasons.push(`warning:${warning.code}`);
@@ -324,8 +345,11 @@ export class ScalpingScanner {
       candidate.quality.reasons.push("low_volume");
       if (this.config.filterLowLiquidity) reasons.push("low_volume");
     }
+    const minimumTradingAmount = marketCountry === "US"
+      ? this.config.usMinimumTradingAmount ?? this.config.minimumTradingAmount
+      : this.config.minimumTradingAmount;
     if (candidate.tradingAmount === undefined) missing.push("trading_amount");
-    else if (candidate.tradingAmount < this.config.minimumTradingAmount) {
+    else if (candidate.tradingAmount < minimumTradingAmount) {
       candidate.quality.reasons.push("low_trading_amount");
       if (this.config.filterLowLiquidity) reasons.push("low_trading_amount");
     }

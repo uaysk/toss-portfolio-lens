@@ -725,6 +725,7 @@ function readScalpingConfig(): ScalpingConfig {
     ["market_data", "TOSS_SCALPING_MARKET_DATA_MIN_INTERVAL_MS"],
     ["chart", "TOSS_SCALPING_CHART_MIN_INTERVAL_MS"],
     ["stock", "TOSS_SCALPING_STOCK_MIN_INTERVAL_MS"],
+    ["market_info", "TOSS_SCALPING_MARKET_INFO_MIN_INTERVAL_MS"],
   ].map(([group, name]) => {
     const minimumIntervalMs = providerLimit(name, 60_000);
     return [group, {
@@ -735,11 +736,13 @@ function readScalpingConfig(): ScalpingConfig {
     }];
   })) as unknown as Omit<TossProviderConfig, "now">["rateLimits"];
 
+  const minimumTradingAmount = providerLimit("SCALPING_MINIMUM_TRADING_AMOUNT", Number.MAX_SAFE_INTEGER);
   const scanner: Omit<ScannerConfig, "now"> = {
     minimumTopCount,
     maximumTopCount,
     minimumVolume: providerLimit("SCALPING_MINIMUM_VOLUME", Number.MAX_SAFE_INTEGER),
-    minimumTradingAmount: providerLimit("SCALPING_MINIMUM_TRADING_AMOUNT", Number.MAX_SAFE_INTEGER),
+    minimumTradingAmount,
+    usMinimumTradingAmount: providerLimit("SCALPING_US_MINIMUM_TRADING_AMOUNT", minimumTradingAmount),
     maximumSpreadBps: providerLimit("SCALPING_MAXIMUM_SPREAD_BPS", 5_000),
     filterLowLiquidity: readBoolean("SCALPING_FILTER_LOW_LIQUIDITY", true),
     filterWideSpread: readBoolean("SCALPING_FILTER_WIDE_SPREAD", true),
@@ -816,6 +819,7 @@ function readScalpingConfig(): ScalpingConfig {
         orderbook: nonnegative("TOSS_SCALPING_ORDERBOOK_CACHE_TTL_MS", 1_000, 3_600_000),
         trades: nonnegative("TOSS_SCALPING_TRADE_CACHE_TTL_MS", 1_000, 3_600_000),
         warnings: nonnegative("TOSS_SCALPING_WARNING_CACHE_TTL_MS", 300_000, 86_400_000),
+        calendar: nonnegative("TOSS_SCALPING_CALENDAR_CACHE_TTL_MS", 3_600_000, 86_400_000),
       },
       retry: {
         maxAttempts: retryMaxAttempts,

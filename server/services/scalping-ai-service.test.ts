@@ -68,13 +68,14 @@ describe("ScalpingAiService", () => {
       { enqueue: vi.fn() } as never,
       20,
     );
-    const result = await service.forecast(request);
+    const result = await service.forecast(request, undefined, "US");
     expect(result.response.status).toBe("unavailable");
     expect(putPrediction).toHaveBeenCalledWith(expect.objectContaining({
       status: "unavailable",
       dataQuality: "model_unavailable",
       modelName: "NeoQuasar/Kronos-small",
       modelVersion: "revision-a",
+      marketCountry: "US",
       retrospective: false,
     }));
   });

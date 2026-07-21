@@ -76,6 +76,39 @@ function minuteRow(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
+function overseasRankRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    rsym: "DNASAAPL",
+    excd: "NAS",
+    symb: "AAPL",
+    name: "Apple Inc",
+    ename: "Apple Inc",
+    last: "212.50",
+    diff: "2.50",
+    rate: "1.19",
+    tvol: "12,345,678",
+    tamt: "2623456789.50",
+    a_tvol: "8300000",
+    a_tamt: "1800000000",
+    rank: "1",
+    ...overrides,
+  };
+}
+
+function overseasMinuteRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    xymd: "20260720",
+    xhms: "093000",
+    open: "210.00",
+    high: "213.00",
+    low: "209.50",
+    last: "212.50",
+    evol: "12345",
+    eamt: "2618812.50",
+    ...overrides,
+  };
+}
+
 describe("KisRestClient", () => {
   it("validates all configured pacing and retry limits", () => {
     expect(() => new KisRestClient({ ...config, maxAttempts: 0 })).toThrow(KisRestValidationError);
@@ -258,6 +291,83 @@ describe("KisRestClient", () => {
     const params = new URL(minuteRequestUrl).searchParams;
     expect(params.get("FID_COND_MRKT_DIV_CODE")).toBe("UN");
     expect(params.get("FID_INPUT_HOUR_1")).toBe("100000");
+  });
+
+  it("calls official US volume/trading-amount ranking TRs and normalizes USD rows", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith("/oauth2/tokenP")) return json({ access_token: "token", expires_in: 86_400 });
+      return json({ rt_cd: "0", output1: {}, output2: [overseasRankRow()] });
+    }) as unknown as typeof fetch;
+    const client = new KisRestClient(config, { fetchImpl, sleepImpl: async () => {}, now: () => NOW });
+
+    const volume = await client.getOverseasVolumeRanking({ exchange: "NAS" });
+    const amount = await client.getOverseasTradingAmountRanking({
+      exchange: "NAS", periodCode: "0", volumeRangeCode: "2", minPrice: 5, maxPrice: 500,
+    });
+    expect(volume.items[0]).toMatchObject({
+      symbol: "AAPL",
+      exchange: "NAS",
+      rank: 1,
+      price: 212.5,
+      changeRate: 1.19,
+      accumulatedVolume: 12_345_678,
+      accumulatedTradingAmount: 2_623_456_789.5,
+      averageVolume: 8_300_000,
+    });
+    const providerRequests = requests.filter(({ url }) => !url.endsWith("/oauth2/tokenP"));
+    expect(providerRequests.map(({ init }) => new Headers(init?.headers).get("tr_id"))).toEqual([
+      "HHDFS76310010", "HHDFS76320010",
+    ]);
+    expect(providerRequests.map(({ url }) => new URL(url).pathname)).toEqual([
+      "/uapi/overseas-stock/v1/ranking/trade-vol",
+      "/uapi/overseas-stock/v1/ranking/trade-pbmn",
+    ]);
+    expect(new URL(providerRequests[1]!.url).searchParams).toMatchObject({});
+    expect(new URL(providerRequests[1]!.url).searchParams.get("EXCD")).toBe("NAS");
+    expect(new URL(providerRequests[1]!.url).searchParams.get("VOL_RANG")).toBe("2");
+  });
+
+  it("recovers US one-minute bars with New York DST timestamps and explicit paging", async () => {
+    const usNow = Date.parse("2026-07-20T09:31:30-04:00");
+    const requests: string[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/oauth2/tokenP")) return json({ access_token: "token", expires_in: 86_400 });
+      requests.push(url);
+      return json({
+        rt_cd: "0",
+        output1: {},
+        output2: [
+          overseasMinuteRow({ xhms: "093100", last: "212.75" }),
+          overseasMinuteRow(),
+        ],
+      });
+    }) as unknown as typeof fetch;
+    const client = new KisRestClient(config, { fetchImpl, sleepImpl: async () => {}, now: () => usNow });
+
+    const first = await client.getOverseasMinutes({
+      symbol: "AAPL", exchange: "NAS", sessionDate: "20260720", recordCount: 120,
+    });
+    expect(first.items).toEqual([
+      expect.objectContaining({
+        symbol: "AAPL", timestamp: "2026-07-20T13:30:00.000Z", status: "final", tradingAmount: 2_618_812.5,
+      }),
+      expect.objectContaining({ timestamp: "2026-07-20T13:31:00.000Z", status: "forming" }),
+    ]);
+    await client.getOverseasMinutes({
+      symbol: "AAPL", exchange: "NAS", sessionDate: "20260720", cursor: "20260720092959",
+    });
+    expect(new URL(requests[0]!).searchParams.get("NEXT")).toBe("");
+    expect(new URL(requests[0]!).searchParams.get("PINC")).toBe("0");
+    expect(new URL(requests[1]!).searchParams.get("NEXT")).toBe("1");
+    expect(new URL(requests[1]!).searchParams.get("PINC")).toBe("1");
+    expect(new URL(requests[1]!).searchParams.get("KEYB")).toBe("20260720092959");
+    await expect(client.getOverseasMinutes({
+      symbol: "AAPL", exchange: "NAS", sessionDate: "20260721",
+    })).rejects.toThrow("current New York trading date");
   });
 
   it("fails explicitly when a provider result collection has the wrong shape", async () => {

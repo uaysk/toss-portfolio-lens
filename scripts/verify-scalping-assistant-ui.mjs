@@ -93,12 +93,14 @@ function portfolio() {
 }
 
 function workspace(body) {
+  const marketCountry = body.marketCountry === "US" ? "US" : "KR";
   const selected = symbols.slice(0, body.topCount);
   return { workspace: {
-    generatedAt: "2026-07-21T01:20:00.000Z", criterion: body.criterion, requestedTopCount: body.topCount,
+    generatedAt: "2026-07-21T01:20:00.000Z", marketCountry, criterion: body.criterion, requestedTopCount: body.topCount,
     interval: body.interval, layoutColumns: body.layoutColumns, preset: body.preset,
     candidates: selected.map((symbol, index) => ({
-      symbol, name: `단타 후보 ${index + 1}`, currency: "KRW", price: 51_000 + index * 400,
+      symbol, ...(marketCountry === "US" ? { exchange: ["NAS", "NYS", "AMS"][index % 3] } : {}),
+      name: `${marketCountry === "US" ? "미국" : "국내"} 단타 후보 ${index + 1}`, currency: marketCountry === "US" ? "USD" : "KRW", price: 51_000 + index * 400,
       changeRateRatio: 0.01 + index / 10_000, volume: 2_000_000 - index * 10_000,
       tradingAmount: 20_000_000_000 - index * 100_000_000, volatilityScore: 0.9 - index / 100,
       spreadBps: 4 + index / 10, providerRanks: { toss: index + 1, kis: index + 2 }, warnings: [],
@@ -183,11 +185,12 @@ async function verify(browser, baseUrl, viewport, theme) {
   await context.addInitScript(({ selectedTheme }) => {
     window.localStorage.setItem("portfolio-theme", selectedTheme);
     history.scrollRestoration = "manual";
+    window.__scalpingEventSourceUrls = [];
     class StaticEventSource {
       static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
       CONNECTING = 0; OPEN = 1; CLOSED = 2; readyState = 0; url; withCredentials = false;
       onopen = null; onmessage = null; onerror = null;
-      constructor(url) { this.url = String(url); setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0); }
+      constructor(url) { this.url = String(url); window.__scalpingEventSourceUrls.push(this.url); setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0); }
       addEventListener() {} removeEventListener() {} dispatchEvent() { return true; } close() { this.readyState = 2; }
     }
     window.EventSource = StaticEventSource;
@@ -204,15 +207,15 @@ async function verify(browser, baseUrl, viewport, theme) {
     const actualViewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     check(actualViewport.width === viewport.width && actualViewport.height === viewport.height, `viewport 불일치: ${JSON.stringify(actualViewport)}`);
     await page.getByRole("heading", { name: "단타 보조", exact: true }).waitFor();
-    await page.getByRole("heading", { name: "거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "국내 · 거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForFunction(() => window.scrollY === 0);
-    check(state.workspaces.length === 1, "초기 workspace가 단일 batch 요청이 아닙니다.");
+    check(state.workspaces.length === 1 && state.workspaces[0]?.marketCountry === "KR", "초기 국내 workspace가 단일 batch 요청이 아닙니다.");
     check(await page.locator("[data-scalping-virtual-symbol]").count() === 10, "초기 후보 카드 수가 10개가 아닙니다.");
     const scanStartedAt = Date.now();
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
-    await page.getByRole("heading", { name: "거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "국내 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.locator("[data-scalping-virtual-symbol]").nth(21).waitFor();
     const twentyTwoRenderMs = Date.now() - scanStartedAt;
     check(state.workspaces.length === 2 && state.workspaces[1]?.topCount === 22, "22종목 workspace가 단일 batch 요청이 아닙니다.");
@@ -221,6 +224,17 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(placeholders > 0, "viewport 밖 차트가 실제 placeholder로 unmount되지 않았습니다.");
     const mounted = await page.locator('[data-scalping-card-state="mounted"]').count();
     check(mounted < 22, "22종목 차트를 초기 viewport에서 모두 동시에 mount했습니다.");
+
+    await page.getByRole("button", { name: "미국 상장 종목 스캔" }).click();
+    await page.locator('[data-scalping-market-guidance="US"]').waitFor();
+    await page.getByRole("button", { name: "스캔 적용" }).click();
+    await page.getByRole("heading", { name: "미국 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
+    check(state.workspaces.length === 3 && state.workspaces[2]?.marketCountry === "US", "미국 workspace 요청에 marketCountry=US가 전달되지 않았습니다.");
+    check(await page.getByText("USD · 미국 정규장(09:30–16:00 ET)", { exact: false }).count() > 0, "미국 시장 통화·정규장 안내가 표시되지 않았습니다.");
+    await page.waitForFunction(() => window.__scalpingEventSourceUrls?.some((value) => {
+      const url = new URL(value, location.origin);
+      return url.searchParams.get("marketCountry") === "US" && url.searchParams.get("exchanges")?.includes("S001:NAS");
+    }));
 
     await page.getByRole("combobox", { name: "차트 열 수" }).click();
     await page.getByRole("option", { name: "4열" }).click();
@@ -236,6 +250,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("button", { name: "AI 전망 요청" }).click();
     await page.locator('[data-scalping-ai="available"]').first().waitFor();
     check(state.forecasts[0]?.symbols.length === 22, "AI 예측이 22종목 batch가 아닙니다.");
+    check(state.forecasts[0]?.marketCountry === "US", "AI 예측 요청에 적용된 미국 시장이 전달되지 않았습니다.");
     await page.getByRole("button", { name: "Walk-forward 검증 시작" }).click();
     await page.locator("[data-scalping-evaluation-results]").waitFor().catch(async (error) => {
       const alerts = await page.getByRole("alert").allTextContents();
@@ -244,6 +259,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     });
     check(state.evaluations[0]?.evaluation?.walkForward === true && state.evaluations[0]?.evaluation?.retrospective === true, "시간 순서 retrospective 평가 요청이 아닙니다.");
     check(state.evaluations[0]?.symbols?.length === 22, "예측 검증이 22종목 batch가 아닙니다.");
+    check(state.evaluations[0]?.marketCountry === "US", "예측 검증 요청에 적용된 미국 시장이 전달되지 않았습니다.");
 
     const last = page.locator("[data-scalping-virtual-symbol]").last();
     await last.scrollIntoViewIfNeeded();
@@ -258,10 +274,10 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(Object.values(errors).every((items) => items.length === 0), `브라우저 오류: ${JSON.stringify(errors)}`);
     await page.goto(`${baseUrl}/?screenshot=${viewport.width}#scalping-assistant`, { waitUntil: "domcontentloaded" });
     await page.getByRole("heading", { name: "실시간 후보와 위험을 한눈에.", exact: true }).waitFor();
-    await page.getByRole("heading", { name: "거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "국내 · 거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
-    await page.getByRole("heading", { name: "거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "국내 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.getByRole("combobox", { name: "차트 열 수" }).click();
     await page.getByRole("option", { name: "4열" }).click();
     await page.locator('[data-scalping-grid-columns="4"]').waitFor();
