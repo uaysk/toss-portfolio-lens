@@ -96,6 +96,33 @@ describe("TossClient 인증", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("시장 데이터의 rate-limit header만 provider 계층에 전달한다", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      result: { rankings: [] },
+    }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "X-RateLimit-Limit": "100",
+        "X-RateLimit-Remaining": "40",
+        "Set-Cookie": "must-not-leak=secret",
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new TossClient(staticBearerConfig()).getReadOnlyMarketData("rankings", {
+      type: "MARKET_TRADING_AMOUNT",
+      marketCountry: "KR",
+      duration: "realtime",
+      count: "5",
+    });
+    expect(result.headers).toEqual({
+      "x-ratelimit-limit": "100",
+      "x-ratelimit-remaining": "40",
+    });
+    expect(result.headers).not.toHaveProperty("set-cookie");
+  });
 });
 
 describe("normalizeHoldingsPayload", () => {

@@ -2709,7 +2709,7 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
             .unwrap_or(Value::Null),
     );
 
-    json!({
+    let mut candidate = json!({
         "weights": weights.to_json(),
         "sampleCount": observations,
         "validationStatus": validation_status,
@@ -2730,7 +2730,22 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
             "averageCvar": average_cvar,
         },
         "robustScoreDetail": robust_detail,
-    })
+    });
+    if validation_reason.is_none() {
+        candidate
+            .as_object_mut()
+            .expect("optimization candidate is an object")
+            .remove("validationReason");
+        candidate["walkForwardSignal"]
+            .as_object_mut()
+            .expect("walk-forward signal is an object")
+            .remove("reason");
+        candidate["robustScoreDetail"]["validation"]
+            .as_object_mut()
+            .expect("robust validation is an object")
+            .remove("reason");
+    }
+    candidate
 }
 
 fn better(left: &Value, right: &Value, objective: &str) -> bool {
@@ -5280,6 +5295,40 @@ mod tests {
         for candidate in result["candidates"].as_array().unwrap() {
             assert_eq!(candidate["validationStatus"], "not_evaluated");
             assert_eq!(candidate["validationReason"], "no_valid_folds");
+            assert_eq!(candidate["walkForwardSignal"]["reason"], "no_valid_folds");
+            assert_eq!(
+                candidate["robustScoreDetail"]["validation"]["reason"],
+                "no_valid_folds"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_candidate_validation_reasons_are_omitted_when_not_applicable() {
+        let result = optimize(&optimization_input()).unwrap();
+        let candidates = result["candidates"].as_array().unwrap();
+        assert!(!candidates.is_empty());
+
+        for candidate in candidates {
+            assert_eq!(candidate["validationStatus"], "not_requested");
+            assert!(
+                !candidate
+                    .as_object()
+                    .unwrap()
+                    .contains_key("validationReason")
+            );
+            assert!(
+                !candidate["walkForwardSignal"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("reason")
+            );
+            assert!(
+                !candidate["robustScoreDetail"]["validation"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("reason")
+            );
         }
     }
 

@@ -52,6 +52,7 @@ import { ReportRepository } from "./repositories/report-repository.js";
 import { RunRepository } from "./repositories/run-repository.js";
 import { PresetRepository } from "./repositories/preset-repository.js";
 import { RunJobRepository } from "./repositories/run-job-repository.js";
+import { ScalpingRepository } from "./repositories/scalping-repository.js";
 import { McpAuditRepository } from "./repositories/mcp-audit-repository.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { ArtifactService } from "./services/artifact-service.js";
@@ -72,6 +73,16 @@ import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
 import { EventLoopLagMonitor } from "./observability/event-loop-monitor.js";
 import { RustComputeClient } from "./worker/rust-client.js";
+import { AiComputeClient } from "./worker/ai-client.js";
+import { ScalpingAiService } from "./services/scalping-ai-service.js";
+import { TossScalpingProvider } from "./scalping/toss-provider.js";
+import { KisRestClient } from "./scalping/kis-rest-client.js";
+import { KisWebSocketClient } from "./scalping/kis-websocket-client.js";
+import { IntradayBarAggregator } from "./scalping/intraday-bar-aggregator.js";
+import { ScalpingScanner } from "./scalping/scanner-service.js";
+import { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
+import { ScalpingService } from "./scalping/scalping-service.js";
+import { createScalpingRouter } from "./scalping/router.js";
 import {
   createDashboardAnalysisExecutor,
   dashboardAnalysisError,
@@ -127,6 +138,7 @@ const optimizationRepository = new OptimizationRepository(database);
 const reportRepository = new ReportRepository(database);
 const runJobRepository = database.dialect === "postgres" ? new RunJobRepository(database) : undefined;
 const mcpAuditRepository = new McpAuditRepository(database);
+const scalpingRepository = config.scalping.enabled ? new ScalpingRepository(database) : undefined;
 await runRepository.initialize();
 const presetService = new PresetService(presetRepository);
 await presetService.initialize();
@@ -135,6 +147,7 @@ await optimizationRepository.initialize();
 await reportRepository.initialize();
 await runJobRepository?.initialize();
 await mcpAuditRepository.initialize();
+await scalpingRepository?.initialize();
 const mcpAuditRetentionMs = config.mcp.auditRetentionDays * 86_400_000;
 await mcpAuditRepository.deleteBefore(Date.now() - mcpAuditRetentionMs);
 mcpAuditCleanupTimer = setInterval(
@@ -190,6 +203,49 @@ const technicalStrategyService = new TechnicalStrategyService(
   rustCompute,
 );
 const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
+let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
+let scalpingService: ScalpingService | undefined;
+if (config.scalping.enabled && scalpingRepository) {
+  const tossScalping = new TossScalpingProvider(toss, config.scalping.toss);
+  const kisScalpingRest = new KisRestClient(config.scalping.kisRest);
+  const kisScalpingSocket = new KisWebSocketClient(config.scalping.kisWebSocket);
+  scalpingLiveRuntime = new ScalpingLiveRuntime(
+    kisScalpingSocket,
+    kisScalpingRest,
+    new IntradayBarAggregator(config.scalping.aggregator),
+    scalpingRepository,
+    {
+      replayEventLimit: config.scalping.sseReplayEvents,
+      disconnectWhenIdle: true,
+      watermarkAdvanceMs: config.scalping.barWatermarkAdvanceMs,
+      recoveryMaximumRequests: config.scalping.recoveryMaximumRequests,
+      recoveryBarLimit: config.scalping.recoveryBarLimit,
+    },
+  );
+  const scalpingAi = new ScalpingAiService(
+    new AiComputeClient({
+      socketPath: config.scalping.ai.socketPath,
+      timeoutMs: config.scalping.ai.timeoutMs,
+      maximumRequestBytes: config.scalping.ai.maximumRequestBytes,
+      maximumResponseBytes: config.scalping.ai.maximumResponseBytes,
+    }),
+    scalpingRepository,
+    runService,
+    config.scalping.ai.maximumBatchSize,
+  );
+  scalpingService = new ScalpingService(
+    tossScalping,
+    kisScalpingRest,
+    new ScalpingScanner(config.scalping.scanner),
+    scalpingLiveRuntime,
+    scalpingRepository,
+    rustCompute,
+    scalpingAi,
+    toss,
+    technicalTradeMarkerService,
+    config.scalping.service,
+  );
+}
 const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
 const computeToolDependencies = {
   instruments: instrumentService,
@@ -319,6 +375,18 @@ function requireSession(request: Request, response: Response, next: NextFunction
   }
   next();
 }
+
+app.use("/api/portfolio/scalping", createScalpingRouter({
+  authenticate: requireSession,
+  service: scalpingService,
+  live: scalpingLiveRuntime,
+  config: {
+    enabled: config.scalping.enabled,
+    maximumSymbols: config.scalping.maximumTopCount,
+    heartbeatMs: config.scalping.enabled ? config.scalping.sseHeartbeatMs : 15_000,
+    analysisDebounceMs: config.scalping.enabled ? config.scalping.realtimeAnalysisDebounceMs : 250,
+  },
+}));
 
 function requireReadOnlyApiToken(request: Request, response: Response, next: NextFunction): void {
   if (!hasValidReadOnlyApiSecret(request.get("authorization"), config.dashboardPassword)) {
@@ -1447,12 +1515,14 @@ function shutdown(signal: string): void {
   clearTimeout(initialCollectionTimer);
   eventLoopLag.stop();
   clearInterval(collectionInterval);
+  scalpingLiveRuntime?.close();
   if (mcpCleanupTimer) clearInterval(mcpCleanupTimer);
   if (mcpAuditCleanupTimer) clearInterval(mcpAuditCleanupTimer);
   server.close(async () => {
     await mcpHttpRuntime?.close();
     await mcpOAuthRuntime?.cleanup().catch(() => undefined);
     rustCompute?.close();
+    await scalpingLiveRuntime?.waitForIdle();
     await historicalBackfill.waitForIdle();
     await historyStore.close();
     console.info("Portfolio Lens stopped by " + signal);

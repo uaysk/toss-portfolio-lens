@@ -11,6 +11,7 @@ pub mod monte_carlo;
 pub mod optimization;
 pub mod portfolio_math;
 pub mod repository;
+pub mod scalping;
 pub mod stats;
 pub mod technical_strategy;
 

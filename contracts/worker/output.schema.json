@@ -22,7 +22,8 @@
         "monte_carlo",
         "outlook",
         "technical_analysis",
-        "technical_strategy"
+        "technical_strategy",
+        "scalping_analysis"
       ]
     },
     "status": { "enum": ["completed", "failed", "cancelled"] },

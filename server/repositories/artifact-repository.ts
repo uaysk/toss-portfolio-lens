@@ -12,6 +12,8 @@ export const ARTIFACT_TYPES = [
   "outlook-oos-equity", "outlook-quantile-paths", "outlook-calibration",
   "outlook-worst-scenarios", "outlook-sensitivity", "outlook-market-regimes",
   "technical-indicators", "technical-signals", "technical-diagnostics",
+  "scalping-evaluation-summary", "scalping-prediction-replay", "scalping-signal-comparison",
+  "scalping-cost-ledger", "scalping-evaluation-diagnostics",
   "portfolio-exposures", "pareto-frontier", "research-report", "worker-metrics", "result",
 ] as const;
 

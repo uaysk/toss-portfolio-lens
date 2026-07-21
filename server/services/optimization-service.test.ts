@@ -41,9 +41,32 @@ describe("portfolio optimization regressions", () => {
       return: first.candidates[0].metrics.cagr,
       period: expect.objectContaining({ role: "screening_full", observationCount: 89 }),
     });
+    expect(first.candidates[0]).not.toHaveProperty("validationReason");
+    expect(first.candidates[0].walkForwardSignal).not.toHaveProperty("reason");
+    expect((first.candidates[0].robustScoreDetail as { validation: object }).validation).not.toHaveProperty("reason");
     expect(first.candidates).toEqual(second.candidates);
     expect(first.bestByObjective).toEqual(second.bestByObjective);
     expect(optimizePortfolio({ ...input, seed: 54321 }).candidates).not.toEqual(first.candidates);
+  });
+
+  it("walk-forward 사유는 적용될 때만 optional 계약에 포함한다", () => {
+    const result = optimizePortfolio({
+      objective: "robust_score",
+      priceSeries: [series("A", 0.001, 0), series("B", 0.0005, 1), series("C", 0.0008, 2)],
+      constraints: { minWeight: 0, maxWeight: 0.8, maxAssets: 3 },
+      seed: 12345,
+      candidateBudget: 8,
+      minimumSamples: 20,
+      walkForwardConfig: { enabled: false },
+    });
+
+    expect(result.candidates.length).toBeGreaterThan(0);
+    for (const candidate of result.candidates) {
+      expect(candidate).toHaveProperty("validationReason", "validation_disabled");
+      expect(candidate.walkForwardSignal).toHaveProperty("reason", "validation_disabled");
+      expect((candidate.robustScoreDetail as { validation: object }).validation)
+        .toHaveProperty("reason", "validation_disabled");
+    }
   });
 
   it("필수·제외 충돌을 거부하고 종목별 비중 제약을 지킨다", () => {

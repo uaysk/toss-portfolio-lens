@@ -12,6 +12,7 @@ use crate::indicators::{
     AvailabilityStatus, TechnicalAnalysisRequest, analyze as analyze_technical_indicators,
 };
 use crate::model::BacktestSimulationInput;
+use crate::scalping::{AssistanceStatus, ScalpingAnalysisRequest, analyze_scalping};
 use crate::stats::round;
 use crate::technical_strategy::{
     TechnicalSignalStatus, TechnicalStrategyDefinition, TechnicalStrategyRunResult,
@@ -405,6 +406,73 @@ fn compute_technical_analysis(
         summary,
         serde_json::to_value(technical)?,
         warnings,
+        artifacts,
+    )
+}
+
+fn compute_scalping_analysis(
+    input: &WorkerInput,
+    include_artifacts: bool,
+    control: Option<&dyn ComputeControl>,
+) -> Result<WorkerOutput> {
+    let request_value = input
+        .payload
+        .get("scalping_analysis")
+        .context("scalping analysis payload.scalping_analysis must be an object")?;
+    let request: ScalpingAnalysisRequest = serde_json::from_value(request_value.clone())
+        .context("invalid scalping analysis request")?;
+    let analysis = analyze_scalping(&request, control)?;
+    checkpoint(control)?;
+    let indicator_count = analysis
+        .instruments
+        .iter()
+        .map(|instrument| instrument.indicators.len())
+        .sum::<usize>();
+    let signals = analysis
+        .instruments
+        .iter()
+        .flat_map(|instrument| {
+            instrument
+                .signals
+                .iter()
+                .flat_map(|series| series.points.iter().flatten().chain(series.latest.iter()))
+        })
+        .collect::<Vec<_>>();
+    let summary = json!({
+        "scalping_engine_version": analysis.scalping_engine_version,
+        "indicator_engine_version": analysis.indicator_engine_version,
+        "response_mode": analysis.response_mode,
+        "interval_minutes": analysis.interval_minutes,
+        "instrument_count": analysis.instruments.len(),
+        "indicator_calculation_count": indicator_count,
+        "signal_count": signals.len(),
+        "entry_candidate_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::EntryCandidate).count(),
+        "hold_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::Hold).count(),
+        "exit_candidate_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::ExitCandidate).count(),
+        "total_bar_count": analysis.diagnostics.total_bar_count,
+    });
+    let artifacts = if include_artifacts {
+        let indicators = analysis
+            .instruments
+            .iter()
+            .flat_map(|instrument| instrument.indicators.iter())
+            .collect::<Vec<_>>();
+        vec![
+            array_artifact("technical-indicators", serde_json::to_value(indicators)?),
+            array_artifact("technical-signals", serde_json::to_value(signals)?),
+            array_artifact(
+                "technical-diagnostics",
+                serde_json::to_value(&analysis.diagnostics)?,
+            ),
+        ]
+    } else {
+        vec![]
+    };
+    WorkerOutput::completed(
+        input,
+        summary,
+        serde_json::to_value(analysis)?,
+        vec![],
         artifacts,
     )
 }
@@ -1566,6 +1634,7 @@ pub fn compute_with_control(
         JobKind::Outlook => compute_outlook(input, include_artifacts, control),
         JobKind::TechnicalAnalysis => compute_technical_analysis(input, include_artifacts, control),
         JobKind::TechnicalStrategy => compute_technical_strategy(input, include_artifacts, control),
+        JobKind::ScalpingAnalysis => compute_scalping_analysis(input, include_artifacts, control),
         JobKind::WalkForward
         | JobKind::StressTest
         | JobKind::WeightSensitivity

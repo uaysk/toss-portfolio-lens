@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import type { MySqlConnectionConfig, PostgresConnectionConfig } from "./database.js";
 import type { KisExchangeRateConfig } from "./kis-exchange-rate.js";
+import type { IntradayBarAggregatorConfig } from "./scalping/intraday-bar-aggregator.js";
+import type { KisRestClientConfig } from "./scalping/kis-rest-client.js";
+import type { KisWebSocketConfig } from "./scalping/kis-websocket-client.js";
+import type { ScannerConfig } from "./scalping/scanner-service.js";
+import type { ScalpingServiceConfig } from "./scalping/scalping-service.js";
+import type { TossProviderConfig } from "./scalping/toss-provider.js";
 
 export type OpenAiConfig = {
   endpoint: string;
@@ -95,6 +101,38 @@ export type McpConfig = {
   auditRetentionDays: number;
 };
 
+export type ScalpingAiConfig = {
+  socketPath: string;
+  timeoutMs: number;
+  maximumBatchSize: number;
+  maximumRequestBytes: number;
+  maximumResponseBytes: number;
+};
+
+export type ScalpingConfig = {
+  enabled: false;
+  minimumTopCount: number;
+  maximumTopCount: number;
+  ai: ScalpingAiConfig;
+} | {
+  enabled: true;
+  minimumTopCount: number;
+  maximumTopCount: number;
+  toss: Omit<TossProviderConfig, "now">;
+  kisRest: KisRestClientConfig;
+  kisWebSocket: KisWebSocketConfig;
+  scanner: Omit<ScannerConfig, "now">;
+  service: Omit<ScalpingServiceConfig, "now">;
+  aggregator: IntradayBarAggregatorConfig;
+  ai: ScalpingAiConfig;
+  sseHeartbeatMs: number;
+  realtimeAnalysisDebounceMs: number;
+  sseReplayEvents: number;
+  barWatermarkAdvanceMs: number;
+  recoveryMaximumRequests: number;
+  recoveryBarLimit: number;
+};
+
 export type AppConfig = TossApiAuthConfig & {
   dashboardPassword: string;
   sessionSecret: string;
@@ -115,6 +153,7 @@ export type AppConfig = TossApiAuthConfig & {
   compute: ComputeConfig;
   mcp: McpConfig;
   kisExchangeRate?: KisExchangeRateConfig;
+  scalping: ScalpingConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -569,6 +608,213 @@ function readKisExchangeRateConfig(): KisExchangeRateConfig | undefined {
   };
 }
 
+function readScalpingConfig(): ScalpingConfig {
+  const enabled = readBoolean("SCALPING_ENABLED", false);
+  const minimumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MIN", 5, 1, 50);
+  const maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
+  const ai: ScalpingAiConfig = {
+    socketPath: optional("AI_COMPUTE_SOCKET") || "/app/run/ai.sock",
+    timeoutMs: readBoundedInteger("AI_COMPUTE_TIMEOUT_MS", 120_000, 1_000, 3_600_000),
+    maximumBatchSize: readBoundedInteger("AI_COMPUTE_MAX_BATCH_SIZE", maximumTopCount, 1, maximumTopCount),
+    maximumRequestBytes: readBoundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+    maximumResponseBytes: readBoundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+  };
+  if (!enabled) return { enabled: false, minimumTopCount, maximumTopCount, ai };
+
+  const appKey = required("KI_APP_KEY");
+  const appSecret = required("KI_APP_SECRET");
+  const environment = (optional("KI_API_ENV") || "demo").toLowerCase();
+  if (environment !== "demo" && environment !== "real") {
+    throw new Error("KI_API_ENV는 demo 또는 real이어야 합니다.");
+  }
+  const providerLimit = (name: string, maximum = 1_000_000) => (
+    readBoundedInteger(name, Number.NaN, 1, maximum)
+  );
+  const nonnegative = (name: string, fallback: number, maximum: number) => (
+    readBoundedInteger(name, fallback, 0, maximum)
+  );
+  const ratio = (name: string, fallback: number) => {
+    const value = Number(optional(name) ?? fallback);
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error(`${name}는 0~1 범위여야 합니다.`);
+    return value;
+  };
+  const weight = (name: string) => {
+    const value = Number(required(name));
+    if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error(`${name}는 0~100 범위여야 합니다.`);
+    return value;
+  };
+  const rateLimits = Object.fromEntries([
+    ["ranking", "TOSS_SCALPING_RANKING_MIN_INTERVAL_MS"],
+    ["market_data", "TOSS_SCALPING_MARKET_DATA_MIN_INTERVAL_MS"],
+    ["chart", "TOSS_SCALPING_CHART_MIN_INTERVAL_MS"],
+    ["stock", "TOSS_SCALPING_STOCK_MIN_INTERVAL_MS"],
+  ].map(([group, name]) => {
+    const minimumIntervalMs = providerLimit(name, 60_000);
+    return [group, {
+      initialIntervalMs: minimumIntervalMs,
+      minimumIntervalMs,
+      maximumIntervalMs: readBoundedInteger("TOSS_SCALPING_RATE_MAX_INTERVAL_MS", 60_000, minimumIntervalMs, 600_000),
+      maximumHeaderDelayMs: readBoundedInteger("TOSS_SCALPING_MAX_HEADER_DELAY_MS", 120_000, 1_000, 3_600_000),
+    }];
+  })) as unknown as Omit<TossProviderConfig, "now">["rateLimits"];
+
+  const scanner: Omit<ScannerConfig, "now"> = {
+    minimumTopCount,
+    maximumTopCount,
+    minimumVolume: providerLimit("SCALPING_MINIMUM_VOLUME", Number.MAX_SAFE_INTEGER),
+    minimumTradingAmount: providerLimit("SCALPING_MINIMUM_TRADING_AMOUNT", Number.MAX_SAFE_INTEGER),
+    maximumSpreadBps: providerLimit("SCALPING_MAXIMUM_SPREAD_BPS", 5_000),
+    filterLowLiquidity: readBoolean("SCALPING_FILTER_LOW_LIQUIDITY", true),
+    filterWideSpread: readBoolean("SCALPING_FILTER_WIDE_SPREAD", true),
+    blockingWarningCodes: (optional("SCALPING_BLOCKING_WARNING_CODES") || "")
+      .split(",").map((value) => value.trim()).filter(Boolean),
+    cautionWarningCodes: (optional("SCALPING_CAUTION_WARNING_CODES") || "")
+      .split(",").map((value) => value.trim()).filter(Boolean),
+    minimumVolatilityComponents: readBoundedInteger("SCALPING_MIN_VOLATILITY_COMPONENTS", 4, 1, 7),
+    volatilityWeights: {
+      realizedVolatility: weight("SCALPING_WEIGHT_REALIZED_VOLATILITY"),
+      normalizedAtr: weight("SCALPING_WEIGHT_NORMALIZED_ATR"),
+      dayRangeRatio: weight("SCALPING_WEIGHT_DAY_RANGE"),
+      bollingerWidthExpansion: weight("SCALPING_WEIGHT_BOLLINGER_EXPANSION"),
+      relativeVolume: weight("SCALPING_WEIGHT_RELATIVE_VOLUME"),
+      tradingAmount: weight("SCALPING_WEIGHT_TRADING_AMOUNT"),
+      spreadBps: weight("SCALPING_WEIGHT_SPREAD"),
+    },
+    providerPrecedence: ["toss", "kis"],
+    staleAfterMs: readBoundedInteger("SCALPING_STALE_AFTER_MS", 120_000, 1_000, 3_600_000),
+  };
+
+  const retryMaxAttempts = readBoundedInteger("TOSS_SCALPING_RETRY_MAX_ATTEMPTS", 3, 1, 10);
+  const rankingMaximumCount = providerLimit("TOSS_SCALPING_RANKING_MAX_COUNT", 10_000);
+  const pricesBatchSize = providerLimit("TOSS_SCALPING_PRICE_BATCH_SIZE", 10_000);
+  const candlesMaximumCount = providerLimit("TOSS_SCALPING_CANDLE_MAX_COUNT", 10_000);
+  const tradesMaximumCount = providerLimit("TOSS_SCALPING_TRADE_MAX_COUNT", 10_000);
+  const kisWebSocketMaximumSubscriptions = providerLimit("KI_SCALPING_WS_MAX_SUBSCRIPTIONS", 10_000);
+  if (kisWebSocketMaximumSubscriptions < maximumTopCount * 2) {
+    throw new Error(
+      `KI_SCALPING_WS_MAX_SUBSCRIPTIONS는 종목당 체결·호가 2개 구독을 위해 최소 ${maximumTopCount * 2}여야 합니다.`,
+    );
+  }
+  if (ai.maximumBatchSize < maximumTopCount) {
+    throw new Error("AI_COMPUTE_MAX_BATCH_SIZE는 SCALPING_TOP_COUNT_MAX 이상이어야 합니다.");
+  }
+  const workspaceBarLimit = readBoundedInteger(
+    "SCALPING_WORKSPACE_BAR_LIMIT",
+    2_000,
+    60,
+    2_000,
+  );
+  const forecastMinimumBars = readBoundedInteger("AI_MIN_CONTEXT_BARS", 64, 8, Math.min(512, workspaceBarLimit));
+  const forecastMaximumBars = readBoundedInteger(
+    "AI_MAX_CONTEXT_BARS",
+    Math.min(512, workspaceBarLimit),
+    forecastMinimumBars,
+    Math.min(512, workspaceBarLimit),
+  );
+  const clockMinute = (name: string, fallback: string) => {
+    const value = optional(name) || fallback;
+    const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!match) throw new Error(`${name}은 HH:MM 형식이어야 합니다.`);
+    return Number(match[1]) * 60 + Number(match[2]);
+  };
+  const sessionOpenMinuteKst = clockMinute("SCALPING_SESSION_OPEN_KST", "09:00");
+  const sessionCloseMinuteKst = clockMinute("SCALPING_SESSION_CLOSE_KST", "15:30");
+  if (sessionOpenMinuteKst >= sessionCloseMinuteKst) {
+    throw new Error("SCALPING_SESSION_OPEN_KST는 SCALPING_SESSION_CLOSE_KST보다 빨라야 합니다.");
+  }
+  return {
+    enabled: true,
+    minimumTopCount,
+    maximumTopCount,
+    toss: {
+      rankingMaximumCount,
+      pricesBatchSize,
+      candlesMaximumCount,
+      tradesMaximumCount,
+      cacheMaximumEntries: readBoundedInteger("TOSS_SCALPING_CACHE_MAX_ENTRIES", 2_000, 10, 100_000),
+      cacheTtlMs: {
+        rankings: nonnegative("TOSS_SCALPING_RANKING_CACHE_TTL_MS", 5_000, 3_600_000),
+        prices: nonnegative("TOSS_SCALPING_PRICE_CACHE_TTL_MS", 1_000, 3_600_000),
+        candles: nonnegative("TOSS_SCALPING_CANDLE_CACHE_TTL_MS", 15_000, 3_600_000),
+        orderbook: nonnegative("TOSS_SCALPING_ORDERBOOK_CACHE_TTL_MS", 1_000, 3_600_000),
+        trades: nonnegative("TOSS_SCALPING_TRADE_CACHE_TTL_MS", 1_000, 3_600_000),
+        warnings: nonnegative("TOSS_SCALPING_WARNING_CACHE_TTL_MS", 300_000, 86_400_000),
+      },
+      retry: {
+        maxAttempts: retryMaxAttempts,
+        baseDelayMs: nonnegative("TOSS_SCALPING_RETRY_BASE_MS", 250, 60_000),
+        maximumDelayMs: readBoundedInteger("TOSS_SCALPING_RETRY_MAX_MS", 5_000, 1, 600_000),
+        jitterRatio: ratio("TOSS_SCALPING_RETRY_JITTER_RATIO", 0.2),
+      },
+      rateLimits,
+    },
+    kisRest: {
+      appKey,
+      appSecret,
+      environment,
+      requestIntervalMs: providerLimit("KI_SCALPING_REST_REQUEST_INTERVAL_MS", 60_000),
+      timeoutMs: readBoundedInteger("KI_SCALPING_REST_TIMEOUT_MS", 15_000, 1_000, 60_000),
+      maxAttempts: readBoundedInteger("KI_SCALPING_REST_MAX_ATTEMPTS", 3, 1, 10),
+      retryBaseMs: readBoundedInteger("KI_SCALPING_REST_RETRY_BASE_MS", 250, 1, 60_000),
+      retryMaxMs: readBoundedInteger("KI_SCALPING_REST_RETRY_MAX_MS", 5_000, 1, 600_000),
+    },
+    kisWebSocket: {
+      appKey,
+      appSecret,
+      environment,
+      ...(optional("KI_SCALPING_WS_URL") ? { url: optional("KI_SCALPING_WS_URL") } : {}),
+      approvalTimeoutMs: readBoundedInteger("KI_SCALPING_WS_APPROVAL_TIMEOUT_MS", 15_000, 1_000, 60_000),
+      approvalMaxAttempts: readBoundedInteger("KI_SCALPING_WS_APPROVAL_MAX_ATTEMPTS", 3, 1, 10),
+      approvalRetryBaseMs: readBoundedInteger("KI_SCALPING_WS_APPROVAL_RETRY_BASE_MS", 250, 1, 60_000),
+      approvalRetryMaxMs: readBoundedInteger("KI_SCALPING_WS_APPROVAL_RETRY_MAX_MS", 5_000, 1, 600_000),
+      maxSubscriptions: kisWebSocketMaximumSubscriptions,
+      subscribeIntervalMs: providerLimit("KI_SCALPING_WS_SUBSCRIBE_INTERVAL_MS", 60_000),
+      connectionTimeoutMs: readBoundedInteger("KI_SCALPING_WS_CONNECTION_TIMEOUT_MS", 15_000, 1_000, 60_000),
+      reconnectBaseMs: readBoundedInteger("KI_SCALPING_WS_RECONNECT_BASE_MS", 1_000, 1, 60_000),
+      reconnectMaxMs: readBoundedInteger("KI_SCALPING_WS_RECONNECT_MAX_MS", 30_000, 1, 600_000),
+      reconnectJitterRatio: ratio("KI_SCALPING_WS_RECONNECT_JITTER_RATIO", 0.2),
+    },
+    scanner,
+    service: {
+      minimumTopCount,
+      maximumTopCount,
+      workspaceBarLimit,
+      candlePageSize: Math.min(candlesMaximumCount, workspaceBarLimit),
+      minimumAnalysisBars: readBoundedInteger("SCALPING_MINIMUM_ANALYSIS_BARS", 60, 1, workspaceBarLimit),
+      barRefreshAfterMs: readBoundedInteger("SCALPING_BAR_REFRESH_AFTER_MS", 15_000, 1_000, 3_600_000),
+      volumeProfileBucketCount: readBoundedInteger("SCALPING_VOLUME_PROFILE_BUCKETS", 24, 5, 200),
+      volumeProfileInstrumentLimit: readBoundedInteger("SCALPING_VOLUME_PROFILE_MAX_INSTRUMENTS", 20, 1, 20),
+      relativeVolumeLookbackSessions: readBoundedInteger("SCALPING_RVOL_LOOKBACK_SESSIONS", 5, 1, 60),
+      tradeFetchCount: readBoundedInteger(
+        "SCALPING_TRADE_FETCH_COUNT",
+        Math.min(50, tradesMaximumCount),
+        1,
+        tradesMaximumCount,
+      ),
+      forecastMinimumBars,
+      forecastMaximumBars,
+      evaluationMaximumOrigins: readBoundedInteger("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
+      evaluationOriginStrideBars: readBoundedInteger("SCALPING_EVALUATION_ORIGIN_STRIDE_BARS", 5, 1, 10_000),
+      sessionOpenMinuteKst,
+      sessionCloseMinuteKst,
+    },
+    aggregator: {
+      allowedLatenessMs: nonnegative("SCALPING_BAR_ALLOWED_LATENESS_MS", 2_000, 60_000),
+      maximumSeenEventIdsPerSymbol: readBoundedInteger("SCALPING_BAR_MAX_EVENT_IDS", 20_000, 100, 1_000_000),
+      maximumOpenMinuteBucketsPerSymbol: readBoundedInteger("SCALPING_BAR_MAX_OPEN_MINUTES", 10, 2, 1_000),
+      finalizedBarRetentionPerInterval: readBoundedInteger("SCALPING_BAR_RETENTION", 1_000, 60, 100_000),
+      higherIntervalsMinutes: [5, 15, 30, 60],
+    },
+    ai,
+    sseHeartbeatMs: readBoundedInteger("SCALPING_SSE_HEARTBEAT_MS", 15_000, 1_000, 60_000),
+    realtimeAnalysisDebounceMs: readBoundedInteger("SCALPING_REALTIME_ANALYSIS_DEBOUNCE_MS", 250, 50, 5_000),
+    sseReplayEvents: readBoundedInteger("SCALPING_SSE_REPLAY_EVENTS", 2_000, 100, 100_000),
+    barWatermarkAdvanceMs: readBoundedInteger("SCALPING_BAR_WATERMARK_ADVANCE_MS", 1_000, 250, 60_000),
+    recoveryMaximumRequests: readBoundedInteger("SCALPING_RECOVERY_MAX_REQUESTS", 20, 1, 1_000),
+    recoveryBarLimit: workspaceBarLimit,
+  };
+}
+
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
   const sessionSecret = required("SESSION_SECRET");
@@ -612,5 +858,6 @@ export function loadConfig(): AppConfig {
     compute: readComputeConfig(dbProvider),
     mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
     kisExchangeRate: readKisExchangeRateConfig(),
+    scalping: readScalpingConfig(),
   };
 }

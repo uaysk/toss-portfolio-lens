@@ -1,0 +1,26 @@
+{
+  "schema_version": "scalping-ai-model-manifest/v1",
+  "kronos_source": {
+    "repository": "https://github.com/shiyu-coder/Kronos",
+    "revision": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+    "license": "MIT"
+  },
+  "models": {
+    "kronos-small": {
+      "model_id": "NeoQuasar/Kronos-small",
+      "revision": "901c26c1332695a2a8f243eb2f37243a37bea320",
+      "tokenizer_id": "NeoQuasar/Kronos-Tokenizer-base",
+      "tokenizer_revision": "0e0117387f39004a9016484a186a908917e22426",
+      "license": "MIT",
+      "loader_version": "kronos-source-67b630e"
+    },
+    "chronos-bolt-small": {
+      "model_id": "amazon/chronos-bolt-small",
+      "revision": "772f3d25d38aec6d914c8949dab4462e2d46f5d8",
+      "tokenizer_id": null,
+      "tokenizer_revision": null,
+      "license": "Apache-2.0",
+      "loader_version": "chronos-forecasting-2.1.0"
+    }
+  }
+}

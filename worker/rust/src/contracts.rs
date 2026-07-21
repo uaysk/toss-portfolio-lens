@@ -27,6 +27,7 @@ pub enum JobKind {
     Outlook,
     TechnicalAnalysis,
     TechnicalStrategy,
+    ScalpingAnalysis,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +317,7 @@ pub fn job_kind(value: &str) -> Result<JobKind> {
         "outlook" => Ok(JobKind::Outlook),
         "technical_analysis" => Ok(JobKind::TechnicalAnalysis),
         "technical_strategy" => Ok(JobKind::TechnicalStrategy),
+        "scalping_analysis" => Ok(JobKind::ScalpingAnalysis),
         _ => bail!("unsupported job kind: {value}"),
     }
 }
@@ -366,6 +368,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(JobKind::TechnicalStrategy).unwrap(),
             "technical_strategy"
+        );
+    }
+
+    #[test]
+    fn scalping_analysis_job_kind_round_trips_as_snake_case() {
+        assert_eq!(
+            job_kind("scalping_analysis").unwrap(),
+            JobKind::ScalpingAnalysis
+        );
+        assert_eq!(
+            serde_json::to_value(JobKind::ScalpingAnalysis).unwrap(),
+            "scalping_analysis"
         );
     }
 }

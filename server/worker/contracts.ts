@@ -25,6 +25,7 @@ const jobKinds = [
   "outlook",
   "technical_analysis",
   "technical_strategy",
+  "scalping_analysis",
 ] as const satisfies readonly PortfolioRunKind[];
 
 export const WorkerJobKindSchema = z.enum(jobKinds);

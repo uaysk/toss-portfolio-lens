@@ -51,6 +51,7 @@ describe("worker contract", () => {
     expect(inputSchema.$defs.job_kind.enum).toEqual(expected);
     expect(outputSchema.properties.job_kind.enum).toEqual(expected);
     expect(WorkerJobKindSchema.parse("technical_analysis")).toBe("technical_analysis");
+    expect(WorkerJobKindSchema.parse("scalping_analysis")).toBe("scalping_analysis");
     expect(Object.keys(outputSchema.properties)).toEqual(expect.arrayContaining([
       "data_revision",
       "request_hash",

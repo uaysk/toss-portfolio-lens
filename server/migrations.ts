@@ -115,6 +115,112 @@ export async function ensureMarketCandleVolumeColumn(database: RelationalDatabas
   });
 }
 
+async function ensureScalpingVolumeAvailabilityColumn(database: RelationalDatabase): Promise<void> {
+  await addMissingColumns(database, "portfolio_intraday_bars", {
+    volume_available: {
+      sqlite: "INTEGER NOT NULL DEFAULT 1",
+      mysql: "TINYINT(1) NOT NULL DEFAULT 1",
+      postgres: "BOOLEAN NOT NULL DEFAULT TRUE",
+    },
+  });
+}
+
+async function createScalpingTables(database: RelationalDatabase): Promise<void> {
+  if (database.dialect === "mysql") {
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
+        symbol VARCHAR(32) NOT NULL,
+        interval_minutes INT NOT NULL,
+        open_time VARCHAR(40) NOT NULL,
+        close_time VARCHAR(40) NOT NULL,
+        session_date VARCHAR(10) NOT NULL,
+        source_kind VARCHAR(32) NOT NULL,
+        bar_state VARCHAR(16) NOT NULL,
+        open_price DOUBLE NOT NULL,
+        high_price DOUBLE NOT NULL,
+        low_price DOUBLE NOT NULL,
+        close_price DOUBLE NOT NULL,
+        volume DOUBLE NOT NULL,
+        turnover DOUBLE NULL,
+        trade_count INT NULL,
+        quality_status VARCHAR(32) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(symbol, interval_minutes, open_time),
+        KEY idx_portfolio_intraday_session (symbol, interval_minutes, session_date, open_time),
+        KEY idx_portfolio_intraday_updated (updated_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
+        prediction_id VARCHAR(64) PRIMARY KEY,
+        symbol VARCHAR(32) NOT NULL,
+        model_name VARCHAR(128) NOT NULL,
+        model_version VARCHAR(128) NOT NULL,
+        input_ended_at VARCHAR(40) NOT NULL,
+        generated_at VARCHAR(40) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        data_quality VARCHAR(32) NOT NULL,
+        retrospective TINYINT(1) NOT NULL,
+        payload_json LONGTEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        KEY idx_portfolio_scalping_prediction_latest (symbol, retrospective, generated_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    return;
+  }
+  const real = database.dialect === "postgres" ? "DOUBLE PRECISION" : "REAL";
+  const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
+  const boolean = database.dialect === "postgres" ? "BOOLEAN" : "INTEGER";
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
+      symbol TEXT NOT NULL,
+      interval_minutes INTEGER NOT NULL,
+      open_time TEXT NOT NULL,
+      close_time TEXT NOT NULL,
+      session_date TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      bar_state TEXT NOT NULL,
+      open_price ${real} NOT NULL,
+      high_price ${real} NOT NULL,
+      low_price ${real} NOT NULL,
+      close_price ${real} NOT NULL,
+      volume ${real} NOT NULL,
+      turnover ${real},
+      trade_count INTEGER,
+      quality_status TEXT NOT NULL,
+      updated_at ${timestamp} NOT NULL,
+      PRIMARY KEY(symbol, interval_minutes, open_time)
+    )
+  `);
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_portfolio_intraday_session
+    ON portfolio_intraday_bars(symbol, interval_minutes, session_date, open_time)
+  `);
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_portfolio_intraday_updated
+    ON portfolio_intraday_bars(updated_at)
+  `);
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
+      prediction_id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      model_version TEXT NOT NULL,
+      input_ended_at TEXT NOT NULL,
+      generated_at TEXT NOT NULL,
+      status TEXT NOT NULL,
+      data_quality TEXT NOT NULL,
+      retrospective ${boolean} NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at ${timestamp} NOT NULL
+    )
+  `);
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_portfolio_scalping_prediction_latest
+    ON portfolio_scalping_predictions(symbol, retrospective, generated_at)
+  `);
+}
+
 async function hasIndex(database: RelationalDatabase, index: string): Promise<boolean> {
   if (database.dialect === "sqlite") {
     const rows = await database.query<{ index_name: string }>(
@@ -392,6 +498,16 @@ const migrations: readonly Migration[] = [
     id: "20260721_005_market_candle_volume",
     signature: "portfolio_market_candles:nullable-provider-volume-v1",
     up: ensureMarketCandleVolumeColumn,
+  },
+  {
+    id: "20260721_006_scalping_intraday_storage",
+    signature: "portfolio_intraday_bars-v1;portfolio_scalping_predictions-v1;forming-final-quality",
+    up: createScalpingTables,
+  },
+  {
+    id: "20260721_007_scalping_volume_availability",
+    signature: "portfolio_intraday_bars:volume_available-v1;missing-volume-is-not-zero",
+    up: ensureScalpingVolumeAvailabilityColumn,
   },
 ];
 

@@ -46,6 +46,86 @@ describe("database environment configuration", () => {
       resultDeadlineMs: 300_000,
     });
     expect(config.kisExchangeRate).toBeUndefined();
+    expect(config.scalping).toMatchObject({
+      enabled: false,
+      minimumTopCount: 5,
+      maximumTopCount: 50,
+      ai: {
+        socketPath: "/app/run/ai.sock",
+        maximumBatchSize: 50,
+        maximumRequestBytes: 64 * 1024 * 1024,
+        maximumResponseBytes: 128 * 1024 * 1024,
+      },
+    });
+  });
+
+  it("단타 기능은 provider 실측 한도를 명시해야만 활성화한다", () => {
+    process.env.SCALPING_ENABLED = "true";
+    expect(() => loadConfig()).toThrow("KI_APP_KEY");
+
+    Object.assign(process.env, {
+      KI_APP_KEY: "kis-key",
+      KI_APP_SECRET: "kis-secret",
+      TOSS_SCALPING_RANKING_MIN_INTERVAL_MS: "100",
+      TOSS_SCALPING_MARKET_DATA_MIN_INTERVAL_MS: "100",
+      TOSS_SCALPING_CHART_MIN_INTERVAL_MS: "200",
+      TOSS_SCALPING_STOCK_MIN_INTERVAL_MS: "200",
+      TOSS_SCALPING_RANKING_MAX_COUNT: "100",
+      TOSS_SCALPING_PRICE_BATCH_SIZE: "200",
+      TOSS_SCALPING_CANDLE_MAX_COUNT: "200",
+      TOSS_SCALPING_TRADE_MAX_COUNT: "200",
+      KI_SCALPING_REST_REQUEST_INTERVAL_MS: "600",
+      KI_SCALPING_WS_MAX_SUBSCRIPTIONS: "100",
+      KI_SCALPING_WS_SUBSCRIBE_INTERVAL_MS: "100",
+      SCALPING_MINIMUM_VOLUME: "10000",
+      SCALPING_MINIMUM_TRADING_AMOUNT: "100000000",
+      SCALPING_MAXIMUM_SPREAD_BPS: "50",
+      SCALPING_WEIGHT_REALIZED_VOLATILITY: "25",
+      SCALPING_WEIGHT_NORMALIZED_ATR: "20",
+      SCALPING_WEIGHT_DAY_RANGE: "15",
+      SCALPING_WEIGHT_BOLLINGER_EXPANSION: "10",
+      SCALPING_WEIGHT_RELATIVE_VOLUME: "15",
+      SCALPING_WEIGHT_TRADING_AMOUNT: "10",
+      SCALPING_WEIGHT_SPREAD: "5",
+      AI_MAX_REQUEST_BYTES: "33554432",
+      AI_MAX_RESPONSE_BYTES: "67108864",
+    });
+    expect(loadConfig().scalping).toMatchObject({
+      enabled: true,
+      toss: {
+        rankingMaximumCount: 100,
+        pricesBatchSize: 200,
+        rateLimits: { ranking: { minimumIntervalMs: 100 }, chart: { minimumIntervalMs: 200 } },
+      },
+      kisRest: { requestIntervalMs: 600 },
+      kisWebSocket: { maxSubscriptions: 100, subscribeIntervalMs: 100 },
+      realtimeAnalysisDebounceMs: 250,
+      scanner: { minimumVolume: 10_000, maximumSpreadBps: 50 },
+      service: {
+        workspaceBarLimit: 2_000,
+        candlePageSize: 200,
+        forecastMinimumBars: 64,
+        forecastMaximumBars: 512,
+        sessionOpenMinuteKst: 540,
+        sessionCloseMinuteKst: 930,
+      },
+      ai: { maximumRequestBytes: 33_554_432, maximumResponseBytes: 67_108_864 },
+    });
+
+    process.env.SCALPING_SESSION_OPEN_KST = "16:00";
+    expect(() => loadConfig()).toThrow("SCALPING_SESSION_OPEN_KST는 SCALPING_SESSION_CLOSE_KST보다 빨라야");
+
+    process.env.SCALPING_SESSION_OPEN_KST = "09:00";
+    process.env.AI_MAX_RESPONSE_BYTES = "513";
+    expect(() => loadConfig()).toThrow("AI_MAX_RESPONSE_BYTES");
+
+    process.env.AI_MAX_RESPONSE_BYTES = "67108864";
+    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "99";
+    expect(() => loadConfig()).toThrow("종목당 체결·호가 2개 구독");
+
+    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "100";
+    process.env.AI_COMPUTE_MAX_BATCH_SIZE = "49";
+    expect(() => loadConfig()).toThrow("SCALPING_TOP_COUNT_MAX 이상");
   });
 
   it("한국투자증권 환율 폴백 설정을 검증한다", () => {

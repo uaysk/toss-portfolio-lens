@@ -15,6 +15,8 @@ export type PortfolioRunKind =
   | "outlook"
   | "technical_analysis"
   | "technical_strategy"
+  | "scalping_prediction_evaluation"
+  | "scalping_analysis"
   | "exposure_analysis"
   | "pareto_frontier"
   | "research_report";

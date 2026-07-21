@@ -6,6 +6,7 @@ describe("dashboard navigation", () => {
     ["overview", "#overview"],
     ["analysis", "#analysis"],
     ["technical", "#technical-analysis"],
+    ["scalping", "#scalping-assistant"],
     ["backtest", "#backtest"],
     ["optimization", "#optimization"],
     ["library", "#library"],

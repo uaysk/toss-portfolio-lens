@@ -48,6 +48,7 @@ import { buildInfo } from "../../build-info.js";
 import { randomUUID } from "node:crypto";
 import { enforceToolRequestLimits } from "../../services/tool-request-limits.js";
 import { TossApiError } from "../../toss.js";
+import { MCP_VISIBLE_RUN_KINDS, mcpVisibleRun } from "../run-visibility.js";
 
 export type ToolHandler = (input: unknown, ownerSubject: string) => Promise<unknown>;
 
@@ -883,14 +884,14 @@ async function resolvedPresetConfig(
     source,
   };
   if (source.type === "run") {
-    const run = await dependencies.runRepository.get(String(source.runId), ownerSubject);
+    const run = mcpVisibleRun(await dependencies.runRepository.get(String(source.runId), ownerSubject));
     if (!run) throw serviceNotFound("run", String(source.runId));
     const base = recordValue(run.input) ?? { input: run.input };
     return { config: symbols ? { ...base, symbols } : base, source };
   }
   if (source.type === "optimization_candidate" || source.type === "pareto_candidate") {
     const runId = String(source.runId);
-    const run = await dependencies.runRepository.get(runId, ownerSubject);
+    const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
     if (!run) throw serviceNotFound("run", runId);
     if (run.kind !== "optimization") {
       throw new ServiceError({ code: "INVALID_RUN_KIND", message: "최적화 후보 preset에는 optimization run이 필요합니다.", retryable: false });
@@ -1342,7 +1343,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     get_backtest_artifact: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       if (run.kind !== "backtest") throw new ServiceError({ code: "INVALID_RUN_KIND", message: "백테스트 run의 artifact만 조회할 수 있습니다.", retryable: false });
       const artifact = await dependencies.artifacts.get(run.id, value.type as never);
@@ -1352,7 +1353,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     get_run_artifact: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       const type = String(value.type);
       if (!isArtifactType(type)) throw new ServiceError({ code: "ARTIFACT_TYPE_NOT_FOUND", message: "지원하지 않는 artifact type입니다.", retryable: false });
@@ -1503,7 +1504,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     analyze_return_contribution: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run?.result) throw new ServiceError({ code: "RUN_RESULT_NOT_FOUND", message: "완료된 run 결과가 없습니다.", retryable: false });
       if (run.kind !== "backtest") throw new ServiceError({ code: "INVALID_RUN_KIND", message: "백테스트 run의 수익 기여만 조회할 수 있습니다.", retryable: false });
       const result = run.result as { contributions?: unknown; advanced?: { riskContributions?: unknown } };
@@ -1851,7 +1852,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     build_pareto_frontier: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       if (run.kind !== "optimization") throw new ServiceError({ code: "INVALID_RUN_KIND", message: "최적화 run이 필요합니다.", retryable: false });
       if (value.executionMode === "async") {
@@ -2309,14 +2310,16 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     explain_data_quality: (input) => dependencies.analytics.dataQuality(object(input) as never),
     get_run_status: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       return runResultEnvelope(run, value, [], false);
     },
     cancel_run: async (input, ownerSubject) => {
       const value = object(input);
+      const before = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
+      if (!before) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       const cancelled = await dependencies.runs.cancel(String(value.runId), ownerSubject);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       const result = runResultEnvelope(run, value, [], false) as { result: GenericInput };
       result.result.cancel_requested = cancelled;
@@ -2324,7 +2327,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     get_run_result: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       const artifactIndex = await dependencies.artifacts.list(run.id);
       const shouldExternalize = dependencies.artifacts.shouldExternalize(run.result);
@@ -2340,7 +2343,9 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       const listed = await dependencies.runRepository.list({
         ownerSubject,
         ...(value.query ? { search: String(value.query) } : {}),
-        kinds: value.kinds as PortfolioRunKind[],
+        kinds: (value.kinds as PortfolioRunKind[]).length
+          ? value.kinds as PortfolioRunKind[]
+          : [...MCP_VISIBLE_RUN_KINDS],
         statuses: value.statuses as never,
         tags: value.tags as string[],
         archived: runListArchived(value.archived),
@@ -2357,7 +2362,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     get_run_events: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const run = await dependencies.runRepository.get(runId, ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!run) throw serviceNotFound("run", runId);
       const limit = Number(value.limit);
       const cursor = eventCursor(value.cursor);
@@ -2381,7 +2386,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     export_run_manifest: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const run = await dependencies.runRepository.get(runId, ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!run) throw serviceNotFound("run", runId);
       const artifacts = await dependencies.artifacts.list(run.id);
       const existing = await dependencies.runRepository.getManifest(runId, ownerSubject);
@@ -2407,21 +2412,21 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     update_run: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      if (!await dependencies.runRepository.get(runId, ownerSubject)) throw serviceNotFound("run", runId);
+      if (!mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject))) throw serviceNotFound("run", runId);
       if (value.name !== undefined) await dependencies.runRepository.rename(runId, ownerSubject, String(value.name));
       if (value.tags !== undefined) await dependencies.runRepository.setTags(runId, ownerSubject, value.tags as string[]);
       if (value.archived !== undefined) {
         if (value.archived) await dependencies.runRepository.archive(runId, ownerSubject);
         else await dependencies.runRepository.unarchive(runId, ownerSubject);
       }
-      const run = await dependencies.runRepository.get(runId, ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!run) throw serviceNotFound("run", runId);
       return envelope({ request: value, dataRevision: run.dataRevision, result: { run }, dataQuality: { persistent: true } });
     },
     duplicate_run: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const source = await dependencies.runRepository.get(runId, ownerSubject);
+      const source = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!source) throw serviceNotFound("run", runId);
       if (["queued", "running", "cancel_requested"].includes(source.status)) {
         throw new ServiceError({ code: "RUN_NOT_TERMINAL", message: "진행 중인 run은 완료·실패·취소 후 복제할 수 있습니다.", retryable: false });
@@ -2503,7 +2508,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     delete_run: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const run = await dependencies.runRepository.get(runId, ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!run) throw serviceNotFound("run", runId);
       const deleted = await dependencies.runRepository.softDelete(runId, ownerSubject);
       if (!deleted) {
@@ -2514,7 +2519,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     rerun_run: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const source = await dependencies.runRepository.get(runId, ownerSubject);
+      const source = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
       if (!source) throw serviceNotFound("run", runId);
       if (["queued", "running", "cancel_requested"].includes(source.status)) {
         throw new ServiceError({ code: "RUN_ALREADY_ACTIVE", message: "진행 중인 run은 다시 실행할 수 없습니다.", retryable: false });
@@ -2707,7 +2712,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     },
     generate_backtest_report: async (input, ownerSubject) => {
       const value = object(input);
-      const run = await dependencies.runs.get(String(value.runId), ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       if (run.kind !== "backtest") throw new ServiceError({ code: "INVALID_RUN_KIND", message: "백테스트 run이 필요합니다.", retryable: false });
       const report = await dependencies.backtests.generateReport({ ownerSubject, run, reportConfig: { failureMode: value.failureMode } });
@@ -2716,7 +2721,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     generate_research_report: async (input, ownerSubject) => {
       const value = object(input);
       const runId = String(value.runId);
-      const run = await dependencies.runs.get(runId, ownerSubject);
+      const run = mcpVisibleRun(await dependencies.runs.get(runId, ownerSubject));
       if (!run) throw serviceNotFound("run", runId);
       if (run.status !== "completed") {
         throw new ServiceError({ code: "RUN_NOT_COMPLETE", message: "연구 보고서는 완료된 run에서 생성할 수 있습니다.", retryable: false });

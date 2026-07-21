@@ -1,6 +1,15 @@
 node_modules
 worker/python/.venv
+worker/ai/.venv
+worker/ai/.ruff_cache
+worker/ai/.mypy_cache
+worker/ai/.coverage
+worker/ai/models
+worker/ai/model-cache
 worker/rust/target
+.cache/huggingface
+ai-model-cache
+models
 **/__pycache__
 **/.pytest_cache
 **/*.py[cod]

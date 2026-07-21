@@ -5,6 +5,7 @@ import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
 import { MCP_SCHEMA_VERSION } from "../services/service-envelope.js";
 import type { PortfolioRunRecord } from "../repositories/run-repository.js";
+import { mcpVisibleRun } from "./run-visibility.js";
 
 type MarketResource = {
   ownerSubject: string;
@@ -141,7 +142,7 @@ export class McpResourceRegistry {
         const runId = String(variables.runId ?? "");
         const artifactType = String(variables.artifactType ?? "");
         if (!isArtifactType(artifactType)) throw new Error("지원하지 않는 artifact type입니다.");
-        const run = await this.runs.get(runId, owner);
+        const run = mcpVisibleRun(await this.runs.get(runId, owner));
         if (!run) throw new Error("실행을 찾을 수 없습니다.");
         requireResourceScope(
           extra,
@@ -174,7 +175,7 @@ export class McpResourceRegistry {
           const runId = String(variables.runId ?? "");
           const artifactType = String(variables.artifactType ?? "");
           if (!isArtifactType(artifactType)) throw new Error("지원하지 않는 artifact type입니다.");
-          if (!await this.runs.get(runId, owner)) throw new Error("실행을 찾을 수 없습니다.");
+          if (!mcpVisibleRun(await this.runs.get(runId, owner))) throw new Error("실행을 찾을 수 없습니다.");
           const artifact = await this.artifacts.get(runId, artifactType);
           if (!artifact) throw new Error("artifact를 찾을 수 없습니다.");
           return {
@@ -207,7 +208,10 @@ export class McpResourceRegistry {
         { title: item.name, description: "저장된 실행 artifact JSON", mimeType: "application/json" },
         async (_uri, variables, extra) => {
           const runId = String(variables.runId ?? "");
-          const run = await this.runs.get(runId, authorizeResource(extra, "backtest:run", this.authMode));
+          const run = mcpVisibleRun(await this.runs.get(
+            runId,
+            authorizeResource(extra, "backtest:run", this.authMode),
+          ));
           if (!run) throw new Error("실행을 찾을 수 없습니다.");
           const artifact = await this.artifacts.get(runId, item.type);
           if (!artifact) throw new Error("artifact를 찾을 수 없습니다.");

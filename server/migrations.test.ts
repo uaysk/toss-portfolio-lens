@@ -154,10 +154,23 @@ describe("versioned portfolio migrations", () => {
       "20260718_003_canonical_local_owner",
       "20260718_004_canonical_local_owner_reconciliation",
       "20260721_005_market_candle_volume",
+      "20260721_006_scalping_intraday_storage",
+      "20260721_007_scalping_volume_availability",
     ]);
-    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(5);
+    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(7);
     const marketCandleColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_market_candles)");
     expect(marketCandleColumns.map((column) => column.name)).toContain("volume");
+    const scalpingTables = await database.query<{ name: string }>(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name IN ('portfolio_intraday_bars', 'portfolio_scalping_predictions')
+      ORDER BY name
+    `);
+    expect(scalpingTables.map((row) => row.name)).toEqual([
+      "portfolio_intraday_bars",
+      "portfolio_scalping_predictions",
+    ]);
+    const intradayColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_intraday_bars)");
+    expect(intradayColumns.map((column) => column.name)).toContain("volume_available");
 
     const legacy = await runs.get("00000000-0000-4000-8000-000000000001", "owner-a");
     expect(legacy).toMatchObject({ tags: [], input: {}, status: "completed" });

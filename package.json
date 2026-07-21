@@ -18,6 +18,7 @@
     "test:rust-worker": "tsx scripts/verify-rust-worker.ts",
     "test:technical-uds": "cargo build --manifest-path worker/rust/Cargo.toml --locked && tsx scripts/verify-technical-analysis-uds.ts",
     "test:technical-ui": "node scripts/verify-technical-analysis-ui.mjs",
+    "test:scalping-ui": "node scripts/verify-scalping-assistant-ui.mjs",
     "test:rust-worker-postgres": "tsx scripts/verify-rust-worker-postgres.ts",
     "test:python-worker": "tsx scripts/verify-python-worker-postgres.ts",
     "benchmark:python-worker": "tsx scripts/benchmark-python-worker.ts",

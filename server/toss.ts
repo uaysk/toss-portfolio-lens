@@ -114,6 +114,7 @@ export type ReadOnlyMarketResponse = {
   upstreamPath: string;
   fetchedAt: string;
   data: unknown;
+  headers?: Readonly<Record<string, string>>;
 };
 
 type TokenCache = {
@@ -132,6 +133,7 @@ export class TossApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     public readonly requestId?: string,
+    public readonly headers?: Readonly<Record<string, string>>,
   ) {
     super(message);
     this.name = "TossApiError";
@@ -607,10 +609,35 @@ export class TossClient {
     const message = oauthMessages[oauthCode] || stringFrom(error, ["message", "error_description"], fallback);
     const requestId =
       stringFrom(error, ["requestId"]) || response.headers.get("x-request-id") || response.headers.get("x-amz-cf-id") || undefined;
-    return new TossApiError(message || fallback, response.status, code, requestId);
+    return new TossApiError(
+      message || fallback,
+      response.status,
+      code,
+      requestId,
+      this.providerHeaders(response),
+    );
   }
 
-  private async get(path: string, accountId?: string): Promise<unknown> {
+  private providerHeaders(response: Response): Readonly<Record<string, string>> {
+    const allowed = [
+      "retry-after",
+      "x-ratelimit-limit",
+      "x-ratelimit-remaining",
+      "x-ratelimit-reset",
+      "x-rate-limit-limit",
+      "x-rate-limit-remaining",
+      "x-rate-limit-reset",
+    ];
+    return Object.fromEntries(allowed.flatMap((name) => {
+      const value = response.headers.get(name);
+      return value === null ? [] : [[name, value]];
+    }));
+  }
+
+  private async request(path: string, accountId?: string): Promise<{
+    data: unknown;
+    headers: Readonly<Record<string, string>>;
+  }> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
@@ -631,7 +658,7 @@ export class TossClient {
           console.info("[toss-schema] " + path, JSON.stringify(describeShape(payload)));
         }
 
-        if (response.ok) return payload;
+        if (response.ok) return { data: payload, headers: this.providerHeaders(response) };
         const apiError = this.toApiError(response, payload, "토스증권 데이터를 불러오지 못했습니다.");
         lastError = apiError;
         if (
@@ -658,6 +685,10 @@ export class TossClient {
       }
     }
     throw lastError;
+  }
+
+  private async get(path: string, accountId?: string): Promise<unknown> {
+    return (await this.request(path, accountId)).data;
   }
 
   async getAccounts(force = false): Promise<Account[]> {
@@ -753,12 +784,13 @@ export class TossClient {
     query: MarketQuery,
   ): Promise<ReadOnlyMarketResponse> {
     const upstreamPath = buildReadOnlyMarketPath(feature, query);
-    const data = await this.get(upstreamPath);
+    const result = await this.request(upstreamPath);
     return {
       feature,
       upstreamPath,
       fetchedAt: new Date().toISOString(),
-      data,
+      data: result.data,
+      headers: result.headers,
     };
   }
 

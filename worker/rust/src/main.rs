@@ -663,6 +663,123 @@ mod tests {
     }
 
     #[test]
+    fn scalping_analysis_batch_round_trips_over_the_real_length_framed_socket() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || handle_socket(server));
+        let mut request = json!({
+            "schema_version": portfolio_lens_compute::WORKER_SCHEMA_VERSION,
+            "engine_version": portfolio_lens_compute::ENGINE_VERSION,
+            "run_id": "scalping-socket-test",
+            "job_kind": "scalping_analysis",
+            "data_revision": "intraday-revision-1",
+            "request_hash": "d".repeat(64),
+            "payload": {
+                "scalping_analysis": {
+                    "schema_version": portfolio_lens_compute::scalping::SCALPING_REQUEST_SCHEMA_VERSION,
+                    "response_mode": "latest_summary",
+                    "adjustment_policy": "adjusted",
+                    "interval_minutes": 1,
+                    "instruments": [{
+                        "key": "KRW:005930",
+                        "symbol": "005930",
+                        "market": "KRX",
+                        "currency": "KRW",
+                        "instrument_type": "stock",
+                        "session_start_confirmed_dates": ["2026-07-21"],
+                        "complete_session_dates": [],
+                        "bars": [
+                            {
+                                "timestamp": "2026-07-21T09:01:00+09:00",
+                                "session_date": "2026-07-21",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": 100.5,
+                                "volume": 1000.0,
+                                "amount": 100500.0,
+                                "complete": true
+                            },
+                            {
+                                "timestamp": "2026-07-21T09:02:00+09:00",
+                                "session_date": "2026-07-21",
+                                "open": 100.5,
+                                "high": 102.0,
+                                "low": 100.0,
+                                "close": 101.5,
+                                "volume": 1200.0,
+                                "amount": 121800.0,
+                                "complete": true
+                            }
+                        ]
+                    }],
+                    "indicators": [{
+                        "id": "sma-one",
+                        "kind": "sma",
+                        "parameters": {"period": 1}
+                    }],
+                    "relative_volume_lookback_sessions": 5,
+                    "signal": {
+                        "enabled": false,
+                        "preset": "trend"
+                    }
+                }
+            },
+            "include_artifacts": true
+        });
+        let mut second = request
+            .pointer("/payload/scalping_analysis/instruments/0")
+            .cloned()
+            .unwrap();
+        second["key"] = json!("KRW:000660");
+        second["symbol"] = json!("000660");
+        request
+            .pointer_mut("/payload/scalping_analysis/instruments")
+            .and_then(Value::as_array_mut)
+            .unwrap()
+            .push(second);
+        if let Err(error) = write_socket_frame(&mut client, &request) {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == ErrorKind::PermissionDenied)
+            {
+                drop(client);
+                let _ = server_thread.join();
+                return;
+            }
+            panic!("write scalping analysis socket frame: {error}");
+        }
+        let source = read_socket_frame(&mut client).unwrap().unwrap();
+        let output: WorkerOutput = serde_json::from_slice(&source).unwrap();
+        assert_eq!(output.job_kind, JobKind::ScalpingAnalysis);
+        assert_eq!(output.status, "completed");
+        assert_eq!(
+            output.result.as_ref().unwrap()["schema_version"],
+            portfolio_lens_compute::scalping::SCALPING_RESULT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            output.result.as_ref().unwrap()["instruments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            output.result.as_ref().unwrap()["instruments"][0]["indicators"][0]["latest"]["timestamp"],
+            "2026-07-21T09:02:00+09:00"
+        );
+        assert!(
+            output
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|artifact| artifact.artifact_type == "technical-signals")
+        );
+        drop(client);
+        server_thread.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn technical_strategy_round_trips_over_the_real_length_framed_socket() {
         let (server, mut client) = UnixStream::pair().unwrap();
         let server_thread = thread::spawn(move || handle_socket(server));

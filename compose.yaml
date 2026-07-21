@@ -16,6 +16,9 @@ services:
       SNAPSHOT_REFRESH_HOURS: "6"
       EXECUTION_MODE: ${EXECUTION_MODE:-rust_socket}
       RUST_COMPUTE_SOCKET: /app/run/compute.sock
+      # The control plane only dials this socket when SCALPING_ENABLED=true.
+      SCALPING_ENABLED: ${SCALPING_ENABLED:-false}
+      AI_COMPUTE_SOCKET: /app/run/ai.sock
       TZ: Asia/Seoul
     extra_hosts:
       - "${POSTGRES_HOST:-postgres.internal}:${POSTGRES_DOCKER_HOST_IP:-host-gateway}"
@@ -85,6 +88,58 @@ services:
       timeout: 2s
       retries: 12
       start_period: 5s
+
+  ai-worker:
+    profiles: ["scalping-ai"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.ai
+    command: ["serve"]
+    environment:
+      AI_COMPUTE_SOCKET: /app/run/ai.sock
+      AI_MODEL_CACHE_DIR: /models
+      AI_MODEL_MANIFEST: /app/model-manifest.json
+      AI_MODEL_PRIMARY: ${AI_MODEL_PRIMARY:-kronos-small}
+      AI_MODEL_FALLBACK: ${AI_MODEL_FALLBACK:-chronos-bolt-small}
+      AI_DEVICE: ${AI_DEVICE:-cuda}
+      AI_ALLOW_CPU_FALLBACK: ${AI_ALLOW_CPU_FALLBACK:-true}
+      AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}
+      AI_MICROBATCH_SIZE: ${AI_MICROBATCH_SIZE:-4}
+      AI_MAX_SERIES: ${AI_MAX_SERIES:-50}
+      AI_MAX_EVALUATION_ORIGINS: ${AI_MAX_EVALUATION_ORIGINS:-10000}
+      AI_MIN_CONTEXT_BARS: ${AI_MIN_CONTEXT_BARS:-64}
+      AI_MAX_CONTEXT_BARS: ${AI_MAX_CONTEXT_BARS:-512}
+      AI_KRONOS_SAMPLE_COUNT: ${AI_KRONOS_SAMPLE_COUNT:-20}
+      AI_MAX_REQUEST_BYTES: ${AI_MAX_REQUEST_BYTES:-67108864}
+      AI_MAX_RESPONSE_BYTES: ${AI_MAX_RESPONSE_BYTES:-134217728}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      CUDA_MODULE_LOADING: LAZY
+      TZ: Asia/Seoul
+    init: true
+    restart: unless-stopped
+    read_only: true
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - compute_socket:/app/run
+      - type: bind
+        source: ${AI_MODEL_CACHE_HOST_PATH:-./data/ai-model-cache}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   portfolio_data:
