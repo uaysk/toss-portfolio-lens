@@ -6,6 +6,8 @@ services:
     env_file:
       - path: .env
         required: false
+      - path: .env.scalping
+        required: false
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
