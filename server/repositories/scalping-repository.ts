@@ -5,6 +5,10 @@ import { canonicalJson } from "../worker/contracts.js";
 import type { MarketCountry } from "../scalping/contracts.js";
 
 export const SCALPING_INTERVALS = [1, 5, 15, 30, 60] as const;
+const INTRADAY_BAR_COLUMNS = 18;
+// Keep every statement comfortably below PostgreSQL's 65,535 bind parameter
+// ceiling as well as the lower limits used by some SQLite builds/proxies.
+const INTRADAY_BAR_UPSERT_BATCH_SIZE = 500;
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
 export type IntradayBarState = "forming" | "final";
 export type IntradayBarSource = "kis_ws" | "kis_rest" | "toss_rest" | "recovered";
@@ -183,47 +187,48 @@ export class ScalpingRepository {
   }
 
   async putBars(input: readonly IntradayBarRecord[]): Promise<void> {
-    if (input.length > 10_000) throw new Error("한 번에 저장할 분봉은 10,000개 이하여야 합니다.");
+    if (input.length > 100_000) throw new Error("한 번에 저장할 분봉은 100,000개 이하여야 합니다.");
+    if (!input.length) return;
     const mysqlPreferred = `(
       CASE VALUES(bar_state) WHEN 'final' THEN 1 ELSE 0 END > CASE bar_state WHEN 'final' THEN 1 ELSE 0 END
       OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        > CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
+        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        > CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
       OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        = CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND CASE VALUES(source_kind)
         WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
         > CASE source_kind WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
       OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        = CASE quality_status WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND VALUES(source_kind) = source_kind AND VALUES(updated_at) >= updated_at)
     )`;
     const conflictPreferred = `(
       CASE EXCLUDED.bar_state WHEN 'final' THEN 1 ELSE 0 END
         > CASE portfolio_intraday_bars.bar_state WHEN 'final' THEN 1 ELSE 0 END
       OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state AND CASE EXCLUDED.quality_status
-        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         > CASE portfolio_intraday_bars.quality_status
-          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
+          WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
       OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state AND CASE EXCLUDED.quality_status
-        WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         = CASE portfolio_intraday_bars.quality_status
-          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+          WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND CASE EXCLUDED.source_kind
         WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
         > CASE portfolio_intraday_bars.source_kind
           WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
       OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state
         AND CASE EXCLUDED.quality_status
-          WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+          WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
           = CASE portfolio_intraday_bars.quality_status
-            WHEN 'complete' THEN 2 WHEN 'recovered' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
+            WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND EXCLUDED.source_kind = portfolio_intraday_bars.source_kind
         AND EXCLUDED.updated_at >= portfolio_intraday_bars.updated_at)
     )`;
-    for (const item of input) {
+    const normalized = input.map((item) => {
       const normalizedMarketCountry = marketCountry(item.marketCountry);
       const normalizedSymbol = symbol(item.symbol);
       if (!(SCALPING_INTERVALS as readonly number[]).includes(item.intervalMinutes)) {
@@ -245,21 +250,46 @@ export class ScalpingRepository {
         throw new Error("tradeCount 값이 올바르지 않습니다.");
       }
       if (!Number.isSafeInteger(item.updatedAt) || item.updatedAt < 0) throw new Error("updatedAt 값이 올바르지 않습니다.");
-      const values = [
+      return [
         normalizedMarketCountry, normalizedSymbol, item.intervalMinutes, openTime, closeTime, date(item.sessionDate), item.source, item.state,
         open, high, low, close, item.volume ?? 0,
         this.database.dialect === "postgres" ? item.volume !== undefined : item.volume === undefined ? 0 : 1,
         item.turnover, item.tradeCount, item.quality, item.updatedAt,
       ];
-      if (this.database.dialect === "mysql") {
+    });
+    const batches: unknown[][][] = [];
+    let batch: unknown[][] = [];
+    let keys = new Set<string>();
+    for (const values of normalized) {
+      // PostgreSQL rejects an INSERT that affects the same conflict key twice.
+      // Flush before a repeated revision so database priority semantics and the
+      // original input order remain identical on every supported dialect.
+      const key = `${values[0]}\0${values[1]}\0${values[2]}\0${values[3]}`;
+      if (batch.length >= INTRADAY_BAR_UPSERT_BATCH_SIZE || keys.has(key)) {
+        batches.push(batch);
+        batch = [];
+        keys = new Set();
+      }
+      batch.push(values);
+      keys.add(key);
+    }
+    if (batch.length) batches.push(batch);
+
+    const writeBatches = async (database: RelationalDatabase): Promise<void> => {
+      for (const values of batches) {
+        const placeholders = values
+          .map(() => `(${Array.from({ length: INTRADAY_BAR_COLUMNS }, () => "?").join(", ")})`)
+          .join(", ");
+        const parameters = values.flat();
+        if (database.dialect === "mysql") {
         // MySQL evaluates assignments left-to-right. Keep the fields used by the
         // priority predicate until last so every accepted value changes together.
-        await this.database.run(`
+          await database.run(`
           INSERT INTO portfolio_intraday_bars (
             market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES ${placeholders}
           ON DUPLICATE KEY UPDATE
             close_time = IF(${mysqlPreferred}, VALUES(close_time), close_time),
             session_date = IF(${mysqlPreferred}, VALUES(session_date), session_date),
@@ -275,14 +305,14 @@ export class ScalpingRepository {
             source_kind = IF(${mysqlPreferred}, VALUES(source_kind), source_kind),
             quality_status = IF(${mysqlPreferred}, VALUES(quality_status), quality_status),
             bar_state = IF(${mysqlPreferred}, VALUES(bar_state), bar_state)
-        `, values);
-      } else {
-        await this.database.run(`
+          `, parameters);
+        } else {
+          await database.run(`
           INSERT INTO portfolio_intraday_bars (
             market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES ${placeholders}
           ON CONFLICT(market_country, symbol, interval_minutes, open_time) DO UPDATE SET
             close_time = EXCLUDED.close_time,
             session_date = EXCLUDED.session_date,
@@ -300,9 +330,15 @@ export class ScalpingRepository {
             quality_status = EXCLUDED.quality_status,
             updated_at = EXCLUDED.updated_at
           WHERE ${conflictPreferred}
-        `, values);
+          `, parameters);
+        }
       }
+    };
+    if (batches.length === 1) {
+      await writeBatches(this.database);
+      return;
     }
+    await this.database.transaction(writeBatches);
   }
 
   async listBars(input: {
@@ -325,7 +361,7 @@ export class ScalpingRepository {
       parameters.push(isoTimestamp(input.to, "to"));
     }
     if (!input.includeForming) conditions.push("bar_state = 'final'");
-    const limit = Math.max(1, Math.min(2_000, Math.trunc(input.limit ?? 500)));
+    const limit = Math.max(1, Math.min(50_000, Math.trunc(input.limit ?? 500)));
     const rows = await this.database.query<IntradayBarRow>(`
       SELECT * FROM portfolio_intraday_bars
       WHERE ${conditions.join(" AND ")}

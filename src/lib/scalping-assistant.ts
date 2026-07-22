@@ -1,6 +1,7 @@
 export const SCALPING_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
 export const SCALPING_MARKET_COUNTRIES = ["KR", "US"] as const;
 export const SCALPING_US_EXCHANGES = ["NAS", "NYS", "AMS"] as const;
+export const SCALPING_MARKET_VENUES = ["KRX", "NXT", "INTEGRATED", "US"] as const;
 export const SCALPING_INTERVALS = ["1m", "5m", "15m", "30m", "60m"] as const;
 export const SCALPING_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
@@ -9,6 +10,7 @@ const SCALPING_INTERVAL_MINUTES = [1, 5, 15, 30, 60] as const;
 export type ScalpingCriterion = typeof SCALPING_CRITERIA[number];
 export type ScalpingMarketCountry = typeof SCALPING_MARKET_COUNTRIES[number];
 export type ScalpingUsExchange = typeof SCALPING_US_EXCHANGES[number];
+export type ScalpingMarketVenue = typeof SCALPING_MARKET_VENUES[number];
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
 export type ScalpingIntervalMinutes = typeof SCALPING_INTERVAL_MINUTES[number];
 export type ScalpingPreset = typeof SCALPING_PRESETS[number];
@@ -37,6 +39,9 @@ export type ScalpingStatus = {
   capabilities: string[];
   limitations: string[];
 };
+
+export type ScalpingRequestLimits = Pick<NonNullable<ScalpingStatus["limits"]>,
+  "minimumTopCount" | "maximumTopCount">;
 
 export type ScalpingQuality = {
   status: ScalpingAvailability;
@@ -94,6 +99,7 @@ export type ScalpingLevels = {
 
 export type ScalpingOrderbook = {
   observedAt?: string;
+  venue?: ScalpingMarketVenue;
   asks: Array<{ price: number; quantity: number }>;
   bids: Array<{ price: number; quantity: number }>;
   imbalance?: number;
@@ -182,6 +188,7 @@ export type ScalpingIndicatorSummary = {
 export type ScalpingCandidate = {
   symbol: string;
   exchange?: ScalpingUsExchange;
+  venue?: ScalpingMarketVenue;
   name: string;
   currency: string;
   rank?: number;
@@ -259,6 +266,7 @@ export type ScalpingEvaluationMetric = {
 export type ScalpingStreamEvent = {
   type: "snapshot" | "candidate" | "bar" | "quote" | "trade" | "orderbook" | "signal" | "forecast" | "analysis" | "connection" | "recovery" | "diagnostic" | "heartbeat";
   symbol?: string;
+  marketCountry?: ScalpingMarketCountry;
   value?: unknown;
 };
 
@@ -307,6 +315,11 @@ function optionalOneOf<T extends string>(value: unknown, allowed: readonly T[]):
 function timestamp(value: unknown): string | undefined {
   const candidate = string(value);
   return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+}
+
+function timestampKey(value: string): number | undefined {
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) ? instant : undefined;
 }
 
 function intervalMinutes(value: unknown): ScalpingIntervalMinutes | undefined {
@@ -446,6 +459,7 @@ function normalizeOrderbook(value: unknown): ScalpingOrderbook | undefined {
     asks,
     bids,
     observedAt: timestamp(valueOf(source, "observedAt", "observed_at")),
+    venue: optionalOneOf(valueOf(source, "market", "venue"), SCALPING_MARKET_VENUES),
     imbalance: number(valueOf(source, "imbalance", "orderbookImbalance", "orderbook_imbalance")),
   };
 }
@@ -667,12 +681,16 @@ function normalizeTechnical(value: unknown, inputBars: ScalpingBar[]): {
   const technical = record(value);
   const intraday = record(valueOf(technical, "intraday"));
   const bars = inputBars.map((bar) => ({ ...bar, indicatorValues: { ...bar.indicatorValues } }));
-  const byTimestamp = new Map(bars.map((bar) => [bar.timestamp, bar]));
+  const byTimestamp = new Map(bars.flatMap((bar) => {
+    const key = timestampKey(bar.timestamp);
+    return key === undefined ? [] : [[key, bar] as const];
+  }));
   const applyMetric = (seriesName: string, valueName: string, target: "sessionVwap" | "anchoredVwap") => {
     for (const point of metricPoints(valueOf(intraday, seriesName))) {
       const at = timestamp(valueOf(point, "timestamp"));
       const metricValue = number(valueOf(record(valueOf(point, "values")), valueName), 0);
-      const bar = at ? byTimestamp.get(at) : undefined;
+      const key = at ? timestampKey(at) : undefined;
+      const bar = key === undefined ? undefined : byTimestamp.get(key);
       if (bar && metricValue !== undefined) bar[target] = metricValue;
     }
   };
@@ -687,7 +705,8 @@ function normalizeTechnical(value: unknown, inputBars: ScalpingBar[]): {
     const points = metricPoints(indicator);
     for (const point of points) {
       const at = timestamp(valueOf(point, "timestamp"));
-      const bar = at ? byTimestamp.get(at) : undefined;
+      const key = at ? timestampKey(at) : undefined;
+      const bar = key === undefined ? undefined : byTimestamp.get(key);
       if (!bar) continue;
       for (const [field, raw] of Object.entries(record(valueOf(point, "values")))) {
         const metricValue = number(raw);
@@ -795,6 +814,9 @@ function normalizeCandidate(value: unknown, instrumentValue?: unknown): Scalping
   return {
     symbol: symbol.toUpperCase(),
     exchange,
+    venue: optionalOneOf(valueOf(realtimeTrade, "market", "venue"), SCALPING_MARKET_VENUES)
+      ?? normalizedBook?.venue
+      ?? optionalOneOf(valueOf(source, "marketVenue", "market_venue", "venue"), SCALPING_MARKET_VENUES),
     name: string(valueOf(source, "name")) ?? string(valueOf(instrument, "name")) ?? string(valueOf(metadata, "name")) ?? symbol.toUpperCase(),
     currency: string(valueOf(source, "currency")) ?? string(valueOf(instrument, "currency")) ?? string(valueOf(metadata, "currency")) ?? "KRW",
     rank,
@@ -1063,6 +1085,7 @@ export function parseScalpingStreamEvent(value: unknown): ScalpingStreamEvent | 
   return {
     type,
     symbol: string(valueOf(source, "symbol", "instrumentKey", "instrument_key"))?.toUpperCase(),
+    marketCountry: optionalOneOf(valueOf(source, "marketCountry", "market_country"), SCALPING_MARKET_COUNTRIES),
     value: valueOf(source, "value", "data", "payload") ?? source,
   };
 }
@@ -1108,6 +1131,7 @@ function mergeRealtimeAnalysis(workspace: ScalpingWorkspace, event: ScalpingStre
 }
 
 export function mergeScalpingStreamEvent(workspace: ScalpingWorkspace, event: ScalpingStreamEvent): ScalpingWorkspace {
+  if (event.marketCountry && event.marketCountry !== workspace.marketCountry) return workspace;
   if (event.type === "heartbeat" || event.type === "connection") return workspace;
   if (event.type === "recovery" || event.type === "diagnostic") {
     if (!event.symbol) return workspace;
@@ -1170,26 +1194,48 @@ export function mergeScalpingStreamEvent(workspace: ScalpingWorkspace, event: Sc
     };
     if (event.type === "trade") return {
       ...candidate,
+      venue: optionalOneOf(valueOf(source, "market", "venue"), SCALPING_MARKET_VENUES) ?? candidate.venue,
       price: number(valueOf(source, "price"), 0) ?? candidate.price,
       executionStrength: number(valueOf(source, "executionStrength", "execution_strength"), 0) ?? candidate.executionStrength,
     };
-    if (event.type === "orderbook") return { ...candidate, orderbook: normalizeOrderbook(source) ?? candidate.orderbook };
+    if (event.type === "orderbook") {
+      const orderbook = normalizeOrderbook(source);
+      return {
+        ...candidate,
+        venue: orderbook?.venue ?? candidate.venue,
+        orderbook: orderbook ?? candidate.orderbook,
+      };
+    }
     if (event.type === "signal") return { ...candidate, signal: normalizeSignal(source) ?? candidate.signal };
     return { ...candidate, forecast: normalizeForecast(source) ?? candidate.forecast };
   });
   return changed ? { ...workspace, candidates } : workspace;
 }
 
-export function validateScalpingRequest(value: ScalpingRequest): string[] {
+export function validateScalpingRequest(
+  value: ScalpingRequest,
+  limits: ScalpingRequestLimits = {},
+): string[] {
   const issues: string[] = [];
+  const configuredMinimum = limits.minimumTopCount;
+  const minimumTopCount = configuredMinimum !== undefined && Number.isInteger(configuredMinimum)
+    && configuredMinimum > 0 ? configuredMinimum : 5;
+  const configuredMaximum = limits.maximumTopCount;
+  const maximumTopCount = configuredMaximum !== undefined && Number.isInteger(configuredMaximum)
+    && configuredMaximum >= minimumTopCount ? configuredMaximum : 50;
   if (!SCALPING_MARKET_COUNTRIES.includes(value.marketCountry)) issues.push("스캔 시장이 올바르지 않습니다.");
   if (!SCALPING_CRITERIA.includes(value.criterion)) issues.push("스캐너 기준이 올바르지 않습니다.");
-  if (!Number.isInteger(value.topCount) || value.topCount < 5 || value.topCount > 50) issues.push("표시 종목 수는 5~50의 정수여야 합니다.");
+  if (!Number.isInteger(value.topCount) || value.topCount < minimumTopCount || value.topCount > maximumTopCount) {
+    issues.push(`표시 종목 수는 ${minimumTopCount}~${maximumTopCount}의 정수여야 합니다.`);
+  }
   if (!SCALPING_INTERVALS.includes(value.interval)) issues.push("분봉 간격이 올바르지 않습니다.");
   if (!Number.isInteger(value.layoutColumns) || value.layoutColumns < 1 || value.layoutColumns > 4) issues.push("차트 열 수는 1~4여야 합니다.");
   if (!SCALPING_PRESETS.includes(value.preset)) issues.push("지표 프리셋이 올바르지 않습니다.");
-  if (value.symbols && (value.symbols.length > 50 || value.symbols.some((symbol) => !/^[A-Za-z0-9._-]{1,32}$/.test(symbol)))) {
+  if (value.symbols && (value.symbols.length > maximumTopCount || value.symbols.some((symbol) => !/^[A-Za-z0-9._-]{1,32}$/.test(symbol)))) {
     issues.push("사용자 지정 종목 목록이 올바르지 않습니다.");
+  }
+  if (value.symbols && value.symbols.length > value.topCount) {
+    issues.push("사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.");
   }
   return issues;
 }

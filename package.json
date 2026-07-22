@@ -18,6 +18,8 @@
     "test:rust-worker": "tsx scripts/verify-rust-worker.ts",
     "test:technical-uds": "cargo build --manifest-path worker/rust/Cargo.toml --locked && tsx scripts/verify-technical-analysis-uds.ts",
     "test:ai-websocket": "tsx scripts/verify-ai-websocket-roundtrip.ts",
+    "test:kis-us-realtime": "tsx scripts/verify-kis-us-realtime.ts",
+    "test:kis-us-rest": "tsx scripts/verify-kis-us-rest.ts",
     "test:technical-ui": "node scripts/verify-technical-analysis-ui.mjs",
     "test:scalping-ui": "node scripts/verify-scalping-assistant-ui.mjs",
     "test:rust-worker-postgres": "tsx scripts/verify-rust-worker-postgres.ts",

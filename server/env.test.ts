@@ -118,15 +118,64 @@ describe("database environment configuration", () => {
         maximumSpreadBps: 50,
       },
       service: {
-        workspaceBarLimit: 2_000,
+        workspaceBarLimit: 4_900,
+        usWorkspaceBarLimit: 8_640,
+        workspaceChartBarLimit: 1_000,
         candlePageSize: 200,
         forecastMinimumBars: 64,
         forecastMaximumBars: 512,
+        preMarketOpenMinuteKst: 480,
+        preMarketCloseMinuteKst: 530,
         sessionOpenMinuteKst: 540,
         sessionCloseMinuteKst: 930,
+        afterMarketOpenMinuteKst: 940,
+        afterMarketCloseMinuteKst: 1_200,
       },
       ai: { maximumRequestBytes: 33_554_432, maximumResponseBytes: 67_108_864 },
     });
+
+    process.env.KI_SCALPING_REST_ENV = "demo";
+    process.env.KI_SCALPING_WS_ENV = "real";
+    expect(loadConfig().scalping).toMatchObject({
+      enabled: true,
+      kisRest: { environment: "demo" },
+      kisWebSocket: { environment: "real" },
+    });
+    process.env.KI_SCALPING_REST_ENV = "invalid";
+    expect(() => loadConfig()).toThrow("KI_SCALPING_REST_ENV는 demo 또는 real");
+    delete process.env.KI_SCALPING_REST_ENV;
+    delete process.env.KI_SCALPING_WS_ENV;
+
+    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "40";
+    expect(loadConfig().scalping).toMatchObject({
+      enabled: true,
+      maximumTopCount: 13,
+      scanner: { maximumTopCount: 13 },
+      service: { maximumTopCount: 13, maximumSubscriptions: 40 },
+      kisWebSocket: { maxSubscriptions: 40 },
+    });
+    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "100";
+
+    process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4899";
+    expect(() => loadConfig()).toThrow("NXT 통합 세션 60분봉 분석 60개를 장중 보장하기 위해 최소 4900");
+    process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4900";
+    process.env.SCALPING_MINIMUM_ANALYSIS_BARS = "61";
+    expect(() => loadConfig()).toThrow("60분봉 분석 61개를 장중 보장하기 위해 최소 5600");
+    process.env.SCALPING_MINIMUM_ANALYSIS_BARS = "1";
+    process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4199";
+    expect(() => loadConfig()).toThrow("NXT 통합 세션 RVOL 5개 이전 세션을 위해 최소 4200");
+    process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4200";
+    process.env.SCALPING_RVOL_LOOKBACK_SESSIONS = "6";
+    expect(() => loadConfig()).toThrow("최소 4900");
+    process.env.SCALPING_RVOL_LOOKBACK_SESSIONS = "5";
+    process.env.SCALPING_MINIMUM_ANALYSIS_BARS = "60";
+    process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4900";
+    process.env.SCALPING_US_WORKSPACE_BAR_LIMIT = "8639";
+    expect(() => loadConfig()).toThrow("미국 확장 세션 RVOL 5개 이전 세션을 위해 최소 8640");
+    process.env.SCALPING_US_WORKSPACE_BAR_LIMIT = "8640";
+    process.env.SCALPING_RVOL_LOOKBACK_SESSIONS = "6";
+    expect(() => loadConfig()).toThrow("미국 확장 세션 RVOL 6개 이전 세션을 위해 최소 10080");
+    process.env.SCALPING_RVOL_LOOKBACK_SESSIONS = "5";
 
     process.env.TOSS_SCALPING_CANDLE_MAX_COUNT = "201";
     expect(() => loadConfig()).toThrow("TOSS_SCALPING_CANDLE_MAX_COUNT");
@@ -136,16 +185,19 @@ describe("database environment configuration", () => {
     expect(() => loadConfig()).toThrow("SCALPING_SESSION_OPEN_KST는 SCALPING_SESSION_CLOSE_KST보다 빨라야");
 
     process.env.SCALPING_SESSION_OPEN_KST = "09:00";
+    process.env.SCALPING_NXT_AFTER_MARKET_OPEN_KST = "15:20";
+    expect(() => loadConfig()).toThrow("must not overlap");
+    process.env.SCALPING_NXT_AFTER_MARKET_OPEN_KST = "15:40";
     process.env.AI_MAX_RESPONSE_BYTES = "513";
     expect(() => loadConfig()).toThrow("AI_MAX_RESPONSE_BYTES");
 
     process.env.AI_MAX_RESPONSE_BYTES = "67108864";
-    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "99";
-    expect(() => loadConfig()).toThrow("종목당 체결·호가 2개 구독");
+    process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "14";
+    expect(() => loadConfig()).toThrow("최소 표시 종목 5개의 미국 표준 체결·데이 체결·1호가 3개 구독");
 
     process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "100";
-    process.env.AI_COMPUTE_MAX_BATCH_SIZE = "49";
-    expect(() => loadConfig()).toThrow("SCALPING_TOP_COUNT_MAX 이상");
+    process.env.AI_COMPUTE_MAX_BATCH_SIZE = "32";
+    expect(() => loadConfig()).toThrow("실제 적용되는 최대 표시 종목 수 이상");
   });
 
   it("AI WebSocket URL의 local, private opt-in, remote TLS 경계를 검증하고 비활성 시 token file을 읽지 않는다", () => {

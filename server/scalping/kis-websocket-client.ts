@@ -7,6 +7,7 @@ type UnknownRecord = Record<string, unknown>;
 export type KisExecutionTrId = "H0STCNT0" | "H0NXCNT0" | "H0UNCNT0" | "HDFSCNT0";
 export type KisOrderbookTrId = "H0STASP0" | "H0NXASP0" | "H0UNASP0" | "HDFSASP0";
 export type KisMarketTrId = KisExecutionTrId | KisOrderbookTrId;
+export type KisUsSessionFeed = "standard" | "day";
 
 export type KisWebSocketConfig = {
   appKey: string;
@@ -29,6 +30,7 @@ export type KisSubscription = {
   trId: KisMarketTrId;
   symbol: string;
   exchange?: KisUsExchangeCode;
+  usFeed?: KisUsSessionFeed;
 };
 
 export type KisConnectionState =
@@ -56,6 +58,7 @@ export type KisExecutionEvent = {
   market: KisMarketSource;
   marketCountry: MarketCountry;
   exchange?: KisUsExchangeCode;
+  usFeed?: KisUsSessionFeed;
   symbol: string;
   eventId: string;
   providerTimestamp: string;
@@ -85,6 +88,7 @@ export type KisOrderbookEvent = {
   market: KisMarketSource;
   marketCountry: MarketCountry;
   exchange?: KisUsExchangeCode;
+  usFeed?: KisUsSessionFeed;
   symbol: string;
   providerTimestamp: string;
   receivedAt: string;
@@ -104,6 +108,7 @@ export type KisSubscriptionEvent = {
   market: KisMarketSource;
   marketCountry: MarketCountry;
   exchange?: KisUsExchangeCode;
+  usFeed?: KisUsSessionFeed;
   symbol: string;
   providerTimestamp: string;
   action: "subscribe" | "unsubscribe" | "unknown";
@@ -236,6 +241,12 @@ function isCompactTime(value: string): boolean {
   return hour <= 23 && minute <= 59 && second <= 59;
 }
 
+function shiftCompactDate(value: string, days: number): string | undefined {
+  if (!isCompactDate(value) || !Number.isInteger(days)) return undefined;
+  const epoch = Date.UTC(Number(value.slice(0, 4)), Number(value.slice(4, 6)) - 1, Number(value.slice(6, 8)));
+  return new Date(epoch + days * 86_400_000).toISOString().slice(0, 10).replaceAll("-", "");
+}
+
 function compactTimestamp(date: string, time: string): string {
   return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}+09:00`;
 }
@@ -273,28 +284,39 @@ function isMarketTrId(value: string): value is KisMarketTrId {
 }
 
 function subscriptionKey(subscription: KisSubscription): string {
-  return `${subscription.trId}:${subscription.exchange ?? ""}:${subscription.symbol}`;
+  return `${subscription.trId}:${subscription.exchange ?? ""}:${subscription.usFeed ?? "standard"}:${subscription.symbol}`;
 }
 
 function providerSubscriptionKey(subscription: KisSubscription): string {
   if (subscription.trId === "HDFSCNT0" || subscription.trId === "HDFSASP0") {
+    if (subscription.usFeed === "day") {
+      const exchange = subscription.exchange === "NAS" ? "BAQ"
+        : subscription.exchange === "NYS" ? "BAY"
+          : subscription.exchange === "AMS" ? "BAA" : undefined;
+      if (!exchange) throw new KisWebSocketValidationError("US day-market subscriptions require exchange NAS, NYS, or AMS.");
+      return `R${exchange}${subscription.symbol}`;
+    }
     return `D${subscription.exchange}${subscription.symbol}`;
   }
   return subscription.symbol;
 }
 
-function overseasSymbol(value: string): { symbol: string; exchange?: KisUsExchangeCode } {
+function overseasSymbol(value: string): { symbol: string; exchange?: KisUsExchangeCode; usFeed?: KisUsSessionFeed } {
   const normalized = value.trim().toUpperCase();
-  const prefixed = /^[DR]([A-Z]{3})([A-Z0-9._-]{1,32})$/.exec(normalized);
+  const prefixed = /^([DR])([A-Z]{3})([A-Z0-9._-]{1,32})$/.exec(normalized);
   if (!prefixed) return { symbol: normalized };
-  const providerExchange = prefixed[1]!;
+  const providerExchange = prefixed[2]!;
   const exchange = providerExchange === "BAQ" ? "NAS"
     : providerExchange === "BAY" ? "NYS"
       : providerExchange === "BAA" ? "AMS"
         : US_EXCHANGES.has(providerExchange as KisUsExchangeCode)
           ? providerExchange as KisUsExchangeCode
           : undefined;
-  return { symbol: prefixed[2]!, ...(exchange ? { exchange } : {}) };
+  return {
+    symbol: prefixed[3]!,
+    ...(exchange ? { exchange } : {}),
+    usFeed: prefixed[1] === "R" ? "day" : "standard",
+  };
 }
 
 function assertPositive(value: number, name: string): void {
@@ -420,7 +442,12 @@ export class KisWebSocketClient {
 
   subscribe(subscription: KisSubscription): boolean {
     this.validateSubscription(subscription);
-    const normalized = { ...subscription, symbol: subscription.symbol.toUpperCase() };
+    const overseas = subscription.trId === "HDFSCNT0" || subscription.trId === "HDFSASP0";
+    const normalized = {
+      ...subscription,
+      symbol: subscription.symbol.toUpperCase(),
+      ...(overseas ? { usFeed: subscription.usFeed ?? "standard" as const } : {}),
+    };
     const key = subscriptionKey(normalized);
     if (this.desiredSubscriptions.has(key)) return false;
     if (this.desiredSubscriptions.size >= this.config.maxSubscriptions) {
@@ -435,7 +462,12 @@ export class KisWebSocketClient {
 
   unsubscribe(subscription: KisSubscription): boolean {
     this.validateSubscription(subscription);
-    const normalized = { ...subscription, symbol: subscription.symbol.toUpperCase() };
+    const overseas = subscription.trId === "HDFSCNT0" || subscription.trId === "HDFSASP0";
+    const normalized = {
+      ...subscription,
+      symbol: subscription.symbol.toUpperCase(),
+      ...(overseas ? { usFeed: subscription.usFeed ?? "standard" as const } : {}),
+    };
     const removed = this.desiredSubscriptions.delete(subscriptionKey(normalized));
     if (removed && this.state === "connected") {
       this.enqueueControl({ action: "unsubscribe", subscription: normalized });
@@ -489,8 +521,18 @@ export class KisWebSocketClient {
     if (overseas && !US_EXCHANGES.has(subscription.exchange as KisUsExchangeCode)) {
       throw new KisWebSocketValidationError("US subscriptions require exchange NAS, NYS, or AMS.");
     }
+    if (overseas && subscription.usFeed !== undefined
+      && subscription.usFeed !== "standard" && subscription.usFeed !== "day") {
+      throw new KisWebSocketValidationError("US subscriptions require standard or day feed mode.");
+    }
+    if (subscription.trId === "HDFSASP0" && subscription.usFeed === "day") {
+      throw new KisWebSocketValidationError("KIS does not document an HDFSASP0 day-market orderbook feed.");
+    }
     if (!overseas && subscription.exchange !== undefined) {
       throw new KisWebSocketValidationError("exchange is only valid for US subscriptions.");
+    }
+    if (!overseas && subscription.usFeed !== undefined) {
+      throw new KisWebSocketValidationError("usFeed is only valid for US subscriptions.");
     }
   }
 
@@ -846,6 +888,7 @@ export class KisWebSocketClient {
       market: marketForTrId(trId)!,
       marketCountry: marketCountryForTrId(trId)!,
       ...(decoded.exchange ? { exchange: decoded.exchange } : {}),
+      ...(decoded.usFeed ? { usFeed: decoded.usFeed } : {}),
       symbol: decoded.symbol,
       providerTimestamp: this.systemTimestamp(header.datetime),
       action: trType === "1" ? "subscribe" : trType === "2" ? "unsubscribe" : pendingAction ?? "unknown",
@@ -958,8 +1001,11 @@ export class KisWebSocketClient {
   private parseOverseasExecution(values: string[]): void {
     const decoded = overseasSymbol(stringValue(values[0]));
     const providerSymbol = stringValue(values[1]).toUpperCase();
-    const sessionDate = stringValue(values[4]);
+    const providerDate = stringValue(values[4]);
     const time = stringValue(values[5]);
+    const sessionDate = decoded.usFeed === "day" && time >= "200000"
+      ? shiftCompactDate(providerDate, 1) ?? ""
+      : providerDate;
     const price = finiteNumber(values[11]);
     const bidPrice1 = finiteNumber(values[15]);
     const askPrice1 = finiteNumber(values[16]);
@@ -967,12 +1013,12 @@ export class KisWebSocketClient {
     const accumulatedVolume = finiteNumber(values[20]);
     const accumulatedTradingAmount = finiteNumber(values[21]);
     const executionStrength = optionalFiniteNumber(values[24]);
-    const providerTimestamp = zonedTimestamp(sessionDate, time, "America/New_York");
+    const providerTimestamp = zonedTimestamp(providerDate, time, "America/New_York");
     const invalid = [
       !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(decoded.symbol) ? "symbol" : "",
       providerSymbol !== decoded.symbol ? "providerSymbol" : "",
       decoded.exchange === undefined ? "exchange" : "",
-      !isCompactDate(sessionDate) ? "sessionDate" : "",
+      !isCompactDate(providerDate) || !isCompactDate(sessionDate) ? "sessionDate" : "",
       !isCompactTime(time) ? "time" : "",
       !providerTimestamp ? "timestamp" : "",
       price === undefined || price <= 0 ? "price" : "",
@@ -1001,8 +1047,9 @@ export class KisWebSocketClient {
       market: "US",
       marketCountry: "US",
       exchange: decoded.exchange,
+      usFeed: decoded.usFeed ?? "standard",
       symbol: decoded.symbol,
-      eventId: `kis:HDFSCNT0:${decoded.exchange}:${decoded.symbol}:${sessionDate}:${time}:${accumulatedVolume}:${price}:${executionVolume}`,
+      eventId: `kis:HDFSCNT0:${decoded.usFeed ?? "standard"}:${decoded.exchange}:${decoded.symbol}:${sessionDate}:${time}:${accumulatedVolume}:${price}:${executionVolume}`,
       providerTimestamp,
       receivedAt,
       sessionDate,
@@ -1062,6 +1109,7 @@ export class KisWebSocketClient {
       market: "US",
       marketCountry: "US",
       exchange: decoded.exchange,
+      usFeed: decoded.usFeed ?? "standard",
       symbol: decoded.symbol,
       providerTimestamp,
       receivedAt,

@@ -98,6 +98,118 @@ describe("ScalpingRepository", () => {
       }]);
   });
 
+  it("종료 단일가까지 완성한 recovered 봉은 먼저 확정된 불완전 WS 봉을 교체한다", async () => {
+    const repository = await setup();
+    const base = {
+      symbol: "005930", marketCountry: "KR" as const, intervalMinutes: 1 as const,
+      openTime: "2026-07-21T06:29:00.000Z", closeTime: "2026-07-21T06:30:00.000Z",
+      sessionDate: "2026-07-21", state: "final" as const,
+    };
+    await repository.putBars([{
+      ...base,
+      source: "kis_ws",
+      open: 100, high: 101, low: 99, close: 100, volume: 10,
+      quality: "complete",
+      updatedAt: 100,
+    }]);
+    await repository.putBars([{
+      ...base,
+      source: "recovered",
+      open: 100, high: 105, low: 98, close: 104, volume: 1_829_148,
+      quality: "recovered",
+      updatedAt: 200,
+    }]);
+    expect(await repository.listBars({ marketCountry: "KR", symbol: "005930", intervalMinutes: 1 }))
+      .toMatchObject([{
+        source: "recovered", quality: "recovered", high: 105, low: 98, close: 104, volume: 1_829_148,
+      }]);
+  });
+
+  it("NXT RVOL 이력에 필요한 4,200개 분봉 조회를 저장소에서 자르지 않는다", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const relational = {
+      dialect: "sqlite" as const,
+      run: vi.fn(),
+      query,
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    const repository = new ScalpingRepository(relational);
+    await repository.listBars({
+      marketCountry: "KR",
+      symbol: "005930",
+      intervalMinutes: 1,
+      includeForming: true,
+      limit: 4_200,
+    });
+    expect(query.mock.calls[0]?.[0]).toContain("LIMIT 4200");
+  });
+
+  it("4,200개 NXT RVOL 분봉을 행별 쿼리 대신 제한된 batch upsert로 저장한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
+    const transactionDatabase = {
+      dialect: "sqlite" as const,
+      run,
+      query: vi.fn(),
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    const transaction = vi.fn(async (work: (database: RelationalDatabase) => Promise<unknown>) => (
+      work(transactionDatabase)
+    ));
+    const relational = {
+      dialect: "sqlite" as const,
+      run: vi.fn(),
+      query: vi.fn(),
+      transaction,
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    const base = Date.parse("2026-07-14T23:00:00.000Z");
+    const bars = Array.from({ length: 4_200 }, (_, index) => ({
+      marketCountry: "KR" as const,
+      symbol: "005930",
+      intervalMinutes: 1 as const,
+      openTime: new Date(base + index * 60_000).toISOString(),
+      closeTime: new Date(base + (index + 1) * 60_000).toISOString(),
+      sessionDate: new Date(base + index * 60_000 + 9 * 60 * 60_000).toISOString().slice(0, 10),
+      source: "toss_rest" as const,
+      state: "final" as const,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 1,
+      quality: "complete" as const,
+      updatedAt: 1,
+    }));
+
+    await new ScalpingRepository(relational).putBars(bars);
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(relational.run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(9);
+    expect(run.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 9_000)).toBe(true);
+    expect(run.mock.calls.reduce((total, [, parameters]) => total + (parameters as unknown[]).length, 0))
+      .toBe(4_200 * 18);
+  });
+
+  it("한 batch의 같은 분봉 revision도 입력 순서와 확정 우선순위를 유지한다", async () => {
+    const repository = await setup();
+    const base = {
+      symbol: "005930", intervalMinutes: 1 as const,
+      openTime: "2026-07-21T09:00:00+09:00", closeTime: "2026-07-21T09:01:00+09:00",
+      sessionDate: "2026-07-21", source: "kis_ws" as const,
+      open: 100, high: 102, low: 99, volume: 12, quality: "complete" as const,
+    };
+    await repository.putBars([
+      { ...base, state: "forming", close: 101, updatedAt: 200 },
+      { ...base, state: "forming", close: 100, updatedAt: 100 },
+      { ...base, state: "final", close: 102, updatedAt: 300 },
+    ]);
+    expect(await repository.listBars({ symbol: "005930", intervalMinutes: 1, includeForming: true }))
+      .toMatchObject([{ state: "final", close: 102, updatedAt: 300 }]);
+  });
+
   it("MySQL upsert는 우선순위 predicate 의존 필드를 안전한 순서로 마지막에 갱신한다", async () => {
     const run = vi.fn().mockResolvedValue({ affectedRows: 1, insertId: 0 });
     const mysql = {

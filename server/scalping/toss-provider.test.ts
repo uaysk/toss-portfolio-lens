@@ -122,7 +122,11 @@ describe("Toss normalizers", () => {
     const candle = normalizeTossMinuteCandles({ result: { candles: [{
       timestamp: "2026-07-21T00:30:00Z", open: 10, high: 11, low: 9, close: 10,
     }] } }, "AAPL", "US")[0]!;
-    expect(candle.sessionDate).toBe("2026-07-20");
+    expect(candle.sessionDate).toBe("2026-07-21");
+    const afterMidnightDay = normalizeTossMinuteCandles({ result: { candles: [{
+      timestamp: "2026-07-21T04:30:00Z", open: 10, high: 11, low: 9, close: 10,
+    }] } }, "AAPL", "US")[0]!;
+    expect(afterMidnightDay.sessionDate).toBe("2026-07-21");
   });
 
   it("sorts orderbook levels and retains unknown warning codes", () => {
@@ -225,11 +229,68 @@ describe("TossScalpingProvider", () => {
     expect(getReadOnlyMarketData).toHaveBeenCalledWith("rankings", expect.objectContaining({ marketCountry: "US" }));
   });
 
-  it("caches and validates US regular-market calendar sessions including early closes", async () => {
+  it("normalizes KR integrated KRX/NXT calendar days and explicit integrated-null holidays", async () => {
+    const getReadOnlyMarketData = vi.fn(async (feature, query) => response(feature, { result: {
+      today: query.date === "2026-07-25" ? {
+        date: "2026-07-25",
+        integrated: null,
+      } : {
+        date: "2026-07-22",
+        integrated: {
+          preMarket: {
+            startTime: "2026-07-22T08:00:00+09:00",
+            singlePriceAuctionStartTime: "2026-07-22T08:40:00+09:00",
+            endTime: "2026-07-22T08:50:00+09:00",
+          },
+          regularMarket: {
+            startTime: "2026-07-22T09:00:00+09:00",
+            endTime: "2026-07-22T15:30:00+09:00",
+          },
+          afterMarket: {
+            startTime: "2026-07-22T15:40:00+09:00",
+            singlePriceAuctionEndTime: "2026-07-22T19:50:00+09:00",
+            endTime: "2026-07-22T20:00:00+09:00",
+          },
+        },
+      },
+    } }));
+    const provider = new TossScalpingProvider({ getReadOnlyMarketData } as TossRawMarketClient, config());
+
+    await expect(provider.getMarketCalendar("KR", "2026-07-22")).resolves.toEqual({
+      marketCountry: "KR",
+      sessionDate: "2026-07-22",
+      dayMarket: null,
+      preMarket: null,
+      regularMarket: {
+        startAt: "2026-07-22T09:00:00+09:00",
+        endAt: "2026-07-22T15:30:00+09:00",
+      },
+      afterMarket: null,
+    });
+    await expect(provider.getMarketCalendar("KR", "2026-07-25")).resolves.toEqual({
+      marketCountry: "KR",
+      sessionDate: "2026-07-25",
+      dayMarket: null,
+      preMarket: null,
+      regularMarket: null,
+      afterMarket: null,
+    });
+    expect(getReadOnlyMarketData).toHaveBeenNthCalledWith(1, "market-calendar", {
+      country: "KR", date: "2026-07-22",
+    });
+    expect(getReadOnlyMarketData).toHaveBeenNthCalledWith(2, "market-calendar", {
+      country: "KR", date: "2026-07-25",
+    });
+  });
+
+  it("caches and validates all US sessions including a cross-midnight day market and early close", async () => {
     const getReadOnlyMarketData = vi.fn(async (feature) => response(feature, { result: {
       today: {
         date: "2026-11-27",
+        dayMarket: { startTime: "2026-11-27T10:00:00+09:00", endTime: "2026-11-27T18:00:00+09:00" },
+        preMarket: { startTime: "2026-11-27T18:00:00+09:00", endTime: "2026-11-27T23:30:00+09:00" },
         regularMarket: { startTime: "2026-11-27T23:30:00+09:00", endTime: "2026-11-28T03:00:00+09:00" },
+        afterMarket: { startTime: "2026-11-28T03:00:00+09:00", endTime: "2026-11-28T08:50:00+09:00" },
       },
     } }));
     const provider = new TossScalpingProvider({ getReadOnlyMarketData } as TossRawMarketClient, config());
@@ -238,8 +299,17 @@ describe("TossScalpingProvider", () => {
     await expect(Promise.all([first, second])).resolves.toEqual([
       expect.objectContaining({
         marketCountry: "US", sessionDate: "2026-11-27",
+        dayMarket: {
+          startAt: "2026-11-27T10:00:00+09:00", endAt: "2026-11-27T18:00:00+09:00",
+        },
+        preMarket: {
+          startAt: "2026-11-27T18:00:00+09:00", endAt: "2026-11-27T23:30:00+09:00",
+        },
         regularMarket: {
           startAt: "2026-11-27T23:30:00+09:00", endAt: "2026-11-28T03:00:00+09:00",
+        },
+        afterMarket: {
+          startAt: "2026-11-28T03:00:00+09:00", endAt: "2026-11-28T08:50:00+09:00",
         },
       }),
       expect.anything(),
@@ -248,6 +318,55 @@ describe("TossScalpingProvider", () => {
     expect(getReadOnlyMarketData).toHaveBeenCalledWith("market-calendar", {
       country: "US", date: "2026-11-27",
     });
+  });
+
+  it("rejects a US day-market period that is not attached to the following trading date", async () => {
+    const provider = new TossScalpingProvider({
+      getReadOnlyMarketData: vi.fn(async (feature) => response(feature, { result: { today: {
+        date: "2026-07-22",
+        dayMarket: { startTime: "2026-07-22T20:00:00-04:00", endTime: "2026-07-23T04:00:00-04:00" },
+        preMarket: null,
+        regularMarket: null,
+        afterMarket: null,
+      } } })),
+    } as TossRawMarketClient, config());
+    await expect(provider.getMarketCalendar("US", "2026-07-22"))
+      .rejects.toThrow(/dayMarket timestamps do not match today\.date/);
+  });
+
+  it("rejects country-shape and local-session-date mismatches instead of confirming a session", async () => {
+    const krTopLevelOnly = new TossScalpingProvider({
+      getReadOnlyMarketData: vi.fn(async (feature) => response(feature, { result: { today: {
+        date: "2026-07-22",
+        regularMarket: {
+          startTime: "2026-07-22T09:00:00+09:00",
+          endTime: "2026-07-22T15:30:00+09:00",
+        },
+      } } })),
+    } as TossRawMarketClient, config());
+    await expect(krTopLevelOnly.getMarketCalendar("KR", "2026-07-22"))
+      .rejects.toThrow(/today\.integrated must be an object or null/);
+
+    const mismatchedSessionDate = new TossScalpingProvider({
+      getReadOnlyMarketData: vi.fn(async (feature) => response(feature, { result: { today: {
+        date: "2026-07-22",
+        integrated: { regularMarket: {
+          startTime: "2026-07-21T09:00:00+09:00",
+          endTime: "2026-07-21T15:30:00+09:00",
+        } },
+      } } })),
+    } as TossRawMarketClient, config());
+    await expect(mismatchedSessionDate.getMarketCalendar("KR", "2026-07-22"))
+      .rejects.toThrow(/timestamps do not match today\.date/);
+
+    const mismatchedProviderDate = new TossScalpingProvider({
+      getReadOnlyMarketData: vi.fn(async (feature) => response(feature, { result: { today: {
+        date: "2026-11-26",
+        regularMarket: null,
+      } } })),
+    } as TossRawMarketClient, config());
+    await expect(mismatchedProviderDate.getMarketCalendar("US", "2026-11-27"))
+      .rejects.toThrow(/today\.date does not match the requested date/);
   });
 
   it("batches price requests using configured capacity", async () => {

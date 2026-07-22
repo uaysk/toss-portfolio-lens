@@ -20,7 +20,23 @@ import type {
   ScalpingRepository,
 } from "../repositories/scalping-repository.js";
 import type { MarketCountry, NormalizedOrderbook, NormalizedTrade } from "./contracts.js";
-import { marketLocalParts, marketSessionAnchor } from "./market-time.js";
+import {
+  marketLocalParts,
+  marketSessionAnchor,
+  marketTimeZone,
+  zonedTimestamp,
+} from "./market-time.js";
+import {
+  DEFAULT_KR_INTEGRATED_SESSION_WINDOWS,
+  marketMinuteOfDay,
+  marketSessionWindowAnchor,
+  marketSessionWindows,
+  marketTradingSessionDate,
+  sessionWindowForBarClose,
+  sessionWindowForTrade,
+  validateSessionWindows,
+  type MarketSessionWindow,
+} from "./market-session.js";
 
 export const SCALPING_LIVE_EVENT_VERSION = "scalping-live-event/v1" as const;
 
@@ -43,6 +59,8 @@ export type ScalpingLiveRuntimeConfig = {
   watermarkAdvanceMs: number;
   recoveryMaximumRequests: number;
   recoveryBarLimit: number;
+  snapshotStaleAfterMs?: number;
+  krSessionWindows?: readonly MarketSessionWindow[];
   now?: () => number;
 };
 
@@ -62,6 +80,31 @@ function expandedSessionDate(compact: string): string {
 
 function marketSymbolKey(symbol: string, marketCountry: MarketCountry): string {
   return `${marketCountry}:${symbol}`;
+}
+
+function sessionWindowClose(
+  sessionDate: string,
+  marketCountry: MarketCountry,
+  window: MarketSessionWindow,
+): { keySuffix: string; timestamp: number } | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate)) return undefined;
+  const dateEpoch = Date.UTC(
+    Number(sessionDate.slice(0, 4)),
+    Number(sessionDate.slice(5, 7)) - 1,
+    Number(sessionDate.slice(8, 10)),
+  );
+  const dayOffset = (window.localDateOffset ?? 0) + Math.floor(window.closeMinute / (24 * 60));
+  const minuteOfDay = window.closeMinute % (24 * 60);
+  const targetDate = new Date(dateEpoch + dayOffset * 24 * 60 * MINUTE_MS)
+    .toISOString().slice(0, 10).replaceAll("-", "");
+  const time = `${String(Math.floor(minuteOfDay / 60)).padStart(2, "0")}`
+    + `${String(minuteOfDay % 60).padStart(2, "0")}00`;
+  const resolved = zonedTimestamp(targetDate, time, marketTimeZone(marketCountry));
+  if (!resolved) return undefined;
+  return {
+    keySuffix: `${sessionDate}:${window.kind}:${window.localDateOffset ?? 0}:${window.openMinute}-${window.closeMinute}`,
+    timestamp: Date.parse(resolved),
+  };
 }
 
 function normalizedSymbol(value: string): string {
@@ -102,42 +145,322 @@ function recordFromAggregated(
   };
 }
 
+function isCanonicalSessionRange(
+  openTime: string,
+  closeTime: string,
+  sessionDate: string,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): boolean {
+  const openWindow = sessionWindowForTrade(openTime, marketCountry, sessionWindows, sessionDate);
+  const closeWindow = sessionWindowForBarClose(closeTime, marketCountry, sessionWindows, sessionDate);
+  return Boolean(openWindow && closeWindow && openWindow === closeWindow);
+}
+
+function isCanonicalSessionBar(
+  bar: AggregatedIntradayBar,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): boolean {
+  return isCanonicalSessionRange(
+    bar.startAt,
+    bar.endAt,
+    bar.sessionDate,
+    marketCountry,
+    sessionWindows,
+  );
+}
+
+export function scheduledSessionIntervalClose(
+  openTime: string,
+  sessionDate: string,
+  intervalMinutes: ScalpingInterval,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): { closeTime: string; truncated: boolean } | undefined {
+  const window = sessionWindowForTrade(openTime, marketCountry, sessionWindows, sessionDate);
+  if (!window) return undefined;
+  const openMs = Date.parse(openTime);
+  const anchorMs = Date.parse(marketSessionWindowAnchor(
+    sessionDate,
+    openTime,
+    marketCountry,
+    sessionWindows,
+  ));
+  const intervalMs = intervalMinutes * MINUTE_MS;
+  if (!Number.isFinite(openMs) || !Number.isFinite(anchorMs)
+    || openMs < anchorMs || (openMs - anchorMs) % intervalMs !== 0) return undefined;
+  const windowCloseMs = anchorMs + (window.closeMinute - window.openMinute) * MINUTE_MS;
+  const nominalCloseMs = openMs + intervalMs;
+  const closeMs = Math.min(nominalCloseMs, windowCloseMs);
+  if (closeMs <= openMs) return undefined;
+  return {
+    closeTime: new Date(closeMs).toISOString(),
+    truncated: closeMs < nominalCloseMs,
+  };
+}
+
+function canonicalSessionAggregatedBar(
+  bar: AggregatedIntradayBar,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): AggregatedIntradayBar | undefined {
+  const intervalMinutes = intervalNumber(bar.interval);
+  const scheduled = scheduledSessionIntervalClose(
+    bar.startAt,
+    bar.sessionDate,
+    intervalMinutes,
+    marketCountry,
+    sessionWindows,
+  );
+  if (!scheduled) return undefined;
+  const nominalCloseTime = new Date(Date.parse(bar.startAt) + intervalMinutes * MINUTE_MS).toISOString();
+  if (bar.endAt !== scheduled.closeTime && bar.endAt !== nominalCloseTime) return undefined;
+  const normalized = scheduled.truncated ? {
+    ...bar,
+    endAt: scheduled.closeTime,
+    quality: "partial" as const,
+    missingMinuteCount: Math.max(
+      bar.missingMinuteCount,
+      intervalMinutes - Math.round((Date.parse(scheduled.closeTime) - Date.parse(bar.startAt)) / MINUTE_MS),
+    ),
+  } : bar;
+  return isCanonicalSessionBar(normalized, marketCountry, sessionWindows) ? normalized : undefined;
+}
+
+export function mergeRecoveredSessionCloseRows(
+  recovered: readonly IntradayBarRecord[],
+  existing: readonly IntradayBarRecord[],
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): IntradayBarRecord[] {
+  const priorByOpenTime = new Map(existing
+    .filter((bar) => bar.intervalMinutes === 1)
+    .map((bar) => [bar.openTime, bar]));
+  const output = new Map<string, IntradayBarRecord>();
+  const boundaries: IntradayBarRecord[] = [];
+  for (const bar of [...recovered].sort((left, right) => left.openTime.localeCompare(right.openTime))) {
+    const closeWindow = sessionWindowForBarClose(bar.openTime, marketCountry, sessionWindows, bar.sessionDate);
+    const exactSessionClose = closeWindow !== undefined
+      && closeWindow.closeMinute % (24 * 60) === marketMinuteOfDay(bar.openTime, marketCountry)
+      && sessionWindowForTrade(bar.openTime, marketCountry, sessionWindows, bar.sessionDate) === undefined;
+    if (exactSessionClose) {
+      boundaries.push(bar);
+      continue;
+    }
+    if (!isCanonicalSessionRange(
+      bar.openTime,
+      bar.closeTime,
+      bar.sessionDate,
+      marketCountry,
+      sessionWindows,
+    )) continue;
+    const existingPrior = priorByOpenTime.get(bar.openTime);
+    // A REST minute is the authoritative reconstruction for that complete
+    // minute. Replacing a possibly partial WS bucket before folding the
+    // separate close-auction row avoids both missing executions and adding the
+    // auction twice to a WS bucket that may already contain part of it.
+    const preferred = bar.source === "kis_rest"
+      ? bar
+      : existingPrior && existingPrior.source !== "kis_rest" ? existingPrior : bar;
+    priorByOpenTime.set(bar.openTime, preferred);
+    output.set(bar.openTime, preferred);
+  }
+  for (const boundary of boundaries) {
+    const priorOpenTime = new Date(Date.parse(boundary.openTime) - MINUTE_MS).toISOString();
+    const prior = priorByOpenTime.get(priorOpenTime);
+    if (!prior || prior.sessionDate !== boundary.sessionDate) {
+      const shifted: IntradayBarRecord = {
+        ...boundary,
+        source: "recovered",
+        openTime: priorOpenTime,
+        closeTime: boundary.openTime,
+        state: "final",
+        quality: "partial",
+      };
+      output.set(priorOpenTime, shifted);
+      priorByOpenTime.set(priorOpenTime, shifted);
+      continue;
+    }
+    if (prior.source !== "kis_rest") {
+      const covered: IntradayBarRecord = {
+        ...prior,
+        closeTime: boundary.openTime,
+        state: "final",
+        quality: "partial",
+        updatedAt: Math.max(prior.updatedAt, boundary.updatedAt),
+      };
+      output.set(priorOpenTime, covered);
+      priorByOpenTime.set(priorOpenTime, covered);
+      continue;
+    }
+    const {
+      volume: priorVolume,
+      turnover: priorTurnover,
+      tradeCount: priorTradeCount,
+      ...priorBase
+    } = prior;
+    const merged: IntradayBarRecord = {
+      ...priorBase,
+      source: "recovered",
+      closeTime: boundary.openTime,
+      state: "final",
+      high: Math.max(prior.high, boundary.high),
+      low: Math.min(prior.low, boundary.low),
+      close: boundary.close,
+      ...(priorVolume !== undefined && boundary.volume !== undefined
+        ? { volume: priorVolume + boundary.volume }
+        : {}),
+      ...(priorTurnover !== undefined && boundary.turnover !== undefined
+        ? { turnover: priorTurnover + boundary.turnover }
+        : {}),
+      ...(priorTradeCount !== undefined && boundary.tradeCount !== undefined
+        ? { tradeCount: priorTradeCount + boundary.tradeCount }
+        : {}),
+      quality: prior.quality === "partial" || prior.quality === "stale" ? "partial" : "recovered",
+      updatedAt: Math.max(prior.updatedAt, boundary.updatedAt),
+    };
+    output.set(priorOpenTime, merged);
+    priorByOpenTime.set(priorOpenTime, merged);
+  }
+  return [...output.values()].sort((left, right) => left.openTime.localeCompare(right.openTime));
+}
+
+function adjacentStoredSessionMinutes(
+  previous: IntradayBarRecord,
+  current: IntradayBarRecord,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): boolean {
+  if (previous.sessionDate !== current.sessionDate) return false;
+  const previousWindow = sessionWindowForTrade(previous.openTime, marketCountry, sessionWindows, previous.sessionDate);
+  const currentWindow = sessionWindowForTrade(current.openTime, marketCountry, sessionWindows, current.sessionDate);
+  if (!previousWindow || !currentWindow) return false;
+  if (previousWindow === currentWindow) {
+    return Date.parse(current.openTime) - Date.parse(previous.openTime) === MINUTE_MS;
+  }
+  const previousIndex = sessionWindows.indexOf(previousWindow);
+  const currentIndex = sessionWindows.indexOf(currentWindow);
+  return previousIndex >= 0
+    && currentIndex === previousIndex + 1
+    && marketMinuteOfDay(previous.closeTime, marketCountry) === previousWindow.closeMinute % (24 * 60)
+    && marketMinuteOfDay(current.closeTime, marketCountry) === currentWindow.openMinute + 1;
+}
+
+function recoveryKnownBoundary(
+  existing: readonly IntradayBarRecord[],
+  sessionDate: string,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): number | undefined {
+  const canonical = [...new Map(existing.flatMap((bar) => (
+    bar.intervalMinutes === 1
+      && bar.sessionDate === sessionDate
+      && isCanonicalSessionRange(
+        bar.openTime,
+        bar.closeTime,
+        bar.sessionDate,
+        marketCountry,
+        sessionWindows,
+      )
+      ? [[bar.openTime, bar] as const]
+      : []
+  ))).values()].sort((left, right) => left.openTime.localeCompare(right.openTime));
+  if (!canonical.length) return undefined;
+  for (let index = 1; index < canonical.length; index += 1) {
+    if (!adjacentStoredSessionMinutes(canonical[index - 1]!, canonical[index]!, marketCountry, sessionWindows)) {
+      return Date.parse(canonical[index - 1]!.openTime);
+    }
+  }
+  return Date.parse(canonical.at(-1)!.openTime);
+}
+
 export function aggregateRecoveredBars(
   bars: readonly IntradayBarRecord[],
   intervalMinutes: ScalpingInterval,
-  options: { sessionStartAt?: string } = {},
+  options: {
+    sessionStartAt?: string;
+    sessionWindows?: readonly MarketSessionWindow[];
+    krSessionWindows?: readonly MarketSessionWindow[];
+  } = {},
 ): IntradayBarRecord[] {
   if (intervalMinutes === 1) return [...bars];
   const intervalMs = intervalMinutes * MINUTE_MS;
   const anchorMs = options.sessionStartAt === undefined ? undefined : Date.parse(options.sessionStartAt);
   if (anchorMs !== undefined && !Number.isFinite(anchorMs)) throw new Error("Recovery session anchor is invalid.");
+  const configuredWindows = options.sessionWindows ?? options.krSessionWindows;
   const groups = new Map<string, IntradayBarRecord[]>();
+  const windowAnchors = new Map<string, number>();
+  const configuredWindowAnchor = (
+    bar: IntradayBarRecord,
+    window = sessionWindowForTrade(bar.openTime, bar.marketCountry ?? "KR", configuredWindows!, bar.sessionDate),
+  ): number => {
+    if (!window) throw new Error("Recovery bar is outside the configured session windows.");
+    const key = `${bar.marketCountry ?? "KR"}:${bar.sessionDate}:${window.kind}:${window.localDateOffset ?? 0}:${window.openMinute}`;
+    const cached = windowAnchors.get(key);
+    if (cached !== undefined) return cached;
+    const value = Date.parse(marketSessionWindowAnchor(
+      bar.sessionDate,
+      bar.openTime,
+      bar.marketCountry ?? "KR",
+      configuredWindows!,
+    ));
+    windowAnchors.set(key, value);
+    return value;
+  };
   for (const bar of [...bars].sort((left, right) => left.openTime.localeCompare(right.openTime))) {
     if (bar.intervalMinutes !== 1) throw new Error("Recovery aggregation requires one-minute bars.");
+    const marketCountry = bar.marketCountry ?? "KR";
+    let openWindow: MarketSessionWindow | undefined;
+    if (configuredWindows) {
+      openWindow = sessionWindowForTrade(bar.openTime, marketCountry, configuredWindows, bar.sessionDate);
+      const closeWindow = sessionWindowForBarClose(bar.closeTime, marketCountry, configuredWindows, bar.sessionDate);
+      if (!openWindow || closeWindow !== openWindow) continue;
+    }
     const openMs = Date.parse(bar.openTime);
-    const start = anchorMs === undefined
+    const barAnchorMs = configuredWindows
+      ? configuredWindowAnchor(bar, openWindow)
+      : anchorMs;
+    const start = barAnchorMs === undefined
       ? Math.floor(openMs / intervalMs) * intervalMs
-      : anchorMs + Math.floor((openMs - anchorMs) / intervalMs) * intervalMs;
+      : barAnchorMs + Math.floor((openMs - barAnchorMs) / intervalMs) * intervalMs;
     const key = `${bar.marketCountry ?? "KR"}:${bar.symbol}:${bar.sessionDate}:${start}`;
-    groups.set(key, [...(groups.get(key) ?? []), bar]);
+    const group = groups.get(key);
+    if (group) group.push(bar);
+    else groups.set(key, [bar]);
   }
-  return Array.from(groups.values()).map((items) => {
+  return Array.from(groups.values()).flatMap((items) => {
     const first = items[0]!;
     const last = items.at(-1)!;
     const firstMs = Date.parse(first.openTime);
-    const start = anchorMs === undefined
+    const groupAnchorMs = configuredWindows
+      ? configuredWindowAnchor(first)
+      : anchorMs;
+    const start = groupAnchorMs === undefined
       ? Math.floor(firstMs / intervalMs) * intervalMs
-      : anchorMs + Math.floor((firstMs - anchorMs) / intervalMs) * intervalMs;
+      : groupAnchorMs + Math.floor((firstMs - groupAnchorMs) / intervalMs) * intervalMs;
     const completeComponents = new Set(items.map((item) => Math.floor(Date.parse(item.openTime) / MINUTE_MS))).size;
-    return {
+    const scheduled = configuredWindows
+      ? scheduledSessionIntervalClose(
+        new Date(start).toISOString(),
+        first.sessionDate,
+        intervalMinutes,
+        first.marketCountry ?? "KR",
+        configuredWindows,
+      )
+      : undefined;
+    if (configuredWindows && !scheduled) return [];
+    const closeTime = scheduled?.closeTime ?? new Date(start + intervalMs).toISOString();
+    const expectedComponents = Math.round((Date.parse(closeTime) - start) / MINUTE_MS);
+    const result: IntradayBarRecord = {
       marketCountry: first.marketCountry ?? "KR",
       symbol: first.symbol,
       intervalMinutes,
       openTime: new Date(start).toISOString(),
-      closeTime: new Date(start + intervalMs).toISOString(),
+      closeTime,
       sessionDate: first.sessionDate,
       source: "recovered",
-      state: items.every((item) => item.state === "final") && completeComponents === intervalMinutes ? "final" : "forming",
+      state: items.every((item) => item.state === "final") && completeComponents === expectedComponents ? "final" : "forming",
       open: first.open,
       high: Math.max(...items.map((item) => item.high)),
       low: Math.min(...items.map((item) => item.low)),
@@ -151,12 +474,19 @@ export function aggregateRecoveredBars(
       ...(items.every((item) => item.tradeCount !== undefined)
         ? { tradeCount: items.reduce((sum, item) => sum + item.tradeCount!, 0) }
         : {}),
-      quality: completeComponents === intervalMinutes
+      quality: !scheduled?.truncated && completeComponents === intervalMinutes
         && items.every((item) => item.quality === "complete" || item.quality === "recovered")
         ? "recovered"
         : "partial",
       updatedAt: Math.max(...items.map((item) => item.updatedAt)),
     };
+    return configuredWindows && !isCanonicalSessionRange(
+      result.openTime,
+      result.closeTime,
+      result.sessionDate,
+      result.marketCountry ?? "KR",
+      configuredWindows,
+    ) ? [] : [result];
   });
 }
 
@@ -164,7 +494,9 @@ type LiveReference = {
   symbol: string;
   marketCountry: MarketCountry;
   exchange?: KisUsExchangeCode;
+  subscriptions: KisSubscription[];
   count: number;
+  closeCursorAt: number;
 };
 
 export class ScalpingLiveRuntime {
@@ -175,7 +507,11 @@ export class ScalpingLiveRuntime {
   private readonly latestTrades = new Map<string, NormalizedTrade>();
   private readonly tradingHalted = new Map<string, boolean>();
   private readonly recoveryInFlight = new Map<string, Promise<void>>();
+  private readonly sessionCloseRecoveryInFlight = new Map<string, Promise<void>>();
+  private readonly observedSessionCloses = new Map<string, number>();
   private readonly now: () => number;
+  private readonly snapshotStaleAfterMs: number;
+  private readonly krSessionWindows: readonly MarketSessionWindow[];
   private readonly removeSocketListener: () => void;
   private readonly watermarkTimer: NodeJS.Timeout;
   private persistenceTail: Promise<void> = Promise.resolve();
@@ -200,9 +536,16 @@ export class ScalpingLiveRuntime {
       || config.recoveryMaximumRequests > 1_000) {
       throw new Error("recoveryMaximumRequests must be in 1..=1000.");
     }
-    if (!Number.isInteger(config.recoveryBarLimit) || config.recoveryBarLimit < 60 || config.recoveryBarLimit > 2_000) {
-      throw new Error("recoveryBarLimit must be in 60..=2000.");
+    if (!Number.isInteger(config.recoveryBarLimit) || config.recoveryBarLimit < 60 || config.recoveryBarLimit > 50_000) {
+      throw new Error("recoveryBarLimit must be in 60..=50000.");
     }
+    this.snapshotStaleAfterMs = config.snapshotStaleAfterMs ?? 120_000;
+    if (!Number.isInteger(this.snapshotStaleAfterMs)
+      || this.snapshotStaleAfterMs < 1_000 || this.snapshotStaleAfterMs > 3_600_000) {
+      throw new Error("snapshotStaleAfterMs must be in 1000..=3600000.");
+    }
+    this.krSessionWindows = config.krSessionWindows ?? DEFAULT_KR_INTEGRATED_SESSION_WINDOWS;
+    validateSessionWindows(this.krSessionWindows);
     this.now = config.now ?? Date.now;
     this.removeSocketListener = socket.onEvent((event) => this.onSocketEvent(event));
     this.watermarkTimer = setInterval(() => this.advanceWallClock(), config.watermarkAdvanceMs);
@@ -217,6 +560,11 @@ export class ScalpingLiveRuntime {
         .map(({ symbol, marketCountry, exchange }) => ({ symbol, marketCountry, ...(exchange ? { exchange } : {}) }))
         .sort((left, right) => `${left.marketCountry}:${left.symbol}`.localeCompare(`${right.marketCountry}:${right.symbol}`)),
       historicalOrderbookAvailable: false as const,
+      usMarketData: {
+        executionFeeds: ["standard", "day"] as const,
+        standardOrderbookDepth: "top_of_book" as const,
+        dayMarketOrderbook: "unavailable" as const,
+      },
     };
   }
 
@@ -226,9 +574,26 @@ export class ScalpingLiveRuntime {
   ): { orderbook?: NormalizedOrderbook; trade?: NormalizedTrade; tradingHalted?: boolean } {
     const normalized = normalizedSymbol(symbol);
     const key = marketSymbolKey(normalized, marketCountry);
+    const observedAt = new Date(this.now()).toISOString();
+    const sessionWindows = marketSessionWindows(marketCountry, this.krSessionWindows);
+    const sessionDate = marketTradingSessionDate(observedAt, marketCountry, sessionWindows);
+    const activeWindow = sessionDate
+      ? sessionWindowForTrade(observedAt, marketCountry, sessionWindows, sessionDate)
+      : undefined;
+    const fresh = (timestamp: string | undefined) => {
+      const parsed = timestamp ? Date.parse(timestamp) : Number.NaN;
+      return Number.isFinite(parsed) && Math.abs(this.now() - parsed) <= this.snapshotStaleAfterMs;
+    };
+    const book = this.latestBooks.get(key);
+    const trade = this.latestTrades.get(key);
+    const bookAvailable = book !== undefined
+      && fresh(book.observedAt)
+      && activeWindow !== undefined
+      && !(marketCountry === "US" && activeWindow.kind === "day_market");
+    const tradeAvailable = trade !== undefined && fresh(trade.executedAt) && activeWindow !== undefined;
     return {
-      ...(this.latestBooks.get(key) ? { orderbook: this.latestBooks.get(key) } : {}),
-      ...(this.latestTrades.get(key) ? { trade: this.latestTrades.get(key) } : {}),
+      ...(bookAvailable ? { orderbook: book } : {}),
+      ...(tradeAvailable ? { trade } : {}),
       ...(this.tradingHalted.has(key) ? { tradingHalted: this.tradingHalted.get(key) } : {}),
     };
   }
@@ -279,29 +644,51 @@ export class ScalpingLiveRuntime {
         retainedKeys.push(key);
         continue;
       }
-      const execution: KisSubscription = marketCountry === "US"
-        ? { trId: "HDFSCNT0", symbol, exchange }
-        : { trId: "H0UNCNT0", symbol };
-      const orderbook: KisSubscription = marketCountry === "US"
-        ? { trId: "HDFSASP0", symbol, exchange }
-        : { trId: "H0UNASP0", symbol };
-      try {
-        this.socket.subscribe(execution);
+      const subscriptions: KisSubscription[] = marketCountry === "US" ? [
+        { trId: "HDFSCNT0", symbol, exchange, usFeed: "standard" },
+        { trId: "HDFSCNT0", symbol, exchange, usFeed: "day" },
+        { trId: "HDFSASP0", symbol, exchange, usFeed: "standard" },
+      ] : [
+        { trId: "H0UNCNT0", symbol },
+        { trId: "H0UNASP0", symbol },
+      ];
+      const subscribed: KisSubscription[] = [];
+      const failed: Array<{ subscription: KisSubscription; error: unknown }> = [];
+      for (const subscription of subscriptions) {
         try {
-          this.socket.subscribe(orderbook);
+          this.socket.subscribe(subscription);
+          subscribed.push(subscription);
         } catch (error) {
-          this.socket.unsubscribe(execution);
-          throw error;
+          failed.push({ subscription, error });
         }
-      } catch (error) {
+      }
+      const hasExecution = subscribed.some(({ trId }) => trId.endsWith("CNT0"));
+      if (!hasExecution) {
+        for (const subscription of subscribed) this.socket.unsubscribe(subscription);
         this.emit("diagnostic", symbol, marketCountry, {
           code: "subscription-unavailable",
           status: "source_unavailable",
-          message: error instanceof Error ? error.message : "KIS subscription failed.",
+          message: failed.map(({ error }) => error instanceof Error ? error.message : "KIS subscription failed.").join("; "),
         });
         continue;
       }
-      const reference = { symbol, marketCountry, ...(exchange ? { exchange } : {}), count: 1 };
+      for (const { subscription, error } of failed) {
+        this.emit("diagnostic", symbol, marketCountry, {
+          code: subscription.usFeed === "day" ? "us-day-feed-unavailable" : "subscription-partial",
+          status: "partial",
+          trId: subscription.trId,
+          usFeed: subscription.usFeed,
+          message: error instanceof Error ? error.message : "KIS subscription failed.",
+        });
+      }
+      const reference = {
+        symbol,
+        marketCountry,
+        ...(exchange ? { exchange } : {}),
+        subscriptions: subscribed,
+        count: 1,
+        closeCursorAt: this.now(),
+      };
       newlyAdded.push(reference);
       newlyAddedKeys.add(key);
       retainedKeys.push(key);
@@ -339,6 +726,9 @@ export class ScalpingLiveRuntime {
         if (reference.count <= 1) {
           this.references.delete(key);
           this.unsubscribeReference(reference);
+          for (const closeKey of this.observedSessionCloses.keys()) {
+            if (closeKey.startsWith(`${key}:`)) this.observedSessionCloses.delete(closeKey);
+          }
         } else {
           reference.count -= 1;
         }
@@ -364,6 +754,43 @@ export class ScalpingLiveRuntime {
     return task;
   }
 
+  private recoverAtSessionClose(
+    symbol: string,
+    marketCountry: MarketCountry,
+    sessionDate: string,
+    sessionWindow: MarketSessionWindow,
+    exchange?: KisUsExchangeCode,
+  ): Promise<void> {
+    const normalized = normalizedSymbol(symbol);
+    if (marketCountry === "US" && !exchange) {
+      return Promise.reject(new Error("US recovery requires an explicit exchange."));
+    }
+    const key = marketSymbolKey(normalized, marketCountry);
+    const close = sessionWindowClose(sessionDate, marketCountry, sessionWindow);
+    if (!close) return Promise.reject(new Error("Market session close could not be resolved."));
+    const closeKey = `${key}:${close.keySuffix}`;
+    const queued = this.sessionCloseRecoveryInFlight.get(closeKey);
+    if (queued) return queued;
+    if (this.observedSessionCloses.has(closeKey)) return this.recoveryInFlight.get(key) ?? Promise.resolve();
+    this.observedSessionCloses.set(closeKey, close.timestamp);
+
+    const current = this.recoveryInFlight.get(key);
+    let task: Promise<void>;
+    const refresh = () => this.performRecovery(normalized, marketCountry, exchange);
+    task = (current ? current.then(refresh, refresh)
+      : this.performRecovery(normalized, marketCountry, exchange)).finally(() => {
+      if (this.recoveryInFlight.get(key) === task) this.recoveryInFlight.delete(key);
+      if (this.sessionCloseRecoveryInFlight.get(closeKey) === task) this.sessionCloseRecoveryInFlight.delete(closeKey);
+    });
+    // Replacing the generic in-flight entry with the whole chain makes every
+    // caller, including waitForIdle(), observe the trailing close refresh. The
+    // original task's cleanup is identity-guarded and therefore cannot remove
+    // this queued task prematurely.
+    this.recoveryInFlight.set(key, task);
+    this.sessionCloseRecoveryInFlight.set(closeKey, task);
+    return task;
+  }
+
   async waitForIdle(): Promise<void> {
     await Promise.allSettled([...this.recoveryInFlight.values(), this.persistenceTail]);
   }
@@ -376,6 +803,8 @@ export class ScalpingLiveRuntime {
     this.socket.disconnect();
     this.listeners.clear();
     this.references.clear();
+    this.sessionCloseRecoveryInFlight.clear();
+    this.observedSessionCloses.clear();
   }
 
   private onSocketEvent(event: KisWebSocketEvent): void {
@@ -401,12 +830,24 @@ export class ScalpingLiveRuntime {
       const key = marketSymbolKey(event.symbol, event.marketCountry);
       const reference = this.references.get(key);
       if (!reference || reference.exchange !== event.exchange) return;
-      this.references.delete(key);
-      this.unsubscribeReference(reference);
+      const rejectedIndex = reference.subscriptions.findIndex((subscription) => (
+        subscription.trId === event.trId
+        && (subscription.usFeed ?? "standard") === (event.usFeed ?? "standard")
+      ));
+      if (rejectedIndex >= 0) {
+        const [rejected] = reference.subscriptions.splice(rejectedIndex, 1);
+        if (rejected) this.socket.unsubscribe(rejected);
+      }
+      const hasExecution = reference.subscriptions.some(({ trId }) => trId.endsWith("CNT0"));
+      if (!hasExecution) {
+        this.references.delete(key);
+        this.unsubscribeReference(reference);
+      }
       this.emit("diagnostic", event.symbol, event.marketCountry, {
-        code: "subscription-rejected",
-        status: "source_unavailable",
+        code: event.usFeed === "day" ? "us-day-feed-rejected" : "subscription-rejected",
+        status: hasExecution ? "partial" : "source_unavailable",
         trId: event.trId,
+        usFeed: event.usFeed,
         providerCode: event.code,
         message: event.message || "KIS rejected the market-data subscription.",
       });
@@ -420,19 +861,66 @@ export class ScalpingLiveRuntime {
       if (event.tradingHalted !== undefined) this.tradingHalted.set(key, event.tradingHalted);
       this.emit("trade", trade.symbol, event.marketCountry, trade);
       try {
-        const sessionDate = expandedSessionDate(event.sessionDate);
+        const configuredWindows = marketSessionWindows(event.marketCountry, this.krSessionWindows);
+        const sessionWindows = event.marketCountry === "US"
+          ? configuredWindows.filter(({ kind }) => event.usFeed === "day" ? kind === "day_market" : kind !== "day_market")
+          : configuredWindows;
+        const sessionDate = marketTradingSessionDate(
+          event.providerTimestamp,
+          event.marketCountry,
+          sessionWindows,
+        ) ?? expandedSessionDate(event.sessionDate);
+        let aggregationTimestamp = event.providerTimestamp;
+        let closesActiveWindow = false;
+        if (!sessionWindowForTrade(aggregationTimestamp, event.marketCountry, sessionWindows, sessionDate)) {
+          const local = marketLocalParts(Date.parse(event.providerTimestamp), event.marketCountry);
+          closesActiveWindow = local.time.slice(4, 6) === "00"
+            && sessionWindowForBarClose(event.providerTimestamp, event.marketCountry, sessionWindows, sessionDate) !== undefined;
+          if (!closesActiveWindow) return;
+          aggregationTimestamp = new Date(Date.parse(event.providerTimestamp) - 1).toISOString();
+        }
+        const sessionWindow = sessionWindowForTrade(
+          aggregationTimestamp,
+          event.marketCountry,
+          sessionWindows,
+          sessionDate,
+        );
+        if (!sessionWindow) return;
+        const sessionStartAt = marketSessionWindowAnchor(
+          sessionDate,
+          aggregationTimestamp,
+          event.marketCountry,
+          sessionWindows,
+        );
+        const sessionEndAt = new Date(
+          Date.parse(sessionStartAt)
+          + (sessionWindow.closeMinute - sessionWindow.openMinute) * MINUTE_MS,
+        ).toISOString();
         const result = this.aggregator.ingest({
           symbol: event.symbol,
           eventId: event.eventId,
           marketCountry: event.marketCountry,
-          executedAt: event.providerTimestamp,
+          executedAt: aggregationTimestamp,
           sessionDate,
-          sessionStartAt: marketSessionAnchor(sessionDate, event.marketCountry),
+          sessionStartAt,
+          sessionEndAt,
           price: event.price,
           quantity: event.executionVolume,
           tradingAmount: event.price * event.executionVolume,
         });
         if (result.accepted) this.persistUpdates(result.updates, event.marketCountry);
+        if (closesActiveWindow) {
+          const reference = this.references.get(key);
+          if (event.marketCountry === "KR" || reference?.exchange) {
+            void this.recoverAtSessionClose(
+              event.symbol,
+              event.marketCountry,
+              sessionDate,
+              sessionWindow,
+              reference?.exchange,
+            );
+          }
+        }
       } catch (error) {
         this.emit("diagnostic", event.symbol, event.marketCountry, {
           code: "bar-ingest-failed",
@@ -454,8 +942,15 @@ export class ScalpingLiveRuntime {
 
   private advanceWallClock(): void {
     if (this.closed || this.socket.connectionState !== "connected") return;
-    const observedAt = new Date(this.now()).toISOString();
+    const observedAtMs = this.now();
+    const observedAt = new Date(observedAtMs).toISOString();
+    const pruneBefore = observedAtMs - 3 * 24 * 60 * MINUTE_MS;
+    for (const [key, timestamp] of this.observedSessionCloses) {
+      if (timestamp < pruneBefore) this.observedSessionCloses.delete(key);
+    }
     for (const reference of this.references.values()) {
+      const previousAtMs = reference.closeCursorAt;
+      reference.closeCursorAt = observedAtMs;
       try {
         this.persistUpdates(
           this.aggregator.advanceWatermark(reference.symbol, observedAt, reference.marketCountry),
@@ -467,13 +962,46 @@ export class ScalpingLiveRuntime {
           message: error instanceof Error ? error.message : "unknown bar watermark error",
         });
       }
+      const dates = new Set([
+        marketLocalParts(previousAtMs, reference.marketCountry).date,
+        marketLocalParts(observedAtMs, reference.marketCountry).date,
+      ]);
+      const windows = marketSessionWindows(reference.marketCountry, this.krSessionWindows);
+      for (const compactDate of dates) {
+        const sessionDate = expandedSessionDate(compactDate);
+        for (const window of windows) {
+          const close = sessionWindowClose(sessionDate, reference.marketCountry, window);
+          if (!close || close.timestamp <= previousAtMs || close.timestamp > observedAtMs) continue;
+          void this.recoverAtSessionClose(
+            reference.symbol,
+            reference.marketCountry,
+            sessionDate,
+            window,
+            reference.exchange,
+          );
+        }
+      }
     }
   }
 
   private persistUpdates(updates: readonly BarUpdate[], marketCountry: MarketCountry): void {
     if (!updates.length) return;
     const updatedAt = this.now();
-    const records = updates.map(({ bar }) => recordFromAggregated(bar, updatedAt, marketCountry));
+    const sessionWindows = marketSessionWindows(marketCountry, this.krSessionWindows);
+    const candidates = updates
+      .flatMap(({ bar }) => {
+        const canonical = canonicalSessionAggregatedBar(bar, marketCountry, sessionWindows);
+        return canonical ? [recordFromAggregated(canonical, updatedAt, marketCountry)] : [];
+      });
+    const byBar = new Map<string, IntradayBarRecord>();
+    for (const record of candidates) {
+      const key = `${record.marketCountry ?? marketCountry}:${record.symbol}:${record.intervalMinutes}:${record.openTime}`;
+      const existing = byBar.get(key);
+      if (existing?.state === "final" && record.state === "forming") continue;
+      byBar.set(key, record);
+    }
+    const records = [...byBar.values()];
+    if (!records.length) return;
     for (const record of records) this.emit("bar", record.symbol, marketCountry, record);
     this.persistenceTail = this.persistenceTail.then(() => this.bars.putBars(records)).catch((error) => {
       this.emit("diagnostic", undefined, marketCountry, {
@@ -484,13 +1012,7 @@ export class ScalpingLiveRuntime {
   }
 
   private unsubscribeReference(reference: LiveReference): void {
-    if (reference.marketCountry === "US") {
-      this.socket.unsubscribe({ trId: "HDFSCNT0", symbol: reference.symbol, exchange: reference.exchange });
-      this.socket.unsubscribe({ trId: "HDFSASP0", symbol: reference.symbol, exchange: reference.exchange });
-      return;
-    }
-    this.socket.unsubscribe({ trId: "H0UNCNT0", symbol: reference.symbol });
-    this.socket.unsubscribe({ trId: "H0UNASP0", symbol: reference.symbol });
+    for (const subscription of reference.subscriptions.splice(0)) this.socket.unsubscribe(subscription);
   }
 
   private async performRecovery(
@@ -502,8 +1024,14 @@ export class ScalpingLiveRuntime {
     try {
       if (marketCountry === "US" && !exchange) throw new Error("US recovery requires an explicit exchange.");
       const localNow = marketLocalParts(now, marketCountry);
-      const sessionDate = localNow.date;
-      const expandedDate = expandedSessionDate(sessionDate);
+      const providerSessionDate = localNow.date;
+      const providerExpandedDate = expandedSessionDate(providerSessionDate);
+      const sessionWindows = marketSessionWindows(marketCountry, this.krSessionWindows);
+      const expandedDate = marketTradingSessionDate(
+        new Date(now).toISOString(),
+        marketCountry,
+        sessionWindows,
+      ) ?? providerExpandedDate;
       const existing = await Promise.resolve(this.bars.listBars({
         marketCountry,
         symbol,
@@ -511,11 +1039,12 @@ export class ScalpingLiveRuntime {
         includeForming: true,
         limit: this.config.recoveryBarLimit,
       })).catch(() => []);
-      const knownBoundary = (existing ?? [])
-        .filter((bar) => bar.sessionDate === expandedDate)
-        .map((bar) => Date.parse(bar.openTime))
-        .filter(Number.isFinite)
-        .sort((left, right) => right - left)[0];
+      const knownBoundary = recoveryKnownBoundary(
+        existing ?? [],
+        expandedDate,
+        marketCountry,
+        sessionWindows,
+      );
       const recovered = new Map<string, ReturnType<typeof adaptKisMinuteBars>["items"][number]>();
       const sourceQualities: Array<ReturnType<typeof adaptKisMinuteBars>["quality"]["status"]> = [];
       let inputTime = localNow.time;
@@ -528,13 +1057,13 @@ export class ScalpingLiveRuntime {
           ? await this.rest.getOverseasMinutes({
             symbol,
             exchange: exchange!,
-            sessionDate,
+            sessionDate: providerSessionDate,
             ...(overseasCursor ? { cursor: overseasCursor } : {}),
             recordCount: Math.min(120, this.config.recoveryBarLimit),
           })
           : await this.rest.getCurrentDayMinutes({
             symbol,
-            sessionDate,
+            sessionDate: providerSessionDate,
             inputTime,
             market: "UN",
             includePrevious: false,
@@ -557,7 +1086,7 @@ export class ScalpingLiveRuntime {
         }
         const nextCursor = oldest - 1;
         const nextLocal = marketLocalParts(nextCursor, marketCountry);
-        if (nextLocal.date !== sessionDate) break;
+        if (nextLocal.date !== providerSessionDate) break;
         previousOldest = oldest;
         inputTime = nextLocal.time;
         overseasCursor = `${nextLocal.date}${nextLocal.time}`;
@@ -567,24 +1096,38 @@ export class ScalpingLiveRuntime {
         .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
         .slice(-this.config.recoveryBarLimit);
       const updatedAt = this.now();
-      const oneMinute: IntradayBarRecord[] = adaptedItems.map((bar) => ({
+      const rawOneMinute: IntradayBarRecord[] = adaptedItems.map((bar) => {
+        const openTime = new Date(Date.parse(bar.timestamp)).toISOString();
+        const canonicalSessionDate = marketTradingSessionDate(
+          openTime,
+          marketCountry,
+          sessionWindows,
+        ) ?? bar.sessionDate;
+        return {
+          marketCountry,
+          symbol: bar.symbol,
+          intervalMinutes: 1,
+          openTime,
+          closeTime: new Date(Date.parse(openTime) + MINUTE_MS).toISOString(),
+          sessionDate: canonicalSessionDate,
+          source: "kis_rest",
+          state: bar.status === "final" ? "final" : "forming",
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+          ...(bar.volume === undefined ? {} : { volume: bar.volume }),
+          ...(bar.tradingAmount === undefined ? {} : { turnover: bar.tradingAmount }),
+          quality: bar.status === "final" ? "recovered" : "partial",
+          updatedAt,
+        };
+      });
+      const oneMinute = mergeRecoveredSessionCloseRows(
+        rawOneMinute,
+        existing ?? [],
         marketCountry,
-        symbol: bar.symbol,
-        intervalMinutes: 1,
-        openTime: bar.timestamp,
-        closeTime: new Date(Date.parse(bar.timestamp) + MINUTE_MS).toISOString(),
-        sessionDate: bar.sessionDate,
-        source: "kis_rest",
-        state: bar.status === "final" ? "final" : "forming",
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
-        ...(bar.volume === undefined ? {} : { volume: bar.volume }),
-        ...(bar.tradingAmount === undefined ? {} : { turnover: bar.tradingAmount }),
-        quality: bar.status === "final" ? "recovered" : "partial",
-        updatedAt,
-      }));
+        sessionWindows,
+      );
       if (oneMinute.length) await this.bars.putBars(oneMinute);
       const persisted = oneMinute.length
         ? await Promise.resolve(this.bars.listBars({
@@ -598,8 +1141,21 @@ export class ScalpingLiveRuntime {
       const sessionBars = (persisted ?? oneMinute).filter((bar) => bar.sessionDate === expandedDate);
       const sessionStartAt = marketSessionAnchor(expandedDate, marketCountry);
       const higher = SUPPORTED_INTERVALS.filter((interval) => interval !== 1)
-        .flatMap((interval) => aggregateRecoveredBars(sessionBars, interval, { sessionStartAt }));
+        .flatMap((interval) => aggregateRecoveredBars(sessionBars, interval, {
+          sessionStartAt,
+          sessionWindows,
+        }));
       if (higher.length) await this.bars.putBars(higher);
+      const latestRecoveredByInterval = new Map<ScalpingInterval, IntradayBarRecord>();
+      for (const bar of [...oneMinute, ...higher]) {
+        const current = latestRecoveredByInterval.get(bar.intervalMinutes);
+        if (!current || Date.parse(bar.openTime) > Date.parse(current.openTime)) {
+          latestRecoveredByInterval.set(bar.intervalMinutes, bar);
+        }
+      }
+      for (const bar of latestRecoveredByInterval.values()) {
+        this.emit("bar", symbol, marketCountry, bar);
+      }
       const recoveryStatus = oneMinute.length === 0 && sourceQualities.some((status) => status === "source_unavailable")
         ? "source_unavailable"
         : stoppedByConfiguredLimit || sourceQualities.some((status) => status !== "available") ? "partial" : "available";
@@ -615,7 +1171,10 @@ export class ScalpingLiveRuntime {
           ? { status: oneMinute.some((bar) => bar.turnover !== undefined) ? "available" : "unavailable", reason: "kis_overseas_eamt_per_bar" }
           : { status: "unavailable", reason: "kis_rest_exposes_cumulative_not_per_bar_turnover" },
         historicalOrderbook: { status: "unavailable", reason: "historical_orderbook_not_supplied" },
-        ...(marketCountry === "US" ? { orderbookDepth: "top_of_book" } : {}),
+        ...(marketCountry === "US" ? {
+          orderbookDepth: "top_of_book",
+          dayMarketOrderbook: { status: "unavailable", reason: "kis_day_market_orderbook_not_documented" },
+        } : {}),
       });
     } catch (error) {
       this.emit("recovery", symbol, marketCountry, {

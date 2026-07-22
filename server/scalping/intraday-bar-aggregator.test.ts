@@ -162,6 +162,38 @@ describe("IntradayBarAggregator", () => {
     expect(aggregator.recentFinalBars("005930", "1m")).toHaveLength(1);
   });
 
+  it("clamps a scheduled 60-minute tail to the session close and finalizes it there as partial", () => {
+    const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
+    aggregator.ingest({
+      ...tick("tail", "2026-07-21T19:40:10+09:00", 100),
+      marketCountry: "KR",
+      sessionStartAt: "2026-07-21T15:40:00+09:00",
+      sessionEndAt: "2026-07-21T20:00:00+09:00",
+    });
+    const forming = aggregator.advanceWatermark("005930", "2026-07-21T19:41:00+09:00", "KR");
+    expect(forming).toContainEqual(expect.objectContaining({
+      bar: expect.objectContaining({
+        interval: "60m",
+        startAt: "2026-07-21T10:40:00.000Z",
+        endAt: "2026-07-21T11:00:00.000Z",
+        status: "forming",
+        quality: "partial",
+      }),
+    }));
+
+    const finalized = aggregator.advanceWatermark("005930", "2026-07-21T20:00:00+09:00", "KR");
+    expect(finalized).toContainEqual(expect.objectContaining({
+      bar: expect.objectContaining({
+        interval: "60m",
+        startAt: "2026-07-21T10:40:00.000Z",
+        endAt: "2026-07-21T11:00:00.000Z",
+        status: "final",
+        quality: "partial",
+        missingMinuteCount: 59,
+      }),
+    }));
+  });
+
   it("finalizes 15/30/60 minute bars from finalized one-minute bars", () => {
     const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0, finalizedBarRetentionPerInterval: 100 }));
     for (let minute = 0; minute < 60; minute += 1) {

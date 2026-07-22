@@ -61,6 +61,7 @@ import {
   type ScalpingMarketCountry,
   type ScalpingPreset,
   type ScalpingRequest,
+  type ScalpingRequestLimits,
   type ScalpingSignal,
   type ScalpingStatus,
   type ScalpingTradeMarker,
@@ -70,6 +71,17 @@ import {
 import { loadAdvancedArtifact, loadAdvancedRunSnapshot } from "@/lib/advanced-analysis";
 import { cn } from "@/lib/utils";
 import type { Portfolio, Theme } from "@/types";
+
+const MARKET_VENUE_LABELS = {
+  KRX: "KRX",
+  NXT: "NXT",
+  INTEGRATED: "통합(KRX·NXT)",
+  US: "미국 통합",
+} as const;
+
+function marketVenueLabel(venue: ScalpingCandidate["venue"]): string | undefined {
+  return venue ? MARKET_VENUE_LABELS[venue] : undefined;
+}
 
 const SCALPING_CHART_SYNC_ID = "scalping-assistant-shared-time";
 const DEFAULT_REQUEST: ScalpingRequest = {
@@ -89,7 +101,7 @@ const CRITERION_LABELS: Record<ScalpingCriterion, string> = {
 
 const MARKET_LABELS: Record<ScalpingMarketCountry, { label: string; detail: string }> = {
   KR: { label: "국내", detail: "KRW · 한국 장" },
-  US: { label: "미국", detail: "USD · 미국 정규장" },
+  US: { label: "미국", detail: "USD · 데이·프리·정규·애프터" },
 };
 
 const PRESET_LABELS: Record<ScalpingPreset, { label: string; description: string }> = {
@@ -389,7 +401,7 @@ function OrderbookPanel({ candidate }: { candidate: ScalpingCandidate }) {
   return (
     <div className="min-w-0 rounded-[20px] bg-secondary p-4" data-scalping-orderbook="available">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[10px] font-black">실시간 호가</p>
+        <p className="text-[10px] font-black">실시간 호가{marketVenueLabel(book.venue) ? ` · ${marketVenueLabel(book.venue)}` : ""}</p>
         <span className="text-[9px] text-muted-foreground">{formatTimestamp(book.observedAt)}</span>
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2 text-[9px]">
@@ -486,13 +498,14 @@ function ForecastPanel({ forecast, candidate }: { forecast: ScalpingForecast | u
 
 const ScalpingCandidateCard = memo(function ScalpingCandidateCard({ candidate, theme: _theme, preset, layoutColumns }: { candidate: ScalpingCandidate; theme: Theme; preset: ScalpingPreset; layoutColumns: 1 | 2 | 3 | 4 }) {
   const latest = candidate.bars.at(-1);
+  const venueLabel = marketVenueLabel(candidate.venue);
   return (
-    <Card className="min-w-0 overflow-hidden bg-card p-4 sm:p-5" data-scalping-symbol={candidate.symbol}>
+    <Card className="min-w-0 overflow-hidden bg-card p-4 sm:p-5" data-scalping-symbol={candidate.symbol} data-scalping-market-venue={candidate.venue}>
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <span className="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-[10px] font-black text-primary-foreground">{candidate.rank ?? "–"}</span>
-            <div className="min-w-0"><h3 className="truncate text-base font-black">{candidate.name}</h3><p className="truncate text-[9px] font-bold text-muted-foreground">{candidate.symbol}{candidate.exchange ? ` · ${candidate.exchange}` : ""} · {candidate.currency}</p></div>
+            <div className="min-w-0"><h3 className="truncate text-base font-black">{candidate.name}</h3><p className="truncate text-[9px] font-bold text-muted-foreground">{candidate.symbol}{candidate.exchange ? ` · ${candidate.exchange}` : ""}{venueLabel ? ` · ${venueLabel}` : ""} · {candidate.currency}</p></div>
             {latest?.status === "forming" ? <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/12 px-2 py-1 text-[8px] font-black text-rose-600"><Radio className="size-2.5" />진행 중 봉</span> : null}
           </div>
         </div>
@@ -586,7 +599,7 @@ function VirtualizedCandidateCard({ candidate, theme, preset = "trend", layoutCo
     <div ref={hostRef} className="min-w-0" style={{ minHeight: placeholderHeight }} data-scalping-virtual-symbol={candidate.symbol} data-scalping-card-state={visible ? "mounted" : "placeholder"}>
       {visible ? <div ref={contentRef}><ScalpingCandidateCard candidate={candidate} theme={theme} preset={preset} layoutColumns={layoutColumns} /></div> : (
         <Card className="grid place-items-center bg-secondary p-5 text-center text-xs font-bold text-muted-foreground" style={{ height: placeholderHeight }} aria-label={`${candidate.symbol} 차트 대기`}>
-          <span>{candidate.symbol} · 화면에 가까워지면 차트를 렌더링합니다.</span>
+          <span>{candidate.symbol}{marketVenueLabel(candidate.venue) ? ` · ${marketVenueLabel(candidate.venue)}` : ""} · 화면에 가까워지면 차트를 렌더링합니다.</span>
         </Card>
       )}
     </div>
@@ -607,7 +620,7 @@ function StatusBanner({ status }: { status: ScalpingStatus }) {
   return (
     <div className="flex flex-wrap gap-2" aria-label="단타 데이터 공급 상태">
       {status.providers.map((provider) => <span key={provider.name} title={provider.message} className={cn("rounded-full px-3 py-1.5 text-[9px] font-black", availabilityClass(provider.status))}>{provider.name} · {provider.status}</span>)}
-      {status.limits?.maximumSubscriptions ? <span className="rounded-full bg-secondary px-3 py-1.5 text-[9px] font-black">실측 구독 상한 {status.limits.maximumSubscriptions}</span> : null}
+      {status.limits?.maximumSubscriptions ? <span className="rounded-full bg-secondary px-3 py-1.5 text-[9px] font-black">KIS 구독 상한 {status.limits.maximumSubscriptions} feeds</span> : null}
     </div>
   );
 }
@@ -767,10 +780,22 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   const [error, setError] = useState("");
   const [forecastError, setForecastError] = useState("");
   const [streamState, setStreamState] = useState<"idle" | "connected" | "reconnecting" | "unavailable">("idle");
-  const requestIssues = useMemo(() => validateScalpingRequest(request), [request]);
+  const minimumTopCount = status?.limits?.minimumTopCount ?? 5;
+  const maximumTopCount = status?.limits?.maximumTopCount ?? 50;
+  const topCountLimits = useMemo<ScalpingRequestLimits>(() => ({
+    minimumTopCount,
+    maximumTopCount,
+  }), [maximumTopCount, minimumTopCount]);
+  const requestIssues = useMemo(
+    () => validateScalpingRequest(request, topCountLimits),
+    [request, topCountLimits],
+  );
 
-  const runWorkspace = useCallback(async (nextRequest: ScalpingRequest) => {
-    const issues = validateScalpingRequest(nextRequest);
+  const runWorkspace = useCallback(async (
+    nextRequest: ScalpingRequest,
+    limits: ScalpingRequestLimits = {},
+  ) => {
+    const issues = validateScalpingRequest(nextRequest, limits);
     if (issues.length) {
       setError(issues.join(" "));
       return;
@@ -813,7 +838,16 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       .then((nextStatus) => {
         if (!nextStatus || controller.signal.aborted) return;
         setStatus(nextStatus);
-        if (nextStatus.enabled) return runWorkspace(DEFAULT_REQUEST);
+        if (nextStatus.enabled) {
+          const minimum = nextStatus.limits?.minimumTopCount ?? 5;
+          const maximum = nextStatus.limits?.maximumTopCount ?? 50;
+          const initialRequest = {
+            ...DEFAULT_REQUEST,
+            topCount: Math.min(maximum, Math.max(minimum, DEFAULT_REQUEST.topCount)),
+          };
+          setRequest(initialRequest);
+          return runWorkspace(initialRequest, nextStatus.limits);
+        }
         setLoading(false);
       })
       .catch((caught) => {
@@ -867,7 +901,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
                 interval: workspaceInterval,
                 layoutColumns: workspaceLayoutColumns,
                 preset: workspacePreset,
-              }), 750);
+              }, topCountLimits), 750);
             }
           }
           setWorkspace((current) => current ? mergeScalpingStreamEvent(current, event) : current);
@@ -890,6 +924,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     runWorkspace,
     status?.enabled,
     symbolsKey,
+    topCountLimits,
     workspaceCriterion,
     workspaceExchangeKey,
     workspaceInterval,
@@ -963,16 +998,17 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         <div className="mt-4 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-6">
           <ScalpingMarketSelector value={request.marketCountry} onChange={setMarketCountry} />
           <fieldset className="min-w-0 rounded-[20px] bg-card p-3 sm:col-span-2"><legend className="px-1 text-[9px] font-black text-muted-foreground">순위 기준</legend><div className="mt-1 grid grid-cols-3 gap-1">{SCALPING_CRITERIA.map((criterion) => <button key={criterion} type="button" aria-pressed={request.criterion === criterion} onClick={() => setCriterion(criterion)} className={cn("min-w-0 rounded-full px-2 py-2 text-[10px] font-black", request.criterion === criterion ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground")}>{CRITERION_LABELS[criterion]}</button>)}</div></fieldset>
-          <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">표시 종목 수 (5~50)</span><Input aria-label="표시 종목 수" type="number" min={5} max={50} step={1} value={request.topCount} onChange={(event) => setRequest((current) => ({ ...current, topCount: Number(event.target.value) }))} aria-invalid={request.topCount < 5 || request.topCount > 50 || !Number.isInteger(request.topCount)} className="h-10 bg-secondary text-xs" /></label>
+          <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">표시 종목 수 ({minimumTopCount}~{maximumTopCount})</span><Input aria-label="표시 종목 수" type="number" min={minimumTopCount} max={maximumTopCount} step={1} value={request.topCount} onChange={(event) => setRequest((current) => ({ ...current, topCount: Number(event.target.value) }))} aria-invalid={request.topCount < minimumTopCount || request.topCount > maximumTopCount || !Number.isInteger(request.topCount)} className="h-10 bg-secondary text-xs" /></label>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">분봉</span><Select value={request.interval} onValueChange={(value) => setInterval(value as ScalpingInterval)}><SelectTrigger aria-label="분봉 간격" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{SCALPING_INTERVALS.map((interval) => <SelectItem key={interval} value={interval}>{interval.replace("m", "분봉")}</SelectItem>)}</SelectContent></Select></label>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">차트 열</span><Select value={String(request.layoutColumns)} onValueChange={(value) => setRequest((current) => ({ ...current, layoutColumns: Number(value) as 1 | 2 | 3 | 4 }))}><SelectTrigger aria-label="차트 열 수" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{([1, 2, 3, 4] as const).map((columns) => <SelectItem key={columns} value={String(columns)}>{columns}열</SelectItem>)}</SelectContent></Select></label>
         </div>
 
         <div className="mt-3 rounded-2xl bg-card px-4 py-3 text-[9px] leading-4 text-muted-foreground" data-scalping-market-guidance={request.marketCountry} role="note">
+          <p><strong className="text-foreground">표시 수 정책</strong> — 사용자 지정 종목을 먼저 포함하고 남은 슬롯을 선택한 순위의 상위 종목으로 채웁니다. 사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.</p>
           {request.marketCountry === "US" ? (
-            <><strong className="text-foreground">미국 상장 종목 · USD · 미국 정규장(09:30–16:00 ET)</strong><span> — 현재 분석은 정규장 기준이며 프리·애프터마켓은 분석 범위 밖입니다. 실시간 호가는 제공 범위 내 최우선 매수·매도(1호가)일 수 있으며, 확장 세션·전체 호가 깊이·보존되지 않은 과거 호가는 partial 또는 unavailable로 표시합니다.</span></>
+            <p className="mt-1"><strong className="text-foreground">미국 상장 종목 · USD · 데이·프리·정규·애프터마켓</strong><span> — Toss 일별 캘린더로 데이마켓(전 거래일 20:00–당일 04:00 ET), 프리마켓(04:00–09:30), 정규장(09:30–16:00), 애프터마켓(16:00 이후)의 실제 개장 구간을 확인합니다. KIS는 데이마켓 체결 피드를 별도로 사용하지만 데이마켓 호가는 제공하지 않습니다. 그 밖의 미국 실시간 호가도 전체 깊이가 아닌 최우선 매수·매도 1호가뿐이므로 호가 불균형·스프레드는 해당 범위만 사용하며, 없는 값과 과거 호가는 추정하지 않고 partial 또는 unavailable로 표시합니다.</span></p>
           ) : (
-            <><strong className="text-foreground">국내 상장 종목 · KRW · 한국 장</strong><span> — 장 세션과 체결·호가 품질은 공급자 응답 기준으로 표시합니다.</span></>
+            <p className="mt-1"><strong className="text-foreground">국내 상장 종목 · KRW · KRX·NXT</strong><span> — 정규장 09:00–15:30을 기본으로 하며, 최신 거래일의 실제 프리·애프터 분봉으로 NXT 참여가 확인된 종목만 프리 08:00–08:50과 애프터 15:40–20:00을 분석·예측합니다. 예정된 휴장 구간의 체결 이벤트는 표시할 수 있지만 분봉 집계에서는 제외하며, 그 공백 자체는 누락 봉으로 간주하지 않습니다. 체결·호가 venue와 품질은 공급자 응답 기준으로 표시합니다.</span></p>
           )}
         </div>
 
@@ -980,7 +1016,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
           <div className="text-[9px] text-muted-foreground">{requestIssues.length ? <span role="alert" className="font-black text-destructive">{requestIssues.join(" ")}</span> : <span>모든 종목·지표는 서버에서 한 번의 batch 요청으로 계산됩니다.</span>}</div>
-          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || forecastLoading || loading || !workspace?.candidates.length}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request)} disabled={!status?.enabled || loading || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
+          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || forecastLoading || loading || !workspace?.candidates.length}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request, topCountLimits)} disabled={!status?.enabled || loading || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
         </div>
       </Card>
 

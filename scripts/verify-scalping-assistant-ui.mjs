@@ -230,7 +230,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "미국 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
     check(state.workspaces.length === 3 && state.workspaces[2]?.marketCountry === "US", "미국 workspace 요청에 marketCountry=US가 전달되지 않았습니다.");
-    check(await page.getByText("USD · 미국 정규장(09:30–16:00 ET)", { exact: false }).count() > 0, "미국 시장 통화·정규장 안내가 표시되지 않았습니다.");
+    check(await page.getByText("USD · 데이·프리·정규·애프터마켓", { exact: false }).count() > 0, "미국 시장 통화·4개 거래 세션 안내가 표시되지 않았습니다.");
     await page.waitForFunction(() => window.__scalpingEventSourceUrls?.some((value) => {
       const url = new URL(value, location.origin);
       return url.searchParams.get("marketCountry") === "US" && url.searchParams.get("exchanges")?.includes("S001:NAS");

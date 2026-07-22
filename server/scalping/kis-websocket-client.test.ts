@@ -148,9 +148,9 @@ function orderbookValues(symbol = "005930"): string[] {
   return values;
 }
 
-function overseasExecutionValues(symbol = "AAPL", exchange = "NAS"): string[] {
+function overseasExecutionValues(symbol = "AAPL", exchange = "NAS", prefix: "D" | "R" = "D"): string[] {
   const values = Array.from({ length: 26 }, () => "");
-  values[0] = `D${exchange}${symbol}`;
+  values[0] = `${prefix}${exchange}${symbol}`;
   values[1] = symbol;
   values[2] = "4";
   values[3] = "20260721";
@@ -371,6 +371,7 @@ describe("KisWebSocketClient", () => {
       market: "US",
       marketCountry: "US",
       exchange: "NAS",
+      usFeed: "standard",
       symbol: "AAPL",
       providerTimestamp: "2026-07-21T14:15:30.000Z",
       price: 212.5,
@@ -386,6 +387,7 @@ describe("KisWebSocketClient", () => {
       trId: "HDFSASP0",
       marketCountry: "US",
       exchange: "NAS",
+      usFeed: "standard",
       symbol: "AAPL",
       providerTimestamp: "2026-07-21T14:15:31.000Z",
       timestampDateSource: "provider-local-date",
@@ -395,6 +397,35 @@ describe("KisWebSocketClient", () => {
       totalBidQuantity: 5_000,
       totalAskQuantity: 4_500,
     }));
+  });
+
+  it("uses the documented R/BAQ mapping for US day-market executions without inventing a day orderbook", async () => {
+    const { client, sockets, events } = testHarness();
+    client.subscribe({ trId: "HDFSCNT0", symbol: "AAPL", exchange: "NAS", usFeed: "day" });
+    await client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    expect(JSON.parse(socket.sent[0]!)).toMatchObject({
+      body: { input: { tr_id: "HDFSCNT0", tr_key: "RBAQAAPL" } },
+    });
+
+    const dayExecution = overseasExecutionValues("AAPL", "BAQ", "R");
+    dayExecution[5] = "201530";
+    socket.message(dataFrame("HDFSCNT0", dayExecution));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "execution",
+      trId: "HDFSCNT0",
+      marketCountry: "US",
+      exchange: "NAS",
+      usFeed: "day",
+      symbol: "AAPL",
+      providerTimestamp: "2026-07-22T00:15:30.000Z",
+      sessionDate: "20260722",
+      eventId: expect.stringContaining("HDFSCNT0:day:NAS:AAPL"),
+    }));
+    expect(() => client.subscribe({
+      trId: "HDFSASP0", symbol: "MSFT", exchange: "NAS", usFeed: "day",
+    })).toThrow(/does not document.*day-market orderbook/);
   });
 
   it("rejects US subscriptions without an exchange instead of guessing NASDAQ", () => {

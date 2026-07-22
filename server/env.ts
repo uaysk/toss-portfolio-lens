@@ -7,6 +7,10 @@ import type { KisRestClientConfig } from "./scalping/kis-rest-client.js";
 import type { KisWebSocketConfig } from "./scalping/kis-websocket-client.js";
 import type { ScannerConfig } from "./scalping/scanner-service.js";
 import type { ScalpingServiceConfig } from "./scalping/scalping-service.js";
+import {
+  DEFAULT_US_EXTENDED_SESSION_WINDOWS,
+  krIntegratedSessionWindows,
+} from "./scalping/market-session.js";
 import type { TossProviderConfig } from "./scalping/toss-provider.js";
 
 export type OpenAiConfig = {
@@ -670,7 +674,7 @@ function readKisExchangeRateConfig(): KisExchangeRateConfig | undefined {
 function readScalpingConfig(): ScalpingConfig {
   const enabled = readBoolean("SCALPING_ENABLED", false);
   const minimumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MIN", 5, 1, 50);
-  const maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
+  let maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
   const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
   const aiUrl = readAiComputeUrl(allowInsecurePrivateWs);
   const authTokenFile = optional("AI_COMPUTE_AUTH_TOKEN_FILE") || "/run/ai-auth/token";
@@ -684,7 +688,7 @@ function readScalpingConfig(): ScalpingConfig {
     reconnectBaseMs,
     reconnectMaxMs: readBoundedInteger("AI_COMPUTE_RECONNECT_MAX_MS", 10_000, reconnectBaseMs, 600_000),
     maximumInFlight: readBoundedInteger("AI_COMPUTE_MAX_IN_FLIGHT", 4, 1, 1_000),
-    maximumBatchSize: readBoundedInteger("AI_COMPUTE_MAX_BATCH_SIZE", maximumTopCount, 1, maximumTopCount),
+    maximumBatchSize: readBoundedInteger("AI_COMPUTE_MAX_BATCH_SIZE", maximumTopCount, 1, 50),
     maximumRequestBytes: readBoundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     maximumResponseBytes: readBoundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
   };
@@ -693,8 +697,13 @@ function readScalpingConfig(): ScalpingConfig {
   const appKey = required("KI_APP_KEY");
   const appSecret = required("KI_APP_SECRET");
   const environment = (optional("KI_API_ENV") || "demo").toLowerCase();
-  if (environment !== "demo" && environment !== "real") {
-    throw new Error("KI_API_ENV는 demo 또는 real이어야 합니다.");
+  const restEnvironment = (optional("KI_SCALPING_REST_ENV") || environment).toLowerCase();
+  const websocketEnvironment = (optional("KI_SCALPING_WS_ENV") || environment).toLowerCase();
+  if (restEnvironment !== "demo" && restEnvironment !== "real") {
+    throw new Error("KI_SCALPING_REST_ENV는 demo 또는 real이어야 합니다.");
+  }
+  if (websocketEnvironment !== "demo" && websocketEnvironment !== "real") {
+    throw new Error("KI_SCALPING_WS_ENV는 demo 또는 real이어야 합니다.");
   }
   const tlsCa = readAiTlsCa();
   if (tlsCa && new URL(aiUrl).protocol !== "wss:") {
@@ -736,6 +745,21 @@ function readScalpingConfig(): ScalpingConfig {
     }];
   })) as unknown as Omit<TossProviderConfig, "now">["rateLimits"];
 
+  const kisWebSocketMaximumSubscriptions = providerLimit("KI_SCALPING_WS_MAX_SUBSCRIPTIONS", 10_000);
+  // US symbols use a standard execution feed, a day-market execution feed,
+  // and the documented standard-session top-of-book feed. Use the stricter
+  // three-feed capacity for the shared KR/US visible-symbol limit.
+  const websocketMaximumTopCount = Math.floor(kisWebSocketMaximumSubscriptions / 3);
+  if (websocketMaximumTopCount < minimumTopCount) {
+    throw new Error(
+      `KI_SCALPING_WS_MAX_SUBSCRIPTIONS는 최소 표시 종목 ${minimumTopCount}개의 미국 표준 체결·데이 체결·1호가 3개 구독을 위해 최소 ${minimumTopCount * 3}여야 합니다.`,
+    );
+  }
+  maximumTopCount = Math.min(maximumTopCount, websocketMaximumTopCount);
+  if (ai.maximumBatchSize < maximumTopCount) {
+    throw new Error("AI_COMPUTE_MAX_BATCH_SIZE는 실제 적용되는 최대 표시 종목 수 이상이어야 합니다.");
+  }
+
   const minimumTradingAmount = providerLimit("SCALPING_MINIMUM_TRADING_AMOUNT", Number.MAX_SAFE_INTEGER);
   const scanner: Omit<ScannerConfig, "now"> = {
     minimumTopCount,
@@ -769,20 +793,29 @@ function readScalpingConfig(): ScalpingConfig {
   const pricesBatchSize = providerLimit("TOSS_SCALPING_PRICE_BATCH_SIZE", 10_000);
   const candlesMaximumCount = providerLimit("TOSS_SCALPING_CANDLE_MAX_COUNT", 200);
   const tradesMaximumCount = providerLimit("TOSS_SCALPING_TRADE_MAX_COUNT", 50);
-  const kisWebSocketMaximumSubscriptions = providerLimit("KI_SCALPING_WS_MAX_SUBSCRIPTIONS", 10_000);
-  if (kisWebSocketMaximumSubscriptions < maximumTopCount * 2) {
-    throw new Error(
-      `KI_SCALPING_WS_MAX_SUBSCRIPTIONS는 종목당 체결·호가 2개 구독을 위해 최소 ${maximumTopCount * 2}여야 합니다.`,
-    );
-  }
-  if (ai.maximumBatchSize < maximumTopCount) {
-    throw new Error("AI_COMPUTE_MAX_BATCH_SIZE는 SCALPING_TOP_COUNT_MAX 이상이어야 합니다.");
-  }
   const workspaceBarLimit = readBoundedInteger(
     "SCALPING_WORKSPACE_BAR_LIMIT",
-    2_000,
+    4_900,
     60,
-    2_000,
+    50_000,
+  );
+  const usWorkspaceBarLimit = readBoundedInteger(
+    "SCALPING_US_WORKSPACE_BAR_LIMIT",
+    8_640,
+    60,
+    50_000,
+  );
+  const workspaceChartBarLimit = readBoundedInteger(
+    "SCALPING_CHART_BAR_LIMIT",
+    1_000,
+    60,
+    Math.max(workspaceBarLimit, usWorkspaceBarLimit),
+  );
+  const minimumAnalysisBars = readBoundedInteger(
+    "SCALPING_MINIMUM_ANALYSIS_BARS",
+    60,
+    1,
+    workspaceBarLimit,
   );
   const forecastMinimumBars = readBoundedInteger("AI_MIN_CONTEXT_BARS", 64, 8, Math.min(512, workspaceBarLimit));
   const forecastMaximumBars = readBoundedInteger(
@@ -799,8 +832,76 @@ function readScalpingConfig(): ScalpingConfig {
   };
   const sessionOpenMinuteKst = clockMinute("SCALPING_SESSION_OPEN_KST", "09:00");
   const sessionCloseMinuteKst = clockMinute("SCALPING_SESSION_CLOSE_KST", "15:30");
+  const preMarketOpenMinuteKst = clockMinute("SCALPING_NXT_PRE_MARKET_OPEN_KST", "08:00");
+  const preMarketCloseMinuteKst = clockMinute("SCALPING_NXT_PRE_MARKET_CLOSE_KST", "08:50");
+  const afterMarketOpenMinuteKst = clockMinute("SCALPING_NXT_AFTER_MARKET_OPEN_KST", "15:40");
+  const afterMarketCloseMinuteKst = clockMinute("SCALPING_NXT_AFTER_MARKET_CLOSE_KST", "20:00");
   if (sessionOpenMinuteKst >= sessionCloseMinuteKst) {
     throw new Error("SCALPING_SESSION_OPEN_KST는 SCALPING_SESSION_CLOSE_KST보다 빨라야 합니다.");
+  }
+  const integratedKrSessionWindows = krIntegratedSessionWindows({
+    preMarketOpenMinuteKst,
+    preMarketCloseMinuteKst,
+    regularMarketOpenMinuteKst: sessionOpenMinuteKst,
+    regularMarketCloseMinuteKst: sessionCloseMinuteKst,
+    afterMarketOpenMinuteKst,
+    afterMarketCloseMinuteKst,
+  });
+  const relativeVolumeLookbackSessions = readBoundedInteger("SCALPING_RVOL_LOOKBACK_SESSIONS", 5, 1, 60);
+  const integratedSessionMinuteSlots = integratedKrSessionWindows.reduce(
+    (sum, window) => sum + window.closeMinute - window.openMinute,
+    0,
+  );
+  const requiredRelativeVolumeBars = integratedSessionMinuteSlots * (relativeVolumeLookbackSessions + 1);
+  // Higher intervals are restarted at every configured market window, and a
+  // short tail is intentionally excluded from Rust/AI input. Retain enough raw
+  // one-minute history for the least-dense supported interval to have the
+  // configured number of complete bars even at the start of the current day.
+  const completeAnalysisBarsPerSession = [1, 5, 15, 30, 60].map((interval) => (
+    integratedKrSessionWindows.reduce(
+      (sum, window) => sum + Math.floor((window.closeMinute - window.openMinute) / interval),
+      0,
+    )
+  ));
+  const minimumCompleteAnalysisBarsPerSession = Math.min(...completeAnalysisBarsPerSession);
+  const requiredAnalysisSessions = Math.ceil(minimumAnalysisBars / minimumCompleteAnalysisBarsPerSession);
+  const requiredAnalysisWorkspaceBars = integratedSessionMinuteSlots * (requiredAnalysisSessions + 1);
+  if (workspaceBarLimit < requiredAnalysisWorkspaceBars) {
+    throw new Error(
+      `SCALPING_WORKSPACE_BAR_LIMIT는 NXT 통합 세션 60분봉 분석 ${minimumAnalysisBars}개를 장중 보장하기 위해 최소 ${requiredAnalysisWorkspaceBars}여야 합니다.`,
+    );
+  }
+  if (workspaceBarLimit < requiredRelativeVolumeBars) {
+    throw new Error(
+      `SCALPING_WORKSPACE_BAR_LIMIT는 NXT 통합 세션 RVOL ${relativeVolumeLookbackSessions}개 이전 세션을 위해 최소 ${requiredRelativeVolumeBars}여야 합니다.`,
+    );
+  }
+  const usSessionMinuteSlots = DEFAULT_US_EXTENDED_SESSION_WINDOWS.reduce(
+    (sum, window) => sum + window.closeMinute - window.openMinute,
+    0,
+  );
+  const requiredUsRelativeVolumeBars = usSessionMinuteSlots * (relativeVolumeLookbackSessions + 1);
+  const usCompleteAnalysisBarsPerSession = [1, 5, 15, 30, 60].map((interval) => (
+    DEFAULT_US_EXTENDED_SESSION_WINDOWS.reduce(
+      (sum, window) => sum + Math.floor((window.closeMinute - window.openMinute) / interval),
+      0,
+    )
+  ));
+  const usMinimumCompleteAnalysisBarsPerSession = Math.min(...usCompleteAnalysisBarsPerSession);
+  const requiredUsAnalysisSessions = Math.ceil(minimumAnalysisBars / usMinimumCompleteAnalysisBarsPerSession);
+  const requiredUsAnalysisWorkspaceBars = usSessionMinuteSlots * (requiredUsAnalysisSessions + 1);
+  if (usWorkspaceBarLimit < requiredUsAnalysisWorkspaceBars) {
+    throw new Error(
+      `SCALPING_US_WORKSPACE_BAR_LIMIT는 미국 확장 세션 60분봉 분석 ${minimumAnalysisBars}개를 장중 보장하기 위해 최소 ${requiredUsAnalysisWorkspaceBars}여야 합니다.`,
+    );
+  }
+  if (usWorkspaceBarLimit < requiredUsRelativeVolumeBars) {
+    throw new Error(
+      `SCALPING_US_WORKSPACE_BAR_LIMIT는 미국 확장 세션 RVOL ${relativeVolumeLookbackSessions}개 이전 세션을 위해 최소 ${requiredUsRelativeVolumeBars}여야 합니다.`,
+    );
+  }
+  if (Math.max(workspaceBarLimit, usWorkspaceBarLimit) * maximumTopCount > 500_000) {
+    throw new Error("시장별 SCALPING_WORKSPACE_BAR_LIMIT와 실제 최대 표시 종목 수의 곱은 500000 이하여야 합니다.");
   }
   return {
     enabled: true,
@@ -832,7 +933,7 @@ function readScalpingConfig(): ScalpingConfig {
     kisRest: {
       appKey,
       appSecret,
-      environment,
+      environment: restEnvironment,
       requestIntervalMs: providerLimit("KI_SCALPING_REST_REQUEST_INTERVAL_MS", 60_000),
       timeoutMs: readBoundedInteger("KI_SCALPING_REST_TIMEOUT_MS", 15_000, 1_000, 60_000),
       maxAttempts: readBoundedInteger("KI_SCALPING_REST_MAX_ATTEMPTS", 3, 1, 10),
@@ -842,7 +943,7 @@ function readScalpingConfig(): ScalpingConfig {
     kisWebSocket: {
       appKey,
       appSecret,
-      environment,
+      environment: websocketEnvironment,
       ...(optional("KI_SCALPING_WS_URL") ? { url: optional("KI_SCALPING_WS_URL") } : {}),
       approvalTimeoutMs: readBoundedInteger("KI_SCALPING_WS_APPROVAL_TIMEOUT_MS", 15_000, 1_000, 60_000),
       approvalMaxAttempts: readBoundedInteger("KI_SCALPING_WS_APPROVAL_MAX_ATTEMPTS", 3, 1, 10),
@@ -859,13 +960,16 @@ function readScalpingConfig(): ScalpingConfig {
     service: {
       minimumTopCount,
       maximumTopCount,
+      maximumSubscriptions: kisWebSocketMaximumSubscriptions,
       workspaceBarLimit,
+      usWorkspaceBarLimit,
+      workspaceChartBarLimit,
       candlePageSize: Math.min(candlesMaximumCount, workspaceBarLimit),
-      minimumAnalysisBars: readBoundedInteger("SCALPING_MINIMUM_ANALYSIS_BARS", 60, 1, workspaceBarLimit),
+      minimumAnalysisBars,
       barRefreshAfterMs: readBoundedInteger("SCALPING_BAR_REFRESH_AFTER_MS", 15_000, 1_000, 3_600_000),
       volumeProfileBucketCount: readBoundedInteger("SCALPING_VOLUME_PROFILE_BUCKETS", 24, 5, 200),
       volumeProfileInstrumentLimit: readBoundedInteger("SCALPING_VOLUME_PROFILE_MAX_INSTRUMENTS", 20, 1, 20),
-      relativeVolumeLookbackSessions: readBoundedInteger("SCALPING_RVOL_LOOKBACK_SESSIONS", 5, 1, 60),
+      relativeVolumeLookbackSessions,
       tradeFetchCount: readBoundedInteger(
         "SCALPING_TRADE_FETCH_COUNT",
         Math.min(50, tradesMaximumCount),
@@ -876,8 +980,12 @@ function readScalpingConfig(): ScalpingConfig {
       forecastMaximumBars,
       evaluationMaximumOrigins: readBoundedInteger("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
       evaluationOriginStrideBars: readBoundedInteger("SCALPING_EVALUATION_ORIGIN_STRIDE_BARS", 5, 1, 10_000),
+      preMarketOpenMinuteKst,
+      preMarketCloseMinuteKst,
       sessionOpenMinuteKst,
       sessionCloseMinuteKst,
+      afterMarketOpenMinuteKst,
+      afterMarketCloseMinuteKst,
     },
     aggregator: {
       allowedLatenessMs: nonnegative("SCALPING_BAR_ALLOWED_LATENESS_MS", 2_000, 60_000),
@@ -891,9 +999,13 @@ function readScalpingConfig(): ScalpingConfig {
     realtimeAnalysisDebounceMs: readBoundedInteger("SCALPING_REALTIME_ANALYSIS_DEBOUNCE_MS", 250, 50, 5_000),
     sseReplayEvents: readBoundedInteger("SCALPING_SSE_REPLAY_EVENTS", 2_000, 100, 100_000),
     barWatermarkAdvanceMs: readBoundedInteger("SCALPING_BAR_WATERMARK_ADVANCE_MS", 1_000, 250, 60_000),
-    recoveryMaximumRequests: readBoundedInteger("SCALPING_RECOVERY_MAX_REQUESTS", 20, 1, 1_000),
+    recoveryMaximumRequests: readBoundedInteger("SCALPING_RECOVERY_MAX_REQUESTS", 30, 1, 1_000),
     recoveryBarLimit: workspaceBarLimit,
   };
+}
+
+export function loadScalpingConfig(): ScalpingConfig {
+  return readScalpingConfig();
 }
 
 export function loadConfig(): AppConfig {

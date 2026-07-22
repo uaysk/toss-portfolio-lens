@@ -44,10 +44,25 @@ import {
   adaptKisVolumeRankings,
 } from "./kis-common-adapter.js";
 import type { KisRestClient, KisUsExchangeCode } from "./kis-rest-client.js";
-import { aggregateRecoveredBars, type ScalpingLiveRuntime } from "./live-runtime.js";
+import {
+  aggregateRecoveredBars,
+  scheduledSessionIntervalClose,
+  type ScalpingLiveRuntime,
+} from "./live-runtime.js";
 import type { ScalpingScanner, ScannerResult } from "./scanner-service.js";
 import type { TossMarketCalendarDay, TossScalpingProvider } from "./toss-provider.js";
-import { marketSessionAnchor, marketTimeZone } from "./market-time.js";
+import { marketLocalParts, marketSessionAnchor, marketTimeZone } from "./market-time.js";
+import {
+  krIntegratedSessionWindows,
+  marketLocalTimestamp,
+  marketSessionEffectiveMinute,
+  marketSessionWindows,
+  marketTradingSessionDate,
+  sessionWindowForBarClose,
+  sessionWindowForTrade,
+  validateSessionWindows,
+  type MarketSessionWindow,
+} from "./market-session.js";
 
 export const SCALPING_WORKSPACE_SCHEMA_VERSION = "scalping-workspace/v1" as const;
 export const SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION = "scalping-realtime-analysis/v1" as const;
@@ -57,11 +72,15 @@ export type WorkspacePreset = z.infer<typeof WorkspacePresetSchema>;
 
 const SYMBOL = /^[A-Z0-9][A-Z0-9._-]{0,31}$/;
 const MINUTE_MS = 60_000;
+const MARKET_CALENDAR_LOOKAHEAD_DAYS = 14;
 
 export type ScalpingServiceConfig = {
   minimumTopCount: number;
   maximumTopCount: number;
+  maximumSubscriptions: number;
   workspaceBarLimit: number;
+  usWorkspaceBarLimit: number;
+  workspaceChartBarLimit: number;
   candlePageSize: number;
   minimumAnalysisBars: number;
   barRefreshAfterMs: number;
@@ -73,8 +92,12 @@ export type ScalpingServiceConfig = {
   forecastMaximumBars: number;
   evaluationMaximumOrigins: number;
   evaluationOriginStrideBars: number;
+  preMarketOpenMinuteKst: number;
+  preMarketCloseMinuteKst: number;
   sessionOpenMinuteKst: number;
   sessionCloseMinuteKst: number;
+  afterMarketOpenMinuteKst: number;
+  afterMarketCloseMinuteKst: number;
   now?: () => number;
 };
 
@@ -172,6 +195,37 @@ function quality(status: DataQuality["status"], reasons: string[], sources: Data
   return DataQualitySchema.parse({ status, missing: [], reasons, sources, observedAt: new Date().toISOString() });
 }
 
+function degradedWorkspaceQuality(base: DataQuality, diagnosticCodes: readonly string[]): DataQuality {
+  if (!diagnosticCodes.length) return base;
+  return DataQualitySchema.parse({
+    ...base,
+    status: base.status === "source_unavailable" ? "source_unavailable" : "partial",
+    missing: Array.from(new Set([...base.missing, ...diagnosticCodes.map((code) => `diagnostic:${code}`)])).slice(0, 64),
+    reasons: Array.from(new Set([...base.reasons, ...diagnosticCodes])).slice(0, 64),
+  });
+}
+
+function unavailableScannerResult(
+  criterion: ScannerCriterion,
+  requestedTopCount: number,
+  generatedAt: string,
+): ScannerResult {
+  return {
+    generatedAt,
+    criterion,
+    requestedTopCount,
+    candidates: [],
+    excluded: [],
+    quality: DataQualitySchema.parse({
+      status: "source_unavailable",
+      missing: ["scanner_contract"],
+      reasons: ["scanner_contract_unavailable"],
+      sources: ["derived"],
+      observedAt: generatedAt,
+    }),
+  };
+}
+
 function presetIndicators(preset: WorkspacePreset): Array<{ id: string; kind: string; parameters?: Record<string, unknown> }> {
   const scanner = [
     { id: "scanner-realized-volatility", kind: "historical_volatility", parameters: { period: 20, annualization: 1, return_type: "log" } },
@@ -238,6 +292,34 @@ function storeRecord(
   };
 }
 
+function isCanonicalOneMinuteRecord(
+  bar: IntradayBarRecord,
+  marketCountry: MarketCountry,
+  sessionWindows: readonly MarketSessionWindow[],
+): boolean {
+  if (bar.intervalMinutes !== 1) return false;
+  const openMs = Date.parse(bar.openTime);
+  const closeMs = Date.parse(bar.closeTime);
+  if (!Number.isFinite(openMs) || !Number.isFinite(closeMs)
+    || openMs % MINUTE_MS !== 0 || closeMs - openMs !== MINUTE_MS) return false;
+  const openWindow = sessionWindowForTrade(bar.openTime, marketCountry, sessionWindows, bar.sessionDate);
+  const closeWindow = sessionWindowForBarClose(bar.closeTime, marketCountry, sessionWindows, bar.sessionDate);
+  return openWindow !== undefined
+    && closeWindow === openWindow;
+}
+
+function groupBarsBySession(
+  bars: readonly IntradayBarRecord[],
+): Map<string, IntradayBarRecord[]> {
+  const sessions = new Map<string, IntradayBarRecord[]>();
+  for (const bar of bars) {
+    const session = sessions.get(bar.sessionDate);
+    if (session) session.push(bar);
+    else sessions.set(bar.sessionDate, [bar]);
+  }
+  return sessions;
+}
+
 function targetStopFromAnalysis(analysis: unknown, symbol: string): z.infer<typeof AiTargetStopSchema> | undefined {
   const instruments = record(analysis)?.instruments;
   if (!Array.isArray(instruments)) return undefined;
@@ -256,6 +338,18 @@ function targetStopFromAnalysis(analysis: unknown, symbol: string): z.infer<type
   return undefined;
 }
 
+function timestampKey(value: string): string | undefined {
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) ? new Date(instant).toISOString() : undefined;
+}
+
+function evaluationSignalPoints(instrument: UnknownRecord | undefined): unknown[] {
+  const snapshots = instrument?.signal_snapshots;
+  if (Array.isArray(snapshots) && snapshots.length) return snapshots;
+  const points = record(instrument?.signals)?.points;
+  return Array.isArray(points) ? points : [];
+}
+
 function targetStopsByTimestamp(
   analysis: unknown,
   symbol: string,
@@ -264,20 +358,20 @@ function targetStopsByTimestamp(
   const instruments = record(analysis)?.instruments;
   if (!Array.isArray(instruments)) return output;
   const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  const points = record(record(instrument)?.signals)?.points;
-  if (!Array.isArray(points)) return output;
-  for (const value of points) {
+  for (const value of evaluationSignalPoints(record(instrument))) {
     const point = record(value);
     const timestamp = string(point?.calculation_timestamp);
     const stop = finite(point?.stop_candidate_price);
     const basis = finite(point?.basis_price);
+    const targetCandidate = finite(point?.target_candidate_price);
     const targetRange = record(point?.target_price_range);
-    const targetLow = finite(targetRange?.low);
-    const targetHigh = finite(targetRange?.high);
-    if (!timestamp || stop === undefined || basis === undefined || targetLow === undefined || targetHigh === undefined) continue;
+    const targetLow = targetCandidate ?? finite(targetRange?.low);
+    const targetHigh = targetCandidate ?? finite(targetRange?.high);
+    const key = timestamp ? timestampKey(timestamp) : undefined;
+    if (!key || stop === undefined || basis === undefined || targetLow === undefined || targetHigh === undefined) continue;
     const target = (targetLow + targetHigh) / 2;
-    if (stop < basis && basis < target) output.set(timestamp, { side: "long", target_price: target, stop_price: stop });
-    else if (target < basis && basis < stop) output.set(timestamp, { side: "short", target_price: target, stop_price: stop });
+    if (stop < basis && basis < target) output.set(key, { side: "long", target_price: target, stop_price: stop });
+    else if (target < basis && basis < stop) output.set(key, { side: "short", target_price: target, stop_price: stop });
   }
   return output;
 }
@@ -287,14 +381,14 @@ function signalByTimestamp(analysis: unknown, symbol: string): Map<string, -1 | 
   const instruments = record(analysis)?.instruments;
   if (!Array.isArray(instruments)) return output;
   const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  const points = record(record(instrument)?.signals)?.points;
-  if (!Array.isArray(points)) return output;
-  for (const value of points) {
+  for (const value of evaluationSignalPoints(record(instrument))) {
     const point = record(value);
     const timestamp = string(point?.calculation_timestamp);
     const status = string(point?.status);
-    if (!timestamp) continue;
-    output.set(timestamp, status === "entry_candidate" ? 1 : status === "exit_candidate" ? -1 : 0);
+    const compact = finite(point?.technical_signal);
+    const key = timestamp ? timestampKey(timestamp) : undefined;
+    if (!key) continue;
+    output.set(key, compact === 1 ? 1 : compact === -1 ? -1 : status === "entry_candidate" ? 1 : status === "exit_candidate" ? -1 : 0);
   }
   return output;
 }
@@ -304,13 +398,12 @@ function regimeByTimestamp(analysis: unknown, symbol: string): Map<string, strin
   const instruments = record(analysis)?.instruments;
   if (!Array.isArray(instruments)) return output;
   const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  const points = record(record(instrument)?.signals)?.points;
-  if (!Array.isArray(points)) return output;
-  for (const value of points) {
+  for (const value of evaluationSignalPoints(record(instrument))) {
     const point = record(value);
     const timestamp = string(point?.calculation_timestamp);
     const agreement = string(point?.multi_timeframe_agreement)?.trim();
-    if (timestamp && agreement && agreement.length <= 64) output.set(timestamp, agreement);
+    const key = timestamp ? timestampKey(timestamp) : undefined;
+    if (key && agreement && agreement.length <= 64) output.set(key, agreement);
   }
   return output;
 }
@@ -388,30 +481,200 @@ function rerankUsKisRankings(
     .map((item, index) => ({ ...item, rank: index + 1 }));
 }
 
+type DomesticKisRanking = {
+  venue: "KRX" | "NXT";
+  ranking: NormalizedRanking;
+};
+
+export function rerankDomesticKisRankings(
+  values: readonly DomesticKisRanking[],
+  criterion: ScannerCriterion,
+): NormalizedRanking[] {
+  const bySymbolAndVenue = new Map<string, Map<DomesticKisRanking["venue"], NormalizedRanking>>();
+  for (const { venue, ranking } of values) {
+    const byVenue = bySymbolAndVenue.get(ranking.symbol) ?? new Map();
+    const current = byVenue.get(venue);
+    if (!current) {
+      byVenue.set(venue, { ...ranking });
+    } else {
+      const representative = current.rank < ranking.rank
+        || (current.rank === ranking.rank && current.rankedAt >= ranking.rankedAt) ? current : ranking;
+      byVenue.set(venue, {
+        ...representative,
+        rank: Math.min(current.rank, ranking.rank),
+        rankedAt: current.rankedAt > ranking.rankedAt ? current.rankedAt : ranking.rankedAt,
+        volume: current.volume === undefined ? ranking.volume
+          : ranking.volume === undefined ? current.volume : Math.max(current.volume, ranking.volume),
+        tradingAmount: current.tradingAmount === undefined ? ranking.tradingAmount
+          : ranking.tradingAmount === undefined ? current.tradingAmount : Math.max(current.tradingAmount, ranking.tradingAmount),
+      });
+    }
+    bySymbolAndVenue.set(ranking.symbol, byVenue);
+  }
+
+  const items = [...bySymbolAndVenue.entries()].map(([symbol, byVenue]) => {
+    const venueItems = [...byVenue.entries()]
+      .sort(([leftVenue, left], [rightVenue, right]) => right.rankedAt.localeCompare(left.rankedAt)
+        || (leftVenue === "NXT" ? -1 : rightVenue === "NXT" ? 1 : 0)
+        || left.rank - right.rank);
+    const representative = venueItems[0]![1];
+    const sum = (field: "volume" | "tradingAmount") => {
+      const present = venueItems.flatMap(([, item]) => item[field] === undefined ? [] : [item[field]]);
+      return present.length ? present.reduce((total, value) => total + value, 0) : undefined;
+    };
+    return {
+      ...representative,
+      symbol,
+      volume: sum("volume"),
+      tradingAmount: sum("tradingAmount"),
+    };
+  });
+  const descendingRanks = (field: "volume" | "tradingAmount") => new Map(
+    [...items]
+      .sort((left, right) => (right[field] ?? -1) - (left[field] ?? -1) || left.symbol.localeCompare(right.symbol))
+      .map((item, index) => [item.symbol, index + 1]),
+  );
+  const volumeRanks = descendingRanks("volume");
+  const amountRanks = descendingRanks("tradingAmount");
+  const score = (item: NormalizedRanking) => criterion === "volume"
+    ? volumeRanks.get(item.symbol)!
+    : criterion === "trading_amount" ? amountRanks.get(item.symbol)!
+      : Math.min(volumeRanks.get(item.symbol)!, amountRanks.get(item.symbol)!);
+  return items
+    .sort((left, right) => score(left) - score(right)
+      || (right.tradingAmount ?? -1) - (left.tradingAmount ?? -1)
+      || (right.volume ?? -1) - (left.volume ?? -1)
+      || left.symbol.localeCompare(right.symbol))
+    .map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
 function marketMinute(timestamp: string, marketCountry: MarketCountry): { date: string; minute: number } {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: marketCountry === "US" ? "America/New_York" : "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(timestamp));
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const parts = marketLocalParts(Date.parse(timestamp), marketCountry);
   return {
-    date: `${values.year}-${values.month}-${values.day}`,
-    minute: Number(values.hour) * 60 + Number(values.minute),
+    date: `${parts.date.slice(0, 4)}-${parts.date.slice(4, 6)}-${parts.date.slice(6, 8)}`,
+    minute: Number(parts.time.slice(0, 2)) * 60 + Number(parts.time.slice(2, 4)),
   };
 }
 
-function regularSessionMinutes(
+function adjacentActiveMinuteBars(
+  previous: IntradayBarRecord,
+  current: IntradayBarRecord,
   marketCountry: MarketCountry,
-  config: Pick<ScalpingServiceConfig, "sessionOpenMinuteKst" | "sessionCloseMinuteKst">,
-): { open: number; close: number } {
-  return marketCountry === "US"
-    ? { open: 9 * 60 + 30, close: 16 * 60 }
-    : { open: config.sessionOpenMinuteKst, close: config.sessionCloseMinuteKst };
+  sessionWindows: readonly MarketSessionWindow[],
+): boolean {
+  if (previous.sessionDate !== current.sessionDate) return false;
+  const previousMinute = marketSessionEffectiveMinute(previous.closeTime, previous.sessionDate, marketCountry);
+  const currentMinute = marketSessionEffectiveMinute(current.closeTime, current.sessionDate, marketCountry);
+  const previousWindow = sessionWindowForBarClose(previous.closeTime, marketCountry, sessionWindows, previous.sessionDate);
+  const currentWindow = sessionWindowForBarClose(current.closeTime, marketCountry, sessionWindows, current.sessionDate);
+  if (!previousWindow || !currentWindow) return false;
+  if (previousWindow === currentWindow) {
+    return Date.parse(current.closeTime) - Date.parse(previous.closeTime) === MINUTE_MS;
+  }
+  const previousIndex = sessionWindows.indexOf(previousWindow);
+  const currentIndex = sessionWindows.indexOf(currentWindow);
+  return previousIndex >= 0
+    && currentIndex === previousIndex + 1
+    && previousMinute === (previousWindow.localDateOffset ?? 0) * 24 * 60 + previousWindow.closeMinute
+    && currentMinute === (currentWindow.localDateOffset ?? 0) * 24 * 60 + currentWindow.openMinute + 1;
+}
+
+type ConfirmedUsSessionSchedule = {
+  windows: readonly MarketSessionWindow[];
+  periods: readonly {
+    kind: MarketSessionWindow["kind"];
+    startAt: string;
+    endAt: string;
+  }[];
+};
+
+type ConfirmedKrCalendarSession =
+  | { status: "closed" }
+  | { status: "open"; minuteCloses: string[] };
+
+function calendarDateAfter(sessionDate: string, days: number): string | undefined {
+  const epoch = Date.parse(`${sessionDate}T00:00:00.000Z`);
+  if (!Number.isFinite(epoch) || !Number.isInteger(days) || days < 1) return undefined;
+  return new Date(epoch + days * 24 * 60 * MINUTE_MS).toISOString().slice(0, 10);
+}
+
+function confirmedKrCalendarSession(
+  calendar: TossMarketCalendarDay | undefined,
+  sessionDate: string,
+): ConfirmedKrCalendarSession | undefined {
+  if (calendar?.marketCountry !== "KR" || calendar.sessionDate !== sessionDate) return undefined;
+  const regular = calendar.regularMarket;
+  if (!regular) return { status: "closed" };
+  const startEpoch = Date.parse(regular.startAt);
+  const endEpoch = Date.parse(regular.endAt);
+  if (!Number.isFinite(startEpoch) || !Number.isFinite(endEpoch)
+    || startEpoch % MINUTE_MS !== 0 || endEpoch % MINUTE_MS !== 0 || startEpoch >= endEpoch) return undefined;
+  const start = marketMinute(regular.startAt, "KR");
+  const end = marketMinute(regular.endAt, "KR");
+  if (start.date !== sessionDate || end.date !== sessionDate) return undefined;
+  const minuteCloses: string[] = [];
+  for (let timestamp = startEpoch + MINUTE_MS; timestamp <= endEpoch; timestamp += MINUTE_MS) {
+    minuteCloses.push(new Date(timestamp).toISOString());
+  }
+  return minuteCloses.length ? { status: "open", minuteCloses } : undefined;
+}
+
+function confirmedUsSessionSchedule(
+  calendar: TossMarketCalendarDay | undefined,
+  sessionDate: string,
+): ConfirmedUsSessionSchedule | undefined {
+  if (calendar?.marketCountry !== "US" || calendar.sessionDate !== sessionDate) return undefined;
+  const periods = [
+    ["day_market", calendar.dayMarket],
+    ["pre_market", calendar.preMarket],
+    ["regular_market", calendar.regularMarket],
+    ["after_market", calendar.afterMarket],
+  ] as const;
+  const available = periods.flatMap(([kind, period]) => period ? [{ kind, ...period }] : []);
+  if (!available.length) return undefined;
+  const windows: MarketSessionWindow[] = [];
+  for (const period of available) {
+    const startEpoch = Date.parse(period.startAt);
+    const endEpoch = Date.parse(period.endAt);
+    if (!Number.isFinite(startEpoch) || !Number.isFinite(endEpoch)
+      || startEpoch % MINUTE_MS !== 0 || endEpoch % MINUTE_MS !== 0 || startEpoch >= endEpoch) return undefined;
+    const start = marketSessionEffectiveMinute(period.startAt, sessionDate, "US");
+    const end = marketSessionEffectiveMinute(period.endAt, sessionDate, "US");
+    if (start === undefined || end === undefined || start >= end || start < -24 * 60 || end > 24 * 60) return undefined;
+    let cursor = start;
+    while (cursor < end) {
+      const localDateOffset = Math.floor(cursor / (24 * 60)) as -1 | 0;
+      if (localDateOffset !== -1 && localDateOffset !== 0) return undefined;
+      const nextMidnight = (localDateOffset + 1) * 24 * 60;
+      const segmentEnd = Math.min(end, nextMidnight);
+      const openMinute = cursor - localDateOffset * 24 * 60;
+      const closeMinute = segmentEnd - localDateOffset * 24 * 60;
+      if (openMinute < closeMinute) windows.push({
+        kind: period.kind,
+        openMinute,
+        closeMinute,
+        localDateOffset,
+      });
+      cursor = segmentEnd;
+    }
+  }
+  try {
+    validateSessionWindows(windows);
+  } catch {
+    return undefined;
+  }
+  return { windows, periods: available };
+}
+
+function configuredKrSessionWindows(config: ScalpingServiceConfig): readonly MarketSessionWindow[] {
+  return krIntegratedSessionWindows({
+    preMarketOpenMinuteKst: config.preMarketOpenMinuteKst,
+    preMarketCloseMinuteKst: config.preMarketCloseMinuteKst,
+    regularMarketOpenMinuteKst: config.sessionOpenMinuteKst,
+    regularMarketCloseMinuteKst: config.sessionCloseMinuteKst,
+    afterMarketOpenMinuteKst: config.afterMarketOpenMinuteKst,
+    afterMarketCloseMinuteKst: config.afterMarketCloseMinuteKst,
+  });
 }
 
 export class ScalpingService {
@@ -437,14 +700,30 @@ export class ScalpingService {
     private readonly tradeMarkers: TradeMarkerSource | undefined,
     private readonly config: ScalpingServiceConfig,
   ) {
-    if (config.workspaceBarLimit < 60 || config.workspaceBarLimit > 2_000) throw new Error("workspaceBarLimit must be in 60..=2000.");
-    if (!Number.isInteger(config.candlePageSize) || config.candlePageSize < 1 || config.candlePageSize > config.workspaceBarLimit) {
+    if (!Number.isInteger(config.maximumSubscriptions)
+      || config.maximumSubscriptions < config.maximumTopCount * 3) {
+      throw new Error("maximumSubscriptions must cover standard execution, US day execution, and orderbook feeds for every visible symbol.");
+    }
+    if (!Number.isInteger(config.workspaceBarLimit) || config.workspaceBarLimit < 60 || config.workspaceBarLimit > 50_000) {
+      throw new Error("workspaceBarLimit must be in 60..=50000.");
+    }
+    if (!Number.isInteger(config.usWorkspaceBarLimit) || config.usWorkspaceBarLimit < 60 || config.usWorkspaceBarLimit > 50_000) {
+      throw new Error("usWorkspaceBarLimit must be in 60..=50000.");
+    }
+    if (!Number.isInteger(config.workspaceChartBarLimit) || config.workspaceChartBarLimit < 60
+      || config.workspaceChartBarLimit > Math.max(config.workspaceBarLimit, config.usWorkspaceBarLimit)) {
+      throw new Error("workspaceChartBarLimit is invalid.");
+    }
+    if (!Number.isInteger(config.candlePageSize) || config.candlePageSize < 1
+      || config.candlePageSize > Math.min(config.workspaceBarLimit, config.usWorkspaceBarLimit)) {
       throw new Error("candlePageSize is invalid.");
     }
-    if (config.minimumAnalysisBars < 1 || config.minimumAnalysisBars > config.workspaceBarLimit) throw new Error("minimumAnalysisBars is invalid.");
+    if (config.minimumAnalysisBars < 1
+      || config.minimumAnalysisBars > Math.min(config.workspaceBarLimit, config.usWorkspaceBarLimit)) {
+      throw new Error("minimumAnalysisBars is invalid.");
+    }
     if (config.forecastMinimumBars < 1 || config.forecastMaximumBars < config.forecastMinimumBars) throw new Error("forecast bar limits are invalid.");
-    if (config.sessionOpenMinuteKst < 0 || config.sessionCloseMinuteKst > 24 * 60
-      || config.sessionOpenMinuteKst >= config.sessionCloseMinuteKst) throw new Error("session minute range is invalid.");
+    validateSessionWindows(configuredKrSessionWindows(config));
     this.now = config.now ?? Date.now;
     this.workspaceSchema = createScannerRequestSchema(config).extend({
       interval: MinuteIntervalSchema,
@@ -452,6 +731,14 @@ export class ScalpingService {
       preset: WorkspacePresetSchema,
       symbols: z.array(z.string()).max(config.maximumTopCount).optional(),
       accountId: z.string().trim().min(1).max(128).optional(),
+    }).superRefine((request, context) => {
+      if ((request.symbols?.length ?? 0) > request.topCount) {
+        context.addIssue({
+          code: "custom",
+          path: ["symbols"],
+          message: "사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.",
+        });
+      }
     }) as z.ZodType<ScalpingWorkspaceRequest>;
   }
 
@@ -461,9 +748,12 @@ export class ScalpingService {
       enabled,
       limits: {
         topCount: { minimum: this.config.minimumTopCount, maximum: this.config.maximumTopCount },
+        maximumSubscriptions: this.config.maximumSubscriptions,
         intervals: [1, 5, 15, 30, 60],
         layoutColumns: [1, 2, 3, 4],
         workspaceBarLimit: this.config.workspaceBarLimit,
+        workspaceBarLimits: { KR: this.config.workspaceBarLimit, US: this.config.usWorkspaceBarLimit },
+        workspaceChartBarLimit: this.config.workspaceChartBarLimit,
         evaluationMaximumOrigins: this.config.evaluationMaximumOrigins,
       },
       providers: {
@@ -484,9 +774,26 @@ export class ScalpingService {
         retrospectiveEvaluation: Boolean(this.ai),
         scannerMarkets: ["KR", "US"],
       },
+      sessions: {
+        KR: {
+          timezone: "Asia/Seoul",
+          policy: "KRX_NXT_evidence_based",
+          eligibility: "per_instrument_latest_session_bar_evidence",
+          windows: configuredKrSessionWindows(this.config),
+        },
+        US: {
+          timezone: "America/New_York",
+          policy: "toss_calendar_confirmed_extended_hours",
+          eligibility: "date_specific_day_pre_regular_after_periods",
+          windows: marketSessionWindows("US", configuredKrSessionWindows(this.config)),
+        },
+      },
       limitations: [
         "과거 호가 이력은 공급자가 제공하지 않아 unavailable입니다.",
         "저유동성 거래대금 필터 단위는 국내 KRW, 미국 USD입니다.",
+        "현재 KIS 권한에서는 NXT 등락률 랭킹을 사용할 수 없어 NXT 거래량 후보와 Rust 변동성 지표로 보완합니다.",
+        "미국 KIS 실시간 호가는 최우선 매수·매도 1호가만 제공하며 데이마켓 호가는 제공하지 않습니다.",
+        "미국 데이마켓은 KIS 체결 피드와 Toss 캘린더·분봉으로 지원하며 호가 기반 지표는 unavailable 또는 partial일 수 있습니다.",
         "신호는 주문 지시나 수익 보장이 아니며 실제 주문을 실행하지 않습니다.",
       ],
     };
@@ -496,14 +803,22 @@ export class ScalpingService {
     const request = this.workspaceSchema.parse(input);
     const marketCountry = request.marketCountry ?? "KR";
     const requestedSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
-    const rankingsResult = await this.collectRankings(request.criterion, request.topCount, marketCountry);
+    const rankingsAttempt = await this.safe(
+      () => this.collectRankings(request.criterion, request.topCount, marketCountry),
+      "ranking_collection_unavailable",
+    );
+    const rankingsResult = rankingsAttempt.value ?? {
+      rankings: [],
+      errors: { toss: "ranking_collection_unavailable", kis: "ranking_collection_unavailable" },
+      diagnostics: ["ranking_collection_unavailable"],
+    };
     const universe = this.universe(
       rankingsResult.rankings,
       requestedSymbols,
       request.topCount,
       request.criterion,
     );
-    const [pricesResult, instrumentsResult, portfolioResult, barsBySymbol, bookAndWarnings] = await Promise.all([
+    const [pricesResult, instrumentsResult, portfolioResult, barsResult, enrichmentResult] = await Promise.all([
       this.safe(() => this.toss.getPrices(universe), "toss_prices"),
       this.portfolio
         ? this.safe(() => this.portfolio!.getInstruments(universe), "toss_instruments")
@@ -511,9 +826,17 @@ export class ScalpingService {
       this.portfolio
         ? this.safe(() => this.portfolio!.getPortfolio(request.accountId, false, false), "portfolio")
         : Promise.resolve<{ value?: Portfolio; error?: string }>({}),
-      this.loadBars(universe, intervalMinutes(request.interval), marketCountry),
-      this.enrich(universe, marketCountry),
+      this.loadBarsWithDiagnostics(universe, intervalMinutes(request.interval), marketCountry),
+      this.safe(() => this.enrich(universe, marketCountry), "quote_enrichment_unavailable"),
     ]);
+    const barsBySymbol = barsResult.barsBySymbol;
+    const bookAndWarnings = enrichmentResult.value ?? {
+      books: new Map<string, NormalizedOrderbook>(),
+      warnings: [] as NormalizedWarning[],
+      trades: new Map<string, NormalizedTrade[]>(),
+      warningUnavailable: new Set(universe),
+      errors: ["quote_enrichment_unavailable"],
+    };
     const priceBySymbol = new Map((pricesResult.value ?? []).map((value) => [value.symbol, value]));
     const metadata = new Map((instrumentsResult.value ?? []).map((item) => [item.symbol, item]));
     const portfolioValue = portfolioResult.value;
@@ -529,7 +852,7 @@ export class ScalpingService {
       metadata: new Map(metadata),
       holdings: new Map(holdings),
     };
-    const analysis = await this.computeAnalysis({
+    const analysisResult = await this.safe(() => this.computeAnalysis({
       symbols: universe,
       interval: intervalMinutes(request.interval),
       preset: request.preset,
@@ -541,45 +864,51 @@ export class ScalpingService {
       marketCountry,
       responseMode: "full_series",
       includeVolumeProfile: true,
-    });
-    const scan = this.scanner.scan({ marketCountry, criterion: request.criterion, topCount: request.topCount }, {
-      rankings: rankingsResult.rankings,
-      prices: pricesResult.value ?? [],
-      orderbooks: [...bookAndWarnings.books.values()],
-      warnings: bookAndWarnings.warnings,
-      instrumentStates: universe.map((symbol) => {
-        const suspended = this.live.snapshot(symbol, marketCountry).tradingHalted === true;
-        const warningUnavailable = bookAndWarnings.warningUnavailable.has(symbol);
-        return {
-        symbol,
-        suspended,
-        managed: false,
-        liquidationTrading: false,
-        investmentCaution: false,
-        unsupported: false,
-        reasons: [
-          ...(suspended ? ["kis_realtime_trading_halted"] : []),
-          ...(warningUnavailable ? ["investment_warning_status_unavailable"] : []),
-        ],
-      };
-      }),
-      volatilityInputs: scannerMetrics(analysis),
-      sourceErrors: {
-        ...rankingsResult.errors,
-        ...(pricesResult.error ? { toss: pricesResult.error } : {}),
-      },
-    });
-    const selectedSymbols = Array.from(new Set([
-      ...scan.candidates.map(({ symbol }) => symbol),
-      ...requestedSymbols,
-    ])).slice(0, this.config.maximumTopCount);
+    }), "rust_analysis_unavailable");
+    const analysis = analysisResult.value;
+    let scanError: string | undefined;
+    let scan: ScannerResult;
+    try {
+      scan = this.scanner.scan({ marketCountry, criterion: request.criterion, topCount: request.topCount }, {
+        rankings: rankingsResult.rankings,
+        prices: pricesResult.value ?? [],
+        orderbooks: [...bookAndWarnings.books.values()],
+        warnings: bookAndWarnings.warnings,
+        instrumentStates: universe.map((symbol) => {
+          const suspended = this.liveSnapshot(symbol, marketCountry).tradingHalted === true;
+          const warningUnavailable = bookAndWarnings.warningUnavailable.has(symbol);
+          return {
+          symbol,
+          suspended,
+          managed: false,
+          liquidationTrading: false,
+          investmentCaution: false,
+          unsupported: false,
+          reasons: [
+            ...(suspended ? ["kis_realtime_trading_halted"] : []),
+            ...(warningUnavailable ? ["investment_warning_status_unavailable"] : []),
+          ],
+        };
+        }),
+        volatilityInputs: scannerMetrics(analysis),
+        sourceErrors: {
+          ...rankingsResult.errors,
+          ...(pricesResult.error ? { toss: pricesResult.error } : {}),
+        },
+      });
+    } catch {
+      scanError = "scanner_contract_unavailable";
+      scan = unavailableScannerResult(request.criterion, request.topCount, new Date(this.now()).toISOString());
+    }
     const candidates = this.withRequestedCandidates(
       scan,
       requestedSymbols,
+      request.topCount,
       priceBySymbol,
       marketCountry,
       metadata,
     );
+    const selectedSymbols = candidates.map(({ symbol }) => symbol);
     const predictions = await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => []);
     const predictionBySymbol = new Map(predictions.map((prediction) => [prediction.symbol, prediction]));
     const markerFromDate = Array.from(barsBySymbol.values()).flat().map((bar) => bar.sessionDate).sort()[0];
@@ -606,6 +935,18 @@ export class ScalpingService {
         if (symbol) markerBySymbol.set(symbol, [...(markerBySymbol.get(symbol) ?? []), marker]);
       }
     }
+    const diagnosticCodes = Array.from(new Set([
+      ...Object.values(rankingsResult.errors),
+      ...rankingsResult.diagnostics,
+      pricesResult.error,
+      instrumentsResult.error,
+      portfolioResult.error,
+      markerResult.error,
+      ...barsResult.errors,
+      analysisResult.error,
+      scanError,
+      ...bookAndWarnings.errors,
+    ].filter((value): value is string => Boolean(value))));
     return {
       workspace: {
         schemaVersion: SCALPING_WORKSPACE_SCHEMA_VERSION,
@@ -621,12 +962,27 @@ export class ScalpingService {
         instruments: selectedSymbols.map((symbol) => ({
           symbol,
           metadata: metadata.get(symbol),
-          bars: barsBySymbol.get(symbol) ?? [],
+          bars: (barsBySymbol.get(symbol) ?? []).slice(-this.config.workspaceChartBarLimit),
+          orderbook: bookAndWarnings.books.get(symbol),
+          orderbookStatus: bookAndWarnings.books.has(symbol)
+            ? {
+                status: "available",
+                source: marketCountry === "US" ? "kis_ws" : "kis_ws_or_toss_rest",
+                ...(marketCountry === "US" ? { depth: "top_of_book" } : {}),
+              }
+            : {
+                status: "unavailable",
+                code: marketCountry === "US" ? "kis_us_orderbook_unavailable" : "realtime_orderbook_unavailable",
+                reason: marketCountry === "US"
+                  ? "현재 세션의 신선한 KIS 미국 1호가가 없습니다. 데이마켓 호가는 제공되지 않으며 Toss 미국 호가를 대체 근거로 사용하지 않습니다."
+                  : "현재 사용할 수 있는 실시간 호가가 없습니다.",
+              },
           technical: analysisBySymbol.get(symbol) ?? {
-            status: "unavailable", reason: this.rust ? "insufficient_final_bars" : "rust_worker_unavailable",
+            status: "unavailable",
+            reason: analysisResult.error ?? (this.rust ? "insufficient_final_bars" : "rust_worker_unavailable"),
           },
           realtime: {
-            ...this.live.snapshot(symbol, marketCountry),
+            ...this.liveSnapshot(symbol, marketCountry),
             historicalOrderbook: { status: "unavailable", reason: "historical_orderbook_not_supplied" },
           },
           position: holdings.get(symbol) ?? { status: "unavailable", reason: "not_held_or_portfolio_unavailable" },
@@ -635,20 +991,16 @@ export class ScalpingService {
             status: "unavailable", reason: this.ai ? "prediction_not_generated" : "ai_worker_unavailable",
           },
         })),
-        quality: scan.quality,
+        quality: degradedWorkspaceQuality(scan.quality, diagnosticCodes),
         diagnostics: {
-          providerErrors: Array.from(new Set([
-            ...Object.values(rankingsResult.errors),
-            pricesResult.error,
-            instrumentsResult.error,
-            portfolioResult.error,
-            markerResult.error,
-            ...bookAndWarnings.errors,
-          ].filter((value): value is string => Boolean(value)))),
+          providerErrors: diagnosticCodes,
           analysisBatchInstrumentCount: universe.length,
           analysisBatchRequestCount: this.rust && analysis ? 1 : 0,
           browserIndicatorCalculation: false,
           tradingAmountUnit: marketCountry === "US" ? "USD" : "KRW",
+          ...(marketCountry === "US" ? {
+            orderbookPolicy: "fresh_kis_standard_feed_top_of_book_only; day_market_unavailable; no_toss_fallback",
+          } : {}),
         },
       },
     };
@@ -668,26 +1020,41 @@ export class ScalpingService {
     });
     const unavailable: Array<{ symbol: string; code: string }> = [];
     const series: AiForecastRequest["series"] = [];
+    const calendarByMarketDate = new Map<string, Promise<TossMarketCalendarDay | undefined>>();
+    const loadMarketCalendar = (marketCountry: MarketCountry, sessionDate: string) => {
+      const key = `${marketCountry}:${sessionDate}`;
+      const existing = calendarByMarketDate.get(key);
+      if (existing) return existing;
+      const pending = this.safe(
+        () => this.toss.getMarketCalendar(marketCountry, sessionDate),
+        "toss_market_calendar",
+      ).then(({ value }) => value);
+      calendarByMarketDate.set(key, pending);
+      return pending;
+    };
     for (const symbol of request.symbols) {
-      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry)
-        .slice(-this.config.forecastMaximumBars);
+      const session = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
+      const finalBars = session.bars.slice(-this.config.forecastMaximumBars);
       if (finalBars.length < this.config.forecastMinimumBars) {
         unavailable.push({ symbol, code: "insufficient_history" });
         continue;
       }
-      let regularMarket: NonNullable<TossMarketCalendarDay["regularMarket"]> | undefined;
+      let usSchedule: ConfirmedUsSessionSchedule | undefined;
       if (request.marketCountry === "US") {
-        const calendar = await this.safe(
-          () => this.toss.getMarketCalendar("US", finalBars.at(-1)!.sessionDate),
-          "toss_market_calendar",
-        );
-        regularMarket = calendar.value?.regularMarket ?? undefined;
-        if (!regularMarket) {
+        const calendar = await loadMarketCalendar("US", finalBars.at(-1)!.sessionDate);
+        usSchedule = confirmedUsSessionSchedule(calendar, finalBars.at(-1)!.sessionDate);
+        if (!usSchedule) {
           unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
           continue;
         }
       }
-      const future = this.liveFutureTimestamps(finalBars.at(-1)!, request.marketCountry, regularMarket);
+      const future = await this.liveFutureTimestamps(
+        finalBars.at(-1)!,
+        request.marketCountry,
+        usSchedule,
+        session.windows,
+        (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+      );
       if (!future) {
         unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
         continue;
@@ -744,16 +1111,11 @@ export class ScalpingService {
     const interval = intervalMinutes(parsed.interval);
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
     await Promise.all(symbols.map(async (symbol) => {
-      barsBySymbol.set(symbol, await this.repository.listBars({
-        marketCountry: parsed.marketCountry,
-        symbol,
-        intervalMinutes: interval,
-        includeForming: true,
-        limit: this.config.workspaceBarLimit,
-      }));
+      const loaded = await this.loadBarsForSymbol(symbol, interval, parsed.marketCountry);
+      barsBySymbol.set(symbol, loaded.bars);
     }));
     const revision = symbols.map((symbol) => {
-      const latest = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], parsed.marketCountry).at(-1);
+      const latest = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], parsed.marketCountry).bars.at(-1);
       return `${symbol}:${latest?.closeTime ?? "unavailable"}:${latest?.updatedAt ?? 0}`;
     }).join("|");
     const key = `${parsed.marketCountry}:${parsed.interval}:${parsed.preset}:${parsed.accountId ?? "default"}:${revision}`;
@@ -768,7 +1130,7 @@ export class ScalpingService {
       const books = new Map<string, NormalizedOrderbook>();
       const trades = new Map<string, NormalizedTrade[]>();
       for (const symbol of symbols) {
-        const snapshot = this.live.snapshot(symbol, parsed.marketCountry);
+        const snapshot = this.liveSnapshot(symbol, parsed.marketCountry);
         if (snapshot.orderbook) books.set(symbol, snapshot.orderbook);
         if (snapshot.trade) trades.set(symbol, [snapshot.trade]);
       }
@@ -818,29 +1180,87 @@ export class ScalpingService {
     if (!this.ai || !this.rust) throw new Error(!this.ai ? "AI worker is unavailable." : "Rust worker is unavailable.");
     const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
     const metadata = await this.instrumentMetadata(request.symbols);
-    const analysis = await this.computeAnalysis({
-      symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
-      holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "full_series", includeVolumeProfile: false,
-      marketCountry: request.marketCountry,
-    });
-    const series: AiEvaluateRequest["series"] = [];
     const baseOriginQuota = Math.floor(this.config.evaluationMaximumOrigins / request.symbols.length);
     const originRemainder = this.config.evaluationMaximumOrigins % request.symbols.length;
+    const originIndexesBySymbol = new Map<string, number[]>();
+    const signalSnapshotTimestamps = new Map<string, string[]>();
     for (const [symbolIndex, symbol] of request.symbols.entries()) {
-      const finalBars = this.configuredSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
-      const signals = signalByTimestamp(analysis, symbol);
-      const regimes = regimeByTimestamp(analysis, symbol);
-      const targetStops = targetStopsByTimestamp(analysis, symbol);
+      const session = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
+      const finalBars = session.bars;
       const candidateIndexes: number[] = [];
       for (let index = this.config.forecastMinimumBars - 1; index + 60 < finalBars.length; index += this.config.evaluationOriginStrideBars) {
         const window = finalBars.slice(index, index + 61);
         if (window.length === 61 && window.every((bar, offset) => (
           bar.sessionDate === window[0]!.sessionDate
-          && (offset === 0 || Date.parse(bar.closeTime) - Date.parse(window[offset - 1]!.closeTime) === MINUTE_MS)
+          && (offset === 0 || adjacentActiveMinuteBars(
+            window[offset - 1]!,
+            bar,
+            request.marketCountry,
+            session.windows,
+          ))
         ))) candidateIndexes.push(index);
       }
       const quota = baseOriginQuota + (symbolIndex < originRemainder ? 1 : 0);
       const indexes = quota > 0 ? candidateIndexes.slice(-quota) : [];
+      originIndexesBySymbol.set(symbol, indexes);
+      if (indexes.length) {
+        signalSnapshotTimestamps.set(
+          symbol,
+          indexes.map((index) => marketLocalTimestamp(finalBars[index]!.closeTime, request.marketCountry)),
+        );
+      }
+    }
+    const analysis = await this.computeAnalysis({
+      symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
+      holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "full_series", includeVolumeProfile: false,
+      marketCountry: request.marketCountry,
+      signalSnapshotTimestamps,
+    });
+    const technicalInstruments = new Map<string, UnknownRecord>();
+    const rawTechnicalInstruments = record(analysis)?.instruments;
+    if (Array.isArray(rawTechnicalInstruments)) {
+      for (const value of rawTechnicalInstruments) {
+        const instrument = record(value);
+        const key = string(instrument?.instrument_key);
+        if (instrument && key) technicalInstruments.set(key, instrument);
+      }
+    }
+    const excluded: Array<{
+      symbol: string;
+      status: "unavailable";
+      code: string;
+      reason: string;
+    }> = [];
+    const series: AiEvaluateRequest["series"] = [];
+    for (const symbol of request.symbols) {
+      const technicalInstrument = technicalInstruments.get(symbol);
+      const technicalAvailability = record(technicalInstrument?.availability);
+      const technicalSignals = record(technicalInstrument?.signals);
+      const technicalPoints = technicalSignals?.points;
+      const technicalSnapshots = technicalInstrument?.signal_snapshots;
+      const explicitUnavailable = string(technicalInstrument?.status) === "unavailable"
+        || string(technicalAvailability?.status) === "unavailable";
+      if (!technicalInstrument || explicitUnavailable || (
+        (!Array.isArray(technicalSnapshots) || !technicalSnapshots.length)
+        && (!Array.isArray(technicalPoints) || !technicalPoints.length)
+      )) {
+        excluded.push({
+          symbol,
+          status: "unavailable",
+          code: string(technicalInstrument?.reason) ?? "technical_analysis_unavailable",
+          reason: string(technicalAvailability?.reason) ?? "full_series_technical_signals_required",
+        });
+        continue;
+      }
+      const session = this.instrumentSessionBars(
+        barsBySymbol.get(symbol) ?? [],
+        request.marketCountry,
+      );
+      const finalBars = session.bars;
+      const signals = signalByTimestamp(analysis, symbol);
+      const regimes = regimeByTimestamp(analysis, symbol);
+      const targetStops = targetStopsByTimestamp(analysis, symbol);
+      const indexes = originIndexesBySymbol.get(symbol) ?? [];
       if (!indexes.length) continue;
       series.push({
         instrument_key: symbol,
@@ -849,13 +1269,23 @@ export class ScalpingService {
         origins: indexes.map((index) => ({
           origin: finalBars[index]!.closeTime,
           future_timestamps: finalBars.slice(index + 1, index + 61).map((bar) => bar.closeTime) as AiEvaluateRequest["series"][number]["origins"][number]["future_timestamps"],
-          technical_signal: signals.get(finalBars[index]!.closeTime) ?? 0,
-          regime: regimes.get(finalBars[index]!.closeTime) ?? null,
-          target_stop: targetStops.get(finalBars[index]!.closeTime) ?? null,
+          technical_signal: signals.get(timestampKey(finalBars[index]!.closeTime)!) ?? 0,
+          regime: regimes.get(timestampKey(finalBars[index]!.closeTime)!) ?? null,
+          target_stop: targetStops.get(timestampKey(finalBars[index]!.closeTime)!) ?? null,
         })),
       });
     }
-    if (!series.length) throw new Error("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
+    if (!series.length) {
+      if (excluded.length) return {
+        status: "unavailable" as const,
+        code: "technical_analysis_unavailable",
+        excluded,
+        retrospective: true as const,
+        walkForward: true as const,
+        randomSplit: false as const,
+      };
+      throw new Error("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
+    }
     const queued = await this.ai.evaluate({
       schema_version: SCALPING_AI_SCHEMA_VERSION,
       request_id: `evaluation:${randomUUID()}`,
@@ -871,7 +1301,13 @@ export class ScalpingService {
         slippage_bps_per_side: request.evaluation.slippageBpsPerSide,
       },
     }, ownerSubject, request.marketCountry);
-    return { ...queued, retrospective: true, walkForward: true, randomSplit: false };
+    return {
+      ...queued,
+      ...(excluded.length ? { excluded } : {}),
+      retrospective: true,
+      walkForward: true,
+      randomSplit: false,
+    };
   }
 
   private forecastSchema(
@@ -914,66 +1350,90 @@ export class ScalpingService {
   ): Promise<{
     rankings: NormalizedRanking[];
     errors: Partial<Record<"toss" | "kis", string>>;
+    diagnostics: string[];
   }> {
     const errors: Partial<Record<"toss" | "kis", string>> = {};
+    const diagnostics: string[] = [];
     const tossCriteria: Array<"trading_amount" | "volume" | "change_rate"> = criterion === "volatility"
       ? ["trading_amount", "volume", "change_rate"] : [criterion];
     const tossSettled = await Promise.allSettled(
       tossCriteria.map((value) => this.toss.getRankings(value, count, marketCountry)),
     );
     const rankings: NormalizedRanking[] = [];
-    for (const result of tossSettled) {
+    let tossRankingCount = 0;
+    tossSettled.forEach((result, index) => {
       if (result.status === "fulfilled") rankings.push(...result.value);
-      else errors.toss = "toss_ranking_unavailable";
+      else diagnostics.push(`toss_${tossCriteria[index]}_ranking_unavailable`);
+      if (result.status === "fulfilled") tossRankingCount += result.value.length;
+    });
+    if (diagnostics.some((code) => code.startsWith("toss_"))) {
+      errors.toss = tossRankingCount > 0 ? "toss_ranking_partial" : "toss_ranking_unavailable";
     }
     if (marketCountry === "US") {
       const exchanges: readonly KisUsExchangeCode[] = ["NAS", "NYS", "AMS"];
       const overseasRequests = exchanges.flatMap((exchange) => [
         ...(criterion === "volume" || criterion === "volatility"
-          ? [this.kis.getOverseasVolumeRanking({ exchange })] : []),
+          ? [{ code: `kis_${exchange.toLowerCase()}_volume_ranking`, task: this.kis.getOverseasVolumeRanking({ exchange }) }] : []),
         ...(criterion === "trading_amount" || criterion === "volatility"
-          ? [this.kis.getOverseasTradingAmountRanking({ exchange })] : []),
+          ? [{ code: `kis_${exchange.toLowerCase()}_trading_amount_ranking`, task: this.kis.getOverseasTradingAmountRanking({ exchange }) }] : []),
       ]);
-      const overseasSettled = await Promise.allSettled(overseasRequests);
+      const overseasSettled = await Promise.allSettled(overseasRequests.map(({ task }) => task));
       const kisRankings: NormalizedRanking[] = [];
-      let rejected = 0;
-      let partial = 0;
-      for (const result of overseasSettled) {
+      overseasSettled.forEach((result, index) => {
+        const code = overseasRequests[index]!.code;
         if (result.status === "fulfilled") {
-          kisRankings.push(...adaptKisOverseasRankings(result.value).items);
-          if (result.value.quality !== "available") partial += 1;
+          try {
+            kisRankings.push(...adaptKisOverseasRankings(result.value).items);
+            if (result.value.quality !== "available") diagnostics.push(`${code}_${result.value.quality}`);
+          } catch {
+            diagnostics.push(`${code}_invalid_response`);
+          }
         } else {
-          rejected += 1;
+          diagnostics.push(`${code}_unavailable`);
         }
-      }
+      });
       const globallyRanked = rerankUsKisRankings(kisRankings, criterion);
       rankings.push(...globallyRanked);
       const kisRankingCount = globallyRanked.length;
-      if (rejected > 0 || partial > 0) {
+      if (diagnostics.some((code) => code.startsWith("kis_"))) {
         errors.kis = kisRankingCount > 0 ? "kis_ranking_partial" : "kis_ranking_unavailable";
       }
-      return { rankings, errors };
+      return { rankings, errors, diagnostics };
     }
-    const [volumeResult, fluctuationResult] = await Promise.allSettled([
-      // Domestic ranking rejects the integrated quote code `UN` (OPSQ2001).
-      // Use the supported KRX universe here; unified KRX/NXT live quotes enrich
-      // the selected candidates after discovery.
-      this.kis.getVolumeRanking({ basisCode: "0", market: "J" }),
-      criterion === "volatility"
-        ? this.kis.getFluctuationRanking({ sortCode: "0", market: "J" })
-        : Promise.resolve(undefined),
+    // KIS rejects the integrated `UN` code for ranking (OPSQ2001). KRX and NXT
+    // expose disjoint venue accumulations, so fetch both and sum duplicate-symbol
+    // volume/amount exactly once per venue before cross-venue reranking.
+    const domesticRequests = ([
+      { venue: "KRX" as const, code: "kis_krx_volume_ranking", task: this.kis.getVolumeRanking({ basisCode: "0", market: "J" }) },
+      { venue: "NXT" as const, code: "kis_nxt_volume_ranking", task: this.kis.getVolumeRanking({ basisCode: "0", market: "NX" }) },
+      ...(criterion === "volatility" ? [
+        { venue: "KRX" as const, code: "kis_krx_fluctuation_ranking", task: this.kis.getFluctuationRanking({ sortCode: "0", market: "J" }) },
+      ] : []),
     ]);
-    if (volumeResult?.status === "fulfilled") {
-      rankings.push(...adaptKisVolumeRankings(volumeResult.value).items);
-    } else {
-      errors.kis = "kis_ranking_unavailable";
+    const domesticSettled = await Promise.allSettled(domesticRequests.map(({ task }) => task));
+    const kisRankings: DomesticKisRanking[] = [];
+    domesticSettled.forEach((result, index) => {
+      const request = domesticRequests[index]!;
+      if (result.status === "rejected") {
+        diagnostics.push(`${request.code}_unavailable`);
+        return;
+      }
+      try {
+        const adapted = request.code.includes("fluctuation")
+          ? adaptKisFluctuationRankings(result.value as Awaited<ReturnType<KisMarket["getFluctuationRanking"]>>)
+          : adaptKisVolumeRankings(result.value as Awaited<ReturnType<KisMarket["getVolumeRanking"]>>);
+        kisRankings.push(...adapted.items.map((ranking) => ({ venue: request.venue, ranking })));
+        if (result.value.quality !== "available") diagnostics.push(`${request.code}_${result.value.quality}`);
+      } catch {
+        diagnostics.push(`${request.code}_invalid_response`);
+      }
+    });
+    const globallyRanked = rerankDomesticKisRankings(kisRankings, criterion);
+    rankings.push(...globallyRanked);
+    if (diagnostics.some((code) => code.startsWith("kis_"))) {
+      errors.kis = globallyRanked.length > 0 ? "kis_ranking_partial" : "kis_ranking_unavailable";
     }
-    if (fluctuationResult.status === "fulfilled" && fluctuationResult.value) {
-        rankings.push(...adaptKisFluctuationRankings(fluctuationResult.value).items);
-    } else if (fluctuationResult.status === "rejected") {
-      errors.kis = "kis_ranking_unavailable";
-    }
-    return { rankings, errors };
+    return { rankings, errors, diagnostics };
   }
 
   private universe(
@@ -1006,14 +1466,19 @@ export class ScalpingService {
     const warningUnavailable = new Set<string>();
     const errors: string[] = [];
     await Promise.all(symbols.map(async (symbol) => {
-      const liveBook = this.live.snapshot(symbol, marketCountry).orderbook;
+      const liveBook = this.liveSnapshot(symbol, marketCountry).orderbook;
+      const orderbookRequest = liveBook
+        ? Promise.resolve(liveBook)
+        : marketCountry === "US"
+          ? Promise.reject(new Error("KIS US real-time top-of-book is unavailable for the current session."))
+          : this.toss.getOrderbook(symbol);
       const [book, warning, trade] = await Promise.allSettled([
-        liveBook ? Promise.resolve(liveBook) : this.toss.getOrderbook(symbol),
+        orderbookRequest,
         this.toss.getWarnings(symbol),
         this.toss.getTrades(symbol, this.config.tradeFetchCount),
       ]);
       if (book.status === "fulfilled") books.set(symbol, book.value);
-      else errors.push(`toss_orderbook_unavailable:${symbol}`);
+      else errors.push(`${marketCountry === "US" ? "kis_us_orderbook_unavailable" : "toss_orderbook_unavailable"}:${symbol}`);
       if (warning.status === "fulfilled") warnings.push(...warning.value);
       else {
         warningUnavailable.add(symbol);
@@ -1030,43 +1495,114 @@ export class ScalpingService {
     interval: ScalpingInterval,
     marketCountry: MarketCountry = "KR",
   ): Promise<Map<string, IntradayBarRecord[]>> {
-    const output = new Map<string, IntradayBarRecord[]>();
+    return (await this.loadBarsWithDiagnostics(symbols, interval, marketCountry)).barsBySymbol;
+  }
+
+  private historyBarLimit(marketCountry: MarketCountry): number {
+    return marketCountry === "US" ? this.config.usWorkspaceBarLimit : this.config.workspaceBarLimit;
+  }
+
+  private async loadBarsWithDiagnostics(
+    symbols: readonly string[],
+    interval: ScalpingInterval,
+    marketCountry: MarketCountry = "KR",
+  ): Promise<{ barsBySymbol: Map<string, IntradayBarRecord[]>; errors: string[] }> {
+    const barsBySymbol = new Map<string, IntradayBarRecord[]>();
+    const errors: string[] = [];
     await Promise.all(symbols.map(async (symbol) => {
-      let oneMinute = await this.repository.listBars({
-        marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit,
-      });
-      const latest = oneMinute.at(-1);
-      if (!latest || this.now() - Date.parse(latest.openTime) > this.config.barRefreshAfterMs) {
-        const normalized = await this.fetchMinuteHistory(symbol, oneMinute, marketCountry);
-        if (normalized.length) {
-          const sessions = new Map<string, IntradayBarRecord[]>();
-          for (const bar of normalized) {
-            sessions.set(bar.sessionDate, [...(sessions.get(bar.sessionDate) ?? []), bar]);
-          }
-          const aggregated = [
-            ...normalized,
-            ...([5, 15, 30, 60] as const).flatMap((minutes) => [...sessions.entries()].flatMap(
-              ([sessionDate, sessionBars]) => aggregateRecoveredBars(sessionBars, minutes, {
-                sessionStartAt: marketSessionAnchor(sessionDate, marketCountry),
-              }).map((bar) => ({
-                ...bar,
-                source: "toss_rest" as const,
-                quality: bar.quality === "recovered" ? "complete" as const : bar.quality,
-              })),
-            )),
-          ];
-          await this.repository.putBars(aggregated);
-          oneMinute = await this.repository.listBars({
-            marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: this.config.workspaceBarLimit,
-          });
-        }
+      try {
+        const loaded = await this.loadBarsForSymbol(symbol, interval, marketCountry);
+        barsBySymbol.set(symbol, loaded.bars);
+        errors.push(...loaded.errors);
+      } catch {
+        barsBySymbol.set(symbol, []);
+        errors.push(`intraday_bar_store_unavailable:${symbol}`);
       }
-      if (interval === 1) output.set(symbol, oneMinute);
-      else output.set(symbol, await this.repository.listBars({
-        marketCountry, symbol, intervalMinutes: interval, includeForming: true, limit: this.config.workspaceBarLimit,
-      }));
     }));
-    return output;
+    return { barsBySymbol, errors: Array.from(new Set(errors)).sort() };
+  }
+
+  private async loadBarsForSymbol(
+    symbol: string,
+    interval: ScalpingInterval,
+    marketCountry: MarketCountry,
+  ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
+    const errors: string[] = [];
+    const historyBarLimit = this.historyBarLimit(marketCountry);
+    const sessionWindows = marketSessionWindows(
+      marketCountry,
+      configuredKrSessionWindows(this.config),
+    );
+    let oneMinute = await this.repository.listBars({
+      marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: historyBarLimit,
+    });
+    const latest = oneMinute.at(-1);
+    if (!latest || this.now() - Date.parse(latest.openTime) > this.config.barRefreshAfterMs) {
+      const history = await this.fetchMinuteHistoryWithDiagnostics(symbol, oneMinute, marketCountry);
+      errors.push(...history.errors);
+      if (history.bars.length) {
+        const sessions = groupBarsBySession(history.bars);
+        const aggregated = [
+          ...history.bars,
+          ...([5, 15, 30, 60] as const).flatMap((minutes) => [...sessions.entries()].flatMap(
+            ([sessionDate, sessionBars]) => aggregateRecoveredBars(sessionBars, minutes, {
+              sessionStartAt: marketSessionAnchor(sessionDate, marketCountry),
+              sessionWindows,
+            }).map((bar) => ({
+              ...bar,
+              source: "toss_rest" as const,
+              quality: bar.quality === "recovered" ? "complete" as const : bar.quality,
+            })),
+          )),
+        ];
+        await this.repository.putBars(aggregated);
+        oneMinute = await this.repository.listBars({
+          marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: historyBarLimit,
+        });
+      }
+    }
+    const configuredOneMinute = oneMinute.filter((bar) => (
+      isCanonicalOneMinuteRecord(bar, marketCountry, sessionWindows)
+    ));
+    if (interval === 1) return { bars: configuredOneMinute, errors };
+    const canonicalOneMinute = configuredOneMinute;
+    const sessions = groupBarsBySession(canonicalOneMinute);
+    const canonical = [...sessions.entries()].flatMap(([sessionDate, sessionBars]) => (
+      aggregateRecoveredBars(sessionBars, interval, {
+        sessionStartAt: marketSessionAnchor(sessionDate, marketCountry),
+        sessionWindows,
+      })
+    )).sort((left, right) => left.openTime.localeCompare(right.openTime))
+      .slice(-historyBarLimit);
+    if (canonical.length) await this.repository.putBars(canonical);
+    const stored = await this.repository.listBars({
+      marketCountry, symbol, intervalMinutes: interval, includeForming: true, limit: historyBarLimit,
+    });
+    const canonicalStored = stored.filter((bar) => {
+      const window = sessionWindowForTrade(bar.openTime, marketCountry, sessionWindows, bar.sessionDate);
+      const scheduled = scheduledSessionIntervalClose(
+        bar.openTime,
+        bar.sessionDate,
+        interval,
+        marketCountry,
+        sessionWindows,
+      );
+      if (!window || !scheduled || bar.closeTime !== scheduled.closeTime) return false;
+      const openMinute = marketSessionEffectiveMinute(bar.openTime, bar.sessionDate, marketCountry);
+      const windowOpen = (window.localDateOffset ?? 0) * 24 * 60 + window.openMinute;
+      if (openMinute === undefined || (openMinute - windowOpen) % interval !== 0) return false;
+      const closeWindow = sessionWindowForBarClose(bar.closeTime, marketCountry, sessionWindows, bar.sessionDate);
+      return closeWindow === window
+        && (!scheduled.truncated || bar.quality === "partial");
+    });
+    const merged = new Map(canonicalStored.map((bar) => [bar.openTime, bar]));
+    for (const bar of canonical) merged.set(bar.openTime, bar);
+    return {
+      bars: [...merged.values()]
+        .sort((left, right) => left.openTime.localeCompare(right.openTime))
+        .slice(-historyBarLimit),
+      errors,
+    };
   }
 
   private async fetchMinuteHistory(
@@ -1074,30 +1610,96 @@ export class ScalpingService {
     existing: readonly IntradayBarRecord[],
     marketCountry: MarketCountry = "KR",
   ): Promise<IntradayBarRecord[]> {
+    return (await this.fetchMinuteHistoryWithDiagnostics(symbol, existing, marketCountry)).bars;
+  }
+
+  private minuteCoverageIsSufficient(
+    bars: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry,
+  ): boolean {
+    // Before the raw window reaches the target it cannot possibly contain the
+    // required number of canonical one-minute bars. Avoid repeatedly sorting
+    // and timezone-normalizing the growing history after every provider page.
+    const historyBarLimit = this.historyBarLimit(marketCountry);
+    if (bars.length < historyBarLimit) return false;
+    const sessionWindows = marketSessionWindows(
+      marketCountry,
+      configuredKrSessionWindows(this.config),
+    );
+    const canonical = [...new Map(bars.flatMap((bar) => {
+      if (bar.intervalMinutes !== 1) return [];
+      return isCanonicalOneMinuteRecord(bar, marketCountry, sessionWindows)
+        ? [[bar.openTime, bar] as const]
+        : [];
+    })).values()].sort((left, right) => left.openTime.localeCompare(right.openTime));
+    if (canonical.length < historyBarLimit) return false;
+    const sessions = groupBarsBySession(canonical);
+    for (const sessionBars of sessions.values()) {
+      for (let index = 1; index < sessionBars.length; index += 1) {
+        const previous = sessionBars[index - 1]!;
+        const current = sessionBars[index]!;
+        const previousWindow = sessionWindowForTrade(previous.openTime, marketCountry, sessionWindows, previous.sessionDate);
+        const currentWindow = sessionWindowForTrade(current.openTime, marketCountry, sessionWindows, current.sessionDate);
+        if (previousWindow !== undefined && previousWindow === currentWindow
+          && Date.parse(current.openTime) - Date.parse(previous.openTime) !== MINUTE_MS) return false;
+      }
+    }
+    return true;
+  }
+
+  private async fetchMinuteHistoryWithDiagnostics(
+    symbol: string,
+    existing: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry = "KR",
+  ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
+    const historyBarLimit = this.historyBarLimit(marketCountry);
+    const sessionWindows = marketSessionWindows(
+      marketCountry,
+      configuredKrSessionWindows(this.config),
+    );
+    // A full workspace already contains the long history needed by indicators.
+    // Its ordinary stale refresh only needs the provider's configured newest
+    // page: revisiting every old page makes permanent zero-trade minutes look
+    // like repairable holes on every request. Cold/partial workspaces retain the
+    // exhaustive cursor walk below so their initial backfill and gap repair are
+    // unchanged. The amount refreshed here is controlled by candlePageSize.
+    const isSeededWorkspace = existing.length >= historyBarLimit;
     const known = new Map(existing.map((bar) => [bar.openTime, bar]));
     const fetched = new Map<string, IntradayBarRecord>();
+    const seenProviderTimestamps = new Set<number>();
+    const errors: string[] = [];
     let before: string | undefined;
-    while (known.size < this.config.workspaceBarLimit || before === undefined) {
+    while (fetched.size < historyBarLimit) {
       const page = await this.safe(
         () => this.toss.getMinuteCandles(symbol, this.config.candlePageSize, before, marketCountry),
-        "toss_candles",
+        `toss_candles_unavailable:${symbol}`,
       );
+      if (page.error) errors.push(page.error);
       if (!page.value?.length) break;
-      let added = 0;
+      let providerTimestampsAdded = 0;
       for (const candle of page.value) {
+        const providerTimestamp = Date.parse(candle.timestamp);
+        if (!Number.isFinite(providerTimestamp)) continue;
+        if (!seenProviderTimestamps.has(providerTimestamp)) providerTimestampsAdded += 1;
+        seenProviderTimestamps.add(providerTimestamp);
         const normalized = storeRecord(candle, this.now(), marketCountry);
-        if (!known.has(normalized.openTime)) added += 1;
+        if (!isCanonicalOneMinuteRecord(normalized, marketCountry, sessionWindows)) continue;
         known.set(normalized.openTime, normalized);
         fetched.set(normalized.openTime, normalized);
       }
       const oldest = page.value[0]?.timestamp;
-      if (!oldest || page.value.length < this.config.candlePageSize || added === 0) break;
+      if (!oldest || providerTimestampsAdded === 0) break;
       before = new Date(Date.parse(oldest) - 1).toISOString();
-      if (known.size >= this.config.workspaceBarLimit) break;
+      if (isSeededWorkspace) break;
+      if (this.minuteCoverageIsSufficient([...known.values()], marketCountry)) break;
+      if (fetched.size >= historyBarLimit) break;
     }
-    return [...fetched.values()]
-      .sort((left, right) => left.openTime.localeCompare(right.openTime))
-      .slice(-this.config.workspaceBarLimit);
+    return {
+      bars: [...fetched.values()]
+        .sort((left, right) => left.openTime.localeCompare(right.openTime))
+        .slice(-historyBarLimit),
+      errors,
+    };
   }
 
   private async computeAnalysis(input: {
@@ -1112,10 +1714,64 @@ export class ScalpingService {
     marketCountry: MarketCountry;
     responseMode: "full_series" | "latest_summary";
     includeVolumeProfile: boolean;
+    signalSnapshotTimestamps?: ReadonlyMap<string, readonly string[]>;
   }): Promise<unknown> {
     if (!this.rust) return undefined;
-    const instruments = input.symbols.flatMap((symbol) => {
-      const bars = this.configuredSessionBars(input.barsBySymbol.get(symbol) ?? [], input.marketCountry);
+    const prepared = input.symbols.map((symbol) => ({
+      symbol,
+      session: this.instrumentSessionBars(input.barsBySymbol.get(symbol) ?? [], input.marketCountry),
+    }));
+    const usCalendarByDate = new Map<string, ConfirmedUsSessionSchedule | undefined>();
+    if (input.marketCountry === "US") {
+      const dates = Array.from(new Set(prepared.flatMap(({ session }) => {
+        return session.bars.map(({ sessionDate }) => sessionDate);
+      })));
+      await Promise.all(dates.map(async (sessionDate) => {
+        const calendar = await this.safe(
+          () => this.toss.getMarketCalendar("US", sessionDate),
+          "toss_market_calendar",
+        );
+        usCalendarByDate.set(
+          sessionDate,
+          confirmedUsSessionSchedule(calendar.value, sessionDate),
+        );
+      }));
+    }
+    const unavailableTechnical: UnknownRecord[] = [];
+    const instruments = prepared.flatMap(({ symbol, session }) => {
+      let bars = session.bars;
+      let sessionWindows = session.windows;
+      let sessionWindowsByDate = new Map<string, readonly MarketSessionWindow[]>();
+      if (input.marketCountry === "US" && bars.length) {
+        const latestSessionDate = bars.at(-1)!.sessionDate;
+        const confirmedSession = usCalendarByDate.get(latestSessionDate);
+        if (!confirmedSession) {
+          unavailableTechnical.push({
+            instrument_key: symbol,
+            symbol,
+            status: "unavailable",
+            reason: "us_market_calendar_unavailable_or_invalid",
+            availability: {
+              status: "unavailable",
+              reason: "confirmed_us_session_schedule_required",
+            },
+          });
+          return [];
+        }
+        sessionWindows = confirmedSession.windows;
+        sessionWindowsByDate = new Map([...usCalendarByDate].flatMap(([date, schedule]) => (
+          schedule ? [[date, schedule.windows] as const] : []
+        )));
+        bars = bars.filter((bar) => {
+          const confirmedWindows = sessionWindowsByDate.get(bar.sessionDate);
+          return confirmedWindows !== undefined && sessionWindowForBarClose(
+            bar.closeTime,
+            "US",
+            confirmedWindows,
+            bar.sessionDate,
+          ) !== undefined;
+        });
+      }
       if (bars.length < this.config.minimumAnalysisBars) return [];
       const last = bars.at(-1)!;
       const item = input.metadata.get(symbol);
@@ -1124,7 +1780,24 @@ export class ScalpingService {
       const buyVolume = trades.filter(({ side }) => side === "buy").reduce((sum, trade) => sum + trade.quantity, 0);
       const sellVolume = trades.filter(({ side }) => side === "sell").reduce((sum, trade) => sum + trade.quantity, 0);
       const holding = input.holdings.get(symbol);
-      const nextQuote = book && Date.parse(book.observedAt) > Date.parse(last.closeTime) ? book.observedAt : undefined;
+      const quoteWindows = sessionWindowsByDate.get(last.sessionDate) ?? sessionWindows;
+      const quoteInsideSelectedSession = !book || sessionWindowForTrade(
+        book.observedAt,
+        input.marketCountry,
+        quoteWindows,
+        last.sessionDate,
+      ) !== undefined;
+      const nextQuote = book && quoteInsideSelectedSession
+        && Date.parse(book.observedAt) > Date.parse(last.closeTime)
+        ? book.observedAt
+        : undefined;
+      const confirmed = this.confirmedSessionDates(
+        bars,
+        input.interval,
+        input.marketCountry,
+        sessionWindows,
+        sessionWindowsByDate,
+      );
       return [{
         key: symbol,
         symbol,
@@ -1132,7 +1805,7 @@ export class ScalpingService {
         currency: item?.currency ?? (input.marketCountry === "US" ? "USD" : "KRW"),
         instrument_type: instrumentType(item),
         bars: bars.map((bar) => ({
-          timestamp: bar.closeTime,
+          timestamp: marketLocalTimestamp(bar.closeTime, input.marketCountry),
           session_date: bar.sessionDate,
           open: bar.open,
           high: bar.high,
@@ -1142,9 +1815,27 @@ export class ScalpingService {
           ...(bar.turnover === undefined ? {} : { amount: bar.turnover }),
           complete: true,
         })),
-        session_start_confirmed_dates: this.confirmedSessionDates(bars, input.interval, input.marketCountry).started,
-        complete_session_dates: this.confirmedSessionDates(bars, input.interval, input.marketCountry).complete,
-        anchored_vwap_timestamp: bars.find((bar) => bar.sessionDate === last.sessionDate)?.closeTime,
+        session_start_confirmed_dates: confirmed.started,
+        complete_session_dates: confirmed.complete,
+        session_windows: sessionWindows.map((window) => ({
+          kind: window.kind,
+          open_minute: window.openMinute,
+          close_minute: window.closeMinute,
+          local_date_offset: window.localDateOffset ?? 0,
+        })),
+        session_window_overrides: [...sessionWindowsByDate].map(([session_date, windows]) => ({
+          session_date,
+          windows: windows.map((window) => ({
+            kind: window.kind,
+            open_minute: window.openMinute,
+            close_minute: window.closeMinute,
+            local_date_offset: window.localDateOffset ?? 0,
+          })),
+        })),
+        anchored_vwap_timestamp: marketLocalTimestamp(
+          bars.find((bar) => bar.sessionDate === last.sessionDate)?.closeTime ?? last.closeTime,
+          input.marketCountry,
+        ),
         ...(nextQuote ? { next_valid_quote_timestamp: nextQuote } : {}),
         ...(book ? {
           orderbook: {
@@ -1167,13 +1858,15 @@ export class ScalpingService {
         } : {}),
       }];
     });
-    if (!instruments.length) return undefined;
+    if (!instruments.length) {
+      return unavailableTechnical.length ? { instruments: unavailableTechnical } : undefined;
+    }
     const profileKeys = input.includeVolumeProfile
       ? instruments.slice(0, this.config.volumeProfileInstrumentLimit).map(({ key }) => key)
       : [];
     const output = await this.rust.compute<unknown>("scalping_analysis", {
       scalping_analysis: {
-        schema_version: "scalping-analysis-request/v1",
+        schema_version: "scalping-analysis-request/v3",
         response_mode: input.responseMode,
         adjustment_policy: "unadjusted",
         interval_minutes: input.interval,
@@ -1189,21 +1882,44 @@ export class ScalpingService {
           },
         } : {}),
         signal: { enabled: true, preset: input.preset },
+        output_projection: {
+          series_tail_points: 180,
+          signal_snapshots: [...(input.signalSnapshotTimestamps ?? new Map())]
+            .filter(([, timestamps]) => timestamps.length > 0)
+            .map(([instrument_key, timestamps]) => ({
+              instrument_key,
+              timestamps: [...timestamps],
+            })),
+        },
       },
     }, { includeArtifacts: false });
-    return output.result;
+    if (!unavailableTechnical.length) return output.result;
+    const result = record(output.result);
+    const resultInstruments = Array.isArray(result?.instruments) ? result.instruments : [];
+    return {
+      ...(result ?? {}),
+      instruments: [...resultInstruments, ...unavailableTechnical],
+    };
   }
 
   private withRequestedCandidates(
     scan: ScannerResult,
     requested: readonly string[],
+    visibleCount: number,
     prices: ReadonlyMap<string, NormalizedPrice>,
     marketCountry: MarketCountry,
     metadata: ReadonlyMap<string, InstrumentInfo>,
   ): ScannerCandidate[] {
-    const output = [...scan.candidates];
+    const scanned = new Map(
+      [...scan.candidates, ...scan.excluded].map((candidate) => [candidate.symbol, candidate]),
+    );
+    const output: ScannerCandidate[] = [];
     for (const symbol of requested) {
-      if (output.some((candidate) => candidate.symbol === symbol)) continue;
+      const existing = scanned.get(symbol);
+      if (existing) {
+        output.push(existing);
+        continue;
+      }
       const price = prices.get(symbol);
       const exchange = marketCountry === "US" ? normalizeUsExchange(metadata.get(symbol)?.market) : undefined;
       output.push({
@@ -1217,7 +1933,12 @@ export class ScalpingService {
         quality: quality(price ? "partial" : "source_unavailable", ["user_requested_symbol_not_in_ranking"], price ? [price.provider] : ["derived"]),
       });
     }
-    return output;
+    for (const candidate of scan.candidates) {
+      if (output.some(({ symbol }) => symbol === candidate.symbol)) continue;
+      output.push(candidate);
+      if (output.length >= visibleCount) break;
+    }
+    return output.slice(0, visibleCount);
   }
 
   private async instrumentMetadata(symbols: readonly string[]): Promise<Map<string, InstrumentInfo>> {
@@ -1242,39 +1963,82 @@ export class ScalpingService {
   private configuredSessionBars(
     bars: readonly IntradayBarRecord[],
     marketCountry: MarketCountry = "KR",
+    sessionWindows: readonly MarketSessionWindow[] = marketSessionWindows(
+      marketCountry,
+      configuredKrSessionWindows(this.config),
+    ),
   ): IntradayBarRecord[] {
-    const session = regularSessionMinutes(marketCountry, this.config);
     return bars.filter((bar) => {
       if (bar.state !== "final") return false;
       if (bar.quality === "partial" || bar.quality === "stale") return false;
-      const local = marketMinute(bar.closeTime, marketCountry);
-      return local.date === bar.sessionDate
-        && local.minute > session.open
-        && local.minute <= session.close;
+      return sessionWindowForBarClose(bar.closeTime, marketCountry, sessionWindows, bar.sessionDate) !== undefined;
     });
+  }
+
+  private evidenceBasedSessionWindows(
+    bars: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry,
+  ): readonly MarketSessionWindow[] {
+    const configured = marketSessionWindows(marketCountry, configuredKrSessionWindows(this.config));
+    if (marketCountry === "US") return configured;
+    const latest = [...bars].sort((left, right) => left.closeTime.localeCompare(right.closeTime)).at(-1);
+    const latestSessionBars = latest ? bars.filter((bar) => bar.sessionDate === latest.sessionDate) : [];
+    const observedKinds = new Set(latestSessionBars.flatMap((bar) => {
+      const window = sessionWindowForBarClose(bar.closeTime, marketCountry, configured, bar.sessionDate);
+      return window ? [window.kind] : [];
+    }));
+    if (observedKinds.has("pre_market")) return configured;
+    if (observedKinds.has("after_market")) {
+      return configured.filter(({ kind }) => kind === "regular_market" || kind === "after_market");
+    }
+    return configured.filter(({ kind }) => kind === "regular_market");
+  }
+
+  private instrumentSessionBars(
+    bars: readonly IntradayBarRecord[],
+    marketCountry: MarketCountry,
+  ): { bars: IntradayBarRecord[]; windows: readonly MarketSessionWindow[] } {
+    const candidates = this.configuredSessionBars(bars, marketCountry);
+    const windows = this.evidenceBasedSessionWindows(candidates, marketCountry);
+    return {
+      bars: this.configuredSessionBars(candidates, marketCountry, windows),
+      windows,
+    };
   }
 
   private confirmedSessionDates(
     bars: readonly IntradayBarRecord[],
     interval: ScalpingInterval,
     marketCountry: MarketCountry = "KR",
+    sessionWindows?: readonly MarketSessionWindow[],
+    sessionWindowsByDate: ReadonlyMap<string, readonly MarketSessionWindow[]> = new Map(),
   ): { started: string[]; complete: string[] } {
-    const session = regularSessionMinutes(marketCountry, this.config);
-    const sessions = new Map<string, IntradayBarRecord[]>();
-    for (const bar of bars) sessions.set(bar.sessionDate, [...(sessions.get(bar.sessionDate) ?? []), bar]);
+    const fallbackWindows = sessionWindows ?? this.evidenceBasedSessionWindows(bars, marketCountry);
+    if (!fallbackWindows.length) return { started: [], complete: [] };
+    const sessions = groupBarsBySession(bars);
     const started: string[] = [];
     const complete: string[] = [];
     for (const [date, sessionBars] of sessions) {
+      const windows = sessionWindowsByDate.get(date) ?? fallbackWindows;
+      const firstWindow = windows[0];
+      if (!firstWindow) continue;
       const sorted = [...sessionBars].sort((left, right) => left.closeTime.localeCompare(right.closeTime));
-      const first = marketMinute(sorted[0]!.closeTime, marketCountry);
-      const last = marketMinute(sorted.at(-1)!.closeTime, marketCountry);
-      if (first.date !== date || first.minute !== session.open + interval) continue;
+      const first = marketSessionEffectiveMinute(sorted[0]!.closeTime, date, marketCountry);
+      const firstExpected = (firstWindow.localDateOffset ?? 0) * 24 * 60 + firstWindow.openMinute + interval;
+      if (first !== firstExpected) continue;
       started.push(date);
-      const expectedCount = (session.close - session.open) / interval;
-      if (last.date === date && last.minute === session.close
-        && Number.isInteger(expectedCount) && sorted.length === expectedCount
+      const expectedMinutes = windows.flatMap((window) => {
+        const output: number[] = [];
+        const offset = (window.localDateOffset ?? 0) * 24 * 60;
+        for (let minute = window.openMinute + interval; minute <= window.closeMinute; minute += interval) {
+          output.push(offset + minute);
+        }
+        return output;
+      });
+      const hasPartialTail = windows.some((window) => (window.closeMinute - window.openMinute) % interval !== 0);
+      if (!hasPartialTail && sorted.length === expectedMinutes.length
         && sorted.every((bar, index) => (
-          marketMinute(bar.closeTime, marketCountry).minute === session.open + interval * (index + 1)
+          marketSessionEffectiveMinute(bar.closeTime, date, marketCountry) === expectedMinutes[index]
         ))) {
         complete.push(date);
       }
@@ -1282,26 +2046,80 @@ export class ScalpingService {
     return { started, complete };
   }
 
-  private liveFutureTimestamps(
+  private async liveFutureTimestamps(
     last: IntradayBarRecord,
     marketCountry: MarketCountry = "KR",
-    confirmedRegularMarket?: NonNullable<TossMarketCalendarDay["regularMarket"]>,
-  ): AiForecastRequest["series"][number]["future_timestamps"] | undefined {
-    const output = Array.from({ length: 60 }, (_, index) => new Date(Date.parse(last.closeTime) + (index + 1) * MINUTE_MS).toISOString());
-    if (Date.parse(output[0]!) <= this.now()) return undefined;
+    confirmedUsSchedule?: ConfirmedUsSessionSchedule,
+    sessionWindows?: readonly MarketSessionWindow[],
+    loadMarketCalendar?: (sessionDate: string) => Promise<TossMarketCalendarDay | undefined>,
+  ): Promise<AiForecastRequest["series"][number]["future_timestamps"] | undefined> {
     if (marketCountry === "US") {
-      if (!confirmedRegularMarket) return undefined;
+      if (!confirmedUsSchedule || !loadMarketCalendar) return undefined;
+      if (!sessionWindowForBarClose(
+        last.closeTime,
+        "US",
+        confirmedUsSchedule.windows,
+        last.sessionDate,
+      )) return undefined;
+      const output: string[] = [];
+      const appendSchedule = (schedule: ConfirmedUsSessionSchedule, after: number) => {
+        for (const period of schedule.periods) {
+          const start = Date.parse(period.startAt);
+          const end = Date.parse(period.endAt);
+          for (let timestamp = Math.max(start + MINUTE_MS, after + MINUTE_MS);
+            timestamp <= end && output.length < 60;
+            timestamp += MINUTE_MS) {
+            output.push(new Date(timestamp).toISOString());
+          }
+          if (output.length >= 60) break;
+        }
+      };
       const inputEnd = Date.parse(last.closeTime);
-      const sessionStart = Date.parse(confirmedRegularMarket.startAt);
-      const sessionEnd = Date.parse(confirmedRegularMarket.endAt);
-      if (inputEnd < sessionStart || Date.parse(output.at(-1)!) > sessionEnd) return undefined;
+      if (!Number.isFinite(inputEnd)) return undefined;
+      appendSchedule(confirmedUsSchedule, inputEnd);
+      for (let days = 1; output.length < 60 && days <= MARKET_CALENDAR_LOOKAHEAD_DAYS; days += 1) {
+        const sessionDate = calendarDateAfter(last.sessionDate, days);
+        if (!sessionDate) return undefined;
+        const schedule = confirmedUsSessionSchedule(await loadMarketCalendar(sessionDate), sessionDate);
+        if (!schedule) continue;
+        appendSchedule(schedule, inputEnd);
+      }
+      if (output.length !== 60 || Date.parse(output[0]!) <= this.now()) return undefined;
       return output as AiForecastRequest["series"][number]["future_timestamps"];
     }
-    const session = regularSessionMinutes(marketCountry, this.config);
+    const windows = sessionWindows ?? this.evidenceBasedSessionWindows([last], marketCountry);
     const local = marketMinute(last.closeTime, marketCountry);
-    const final = marketMinute(output.at(-1)!, marketCountry);
-    if (local.date !== last.sessionDate || local.date !== final.date || local.minute < session.open
-      || final.minute > session.close) return undefined;
+    const currentWindowIndex = windows.findIndex((window) => (
+      local.minute > window.openMinute && local.minute <= window.closeMinute
+    ));
+    if (local.date !== last.sessionDate || currentWindowIndex < 0) return undefined;
+    const output: string[] = [];
+    let windowIndex = currentWindowIndex;
+    let minute = local.minute;
+    while (output.length < 60 && windowIndex < windows.length) {
+      const window = windows[windowIndex]!;
+      if (minute < window.closeMinute) {
+        minute += 1;
+      } else {
+        windowIndex += 1;
+        const next = windows[windowIndex];
+        if (!next) break;
+        minute = next.openMinute + 1;
+      }
+      const deltaMinutes = minute - local.minute;
+      output.push(new Date(Date.parse(last.closeTime) + deltaMinutes * MINUTE_MS).toISOString());
+    }
+    if (output[0] && Date.parse(output[0]) <= this.now()) return undefined;
+    if (output.length < 60 && !loadMarketCalendar) return undefined;
+    for (let days = 1; output.length < 60 && days <= MARKET_CALENDAR_LOOKAHEAD_DAYS; days += 1) {
+      const sessionDate = calendarDateAfter(last.sessionDate, days);
+      if (!sessionDate) return undefined;
+      const confirmed = confirmedKrCalendarSession(await loadMarketCalendar!(sessionDate), sessionDate);
+      if (!confirmed) return undefined;
+      if (confirmed.status === "closed") continue;
+      output.push(...confirmed.minuteCloses.slice(0, 60 - output.length));
+    }
+    if (output.length !== 60 || Date.parse(output[0]!) <= this.now()) return undefined;
     return output as AiForecastRequest["series"][number]["future_timestamps"];
   }
 
@@ -1310,6 +2128,17 @@ export class ScalpingService {
       return { value: await task() };
     } catch {
       return { error: code };
+    }
+  }
+
+  private liveSnapshot(
+    symbol: string,
+    marketCountry: MarketCountry,
+  ): ReturnType<ScalpingLiveRuntime["snapshot"]> {
+    try {
+      return this.live.snapshot(symbol, marketCountry);
+    } catch {
+      return {};
     }
   }
 }

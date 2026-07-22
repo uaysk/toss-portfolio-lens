@@ -5,6 +5,7 @@ import type { ScalpingCandidate } from "@/lib/scalping-assistant";
 
 const candidate: ScalpingCandidate = {
   symbol: "005930",
+  venue: "INTEGRATED",
   name: "삼성전자",
   currency: "KRW",
   providerRanks: { toss: 1 },
@@ -20,6 +21,7 @@ describe("ScalpingVirtualizedCandidateCard", () => {
     const markup = renderToStaticMarkup(<ScalpingVirtualizedCandidateCard candidate={candidate} theme="dark" />);
     expect(markup).toContain('data-scalping-card-state="placeholder"');
     expect(markup).toContain("화면에 가까워지면 차트를 렌더링합니다.");
+    expect(markup).toContain("005930 · 통합(KRX·NXT)");
     expect(markup).not.toContain("data-scalping-price-chart");
   });
 });

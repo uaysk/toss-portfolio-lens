@@ -46,6 +46,17 @@ describe("scalping assistant request validation", () => {
     expect(validateScalpingRequest({ ...request, topCount: 51 })).toContain("표시 종목 수는 5~50의 정수여야 합니다.");
     expect(validateScalpingRequest({ ...request, topCount: 5.5 })).toContain("표시 종목 수는 5~50의 정수여야 합니다.");
   });
+
+  it("uses the server-provided top-count limits for counts and custom symbols", () => {
+    const limits = { minimumTopCount: 5, maximumTopCount: 20 };
+    expect(validateScalpingRequest({ ...request, topCount: 20 }, limits)).toEqual([]);
+    expect(validateScalpingRequest({ ...request, topCount: 21 }, limits))
+      .toContain("표시 종목 수는 5~20의 정수여야 합니다.");
+    expect(validateScalpingRequest({ ...request, symbols: Array.from({ length: 21 }, (_, index) => `S${index}`) }, limits))
+      .toContain("사용자 지정 종목 목록이 올바르지 않습니다.");
+    expect(validateScalpingRequest({ ...request, topCount: 5, symbols: ["A", "B", "C", "D", "E", "F"] }, limits))
+      .toContain("사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.");
+  });
 });
 
 describe("scalping assistant response normalization", () => {
@@ -64,7 +75,7 @@ describe("scalping assistant response normalization", () => {
   it("reads concrete nested status limits and configured provider states", () => {
     const status = normalizeScalpingStatus({
       enabled: true,
-      limits: { topCount: { minimum: 5, maximum: 50 } },
+      limits: { topCount: { minimum: 5, maximum: 20 }, maximumSubscriptions: 40 },
       providers: {
         toss: { configured: true },
         kis: { configured: true, websocket: { connection: "connected" } },
@@ -73,7 +84,7 @@ describe("scalping assistant response normalization", () => {
       capabilities: { autoOrder: false, mcp: false, historicalOrderbook: false },
       limitations: [],
     });
-    expect(status.limits).toMatchObject({ minimumTopCount: 5, maximumTopCount: 50 });
+    expect(status.limits).toMatchObject({ minimumTopCount: 5, maximumTopCount: 20, maximumSubscriptions: 40 });
     expect(status.providers).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "toss", status: "configured" }),
       expect.objectContaining({ name: "kis", status: "connected" }),
@@ -141,6 +152,7 @@ describe("scalping assistant response normalization", () => {
 
   it("normalizes the concrete server bars, Rust technical result, realtime snapshot, and stored prediction", () => {
     const closeTime = "2026-07-21T00:01:00.000Z";
+    const rustCloseTime = "2026-07-21T09:01:00.000+09:00";
     const workspace = normalizeScalpingWorkspace({ workspace: {
       generatedAt: "2026-07-21T00:02:00.000Z",
       criterion: "trading_amount", requestedTopCount: 5, interval: "1m", layoutColumns: 2, preset: "trend",
@@ -157,8 +169,8 @@ describe("scalping assistant response normalization", () => {
         }],
         technical: {
           intraday: {
-            session_vwap: { points: [{ timestamp: closeTime, values: { session_vwap: 100.5 } }] },
-            anchored_vwap: { points: [{ timestamp: closeTime, values: { anchored_vwap: 100.25 } }] },
+            session_vwap: { points: [{ timestamp: rustCloseTime, values: { session_vwap: 100.5 } }] },
+            anchored_vwap: { points: [{ timestamp: rustCloseTime, values: { anchored_vwap: 100.25 } }] },
             opening_range_5: { latest: { timestamp: closeTime, values: { high: 102, low: 99 } } },
             opening_range_15: { latest: { timestamp: closeTime, values: { high: 103, low: 98 } } },
             opening_range_30: { latest: { timestamp: closeTime, values: { high: 104, low: 97 } } },
@@ -170,7 +182,7 @@ describe("scalping assistant response normalization", () => {
           },
           indicators: [{
             indicator_id: "trend-ema-fast", kind: "ema", availability: { status: "available" },
-            points: [{ timestamp: closeTime, values: { value: 100.4 } }],
+            points: [{ timestamp: rustCloseTime, values: { value: 100.4 } }],
           }],
           signals: { latest: {
             status: "entry_candidate", calculation_timestamp: closeTime, signal_timestamp: closeTime,
@@ -261,6 +273,36 @@ describe("scalping assistant response normalization", () => {
     const merged = mergeScalpingStreamEvent(initial, parsed!);
     expect(merged.candidates[0]?.bars).toEqual([expect.objectContaining({ intervalMinutes: 1, close: 101, status: "forming" })]);
     expect(merged.candidates[0]?.price).toBe(101);
+  });
+
+  it("preserves canonical KIS venues from snapshots and stream updates", () => {
+    const initial = normalizeScalpingWorkspace({ workspace: {
+      marketCountry: "KR",
+      candidates: [{ symbol: "005930", currency: "KRW", quality: { status: "available", sources: ["kis"] } }],
+      instruments: [{
+        symbol: "005930",
+        realtime: {
+          trade: { market: "NXT", price: 101, executedAt: "2026-07-21T16:01:00+09:00" },
+          orderbook: {
+            market: "NXT", observedAt: "2026-07-21T16:01:00+09:00",
+            asks: [{ price: 102, quantity: 3 }], bids: [{ price: 101, quantity: 4 }],
+          },
+        },
+      }],
+    } }, request);
+    expect(initial.candidates[0]).toMatchObject({ venue: "NXT", orderbook: { venue: "NXT" } });
+
+    const integrated = parseScalpingStreamEvent({
+      type: "trade", symbol: "005930", marketCountry: "KR",
+      data: { market: "INTEGRATED", price: 103, executionStrength: 120 },
+    });
+    expect(mergeScalpingStreamEvent(initial, integrated!).candidates[0]).toMatchObject({
+      venue: "INTEGRATED", price: 103, executionStrength: 120,
+    });
+    const crossMarket = parseScalpingStreamEvent({
+      type: "trade", symbol: "005930", marketCountry: "US", data: { market: "US", price: 999 },
+    });
+    expect(mergeScalpingStreamEvent(initial, crossMarket!)).toBe(initial);
   });
 
   it("keeps realtime quality monotone-worst and applies per-symbol provider diagnostics", () => {

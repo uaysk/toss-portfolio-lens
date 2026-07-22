@@ -91,7 +91,7 @@ describe("KIS common contract adapters", () => {
     const trade = adaptKisExecution({
       type: "execution",
       trId: "H0STCNT0",
-      market: "KRX",
+      market: "NXT",
       marketCountry: "KR",
       symbol: "005930",
       eventId: "kis:event:1",
@@ -109,6 +109,7 @@ describe("KIS common contract adapters", () => {
       tradingHalted: false,
     });
     expect(trade).toMatchObject({
+      market: "NXT",
       eventId: "kis:event:1",
       eventIdSource: "provider",
       tradingAmount: 300,
@@ -121,7 +122,7 @@ describe("KIS common contract adapters", () => {
     const book = adaptKisOrderbook({
       type: "orderbook",
       trId: "H0STASP0",
-      market: "KRX",
+      market: "INTEGRATED",
       marketCountry: "KR",
       symbol: "005930",
       providerTimestamp,
@@ -135,6 +136,7 @@ describe("KIS common contract adapters", () => {
       totalAskQuantity: 3,
       totalBidQuantity: 7,
     });
+    expect(book.market).toBe("INTEGRATED");
     expect(book.asks.map(({ price }) => price)).toEqual([101, 102]);
     expect(book.bids.map(({ price }) => price)).toEqual([100, 99]);
   });

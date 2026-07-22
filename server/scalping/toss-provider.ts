@@ -27,6 +27,10 @@ import {
   type ProviderHeaders,
   type RetryConfig,
 } from "./rate-limiter.js";
+import {
+  DEFAULT_US_EXTENDED_SESSION_WINDOWS,
+  marketTradingSessionDate,
+} from "./market-session.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -45,10 +49,15 @@ export type TossRawMarketClient = {
 export type TossRateLimitGroup = "ranking" | "market_data" | "chart" | "stock" | "market_info";
 export type TossRankingCriterion = Extract<ScannerCriterion, "trading_amount" | "volume"> | "change_rate";
 
+export type TossMarketSessionPeriod = { startAt: string; endAt: string };
+
 export type TossMarketCalendarDay = {
   marketCountry: MarketCountry;
   sessionDate: string;
-  regularMarket: { startAt: string; endAt: string } | null;
+  dayMarket: TossMarketSessionPeriod | null;
+  preMarket: TossMarketSessionPeriod | null;
+  regularMarket: TossMarketSessionPeriod | null;
+  afterMarket: TossMarketSessionPeriod | null;
 };
 
 export type TossProviderConfig = {
@@ -165,6 +174,42 @@ function sessionDateAt(value: string, marketCountry: MarketCountry): string {
   return `${fields.year}-${fields.month}-${fields.day}`;
 }
 
+function calendarDayOffset(value: string, sessionDate: string, marketCountry: MarketCountry): number {
+  const localDate = sessionDateAt(value, marketCountry);
+  const localEpoch = Date.parse(`${localDate}T00:00:00.000Z`);
+  const sessionEpoch = Date.parse(`${sessionDate}T00:00:00.000Z`);
+  if (!Number.isFinite(localEpoch) || !Number.isFinite(sessionEpoch)) {
+    throw new TossProviderContractError("market-calendar", "session date offset could not be resolved");
+  }
+  return Math.round((localEpoch - sessionEpoch) / 86_400_000);
+}
+
+function calendarPeriod(
+  container: UnknownRecord,
+  field: "dayMarket" | "preMarket" | "regularMarket" | "afterMarket",
+  fieldPrefix: string,
+  marketCountry: MarketCountry,
+  sessionDate: string,
+  expectedStartOffset: -1 | 0,
+  expectedEndOffset: 0,
+): TossMarketSessionPeriod | null {
+  const value = container[field];
+  if (value === null) return null;
+  if (!isRecord(value)) {
+    throw new TossProviderContractError("market-calendar", `${fieldPrefix}.${field} must be an object or null`);
+  }
+  const startAt = timestamp(value.startTime, "market-calendar", `${fieldPrefix}.${field}.startTime`);
+  const endAt = timestamp(value.endTime, "market-calendar", `${fieldPrefix}.${field}.endTime`);
+  if (Date.parse(startAt) >= Date.parse(endAt)) {
+    throw new TossProviderContractError("market-calendar", `${field} start must precede end`);
+  }
+  if (calendarDayOffset(startAt, sessionDate, marketCountry) !== expectedStartOffset
+    || calendarDayOffset(endAt, sessionDate, marketCountry) !== expectedEndOffset) {
+    throw new TossProviderContractError("market-calendar", `${field} timestamps do not match today.date`);
+  }
+  return { startAt, endAt };
+}
+
 function parseWithContract<T>(
   feature: string,
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { issues: { path: PropertyKey[]; message: string }[] } } },
@@ -182,6 +227,70 @@ function currency(record: UnknownRecord, marketCountry: MarketCountry, feature: 
     throw new TossProviderContractError(feature, `currency ${value} does not match market ${marketCountry}`);
   }
   return value;
+}
+
+function normalizeTossMarketCalendarDay(
+  payload: unknown,
+  marketCountry: MarketCountry,
+  requestedDate: string,
+): TossMarketCalendarDay {
+  const feature = "market-calendar";
+  const result = resultRecord(payload, feature);
+  const today = result.today;
+  if (!isRecord(today)) throw new TossProviderContractError(feature, "today must be an object");
+  const providerDate = requiredText(today, ["date"], feature, "today.date");
+  if (providerDate !== requestedDate || !sessionDateSchema.safeParse(providerDate).success) {
+    throw new TossProviderContractError(feature, "today.date does not match the requested date");
+  }
+
+  // Toss exposes the KR integrated KRX/NXT day below `integrated`, while the
+  // US calendar exposes four nullable top-level sessions. Do not fall back
+  // between these shapes: accepting the other country's shape could turn a
+  // malformed response into an apparently confirmed trading session.
+  const container = marketCountry === "KR" ? today.integrated : today;
+  if (container === null) {
+    if (marketCountry !== "KR") {
+      throw new TossProviderContractError(feature, "today must contain US market-session states");
+    }
+    return {
+      marketCountry, sessionDate: providerDate,
+      dayMarket: null, preMarket: null, regularMarket: null, afterMarket: null,
+    };
+  }
+  if (!isRecord(container)) {
+    throw new TossProviderContractError(
+      feature,
+      marketCountry === "KR" ? "today.integrated must be an object or null" : "today must be an object",
+    );
+  }
+
+  if (marketCountry === "KR") {
+    if (!isRecord(container.regularMarket)) {
+      throw new TossProviderContractError(feature, "today.integrated.regularMarket must be an object");
+    }
+    return {
+      marketCountry,
+      sessionDate: providerDate,
+      dayMarket: null,
+      preMarket: null,
+      regularMarket: calendarPeriod(container, "regularMarket", "today.integrated", "KR", providerDate, 0, 0),
+      afterMarket: null,
+    };
+  }
+
+  const dayMarket = calendarPeriod(container, "dayMarket", "today", "US", providerDate, -1, 0);
+  const preMarket = calendarPeriod(container, "preMarket", "today", "US", providerDate, 0, 0);
+  const regularMarket = calendarPeriod(container, "regularMarket", "today", "US", providerDate, 0, 0);
+  const afterMarket = calendarPeriod(container, "afterMarket", "today", "US", providerDate, 0, 0);
+  const ordered = [dayMarket, preMarket, regularMarket, afterMarket].filter(
+    (period): period is TossMarketSessionPeriod => period !== null,
+  );
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (Date.parse(ordered[index]!.startAt) < Date.parse(ordered[index - 1]!.endAt)) {
+      throw new TossProviderContractError(feature, "US market sessions must be ordered and non-overlapping");
+    }
+  }
+  return { marketCountry, sessionDate: providerDate, dayMarket, preMarket, regularMarket, afterMarket };
 }
 
 export function normalizeTossRankings(
@@ -258,11 +367,16 @@ export function normalizeTossMinuteCandles(
   const feature = "candles";
   return rows(payload, feature, ["candles", "items"]).map((row) => {
     const observedAt = timestamp(pick(row, ["timestamp", "dateTime", "time"]), feature, "timestamp");
+    const suppliedSessionDate = text(row, ["date", "businessDate", "tradeDate"]);
+    const normalizedSessionDate = marketCountry === "US"
+      ? marketTradingSessionDate(observedAt, "US", DEFAULT_US_EXTENDED_SESSION_WINDOWS)
+        ?? suppliedSessionDate ?? sessionDateAt(observedAt, marketCountry)
+      : suppliedSessionDate ?? sessionDateAt(observedAt, marketCountry);
     return parseWithContract(feature, NormalizedMinuteCandleSchema, {
       provider: "toss",
       symbol,
       timestamp: observedAt,
-      sessionDate: text(row, ["date", "businessDate", "tradeDate"]) ?? sessionDateAt(observedAt, marketCountry),
+      sessionDate: normalizedSessionDate,
       interval: "1m",
       status: "unknown",
       open: requiredNumber(row, ["open", "openPrice", "openingPrice"], feature, "open"),
@@ -520,26 +634,7 @@ export class TossScalpingProvider {
       country: marketCountry,
       date: parsedDate.data,
     }, "market_info", this.config.cacheTtlMs.calendar);
-    const feature = "market-calendar";
-    const result = resultRecord(response.data, feature);
-    const today = result.today;
-    if (!isRecord(today)) throw new TossProviderContractError(feature, "today must be an object");
-    const providerDate = requiredText(today, ["date"], feature, "today.date");
-    if (providerDate !== parsedDate.data || !sessionDateSchema.safeParse(providerDate).success) {
-      throw new TossProviderContractError(feature, "today.date does not match the requested date");
-    }
-    if (today.regularMarket === null) {
-      return { marketCountry, sessionDate: providerDate, regularMarket: null };
-    }
-    if (!isRecord(today.regularMarket)) {
-      throw new TossProviderContractError(feature, "today.regularMarket must be an object or null");
-    }
-    const startAt = timestamp(today.regularMarket.startTime, feature, "today.regularMarket.startTime");
-    const endAt = timestamp(today.regularMarket.endTime, feature, "today.regularMarket.endTime");
-    if (Date.parse(startAt) >= Date.parse(endAt)) {
-      throw new TossProviderContractError(feature, "regular market start must precede end");
-    }
-    return { marketCountry, sessionDate: providerDate, regularMarket: { startAt, endAt } };
+    return normalizeTossMarketCalendarDay(response.data, marketCountry, parsedDate.data);
   }
 
   rateLimitSnapshot(group: TossRateLimitGroup) {

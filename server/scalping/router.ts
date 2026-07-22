@@ -22,6 +22,7 @@ export type ScalpingRouterConfig = {
   maximumSymbols: number;
   heartbeatMs: number;
   analysisDebounceMs: number;
+  backpressureEventLimit: number;
 };
 
 export type ScalpingRouterDependencies = {
@@ -115,6 +116,7 @@ function writeSse(response: Response, event: ScalpingLiveEvent): boolean {
     emittedAt: event.emittedAt,
     type: event.type,
     symbol: event.symbol,
+    marketCountry: event.marketCountry,
     data: event.payload,
   })}\n\n`);
 }
@@ -225,8 +227,9 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     response.flushHeaders();
 
     let ended = false;
-    let lastSent = lastEventId(request) ?? 0;
-    let pending: ScalpingLiveEvent | undefined;
+    const resumeAfter = lastEventId(request);
+    let lastSent = resumeAfter ?? 0;
+    const pendingEvents: ScalpingLiveEvent[] = [];
     let pendingAnalysis: unknown;
     let blocked = false;
     let analysisTimer: ReturnType<typeof setTimeout> | undefined;
@@ -272,10 +275,30 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
       analysisTimer.unref();
     };
 
+    let removeListener: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let release: (() => void) | undefined;
+    const cleanup = () => {
+      if (ended) return;
+      ended = true;
+      if (heartbeat) clearInterval(heartbeat);
+      if (analysisTimer) clearTimeout(analysisTimer);
+      response.off("drain", drain);
+      removeListener?.();
+      release?.();
+    };
     const writeLiveEvent = (event: ScalpingLiveEvent) => {
       if (ended || event.id <= lastSent) return;
       if (blocked) {
-        pending = event;
+        // The same configured limit bounds both the runtime replay ring and this
+        // connection-local FIFO. Close before it can outrun the replay ring so
+        // EventSource can resume from the last event that was actually written.
+        if (pendingEvents.length >= Math.max(1, dependencies.config.backpressureEventLimit - 1)) {
+          response.end();
+          cleanup();
+          return;
+        }
+        pendingEvents.push(event);
         return;
       }
       blocked = !writeSse(response, event);
@@ -291,11 +314,15 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
       if (interval === requestedInterval && isFinalBar(event)) scheduleAnalysis();
       writeLiveEvent(event);
     };
+    let replaying = resumeAfter !== undefined;
+    const queuedDuringReplay: ScalpingLiveEvent[] = [];
+    const sendLive = (event: ScalpingLiveEvent) => {
+      if (replaying) queuedDuringReplay.push(event);
+      else send(event);
+    };
     const drain = () => {
       blocked = false;
-      const event = pending;
-      pending = undefined;
-      if (event) writeLiveEvent(event);
+      while (!blocked && pendingEvents.length) writeLiveEvent(pendingEvents.shift()!);
       if (!blocked && pendingAnalysis !== undefined) {
         const analysis = pendingAnalysis;
         pendingAnalysis = undefined;
@@ -303,24 +330,20 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
       }
     };
     response.on("drain", drain);
-    const removeListener = dependencies.live.onEvent(send);
-    for (const event of dependencies.live.eventsAfter(lastSent)) send(event);
-    const heartbeat = setInterval(() => {
+    request.on("close", cleanup);
+    response.on("close", cleanup);
+    removeListener = dependencies.live.onEvent(sendLive);
+    if (resumeAfter !== undefined) {
+      for (const event of dependencies.live.eventsAfter(resumeAfter).sort((left, right) => left.id - right.id)) send(event);
+      replaying = false;
+      for (const event of queuedDuringReplay.sort((left, right) => left.id - right.id)) send(event);
+      queuedDuringReplay.length = 0;
+    }
+    if (ended) return;
+    heartbeat = setInterval(() => {
       if (!ended && !blocked) blocked = !response.write(`: heartbeat ${Date.now()}\n\n`);
     }, dependencies.config.heartbeatMs);
     heartbeat.unref();
-    let release: (() => void) | undefined;
-    const cleanup = () => {
-      if (ended) return;
-      ended = true;
-      clearInterval(heartbeat);
-      if (analysisTimer) clearTimeout(analysisTimer);
-      response.off("drain", drain);
-      removeListener();
-      release?.();
-    };
-    request.on("close", cleanup);
-    response.on("close", cleanup);
     try {
       release = await dependencies.live.retain(symbols, analysisOptions.marketCountry, exchanges);
       if (ended) release();

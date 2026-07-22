@@ -83,6 +83,7 @@ import { ScalpingScanner } from "./scalping/scanner-service.js";
 import { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
 import { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
+import { krIntegratedSessionWindows } from "./scalping/market-session.js";
 import {
   createDashboardAnalysisExecutor,
   dashboardAnalysisError,
@@ -221,6 +222,15 @@ if (config.scalping.enabled && scalpingRepository) {
       watermarkAdvanceMs: config.scalping.barWatermarkAdvanceMs,
       recoveryMaximumRequests: config.scalping.recoveryMaximumRequests,
       recoveryBarLimit: config.scalping.recoveryBarLimit,
+      snapshotStaleAfterMs: config.scalping.scanner.staleAfterMs,
+      krSessionWindows: krIntegratedSessionWindows({
+        preMarketOpenMinuteKst: config.scalping.service.preMarketOpenMinuteKst,
+        preMarketCloseMinuteKst: config.scalping.service.preMarketCloseMinuteKst,
+        regularMarketOpenMinuteKst: config.scalping.service.sessionOpenMinuteKst,
+        regularMarketCloseMinuteKst: config.scalping.service.sessionCloseMinuteKst,
+        afterMarketOpenMinuteKst: config.scalping.service.afterMarketOpenMinuteKst,
+        afterMarketCloseMinuteKst: config.scalping.service.afterMarketCloseMinuteKst,
+      }),
     },
   );
   aiComputeClient = new AiComputeClient({
@@ -393,6 +403,7 @@ app.use("/api/portfolio/scalping", createScalpingRouter({
     maximumSymbols: config.scalping.maximumTopCount,
     heartbeatMs: config.scalping.enabled ? config.scalping.sseHeartbeatMs : 15_000,
     analysisDebounceMs: config.scalping.enabled ? config.scalping.realtimeAnalysisDebounceMs : 250,
+    backpressureEventLimit: config.scalping.enabled ? config.scalping.sseReplayEvents : 100,
   },
 }));
 

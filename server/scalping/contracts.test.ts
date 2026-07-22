@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   NormalizedMinuteCandleSchema,
   NormalizedOrderbookSchema,
+  NormalizedTradeSchema,
   createScannerRequestSchema,
   isoTimestampSchema,
 } from "./contracts.js";
@@ -37,13 +38,30 @@ describe("scalping contracts", () => {
     const base = {
       provider: "kis",
       symbol: "005930",
+      market: "INTEGRATED",
       observedAt: "2026-07-21T09:00:00+09:00",
       asks: [{ price: 101, quantity: 10 }, { price: 102, quantity: 20 }],
       bids: [{ price: 100, quantity: 30 }, { price: 99, quantity: 40 }],
     } as const;
-    expect(NormalizedOrderbookSchema.parse(base).asks).toHaveLength(2);
+    expect(NormalizedOrderbookSchema.parse(base)).toMatchObject({ market: "INTEGRATED", asks: expect.any(Array) });
     expect(() => NormalizedOrderbookSchema.parse({ ...base, asks: [...base.asks].reverse() })).toThrow(/asks must be ordered/);
     expect(() => NormalizedOrderbookSchema.parse({ ...base, bids: [...base.bids].reverse() })).toThrow(/bids must be ordered/);
+  });
+
+  it("preserves only canonical KIS market venues on realtime contracts", () => {
+    const trade = {
+      provider: "kis",
+      symbol: "005930",
+      market: "NXT",
+      eventId: "kis:nxt:1",
+      eventIdSource: "provider",
+      executedAt: "2026-07-21T16:01:00+09:00",
+      price: 101,
+      quantity: 2,
+      side: "unknown",
+    } as const;
+    expect(NormalizedTradeSchema.parse(trade).market).toBe("NXT");
+    expect(() => NormalizedTradeSchema.parse({ ...trade, market: "AFTERMARKET" })).toThrow();
   });
 
   it("uses configured scanner count limits", () => {

@@ -8,6 +8,9 @@ export type MarketProvider = z.infer<typeof MarketProviderSchema>;
 export const MarketCountrySchema = z.enum(["KR", "US"]);
 export type MarketCountry = z.infer<typeof MarketCountrySchema>;
 
+export const MarketVenueSchema = z.enum(["KRX", "NXT", "INTEGRATED", "US"]);
+export type MarketVenue = z.infer<typeof MarketVenueSchema>;
+
 export const UsExchangeSchema = z.enum(["NAS", "NYS", "AMS"]);
 export type UsExchange = z.infer<typeof UsExchangeSchema>;
 
@@ -117,6 +120,7 @@ export type NormalizedMinuteCandle = z.infer<typeof NormalizedMinuteCandleSchema
 export const NormalizedTradeSchema = z.object({
   provider: z.enum(["toss", "kis"]),
   symbol: marketSymbolSchema,
+  market: MarketVenueSchema.optional(),
   eventId: z.string().trim().min(1).max(240),
   eventIdSource: z.enum(["provider", "composite"]),
   executedAt: isoTimestampSchema,
@@ -138,6 +142,7 @@ export type OrderbookLevel = z.infer<typeof OrderbookLevelSchema>;
 export const NormalizedOrderbookSchema = z.object({
   provider: z.enum(["toss", "kis"]),
   symbol: marketSymbolSchema,
+  market: MarketVenueSchema.optional(),
   observedAt: isoTimestampSchema,
   depth: z.enum(["top_of_book", "ten_level"]).optional(),
   asks: z.array(OrderbookLevelSchema).min(1),

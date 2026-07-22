@@ -128,6 +128,7 @@ export function adaptKisExecution(event: KisExecutionEvent): NormalizedTrade {
   return NormalizedTradeSchema.parse({
     provider: "kis",
     symbol: event.symbol,
+    market: event.market,
     eventId: event.eventId,
     eventIdSource: "provider",
     executedAt: event.providerTimestamp,
@@ -144,6 +145,7 @@ export function adaptKisOrderbook(event: KisOrderbookEvent): NormalizedOrderbook
   return NormalizedOrderbookSchema.parse({
     provider: "kis",
     symbol: event.symbol,
+    market: event.market,
     observedAt: event.providerTimestamp,
     depth: event.depth,
     asks: event.asks.map(({ price, quantity }) => ({ price, quantity })).sort((left, right) => left.price - right.price),

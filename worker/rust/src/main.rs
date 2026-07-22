@@ -687,6 +687,11 @@ mod tests {
                         "instrument_type": "stock",
                         "session_start_confirmed_dates": ["2026-07-21"],
                         "complete_session_dates": [],
+                        "session_windows": [
+                            { "kind": "pre_market", "open_minute": 480, "close_minute": 530 },
+                            { "kind": "regular_market", "open_minute": 540, "close_minute": 930 },
+                            { "kind": "after_market", "open_minute": 940, "close_minute": 1200 }
+                        ],
                         "bars": [
                             {
                                 "timestamp": "2026-07-21T09:01:00+09:00",

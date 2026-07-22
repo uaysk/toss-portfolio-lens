@@ -17,6 +17,7 @@ export const IntradayTradeTickSchema = z.object({
   executedAt: isoTimestampSchema,
   sessionDate: sessionDateSchema,
   sessionStartAt: isoTimestampSchema.optional(),
+  sessionEndAt: isoTimestampSchema.optional(),
   price: z.number().finite().positive(),
   quantity: z.number().finite().positive(),
   tradingAmount: z.number().finite().positive().optional(),
@@ -71,6 +72,7 @@ type MutableBar = {
   endMs: number;
   sessionDate: string;
   sessionStartMs?: number;
+  sessionEndMs?: number;
   open: number;
   high: number;
   low: number;
@@ -175,14 +177,18 @@ function intervalStart(startMs: number, intervalMs: number, sessionStartMs?: num
 function higherMutable(oneMinute: MutableBar, intervalMinutes: 5 | 15 | 30 | 60): MutableBar {
   const intervalMs = intervalMinutes * MINUTE_MS;
   const startMs = intervalStart(oneMinute.startMs, intervalMs, oneMinute.sessionStartMs);
+  const endMs = oneMinute.sessionEndMs === undefined
+    ? startMs + intervalMs
+    : Math.min(startMs + intervalMs, oneMinute.sessionEndMs);
   return {
     symbol: oneMinute.symbol,
     marketCountry: oneMinute.marketCountry,
     intervalMinutes,
     startMs,
-    endMs: startMs + intervalMs,
+    endMs,
     sessionDate: oneMinute.sessionDate,
     ...(oneMinute.sessionStartMs === undefined ? {} : { sessionStartMs: oneMinute.sessionStartMs }),
+    ...(oneMinute.sessionEndMs === undefined ? {} : { sessionEndMs: oneMinute.sessionEndMs }),
     open: oneMinute.open,
     high: oneMinute.high,
     low: oneMinute.low,
@@ -246,6 +252,14 @@ export class IntradayBarAggregator {
     const tick = IntradayTradeTickSchema.parse(input);
     const marketCountry = tick.marketCountry ?? "KR";
     const eventMs = Date.parse(tick.executedAt);
+    const sessionStartMs = tick.sessionStartAt === undefined ? undefined : Date.parse(tick.sessionStartAt);
+    const sessionEndMs = tick.sessionEndAt === undefined ? undefined : Date.parse(tick.sessionEndAt);
+    if (sessionStartMs !== undefined && sessionEndMs !== undefined && sessionStartMs >= sessionEndMs) {
+      throw new Error("sessionStartAt must precede sessionEndAt.");
+    }
+    if (sessionEndMs !== undefined && eventMs >= sessionEndMs) {
+      throw new Error("executedAt must precede sessionEndAt.");
+    }
     const state = stateFor(this.states, tick.symbol, marketCountry);
     if (state.seenEventIds.has(tick.eventId)) return { accepted: false, reason: "duplicate", updates: [] };
     const currentWatermark = state.maximumEventMs - this.config.allowedLatenessMs;
@@ -273,7 +287,8 @@ export class IntradayBarAggregator {
         startMs,
         endMs: startMs + MINUTE_MS,
         sessionDate: tick.sessionDate,
-        ...(tick.sessionStartAt === undefined ? {} : { sessionStartMs: Date.parse(tick.sessionStartAt) }),
+        ...(sessionStartMs === undefined ? {} : { sessionStartMs }),
+        ...(sessionEndMs === undefined ? {} : { sessionEndMs }),
         open: tick.price,
         high: tick.price,
         low: tick.price,

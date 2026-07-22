@@ -14,9 +14,9 @@ use crate::indicators::{
 };
 use crate::stats::round;
 
-pub const SCALPING_ENGINE_VERSION: &str = "scalping-analysis/1.0.0";
-pub const SCALPING_REQUEST_SCHEMA_VERSION: &str = "scalping-analysis-request/v1";
-pub const SCALPING_RESULT_SCHEMA_VERSION: &str = "scalping-analysis-result/v1";
+pub const SCALPING_ENGINE_VERSION: &str = "scalping-analysis/1.4.0";
+pub const SCALPING_REQUEST_SCHEMA_VERSION: &str = "scalping-analysis-request/v3";
+pub const SCALPING_RESULT_SCHEMA_VERSION: &str = "scalping-analysis-result/v3";
 
 const MAX_INSTRUMENTS: usize = 50;
 const MAX_BARS_PER_INSTRUMENT: usize = 100_000;
@@ -24,6 +24,10 @@ const MAX_TOTAL_BARS: usize = 2_000_000;
 const MAX_INDICATORS: usize = 256;
 const MAX_PROFILE_INSTRUMENTS: usize = 20;
 const MAX_PROFILE_OBSERVATIONS: usize = 20_000;
+const MAX_OUTPUT_SERIES_TAIL_POINTS: usize = 512;
+const DEFAULT_OUTPUT_SERIES_TAIL_POINTS: usize = 180;
+const MAX_SIGNAL_SNAPSHOT_POINTS: usize = 100_000;
+const MAX_OUTPUT_SERIALIZATION_UNITS: usize = 300_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +100,23 @@ pub struct PositionSnapshot {
     pub average_price: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionWindow {
+    pub kind: String,
+    pub open_minute: u32,
+    pub close_minute: u32,
+    #[serde(default)]
+    pub local_date_offset: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionWindowOverride {
+    pub session_date: String,
+    pub windows: Vec<SessionWindow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ScalpingInstrument {
@@ -109,6 +130,10 @@ pub struct ScalpingInstrument {
     pub session_start_confirmed_dates: Vec<String>,
     #[serde(default)]
     pub complete_session_dates: Vec<String>,
+    #[serde(default)]
+    pub session_windows: Vec<SessionWindow>,
+    #[serde(default)]
+    pub session_window_overrides: Vec<SessionWindowOverride>,
     #[serde(default)]
     pub anchored_vwap_timestamp: Option<String>,
     #[serde(default)]
@@ -128,6 +153,35 @@ pub struct VolumeProfileConfig {
     pub bucket_count: usize,
     pub value_area_percent: f64,
     pub price_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignalSnapshotSelection {
+    pub instrument_key: String,
+    pub timestamps: Vec<String>,
+}
+
+fn default_output_series_tail_points() -> usize {
+    DEFAULT_OUTPUT_SERIES_TAIL_POINTS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScalpingOutputProjection {
+    #[serde(default = "default_output_series_tail_points")]
+    pub series_tail_points: usize,
+    #[serde(default)]
+    pub signal_snapshots: Vec<SignalSnapshotSelection>,
+}
+
+impl Default for ScalpingOutputProjection {
+    fn default() -> Self {
+        Self {
+            series_tail_points: DEFAULT_OUTPUT_SERIES_TAIL_POINTS,
+            signal_snapshots: Vec::new(),
+        }
+    }
 }
 
 fn default_relative_volume_lookback_sessions() -> usize {
@@ -180,6 +234,8 @@ pub struct ScalpingAnalysisRequest {
     pub volume_profile: Option<VolumeProfileConfig>,
     #[serde(default)]
     pub signal: Option<SignalConfig>,
+    #[serde(default)]
+    pub output_projection: ScalpingOutputProjection,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -307,7 +363,8 @@ pub struct AssistanceSignal {
     pub status: AssistanceStatus,
     pub calculation_timestamp: String,
     pub signal_timestamp: String,
-    pub earliest_eligible_timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earliest_eligible_timestamp: Option<String>,
     pub eligibility_basis: String,
     pub basis_price: f64,
     pub expected_entry_range: Option<PriceRange>,
@@ -332,6 +389,17 @@ pub struct AssistanceSignalSeries {
     pub points: Option<Vec<AssistanceSignal>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<AssistanceSignal>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ScalpingSignalSnapshot {
+    pub calculation_timestamp: String,
+    pub technical_signal: i8,
+    pub multi_timeframe_agreement: String,
+    pub basis_price: f64,
+    pub stop_candidate_price: Option<f64>,
+    pub target_candidate_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -376,6 +444,8 @@ pub struct ScalpingInstrumentResult {
     pub intraday: IntradayMetrics,
     pub volume_profile: Option<ScalpingVolumeProfileOutput>,
     pub signals: Option<AssistanceSignalSeries>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signal_snapshots: Vec<ScalpingSignalSnapshot>,
     pub scanner_metrics: ScannerMetrics,
     pub data_quality: ScalpingDataQuality,
 }
@@ -391,6 +461,9 @@ pub struct ScalpingDiagnostics {
     pub relative_volume_policy: String,
     pub signal_execution_policy: String,
     pub orderbook_history_policy: String,
+    pub output_projection_policy: String,
+    pub series_tail_points: usize,
+    pub signal_snapshot_count: usize,
     pub instrument_count: usize,
     pub indicator_definition_count: usize,
     pub total_bar_count: usize,
@@ -412,6 +485,7 @@ pub struct ScalpingAnalysisResult {
 #[derive(Debug, Clone)]
 struct ParsedTimestamp {
     epoch_millis: i64,
+    local_epoch_day: i64,
     local_minute_of_day: u32,
 }
 
@@ -499,8 +573,170 @@ fn parse_timestamp(value: &str) -> Result<ParsedTimestamp> {
             .checked_mul(1_000)
             .and_then(|value| value.checked_add(fraction_millis))
             .context("timestamp is outside supported range")?,
+        local_epoch_day: day,
         local_minute_of_day: hour * 60 + minute,
     })
+}
+
+fn window_effective_open(window: &SessionWindow) -> i32 {
+    window.local_date_offset * 24 * 60 + window.open_minute as i32
+}
+
+fn window_effective_close(window: &SessionWindow) -> i32 {
+    window.local_date_offset * 24 * 60 + window.close_minute as i32
+}
+
+fn last_complete_minute(window: &SessionWindow, interval_minutes: u32) -> Option<i32> {
+    let count = (window.close_minute - window.open_minute) / interval_minutes;
+    (count > 0).then_some(window_effective_open(window) + (count * interval_minutes) as i32)
+}
+
+fn session_windows_for_date<'a>(
+    instrument: &'a ScalpingInstrument,
+    session_date: &str,
+) -> &'a [SessionWindow] {
+    instrument
+        .session_window_overrides
+        .iter()
+        .find(|schedule| schedule.session_date == session_date)
+        .map_or(instrument.session_windows.as_slice(), |schedule| {
+            schedule.windows.as_slice()
+        })
+}
+
+fn has_configured_session_windows(instrument: &ScalpingInstrument) -> bool {
+    !instrument.session_windows.is_empty() || !instrument.session_window_overrides.is_empty()
+}
+
+fn effective_session_minute(parsed: &ParsedTimestamp, session_date: &str) -> Result<i32> {
+    let session_day = epoch_day(session_date).context("session_date must be a valid ISO date")?;
+    let day_delta = parsed
+        .local_epoch_day
+        .checked_sub(session_day)
+        .context("session-date offset overflow")?;
+    let effective = day_delta
+        .checked_mul(24 * 60)
+        .and_then(|value| value.checked_add(i64::from(parsed.local_minute_of_day)))
+        .context("effective session minute overflow")?;
+    i32::try_from(effective).context("effective session minute is outside supported range")
+}
+
+fn has_scheduled_window_tail(instrument: &ScalpingInstrument, interval_minutes: u32) -> bool {
+    instrument
+        .session_windows
+        .iter()
+        .chain(
+            instrument
+                .session_window_overrides
+                .iter()
+                .flat_map(|schedule| schedule.windows.iter()),
+        )
+        .any(|window| (window.close_minute - window.open_minute) % interval_minutes != 0)
+}
+
+fn session_window_index(
+    windows: &[SessionWindow],
+    effective_minute: i32,
+    interval_minutes: u32,
+) -> Option<usize> {
+    windows.iter().position(|window| {
+        let open = window_effective_open(window);
+        let close = window_effective_close(window);
+        effective_minute > open
+            && effective_minute <= close
+            && (effective_minute - open) % interval_minutes as i32 == 0
+    })
+}
+
+fn is_scheduled_session_transition(
+    instrument: &ScalpingInstrument,
+    previous: &MinuteBar,
+    current: &MinuteBar,
+    interval_minutes: u32,
+) -> Result<bool> {
+    if previous.session_date != current.session_date {
+        return Ok(false);
+    }
+    let windows = session_windows_for_date(instrument, &previous.session_date);
+    if windows.is_empty() {
+        return Ok(false);
+    }
+    let previous_time = parse_timestamp(&previous.timestamp)?;
+    let current_time = parse_timestamp(&current.timestamp)?;
+    let previous_minute = effective_session_minute(&previous_time, &previous.session_date)?;
+    let current_minute = effective_session_minute(&current_time, &current.session_date)?;
+    let Some(previous_index) = session_window_index(windows, previous_minute, interval_minutes)
+    else {
+        return Ok(false);
+    };
+    let Some(current_index) = session_window_index(windows, current_minute, interval_minutes)
+    else {
+        return Ok(false);
+    };
+    if current_index != previous_index + 1 {
+        return Ok(false);
+    }
+    let previous_window = &windows[previous_index];
+    let current_window = &windows[current_index];
+    Ok(
+        last_complete_minute(previous_window, interval_minutes) == Some(previous_minute)
+            && current_minute == window_effective_open(current_window) + interval_minutes as i32,
+    )
+}
+
+fn is_unexpected_same_session_gap(
+    instrument: &ScalpingInstrument,
+    previous: &MinuteBar,
+    current: &MinuteBar,
+    interval_minutes: u32,
+) -> Result<bool> {
+    if previous.session_date != current.session_date {
+        return Ok(false);
+    }
+    let previous_epoch = parse_timestamp(&previous.timestamp)?.epoch_millis;
+    let current_epoch = parse_timestamp(&current.timestamp)?.epoch_millis;
+    Ok(
+        current_epoch - previous_epoch > i64::from(interval_minutes) * 60_000
+            && !is_scheduled_session_transition(instrument, previous, current, interval_minutes)?,
+    )
+}
+
+fn unexpected_gap_in_validated_request(
+    instrument: &ScalpingInstrument,
+    previous: &MinuteBar,
+    current: &MinuteBar,
+    interval_minutes: u32,
+) -> bool {
+    is_unexpected_same_session_gap(instrument, previous, current, interval_minutes)
+        .expect("validated scalping timestamps and session windows")
+}
+
+fn next_scheduled_close_epoch(
+    instrument: &ScalpingInstrument,
+    bar: &MinuteBar,
+    interval_minutes: u32,
+) -> Result<Option<i64>> {
+    let windows = session_windows_for_date(instrument, &bar.session_date);
+    if windows.is_empty() {
+        return Ok(None);
+    }
+    let parsed = parse_timestamp(&bar.timestamp)?;
+    let effective_minute = effective_session_minute(&parsed, &bar.session_date)?;
+    let Some(index) = session_window_index(windows, effective_minute, interval_minutes) else {
+        return Ok(None);
+    };
+    let window = &windows[index];
+    let next_minute =
+        if effective_minute + interval_minutes as i32 <= window_effective_close(window) {
+            Some(effective_minute + interval_minutes as i32)
+        } else {
+            windows.get(index + 1).and_then(|next| {
+                last_complete_minute(next, interval_minutes)
+                    .map(|_| window_effective_open(next) + interval_minutes as i32)
+            })
+        };
+    Ok(next_minute
+        .map(|minute| parsed.epoch_millis + i64::from(minute - effective_minute) * 60_000))
 }
 
 fn format_utc_timestamp(epoch_millis: i64) -> String {
@@ -532,6 +768,37 @@ fn validate_snapshot_timestamp(value: &str, label: &str) -> Result<i64> {
     parse_timestamp(value)
         .with_context(|| format!("{label} must be a valid RFC3339 timestamp"))
         .map(|parsed| parsed.epoch_millis)
+}
+
+fn validate_session_windows(
+    instrument_key: &str,
+    windows: &[SessionWindow],
+    label: &str,
+) -> Result<()> {
+    ensure!(
+        windows.len() <= 16,
+        "instrument {instrument_key} {label} must contain at most 16 items"
+    );
+    let mut previous_window_close: Option<i32> = None;
+    for window in windows {
+        non_empty_bounded(&window.kind, 32, "session window kind")?;
+        ensure!(
+            matches!(window.local_date_offset, -1 | 0),
+            "instrument {instrument_key} {label} local_date_offset is invalid"
+        );
+        ensure!(
+            window.open_minute < window.close_minute && window.close_minute <= 24 * 60,
+            "instrument {instrument_key} {label} minute range is invalid"
+        );
+        let effective_open = window_effective_open(window);
+        let effective_close = window_effective_close(window);
+        ensure!(
+            previous_window_close.is_none_or(|close| effective_open >= close),
+            "instrument {instrument_key} {label} must be sorted and non-overlapping"
+        );
+        previous_window_close = Some(effective_close);
+    }
+    Ok(())
 }
 
 fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
@@ -587,8 +854,43 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
             total_bars <= MAX_TOTAL_BARS,
             "scalping total bars exceed {MAX_TOTAL_BARS}"
         );
+        validate_session_windows(
+            &instrument.key,
+            &instrument.session_windows,
+            "session_windows",
+        )?;
+        ensure!(
+            instrument.session_window_overrides.len() <= 400,
+            "instrument {} session_window_overrides must contain at most 400 items",
+            instrument.key
+        );
+        let mut override_dates = BTreeSet::new();
+        for schedule in &instrument.session_window_overrides {
+            parse_iso_date(&schedule.session_date).with_context(|| {
+                format!(
+                    "instrument {} has invalid session-window override date {}",
+                    instrument.key, schedule.session_date
+                )
+            })?;
+            ensure!(
+                override_dates.insert(schedule.session_date.as_str()),
+                "instrument {} session-window override dates must be unique",
+                instrument.key
+            );
+            ensure!(
+                !schedule.windows.is_empty(),
+                "instrument {} session-window override must not be empty",
+                instrument.key
+            );
+            validate_session_windows(
+                &instrument.key,
+                &schedule.windows,
+                "session_window_overrides.windows",
+            )?;
+        }
         let mut previous_epoch = None;
         let mut previous_session: Option<&str> = None;
+        let mut previous_bar: Option<&MinuteBar> = None;
         for bar in &instrument.bars {
             ensure!(
                 bar.complete,
@@ -609,17 +911,29 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
                 )
             })?;
             ensure!(
-                bar.timestamp.get(..10) == Some(bar.session_date.as_str()),
-                "instrument {} session_date must match the timestamp local calendar date at {}",
-                instrument.key,
-                bar.timestamp
-            );
-            ensure!(
                 parsed.epoch_millis.rem_euclid(60_000) == 0,
                 "instrument {} minute bars must end on an exact minute at {}",
                 instrument.key,
                 bar.timestamp
             );
+            let windows = session_windows_for_date(instrument, &bar.session_date);
+            if windows.is_empty() {
+                ensure!(
+                    bar.timestamp.get(..10) == Some(bar.session_date.as_str()),
+                    "instrument {} session_date must match the timestamp local calendar date when no windows are configured at {}",
+                    instrument.key,
+                    bar.timestamp
+                );
+            } else {
+                let effective_minute = effective_session_minute(&parsed, &bar.session_date)?;
+                ensure!(
+                    session_window_index(windows, effective_minute, request.interval_minutes)
+                        .is_some(),
+                    "instrument {} bar timestamp is outside configured session windows at {}",
+                    instrument.key,
+                    bar.timestamp
+                );
+            }
             if let Some(previous) = previous_epoch {
                 ensure!(
                     previous < parsed.epoch_millis,
@@ -630,7 +944,16 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
                     let gap_minutes = (parsed.epoch_millis - previous) / 60_000;
                     ensure!(
                         gap_minutes >= i64::from(request.interval_minutes)
-                            && gap_minutes % i64::from(request.interval_minutes) == 0,
+                            && (gap_minutes % i64::from(request.interval_minutes) == 0
+                                || previous_bar.is_some_and(|previous_bar| {
+                                    is_scheduled_session_transition(
+                                        instrument,
+                                        previous_bar,
+                                        bar,
+                                        request.interval_minutes,
+                                    )
+                                    .unwrap_or(false)
+                                })),
                         "instrument {} same-session bar timestamps must align to the selected interval",
                         instrument.key
                     );
@@ -674,6 +997,7 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
             );
             previous_epoch = Some(parsed.epoch_millis);
             previous_session = Some(&bar.session_date);
+            previous_bar = Some(bar);
         }
         let last_epoch = previous_epoch.expect("validated non-empty bars");
         let supplied_sessions = instrument
@@ -796,6 +1120,66 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
         }
     }
 
+    ensure!(
+        (1..=MAX_OUTPUT_SERIES_TAIL_POINTS).contains(&request.output_projection.series_tail_points),
+        "output_projection series_tail_points must be in 1..={MAX_OUTPUT_SERIES_TAIL_POINTS}"
+    );
+    ensure!(
+        request.output_projection.signal_snapshots.len() <= request.instruments.len(),
+        "output_projection signal_snapshots cannot exceed the instrument count"
+    );
+    let mut selected_keys = BTreeSet::new();
+    let mut selected_timestamp_count = 0_usize;
+    for selection in &request.output_projection.signal_snapshots {
+        ensure!(
+            selected_keys.insert(selection.instrument_key.as_str()),
+            "output_projection signal snapshot instrument keys must be unique"
+        );
+        let instrument = request
+            .instruments
+            .iter()
+            .find(|instrument| instrument.key == selection.instrument_key)
+            .with_context(|| {
+                format!(
+                    "output_projection signal snapshots reference unknown instrument {}",
+                    selection.instrument_key
+                )
+            })?;
+        ensure!(
+            !selection.timestamps.is_empty(),
+            "output_projection signal snapshot timestamps must not be empty"
+        );
+        ensure!(
+            selection.timestamps.len()
+                == selection.timestamps.iter().collect::<BTreeSet<_>>().len(),
+            "output_projection signal snapshot timestamps must be unique"
+        );
+        let bar_timestamps = instrument
+            .bars
+            .iter()
+            .map(|bar| bar.timestamp.as_str())
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            selection
+                .timestamps
+                .iter()
+                .all(|timestamp| bar_timestamps.contains(timestamp.as_str())),
+            "output_projection signal snapshot timestamps must reference supplied finalized bars"
+        );
+        selected_timestamp_count = selected_timestamp_count
+            .checked_add(selection.timestamps.len())
+            .context("output_projection signal snapshot count overflow")?;
+    }
+    ensure!(
+        selected_timestamp_count <= MAX_SIGNAL_SNAPSHOT_POINTS,
+        "output_projection signal snapshots exceed {MAX_SIGNAL_SNAPSHOT_POINTS} points"
+    );
+    ensure!(
+        selected_timestamp_count == 0
+            || request.signal.as_ref().is_some_and(|signal| signal.enabled),
+        "output_projection signal snapshots require enabled signal calculation"
+    );
+
     let mut ids = BTreeSet::new();
     for definition in &request.indicators {
         ensure!(
@@ -860,6 +1244,65 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
             "signal target_reward_ratio must be in 0.1..=20"
         );
     }
+    let indicator_calculation_count = request
+        .indicators
+        .iter()
+        .try_fold(0_usize, |count, definition| {
+            count.checked_add(
+                definition
+                    .instrument_keys
+                    .as_ref()
+                    .map(Vec::len)
+                    .unwrap_or(request.instruments.len()),
+            )
+        })
+        .context("output projection indicator calculation count overflow")?;
+    let instrument_count = request.instruments.len();
+    let series_per_instrument = 8_usize
+        .checked_add(
+            request
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.enabled)
+                .then_some(5)
+                .unwrap_or_default(),
+        )
+        .context("output projection series count overflow")?;
+    let point_multiplier = if request.response_mode == ResponseMode::FullSeries {
+        request.output_projection.series_tail_points
+    } else {
+        1
+    };
+    let series_units = indicator_calculation_count
+        .checked_add(
+            instrument_count
+                .checked_mul(series_per_instrument)
+                .context("output projection series count overflow")?,
+        )
+        .and_then(|count| count.checked_mul(point_multiplier))
+        .context("output projection series units overflow")?;
+    let snapshot_units = selected_timestamp_count
+        .checked_mul(2)
+        .context("output projection signal snapshot units overflow")?;
+    let profile_units = request
+        .volume_profile
+        .as_ref()
+        .map(|profile| {
+            profile
+                .instrument_keys
+                .len()
+                .checked_mul(profile.bucket_count)
+        })
+        .flatten()
+        .unwrap_or_default();
+    let output_units = series_units
+        .checked_add(snapshot_units)
+        .and_then(|units| units.checked_add(profile_units))
+        .context("output projection serialization units overflow")?;
+    ensure!(
+        output_units <= MAX_OUTPUT_SERIALIZATION_UNITS,
+        "output_projection exceeds the bounded serialization budget of {MAX_OUTPUT_SERIALIZATION_UNITS} units"
+    );
     Ok(())
 }
 
@@ -1035,6 +1478,12 @@ fn map_point(
     }
 }
 
+fn retain_tail<T>(points: &mut Vec<T>, limit: usize) {
+    if points.len() > limit {
+        points.drain(..points.len() - limit);
+    }
+}
+
 fn map_profile(
     profile: crate::indicators::VolumeProfileResult,
     local: &BTreeMap<String, String>,
@@ -1066,13 +1515,14 @@ fn map_calculation(
     calculation: IndicatorCalculation,
     local: &BTreeMap<String, String>,
     global: &BTreeMap<String, String>,
+    series_tail_points: usize,
 ) -> ScalpingIndicatorCalculation {
     let first_available_timestamp = calculation
         .warmup
         .first_available_date
         .as_deref()
         .map(|date| mapped_timestamp(date, local, global));
-    ScalpingIndicatorCalculation {
+    let mut mapped = ScalpingIndicatorCalculation {
         instrument_key: calculation.instrument_key,
         indicator_id: calculation.indicator_id,
         kind: calculation.kind,
@@ -1097,7 +1547,11 @@ fn map_calculation(
         latest: calculation
             .latest
             .map(|point| map_point(point, local, global)),
+    };
+    if let Some(points) = &mut mapped.points {
+        retain_tail(points, series_tail_points);
     }
+    mapped
 }
 
 fn availability_from_points(
@@ -1131,18 +1585,22 @@ fn availability_from_points(
 }
 
 fn metric_series(
-    points: Vec<IntradayMetricPoint>,
+    mut points: Vec<IntradayMetricPoint>,
     response_mode: ResponseMode,
     availability: Availability,
     metadata: BTreeMap<String, Value>,
+    series_tail_points: usize,
 ) -> IntradayMetricSeries {
     match response_mode {
-        ResponseMode::FullSeries => IntradayMetricSeries {
-            availability,
-            metadata,
-            points: Some(points),
-            latest: None,
-        },
+        ResponseMode::FullSeries => {
+            retain_tail(&mut points, series_tail_points);
+            IntradayMetricSeries {
+                availability,
+                metadata,
+                points: Some(points),
+                latest: None,
+            }
+        }
         ResponseMode::LatestSummary => IntradayMetricSeries {
             availability,
             metadata,
@@ -1173,7 +1631,7 @@ fn session_vwap_points(
     let mut weighted = 0.0;
     let mut volume_total = 0.0;
     let mut missing = false;
-    let mut previous_epoch = None;
+    let mut previous_bar: Option<&MinuteBar> = None;
     let mut points = Vec::with_capacity(instrument.bars.len());
     for bar in &instrument.bars {
         if current_session != bar.session_date {
@@ -1182,12 +1640,11 @@ fn session_vwap_points(
             weighted = 0.0;
             volume_total = 0.0;
             missing = false;
-            previous_epoch = None;
+            previous_bar = None;
         }
-        let epoch = parse_timestamp(&bar.timestamp)?.epoch_millis;
-        if previous_epoch
-            .is_some_and(|previous| epoch - previous > i64::from(interval_minutes) * 60_000)
-        {
+        if previous_bar.is_some_and(|previous| {
+            unexpected_gap_in_validated_request(instrument, previous, bar, interval_minutes)
+        }) {
             missing = true;
         }
         if let Some(volume) = bar.volume {
@@ -1213,7 +1670,7 @@ fn session_vwap_points(
             },
             values: values(&[("session_vwap", value)]),
         });
-        previous_epoch = Some(epoch);
+        previous_bar = Some(bar);
     }
     Ok(points)
 }
@@ -1232,7 +1689,7 @@ fn anchored_vwap_points(
     let mut weighted = 0.0;
     let mut volume_total = 0.0;
     let mut missing = false;
-    let mut previous_started_epoch = None;
+    let mut previous_started_bar: Option<&MinuteBar> = None;
     let mut points = Vec::with_capacity(instrument.bars.len());
     for bar in &instrument.bars {
         let epoch = parse_timestamp(&bar.timestamp)?.epoch_millis;
@@ -1243,9 +1700,9 @@ fn anchored_vwap_points(
         let state = if !started {
             PointState::Warmup
         } else {
-            if previous_started_epoch
-                .is_some_and(|previous| epoch - previous > i64::from(interval_minutes) * 60_000)
-            {
+            if previous_started_bar.is_some_and(|previous| {
+                unexpected_gap_in_validated_request(instrument, previous, bar, interval_minutes)
+            }) {
                 missing = true;
             }
             if let Some(volume) = bar.volume {
@@ -1273,7 +1730,7 @@ fn anchored_vwap_points(
             values: values(&[("anchored_vwap", value)]),
         });
         if started {
-            previous_started_epoch = Some(epoch);
+            previous_started_bar = Some(bar);
         }
     }
     Ok(points)
@@ -1284,6 +1741,17 @@ fn opening_range_points(
     interval_minutes: u32,
     range_minutes: u32,
 ) -> Vec<IntradayMetricPoint> {
+    if interval_minutes > range_minutes {
+        return instrument
+            .bars
+            .iter()
+            .map(|bar| IntradayMetricPoint {
+                timestamp: bar.timestamp.clone(),
+                state: PointState::Unavailable,
+                values: values(&[("high", None), ("low", None)]),
+            })
+            .collect();
+    }
     let confirmed = instrument
         .session_start_confirmed_dates
         .iter()
@@ -1295,27 +1763,53 @@ fn opening_range_points(
     let mut count = 0_usize;
     let mut high = f64::NEG_INFINITY;
     let mut low = f64::INFINITY;
-    let mut previous_epoch = None;
+    let mut previous_bar: Option<&MinuteBar> = None;
     let mut range_invalid = false;
+    let mut regular_window: Option<&SessionWindow> = None;
+    let mut range_started = false;
     instrument
         .bars
         .iter()
         .map(|bar| {
             if current_session != bar.session_date {
                 current_session = &bar.session_date;
-                coverage_confirmed = confirmed.contains(bar.session_date.as_str());
+                regular_window = session_windows_for_date(instrument, &bar.session_date)
+                    .iter()
+                    .find(|window| window.kind == "regular_market");
+                coverage_confirmed =
+                    regular_window.is_none() && confirmed.contains(bar.session_date.as_str());
                 count = 0;
                 high = f64::NEG_INFINITY;
                 low = f64::INFINITY;
-                previous_epoch = None;
+                previous_bar = None;
                 range_invalid = false;
+                range_started = regular_window.is_none();
             }
-            let epoch = parse_timestamp(&bar.timestamp)
+            let local_minute = parse_timestamp(&bar.timestamp)
                 .expect("validated opening-range timestamp")
-                .epoch_millis;
+                .local_minute_of_day;
+            if !range_started {
+                let regular = regular_window.expect("checked configured regular window");
+                if local_minute > regular.open_minute && local_minute <= regular.close_minute {
+                    range_started = true;
+                    coverage_confirmed = local_minute == regular.open_minute + interval_minutes;
+                    range_invalid = !coverage_confirmed;
+                } else {
+                    return IntradayMetricPoint {
+                        timestamp: bar.timestamp.clone(),
+                        state: if local_minute > regular.close_minute {
+                            PointState::Unavailable
+                        } else {
+                            PointState::Warmup
+                        },
+                        values: values(&[("high", None), ("low", None)]),
+                    };
+                }
+            }
             if count < required_bars
-                && previous_epoch
-                    .is_some_and(|previous| epoch - previous > i64::from(interval_minutes) * 60_000)
+                && previous_bar.is_some_and(|previous| {
+                    unexpected_gap_in_validated_request(instrument, previous, bar, interval_minutes)
+                })
             {
                 range_invalid = true;
             }
@@ -1339,7 +1833,7 @@ fn opening_range_points(
                     ("low", ready.then_some(round(low, 8))),
                 ]),
             };
-            previous_epoch = Some(epoch);
+            previous_bar = Some(bar);
             point
         })
         .collect()
@@ -1414,7 +1908,7 @@ fn session_level_points(
     let mut current_high = f64::NEG_INFINITY;
     let mut current_low = f64::INFINITY;
     let mut current_close = 0.0;
-    let mut previous_epoch = None;
+    let mut previous_bar: Option<&MinuteBar> = None;
     let mut current_gap = false;
     let mut previous_points = Vec::with_capacity(instrument.bars.len());
     let mut current_points = Vec::with_capacity(instrument.bars.len());
@@ -1432,18 +1926,15 @@ fn session_level_points(
             current_open = bar.open;
             current_high = bar.high;
             current_low = bar.low;
-            previous_epoch = None;
+            previous_bar = None;
             current_gap = false;
         } else {
             current_high = current_high.max(bar.high);
             current_low = current_low.min(bar.low);
         }
-        let epoch = parse_timestamp(&bar.timestamp)
-            .expect("validated session-level timestamp")
-            .epoch_millis;
-        if previous_epoch
-            .is_some_and(|previous| epoch - previous > i64::from(interval_minutes) * 60_000)
-        {
+        if previous_bar.is_some_and(|previous| {
+            unexpected_gap_in_validated_request(instrument, previous, bar, interval_minutes)
+        }) {
             current_gap = true;
         }
         current_close = bar.close;
@@ -1488,7 +1979,7 @@ fn session_level_points(
                 ),
             ]),
         });
-        previous_epoch = Some(epoch);
+        previous_bar = Some(bar);
     }
     (previous_points, current_points)
 }
@@ -1620,7 +2111,13 @@ fn intraday_metrics(
         }
     };
     let opening_series = |points: Vec<IntradayMetricPoint>, requested: u32| {
-        let availability = if any_session_start_confirmed {
+        let resolution_supported = request.interval_minutes <= requested;
+        let availability = if !resolution_supported {
+            Availability {
+                status: AvailabilityStatus::Unavailable,
+                reason: "selected_interval_coarser_than_opening_range".into(),
+            }
+        } else if any_session_start_confirmed {
             availability_from_points(&points, "opening_range_not_complete")
         } else {
             Availability {
@@ -1636,10 +2133,25 @@ fn intraday_metrics(
                 ("requested_minutes".into(), json!(requested)),
                 (
                     "effective_minutes".into(),
-                    json!(requested.div_ceil(request.interval_minutes) * request.interval_minutes),
+                    json!(resolution_supported.then_some(
+                        requested.div_ceil(request.interval_minutes) * request.interval_minutes,
+                    )),
+                ),
+                (
+                    "source_interval_minutes".into(),
+                    json!(request.interval_minutes),
                 ),
                 ("completed_bar_only".into(), json!(true)),
+                (
+                    "anchor".into(),
+                    json!(if !has_configured_session_windows(instrument) {
+                        "first_confirmed_session_bar"
+                    } else {
+                        "caller_configured_regular_market_open"
+                    }),
+                ),
             ]),
+            request.output_projection.series_tail_points,
         )
     };
     Ok(IntradayMetrics {
@@ -1662,6 +2174,14 @@ fn intraday_metrics(
                 ("price_basis".into(), json!("typical_price_hlc3")),
                 ("weight".into(), json!("caller_supplied_final_bar_volume")),
                 ("reset".into(), json!("session_date")),
+                (
+                    "accumulation_scope".into(),
+                    json!(if !has_configured_session_windows(instrument) {
+                        "all_supplied_session_bars"
+                    } else {
+                        "all_caller_configured_session_windows"
+                    }),
+                ),
                 ("amount_used".into(), json!(false)),
                 (
                     "approximation".into(),
@@ -1671,7 +2191,20 @@ fn intraday_metrics(
                     "missing_volume_policy".into(),
                     json!("session_range_with_any_missing_volume_is_unavailable"),
                 ),
+                (
+                    "caller_configured_session_windows".into(),
+                    json!(instrument.session_windows),
+                ),
+                (
+                    "caller_configured_session_window_overrides".into(),
+                    json!(instrument.session_window_overrides),
+                ),
+                (
+                    "scheduled_break_policy".into(),
+                    json!("gaps_between_adjacent_caller_configured_windows_are_not_missing_bars"),
+                ),
             ]),
+            request.output_projection.series_tail_points,
         ),
         anchored_vwap: metric_series(
             anchored_vwap.clone(),
@@ -1697,6 +2230,7 @@ fn intraday_metrics(
                 ),
                 ("future_data_used".into(), json!(false)),
             ]),
+            request.output_projection.series_tail_points,
         ),
         opening_range_5: opening_series(opening_5, 5),
         opening_range_15: opening_series(opening_15, 15),
@@ -1723,6 +2257,7 @@ fn intraday_metrics(
                     json!("complete_lookback_required"),
                 ),
             ]),
+            request.output_projection.series_tail_points,
         ),
         previous_session_levels: metric_series(
             previous_levels.clone(),
@@ -1736,6 +2271,7 @@ fn intraday_metrics(
                 }
             },
             BTreeMap::from([("source".into(), json!("finalized_previous_session_bars"))]),
+            request.output_projection.series_tail_points,
         ),
         current_session_levels: metric_series(
             current_levels.clone(),
@@ -1755,6 +2291,7 @@ fn intraday_metrics(
                 ),
                 ("future_data_used".into(), json!(false)),
             ]),
+            request.output_projection.series_tail_points,
         ),
         orderbook_imbalance: orderbook,
         execution_strength: execution,
@@ -1999,13 +2536,7 @@ fn scanner_metrics(
     let session_has_gap = instrument.bars.windows(2).any(|bars| {
         bars[0].session_date == latest_bar.session_date
             && bars[1].session_date == latest_bar.session_date
-            && parse_timestamp(&bars[1].timestamp)
-                .expect("validated scanner timestamp")
-                .epoch_millis
-                - parse_timestamp(&bars[0].timestamp)
-                    .expect("validated scanner timestamp")
-                    .epoch_millis
-                > i64::from(interval_minutes) * 60_000
+            && unexpected_gap_in_validated_request(instrument, &bars[0], &bars[1], interval_minutes)
     });
     let session_start_confirmed = instrument
         .session_start_confirmed_dates
@@ -2168,12 +2699,27 @@ fn multi_timeframe_trends(
         }
         let ratio = (timeframe / base_interval) as usize;
         let mut session = "";
+        let mut session_window = None;
         let mut session_ordinal = 0_usize;
         let mut previous_completed_close: Option<f64> = None;
         let mut direction = None;
         for (index, bar) in instrument.bars.iter().enumerate() {
             if session != bar.session_date {
                 session = &bar.session_date;
+                session_window = None;
+                session_ordinal = 0;
+            }
+            let parsed =
+                parse_timestamp(&bar.timestamp).expect("validated multi-timeframe timestamp");
+            let effective_minute = effective_session_minute(&parsed, &bar.session_date)
+                .expect("validated multi-timeframe session minute");
+            let current_window = session_window_index(
+                session_windows_for_date(instrument, &bar.session_date),
+                effective_minute,
+                base_interval,
+            );
+            if current_window != session_window {
+                session_window = current_window;
                 session_ordinal = 0;
             }
             session_ordinal += 1;
@@ -2239,9 +2785,10 @@ fn assistance_signals(
     instrument: &ScalpingInstrument,
     request: &ScalpingAnalysisRequest,
     calculations: &[ScalpingIndicatorCalculation],
-) -> Result<Option<AssistanceSignalSeries>> {
+    selected_timestamps: &BTreeSet<String>,
+) -> Result<(Option<AssistanceSignalSeries>, Vec<ScalpingSignalSnapshot>)> {
     let Some(config) = request.signal.as_ref().filter(|config| config.enabled) else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let vwap = session_vwap_points(instrument, request.interval_minutes)?;
     let opening = opening_range_points(instrument, request.interval_minutes, 15);
@@ -2259,18 +2806,19 @@ fn assistance_signals(
         .transpose()?
         .map(|parsed| parsed.epoch_millis);
     let mut points = Vec::with_capacity(instrument.bars.len());
+    let mut snapshots = Vec::with_capacity(selected_timestamps.len());
     let mut current_session = "";
-    let mut previous_epoch = None;
+    let mut previous_bar: Option<&MinuteBar> = None;
     let mut session_gap_seen = false;
     for (index, bar) in instrument.bars.iter().enumerate() {
         let bar_epoch = parse_timestamp(&bar.timestamp)?.epoch_millis;
         if current_session != bar.session_date {
             current_session = &bar.session_date;
-            previous_epoch = None;
+            previous_bar = None;
             session_gap_seen = false;
         }
-        if previous_epoch.is_some_and(|previous| {
-            bar_epoch - previous > i64::from(request.interval_minutes) * 60_000
+        if previous_bar.is_some_and(|previous| {
+            unexpected_gap_in_validated_request(instrument, previous, bar, request.interval_minutes)
         }) {
             session_gap_seen = true;
         }
@@ -2336,6 +2884,9 @@ fn assistance_signals(
             entry_condition = false;
             rationale.push("unrecovered_same_session_bar_gap".into());
         }
+        if has_scheduled_window_tail(instrument, request.interval_minutes) {
+            rationale.push("scheduled_window_tail_omitted".into());
+        }
         if post_close_position_for_latest_label {
             rationale.push(
                 "post_close_position_used_for_current_status_label_only_not_technical_conditions"
@@ -2345,7 +2896,7 @@ fn assistance_signals(
             rationale
                 .push("position_state_unavailable_entry_candidate_does_not_assume_a_fill".into());
         }
-        let status = if held {
+        let mut status = if held {
             if exit_condition {
                 AssistanceStatus::ExitCandidate
             } else {
@@ -2374,20 +2925,27 @@ fn assistance_signals(
                 low: round((bar.close - entry_buffer).max(f64::MIN_POSITIVE), 8),
                 high: round(bar.close + entry_buffer, 8),
             });
-        let eligible = if index + 1 == instrument.bars.len() {
-            instrument
-                .next_valid_quote_timestamp
-                .clone()
-                .unwrap_or_else(|| {
-                    format_utc_timestamp(bar_epoch + i64::from(request.interval_minutes) * 60_000)
-                })
+        let eligible = if index + 1 == instrument.bars.len()
+            && instrument.next_valid_quote_timestamp.is_some()
+        {
+            instrument.next_valid_quote_timestamp.clone()
+        } else if !has_configured_session_windows(instrument) {
+            Some(format_utc_timestamp(
+                bar_epoch + i64::from(request.interval_minutes) * 60_000,
+            ))
         } else {
-            format_utc_timestamp(bar_epoch + i64::from(request.interval_minutes) * 60_000)
+            next_scheduled_close_epoch(instrument, bar, request.interval_minutes)?
+                .map(format_utc_timestamp)
         };
-        ensure!(
-            parse_timestamp(&eligible)?.epoch_millis > bar_epoch,
-            "assistance signal eligibility must be after its calculation bar"
-        );
+        if let Some(eligible) = &eligible {
+            ensure!(
+                parse_timestamp(eligible)?.epoch_millis > bar_epoch,
+                "assistance signal eligibility must be after its calculation bar"
+            );
+        } else {
+            status = AssistanceStatus::Watch;
+            rationale.push("next_valid_market_timestamp_unavailable".into());
+        }
         let indicator_ids = indicator_ids_at(calculations, &bar.timestamp);
         let volume_quality = if bar.volume.is_some() && !session_gap_seen {
             Availability {
@@ -2417,13 +2975,15 @@ fn assistance_signals(
             .min(1.0),
             4,
         );
-        points.push(AssistanceSignal {
+        let signal = AssistanceSignal {
             instrument_key: instrument.key.clone(),
             status,
             calculation_timestamp: bar.timestamp.clone(),
             signal_timestamp: bar.timestamp.clone(),
-            earliest_eligible_timestamp: eligible,
-            eligibility_basis: if index + 1 == instrument.bars.len()
+            earliest_eligible_timestamp: eligible.clone(),
+            eligibility_basis: if eligible.is_none() {
+                "caller_configured_session_ended_next_valid_quote_unavailable".into()
+            } else if index + 1 == instrument.bars.len()
                 && instrument.next_valid_quote_timestamp.is_some()
             {
                 if post_close_position_for_latest_label {
@@ -2446,24 +3006,49 @@ fn assistance_signals(
             multi_timeframe_trends: trends[index].clone(),
             multi_timeframe_agreement: agreement,
             confidence,
-            confidence_semantics: "deterministic_data_and_condition_completeness_score_not_success_probability".into(),
+            confidence_semantics:
+                "deterministic_data_and_condition_completeness_score_not_success_probability".into(),
             data_quality: volume_quality,
             position_known,
             rationale,
             disclaimer: "decision_support_only_not_an_order_instruction_or_return_guarantee".into(),
-        });
-        previous_epoch = Some(bar_epoch);
+        };
+        if selected_timestamps.contains(&bar.timestamp) {
+            snapshots.push(ScalpingSignalSnapshot {
+                calculation_timestamp: signal.calculation_timestamp.clone(),
+                technical_signal: match signal.status {
+                    AssistanceStatus::EntryCandidate => 1,
+                    AssistanceStatus::ExitCandidate => -1,
+                    AssistanceStatus::Watch | AssistanceStatus::Hold => 0,
+                },
+                multi_timeframe_agreement: signal.multi_timeframe_agreement.clone(),
+                basis_price: signal.basis_price,
+                stop_candidate_price: signal.stop_candidate_price,
+                target_candidate_price: signal
+                    .target_price_range
+                    .as_ref()
+                    .map(|range| round((range.low + range.high) / 2.0, 8)),
+            });
+        }
+        points.push(signal);
+        previous_bar = Some(bar);
     }
-    Ok(Some(match request.response_mode {
-        ResponseMode::FullSeries => AssistanceSignalSeries {
-            points: Some(points),
-            latest: None,
-        },
-        ResponseMode::LatestSummary => AssistanceSignalSeries {
-            latest: points.last().cloned(),
-            points: None,
-        },
-    }))
+    Ok((
+        Some(match request.response_mode {
+            ResponseMode::FullSeries => {
+                retain_tail(&mut points, request.output_projection.series_tail_points);
+                AssistanceSignalSeries {
+                    points: Some(points),
+                    latest: None,
+                }
+            }
+            ResponseMode::LatestSummary => AssistanceSignalSeries {
+                latest: points.last().cloned(),
+                points: None,
+            },
+        }),
+        snapshots,
+    ))
 }
 
 fn data_quality(instrument: &ScalpingInstrument, interval_minutes: u32) -> ScalpingDataQuality {
@@ -2481,10 +3066,7 @@ fn data_quality(instrument: &ScalpingInstrument, interval_minutes: u32) -> Scalp
         .bars
         .windows(2)
         .filter(|bars| {
-            bars[0].session_date == bars[1].session_date
-                && parse_timestamp(&bars[1].timestamp).unwrap().epoch_millis
-                    - parse_timestamp(&bars[0].timestamp).unwrap().epoch_millis
-                    > i64::from(interval_minutes) * 60_000
+            unexpected_gap_in_validated_request(instrument, &bars[0], &bars[1], interval_minutes)
         })
         .count();
     let latest_session_start_confirmed = instrument.bars.last().is_some_and(|bar| {
@@ -2492,11 +3074,13 @@ fn data_quality(instrument: &ScalpingInstrument, interval_minutes: u32) -> Scalp
             .session_start_confirmed_dates
             .contains(&bar.session_date)
     });
+    let scheduled_window_tail_omitted = has_scheduled_window_tail(instrument, interval_minutes);
     let status = if missing_volume_count == instrument.bars.len() {
         AvailabilityStatus::VolumeUnavailable
     } else if missing_volume_count > 0
         || missing_amount_count > 0
         || same_session_gap_count > 0
+        || scheduled_window_tail_omitted
         || !latest_session_start_confirmed
     {
         AvailabilityStatus::Partial
@@ -2512,6 +3096,9 @@ fn data_quality(instrument: &ScalpingInstrument, interval_minutes: u32) -> Scalp
     }
     if same_session_gap_count > 0 {
         reasons.push("same_session_bar_gaps".into());
+    }
+    if scheduled_window_tail_omitted {
+        reasons.push("scheduled_window_tail_omitted".into());
     }
     if !latest_session_start_confirmed {
         reasons.push("latest_session_start_coverage_unconfirmed".into());
@@ -2557,6 +3144,7 @@ pub fn analyze_scalping(
                     calculation,
                     local,
                     &translated.global_timestamps,
+                    request.output_projection.series_tail_points,
                 ));
         }
     }
@@ -2571,6 +3159,21 @@ pub fn analyze_scalping(
     )?;
     let mut instruments = request.instruments.iter().collect::<Vec<_>>();
     instruments.sort_by(|left, right| left.key.cmp(&right.key));
+    let selected_signal_timestamps = request
+        .output_projection
+        .signal_snapshots
+        .iter()
+        .map(|selection| {
+            (
+                selection.instrument_key.as_str(),
+                selection
+                    .timestamps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut results = Vec::with_capacity(instruments.len());
     for instrument in instruments {
         checkpoint(control)?;
@@ -2584,7 +3187,12 @@ pub fn analyze_scalping(
             &scanner_calculations,
             request.interval_minutes,
         );
-        let signals = assistance_signals(instrument, request, &calculations)?;
+        let selected_timestamps = selected_signal_timestamps
+            .get(instrument.key.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let (signals, signal_snapshots) =
+            assistance_signals(instrument, request, &calculations, &selected_timestamps)?;
         results.push(ScalpingInstrumentResult {
             instrument_key: instrument.key.clone(),
             interval_minutes: request.interval_minutes,
@@ -2593,6 +3201,7 @@ pub fn analyze_scalping(
             intraday,
             volume_profile: profiles.remove(&instrument.key),
             signals,
+            signal_snapshots,
             scanner_metrics,
             data_quality: data_quality(instrument, request.interval_minutes),
         });
@@ -2615,19 +3224,29 @@ pub fn analyze_scalping(
             timestamp_policy: "RFC3339 instants are ordered in UTC; session_date is the explicit local exchange-session calendar date".into(),
             bar_policy: "forming bars are rejected; calculations consume finalized bars only".into(),
             indicator_reuse: format!("all selected indicators and scanner volatility primitives use shared Rust {INDICATOR_ENGINE_VERSION}"),
-            session_vwap_policy: "session reset HLC3 times final-bar volume approximation; amount is not substituted for missing volume".into(),
+            session_vwap_policy: "session-date reset HLC3 times final-bar volume approximation; explicitly configured inter-window breaks are not treated as missing bars; amount is not substituted for missing volume".into(),
             relative_volume_policy: "current volume divided by complete same-local-minute observations from prior sessions only".into(),
             signal_execution_policy: "signals are decision support only and earliest eligibility is strictly after the finalized calculation bar; a position snapshot after that close but at-or-before an explicit next valid quote may affect only the current status label, never historical technical conditions; no fill or order is generated".into(),
             orderbook_history_policy: "only an explicitly supplied current snapshot is used; historical orderbook is unavailable and never synthesized".into(),
+            output_projection_policy: "full-series indicator, intraday, and assistance-signal arrays are bounded to the requested tail; evaluation receives only explicitly selected compact signal snapshots".into(),
+            series_tail_points: request.output_projection.series_tail_points,
+            signal_snapshot_count: request
+                .output_projection
+                .signal_snapshots
+                .iter()
+                .map(|selection| selection.timestamps.len())
+                .sum(),
             instrument_count: request.instruments.len(),
             indicator_definition_count: request.indicators.len(),
             total_bar_count,
             messages: vec![
                 "scanner realized volatility, normalized ATR, and Bollinger bandwidth reuse the shared versioned indicator engine".into(),
-                "opening ranges use the first ceil(requested_minutes/selected_interval) finalized session bars and disclose their effective duration".into(),
+                "opening ranges use finalized session bars only when the selected interval is no coarser than the requested range; coarser inputs are explicitly unavailable".into(),
                 "higher-timeframe direction changes only when a full aggregate-sized group of finalized base bars exists; an in-progress higher-timeframe group is ignored".into(),
                 "confidence is a deterministic data/condition completeness score, not a forecast probability or return guarantee".into(),
                 "volume profile remains bounded to explicitly requested instruments, 200 buckets, and 20,000 finalized bars per instrument".into(),
+                format!("serialized point series retain at most {} observations per instrument while all supplied bars remain calculation inputs", request.output_projection.series_tail_points),
+                "scheduled session windows are validated, and only exact adjacent-window boundary transitions are exempted from same-session gap diagnostics".into(),
             ],
         },
     })
@@ -2683,6 +3302,8 @@ mod tests {
             instrument_type: InstrumentType::Stock,
             session_start_confirmed_dates: session_dates.clone(),
             complete_session_dates: session_dates,
+            session_windows: Vec::new(),
+            session_window_overrides: Vec::new(),
             anchored_vwap_timestamp: Some(bars[30].timestamp.clone()),
             next_valid_quote_timestamp: None,
             orderbook: Some(OrderBookSnapshot {
@@ -2746,6 +3367,72 @@ mod tests {
                 stop_loss_bps: 100.0,
                 target_reward_ratio: 2.0,
             }),
+            output_projection: ScalpingOutputProjection::default(),
+        }
+    }
+
+    fn integrated_session_instrument() -> ScalpingInstrument {
+        let date = "2026-07-21";
+        let windows = vec![
+            SessionWindow {
+                kind: "pre_market".into(),
+                open_minute: 480,
+                close_minute: 530,
+                local_date_offset: 0,
+            },
+            SessionWindow {
+                kind: "regular_market".into(),
+                open_minute: 540,
+                close_minute: 930,
+                local_date_offset: 0,
+            },
+            SessionWindow {
+                kind: "after_market".into(),
+                open_minute: 940,
+                close_minute: 1_200,
+                local_date_offset: 0,
+            },
+        ];
+        let mut sequence = 0_usize;
+        let mut bars = Vec::new();
+        for window in &windows {
+            for minute in (window.open_minute + 1)..=window.close_minute {
+                let base = if window.kind == "after_market" {
+                    80.0 - f64::from(minute - window.open_minute) / 100.0
+                } else {
+                    100.0 + sequence as f64 / 100.0
+                };
+                bars.push(MinuteBar {
+                    timestamp: format!("{date}T{:02}:{:02}:00+09:00", minute / 60, minute % 60,),
+                    session_date: date.into(),
+                    open: base,
+                    high: base + 0.2,
+                    low: base - 0.2,
+                    close: base + 0.05,
+                    volume: Some(1_000.0 + sequence as f64),
+                    amount: Some((1_000.0 + sequence as f64) * (base + 0.05)),
+                    complete: true,
+                });
+                sequence += 1;
+            }
+        }
+        let anchor = bars[0].timestamp.clone();
+        ScalpingInstrument {
+            key: "KRW:005930".into(),
+            symbol: "005930".into(),
+            market: "KRX_NXT_INTEGRATED".into(),
+            currency: "KRW".into(),
+            instrument_type: InstrumentType::Stock,
+            session_start_confirmed_dates: vec![date.into()],
+            complete_session_dates: vec![date.into()],
+            session_windows: windows,
+            session_window_overrides: Vec::new(),
+            anchored_vwap_timestamp: Some(anchor.clone()),
+            next_valid_quote_timestamp: None,
+            orderbook: None,
+            trade_stats: None,
+            position: None,
+            bars,
         }
     }
 
@@ -2763,6 +3450,90 @@ mod tests {
         assert_eq!(
             format_utc_timestamp(seoul.epoch_millis),
             "2026-07-21T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn us_day_market_crosses_midnight_without_resetting_the_trading_session() {
+        let windows = vec![
+            SessionWindow {
+                kind: "day_market".into(),
+                open_minute: 1_200,
+                close_minute: 1_440,
+                local_date_offset: -1,
+            },
+            SessionWindow {
+                kind: "day_market".into(),
+                open_minute: 0,
+                close_minute: 240,
+                local_date_offset: 0,
+            },
+            SessionWindow {
+                kind: "pre_market".into(),
+                open_minute: 240,
+                close_minute: 570,
+                local_date_offset: 0,
+            },
+            SessionWindow {
+                kind: "regular_market".into(),
+                open_minute: 570,
+                close_minute: 960,
+                local_date_offset: 0,
+            },
+            SessionWindow {
+                kind: "after_market".into(),
+                open_minute: 960,
+                close_minute: 1_200,
+                local_date_offset: 0,
+            },
+        ];
+        let make_bar = |timestamp: &str, close: f64| MinuteBar {
+            timestamp: timestamp.into(),
+            session_date: "2026-07-22".into(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: Some(10.0),
+            amount: Some(close * 10.0),
+            complete: true,
+        };
+        let mut us = instrument("USD:AAPL", 0.0);
+        us.market = "US".into();
+        us.currency = "USD".into();
+        us.bars = vec![
+            make_bar("2026-07-22T00:00:00-04:00", 200.0),
+            make_bar("2026-07-22T00:01:00-04:00", 201.0),
+        ];
+        us.session_windows = windows.clone();
+        us.session_window_overrides = vec![SessionWindowOverride {
+            session_date: "2026-07-22".into(),
+            windows,
+        }];
+        us.session_start_confirmed_dates = vec!["2026-07-22".into()];
+        us.complete_session_dates.clear();
+        us.anchored_vwap_timestamp = None;
+        us.orderbook = None;
+        us.trade_stats = None;
+        us.position = None;
+        let mut input = request(ResponseMode::FullSeries, false);
+        input.instruments = vec![us.clone()];
+        input.volume_profile = None;
+        validate_request(&input).unwrap();
+        let next = next_scheduled_close_epoch(&us, &us.bars[0], 1)
+            .unwrap()
+            .map(format_utc_timestamp);
+        assert_eq!(next.as_deref(), Some("2026-07-22T04:01:00.000Z"));
+        let points = session_vwap_points(&us, 1).unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points[1].values["session_vwap"].is_some());
+
+        input.instruments[0].bars[0].session_date = "2026-07-21".into();
+        assert!(
+            validate_request(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("outside configured session windows")
         );
     }
 
@@ -3081,7 +3852,10 @@ mod tests {
             .unwrap();
         assert_eq!(signal.status, AssistanceStatus::Hold);
         assert!(signal.position_known);
-        assert_eq!(signal.earliest_eligible_timestamp, quote_timestamp);
+        assert_eq!(
+            signal.earliest_eligible_timestamp.as_deref(),
+            Some(quote_timestamp.as_str())
+        );
         assert!(
             signal
                 .eligibility_basis
@@ -3150,7 +3924,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(signals.iter().all(|signal| {
-            parse_timestamp(&signal.earliest_eligible_timestamp)
+            parse_timestamp(signal.earliest_eligible_timestamp.as_deref().unwrap())
                 .unwrap()
                 .epoch_millis
                 > parse_timestamp(&signal.calculation_timestamp)
@@ -3163,6 +3937,380 @@ mod tests {
                     .confidence_semantics
                     .contains("not_success_probability")
         }));
+    }
+
+    #[test]
+    fn integrated_nxt_windows_allow_only_scheduled_breaks_and_keep_regular_opening_range() {
+        let mut full_input = request(ResponseMode::FullSeries, false);
+        full_input.instruments = vec![integrated_session_instrument()];
+        let full_result = analyze_scalping(&full_input, None).unwrap();
+        assert_eq!(
+            full_result.scalping_engine_version,
+            "scalping-analysis/1.4.0"
+        );
+        let full_instrument = &full_result.instruments[0];
+        assert_eq!(full_instrument.data_quality.same_session_gap_count, 0);
+        assert_eq!(
+            full_instrument.data_quality.status,
+            AvailabilityStatus::Available
+        );
+
+        let mut early_input = full_input.clone();
+        early_input.output_projection.series_tail_points = 512;
+        early_input.instruments[0]
+            .bars
+            .retain(|bar| bar.timestamp.as_str() <= "2026-07-21T15:55:00+09:00");
+        early_input.instruments[0].complete_session_dates.clear();
+        let early_result = analyze_scalping(&early_input, None).unwrap();
+        let instrument = &early_result.instruments[0];
+
+        let vwap = metric_points(&instrument.intraday.session_vwap);
+        let after = vwap
+            .iter()
+            .find(|point| point.timestamp == "2026-07-21T15:41:00+09:00")
+            .unwrap();
+        assert_eq!(after.state, PointState::Available);
+        assert_eq!(
+            instrument
+                .intraday
+                .session_vwap
+                .metadata
+                .get("accumulation_scope"),
+            Some(&json!("all_caller_configured_session_windows")),
+        );
+
+        let opening = metric_points(&instrument.intraday.opening_range_5);
+        let pre_market = opening
+            .iter()
+            .find(|point| point.timestamp == "2026-07-21T08:05:00+09:00")
+            .unwrap();
+        assert_eq!(pre_market.state, PointState::Warmup);
+        let regular_ready = opening
+            .iter()
+            .find(|point| point.timestamp == "2026-07-21T09:05:00+09:00")
+            .unwrap();
+        assert_eq!(regular_ready.state, PointState::Available);
+
+        let signals = instrument
+            .signals
+            .as_ref()
+            .unwrap()
+            .points
+            .as_ref()
+            .unwrap();
+        let pre_close = signals
+            .iter()
+            .find(|signal| signal.calculation_timestamp == "2026-07-21T08:50:00+09:00")
+            .unwrap();
+        assert_eq!(
+            pre_close.earliest_eligible_timestamp.as_deref(),
+            Some("2026-07-21T00:01:00.000Z"),
+        );
+        let regular_close = signals
+            .iter()
+            .find(|signal| signal.calculation_timestamp == "2026-07-21T15:30:00+09:00")
+            .unwrap();
+        assert_eq!(
+            regular_close.earliest_eligible_timestamp.as_deref(),
+            Some("2026-07-21T06:41:00.000Z"),
+        );
+        let after_ten = signals
+            .iter()
+            .find(|signal| signal.calculation_timestamp == "2026-07-21T15:50:00+09:00")
+            .unwrap();
+        assert_eq!(
+            after_ten.multi_timeframe_trends.get("15m"),
+            Some(&Some(TrendDirection::Bullish))
+        );
+        let after_fifteen = signals
+            .iter()
+            .find(|signal| signal.calculation_timestamp == "2026-07-21T15:55:00+09:00")
+            .unwrap();
+        assert_eq!(
+            after_fifteen.multi_timeframe_trends.get("15m"),
+            Some(&Some(TrendDirection::Bearish))
+        );
+        let after_close = full_instrument
+            .signals
+            .as_ref()
+            .unwrap()
+            .points
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(
+            after_close.calculation_timestamp,
+            "2026-07-21T20:00:00+09:00"
+        );
+        assert_eq!(after_close.earliest_eligible_timestamp, None);
+        assert_eq!(after_close.status, AssistanceStatus::Watch);
+        assert_eq!(
+            after_close.eligibility_basis,
+            "caller_configured_session_ended_next_valid_quote_unavailable",
+        );
+        assert!(
+            after_close
+                .rationale
+                .iter()
+                .any(|value| value == "next_valid_market_timestamp_unavailable")
+        );
+    }
+
+    #[test]
+    fn opening_ranges_do_not_expand_a_short_range_to_a_coarser_selected_interval() {
+        let mut instrument = integrated_session_instrument();
+        instrument
+            .session_windows
+            .retain(|window| window.kind == "regular_market");
+        instrument.bars.retain(|bar| {
+            let minute = parse_timestamp(&bar.timestamp).unwrap().local_minute_of_day;
+            minute > 540 && minute <= 930 && (minute - 540) % 60 == 0
+        });
+        instrument.session_start_confirmed_dates = vec!["2026-07-21".into()];
+        instrument.complete_session_dates.clear();
+        instrument.anchored_vwap_timestamp = Some(instrument.bars[0].timestamp.clone());
+        instrument.orderbook = None;
+        instrument.trade_stats = None;
+        instrument.position = None;
+
+        let mut input = request(ResponseMode::LatestSummary, false);
+        input.interval_minutes = 60;
+        input.instruments = vec![instrument];
+        input.volume_profile = None;
+        let result = analyze_scalping(&input, None).unwrap();
+        let intraday = &result.instruments[0].intraday;
+        for series in [
+            &intraday.opening_range_5,
+            &intraday.opening_range_15,
+            &intraday.opening_range_30,
+        ] {
+            assert_eq!(series.availability.status, AvailabilityStatus::Unavailable);
+            assert_eq!(
+                series.availability.reason,
+                "selected_interval_coarser_than_opening_range",
+            );
+            assert_eq!(
+                series.latest.as_ref().unwrap().state,
+                PointState::Unavailable,
+            );
+            assert_eq!(series.metadata.get("effective_minutes"), Some(&Value::Null));
+            assert_eq!(
+                series.metadata.get("source_interval_minutes"),
+                Some(&json!(60))
+            );
+        }
+    }
+
+    #[test]
+    fn six_full_integrated_sessions_make_five_session_time_of_day_rvol_available() {
+        let template = integrated_session_instrument();
+        let mut instrument = template.clone();
+        instrument.bars.clear();
+        instrument.session_start_confirmed_dates.clear();
+        instrument.complete_session_dates.clear();
+        for day in 21..=26 {
+            let date = format!("2026-07-{day:02}");
+            instrument.session_start_confirmed_dates.push(date.clone());
+            instrument.complete_session_dates.push(date.clone());
+            instrument
+                .bars
+                .extend(template.bars.iter().cloned().map(|mut bar| {
+                    bar.timestamp = format!("{date}{}", &bar.timestamp[10..]);
+                    bar.session_date = date.clone();
+                    bar
+                }));
+        }
+        instrument.anchored_vwap_timestamp = Some(instrument.bars[0].timestamp.clone());
+        instrument.next_valid_quote_timestamp = None;
+        instrument.orderbook = None;
+        instrument.trade_stats = None;
+        instrument.position = None;
+
+        let mut input = request(ResponseMode::LatestSummary, false);
+        input.instruments = vec![instrument];
+        input.volume_profile = None;
+        let result = analyze_scalping(&input, None).unwrap();
+        let relative_volume = &result.instruments[0].intraday.time_of_day_relative_volume;
+        assert_eq!(
+            relative_volume.availability.status,
+            AvailabilityStatus::Available
+        );
+        assert_eq!(
+            relative_volume
+                .latest
+                .as_ref()
+                .unwrap()
+                .values
+                .get("relative_volume"),
+            Some(&Some(1.0)),
+        );
+        assert_eq!(result.diagnostics.total_bar_count, 4_200);
+    }
+
+    #[test]
+    fn regular_only_instrument_does_not_infer_an_nxt_after_market_transition() {
+        let mut instrument = integrated_session_instrument();
+        instrument
+            .session_windows
+            .retain(|window| window.kind == "regular_market");
+        instrument.bars.retain(|bar| {
+            let minute = parse_timestamp(&bar.timestamp).unwrap().local_minute_of_day;
+            minute > 540 && minute <= 930
+        });
+        instrument.anchored_vwap_timestamp = Some(instrument.bars[0].timestamp.clone());
+        let mut input = request(ResponseMode::FullSeries, false);
+        input.instruments = vec![instrument];
+
+        let result = analyze_scalping(&input, None).unwrap();
+        let signals = result.instruments[0]
+            .signals
+            .as_ref()
+            .unwrap()
+            .points
+            .as_ref()
+            .unwrap();
+        let regular_close = signals.last().unwrap();
+        assert_eq!(
+            regular_close.calculation_timestamp,
+            "2026-07-21T15:30:00+09:00",
+        );
+        assert_eq!(regular_close.earliest_eligible_timestamp, None);
+        assert_eq!(regular_close.status, AssistanceStatus::Watch);
+        assert_eq!(
+            regular_close.eligibility_basis,
+            "caller_configured_session_ended_next_valid_quote_unavailable",
+        );
+        assert!(!signals.iter().any(|signal| {
+            signal.earliest_eligible_timestamp.as_deref() == Some("2026-07-21T06:41:00.000Z")
+        }));
+    }
+
+    #[test]
+    fn us_early_close_window_has_no_post_close_signal_eligibility() {
+        let date = "2026-07-21";
+        let bars = (571..=780)
+            .enumerate()
+            .map(|(index, minute)| {
+                let price = 200.0 + index as f64 / 100.0;
+                MinuteBar {
+                    timestamp: format!("{date}T{:02}:{:02}:00-04:00", minute / 60, minute % 60,),
+                    session_date: date.into(),
+                    open: price,
+                    high: price + 0.2,
+                    low: price - 0.2,
+                    close: price + 0.05,
+                    volume: Some(1_000.0 + index as f64),
+                    amount: None,
+                    complete: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut instrument = integrated_session_instrument();
+        instrument.key = "USD:AAPL".into();
+        instrument.symbol = "AAPL".into();
+        instrument.market = "US".into();
+        instrument.currency = "USD".into();
+        instrument.session_windows = vec![SessionWindow {
+            kind: "regular_market".into(),
+            open_minute: 570,
+            close_minute: 780,
+            local_date_offset: 0,
+        }];
+        instrument.anchored_vwap_timestamp = Some(bars[0].timestamp.clone());
+        instrument.bars = bars;
+        let mut input = request(ResponseMode::FullSeries, false);
+        input.instruments = vec![instrument];
+        input.volume_profile = None;
+
+        let result = analyze_scalping(&input, None).unwrap();
+        let last = result.instruments[0]
+            .signals
+            .as_ref()
+            .unwrap()
+            .points
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(last.calculation_timestamp, "2026-07-21T13:00:00-04:00");
+        assert_eq!(last.earliest_eligible_timestamp, None);
+        assert_eq!(last.status, AssistanceStatus::Watch);
+        assert_eq!(
+            last.eligibility_basis,
+            "caller_configured_session_ended_next_valid_quote_unavailable",
+        );
+    }
+
+    #[test]
+    fn integrated_nxt_windows_do_not_hide_a_real_missing_bar() {
+        let mut input = request(ResponseMode::LatestSummary, false);
+        let mut instrument = integrated_session_instrument();
+        instrument
+            .bars
+            .retain(|bar| bar.timestamp != "2026-07-21T10:00:00+09:00");
+        instrument.complete_session_dates.clear();
+        input.instruments = vec![instrument];
+        let result = analyze_scalping(&input, None).unwrap();
+        assert_eq!(result.instruments[0].data_quality.same_session_gap_count, 1);
+        assert_eq!(
+            result.instruments[0].data_quality.status,
+            AvailabilityStatus::Partial
+        );
+        let signal = result.instruments[0]
+            .signals
+            .as_ref()
+            .unwrap()
+            .latest
+            .as_ref()
+            .unwrap();
+        assert!(
+            signal
+                .rationale
+                .iter()
+                .any(|value| value == "unrecovered_same_session_bar_gap")
+        );
+    }
+
+    #[test]
+    fn non_divisible_integrated_windows_disclose_omitted_higher_interval_tails() {
+        let mut instrument = integrated_session_instrument();
+        let windows = instrument.session_windows.clone();
+        instrument.bars.retain(|bar| {
+            let minute = parse_timestamp(&bar.timestamp).unwrap().local_minute_of_day;
+            let window = windows
+                .iter()
+                .find(|window| minute > window.open_minute && minute <= window.close_minute)
+                .unwrap();
+            (minute - window.open_minute) % 15 == 0
+        });
+        instrument.complete_session_dates.clear();
+        instrument.anchored_vwap_timestamp = Some(instrument.bars[0].timestamp.clone());
+        let mut input = request(ResponseMode::LatestSummary, false);
+        input.interval_minutes = 15;
+        input.instruments = vec![instrument];
+        let result = analyze_scalping(&input, None).unwrap();
+        let instrument = &result.instruments[0];
+        assert_eq!(instrument.data_quality.status, AvailabilityStatus::Partial);
+        assert!(
+            instrument
+                .data_quality
+                .reasons
+                .iter()
+                .any(|reason| reason == "scheduled_window_tail_omitted")
+        );
+        assert!(
+            instrument
+                .signals
+                .as_ref()
+                .unwrap()
+                .latest
+                .as_ref()
+                .unwrap()
+                .rationale
+                .iter()
+                .any(|reason| reason == "scheduled_window_tail_omitted")
+        );
     }
 
     #[test]
@@ -3186,6 +4334,25 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("must be supplied together")
+        );
+        let mut invalid_projection = request(ResponseMode::FullSeries, false);
+        invalid_projection.output_projection.series_tail_points = 513;
+        assert!(
+            analyze_scalping(&invalid_projection, None)
+                .unwrap_err()
+                .to_string()
+                .contains("series_tail_points must be in 1..=512")
+        );
+        let mut invalid_selection = request(ResponseMode::FullSeries, false);
+        invalid_selection.output_projection.signal_snapshots = vec![SignalSnapshotSelection {
+            instrument_key: invalid_selection.instruments[0].key.clone(),
+            timestamps: vec!["2026-07-21T09:00:00+09:00".into()],
+        }];
+        assert!(
+            analyze_scalping(&invalid_selection, None)
+                .unwrap_err()
+                .to_string()
+                .contains("must reference supplied finalized bars")
         );
     }
 
@@ -3247,5 +4414,203 @@ mod tests {
         assert_eq!(first.instruments.len(), 20);
         assert_eq!(first.diagnostics.total_bar_count, 3_000);
         eprintln!("20-instrument/3000-bar scalping batch: {elapsed:?}");
+    }
+
+    #[test]
+    fn twenty_instrument_four_thousand_nine_hundred_bar_response_is_bounded() {
+        let template = integrated_session_instrument();
+        let instruments = (0..20)
+            .map(|index| {
+                let key = format!("KRW:{index:06}");
+                let offset = index as f64 * 10.0;
+                let mut instrument = template.clone();
+                instrument.key = key;
+                instrument.symbol = format!("{index:06}");
+                instrument.bars.clear();
+                instrument.session_start_confirmed_dates.clear();
+                instrument.complete_session_dates.clear();
+                for day in 21..=27 {
+                    let date = format!("2026-07-{day:02}");
+                    instrument.session_start_confirmed_dates.push(date.clone());
+                    instrument.complete_session_dates.push(date.clone());
+                    instrument
+                        .bars
+                        .extend(template.bars.iter().cloned().map(|mut bar| {
+                            bar.timestamp = format!("{date}{}", &bar.timestamp[10..]);
+                            bar.session_date = date.clone();
+                            bar.open += offset;
+                            bar.high += offset;
+                            bar.low += offset;
+                            bar.close += offset;
+                            bar.amount = bar.volume.map(|volume| volume * bar.close);
+                            bar
+                        }));
+                }
+                instrument.anchored_vwap_timestamp =
+                    Some(instrument.bars.first().unwrap().timestamp.clone());
+                instrument.next_valid_quote_timestamp = None;
+                instrument.orderbook = None;
+                instrument.trade_stats = None;
+                instrument.position = None;
+                assert_eq!(instrument.bars.len(), 4_900);
+                instrument
+            })
+            .collect::<Vec<_>>();
+        let signal_snapshots = instruments
+            .iter()
+            .map(|instrument| SignalSnapshotSelection {
+                instrument_key: instrument.key.clone(),
+                timestamps: instrument
+                    .bars
+                    .iter()
+                    .map(|bar| bar.timestamp.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let profile_keys = instruments
+            .iter()
+            .map(|instrument| instrument.key.clone())
+            .collect::<Vec<_>>();
+        let mut input = request(ResponseMode::FullSeries, false);
+        input.instruments = instruments;
+        input.indicators = vec![
+            IndicatorDefinition {
+                id: "scanner-realized-volatility".into(),
+                kind: IndicatorKind::HistoricalVolatility,
+                parameters: BTreeMap::from([
+                    ("period".into(), json!(20)),
+                    ("annualization".into(), json!(1)),
+                    ("return_type".into(), json!("log")),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "scanner-natr".into(),
+                kind: IndicatorKind::NormalizedAtr,
+                parameters: BTreeMap::from([("period".into(), json!(14))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "scanner-bollinger-width".into(),
+                kind: IndicatorKind::BollingerBandWidthPercentB,
+                parameters: BTreeMap::from([
+                    ("period".into(), json!(20)),
+                    ("stddev_multiplier".into(), json!(2)),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "scanner-rvol".into(),
+                kind: IndicatorKind::RelativeVolume,
+                parameters: BTreeMap::from([("period".into(), json!(20))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "trend-ema-fast".into(),
+                kind: IndicatorKind::Ema,
+                parameters: BTreeMap::from([("period".into(), json!(20))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "trend-ema-slow".into(),
+                kind: IndicatorKind::Ema,
+                parameters: BTreeMap::from([("period".into(), json!(50))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "trend-macd".into(),
+                kind: IndicatorKind::Macd,
+                parameters: BTreeMap::from([
+                    ("fast_period".into(), json!(12)),
+                    ("slow_period".into(), json!(26)),
+                    ("signal_period".into(), json!(9)),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "trend-adx".into(),
+                kind: IndicatorKind::AdxDmi,
+                parameters: BTreeMap::from([("period".into(), json!(14))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "trend-supertrend".into(),
+                kind: IndicatorKind::Supertrend,
+                parameters: BTreeMap::from([
+                    ("atr_period".into(), json!(10)),
+                    ("multiplier".into(), json!(3)),
+                ]),
+                instrument_keys: None,
+            },
+        ];
+        input.volume_profile = Some(VolumeProfileConfig {
+            instrument_keys: profile_keys,
+            bucket_count: 200,
+            value_area_percent: 70.0,
+            price_source: "typical_price".into(),
+        });
+        input.output_projection = ScalpingOutputProjection {
+            series_tail_points: 180,
+            signal_snapshots,
+        };
+
+        let started = Instant::now();
+        let result = analyze_scalping(&input, None).unwrap();
+        let serialized_bytes = serde_json::to_vec(&result).unwrap().len();
+        assert_eq!(result.diagnostics.total_bar_count, 98_000);
+        assert_eq!(result.diagnostics.signal_snapshot_count, 98_000);
+        assert_eq!(result.instruments.len(), 20);
+        for instrument in &result.instruments {
+            assert_eq!(instrument.signal_snapshots.len(), 4_900);
+            assert!(instrument.indicators.iter().all(|calculation| {
+                calculation
+                    .points
+                    .as_ref()
+                    .is_none_or(|points| points.len() <= 180)
+            }));
+            assert!(
+                instrument
+                    .signals
+                    .as_ref()
+                    .unwrap()
+                    .points
+                    .as_ref()
+                    .unwrap()
+                    .len()
+                    <= 180
+            );
+            for series in [
+                &instrument.intraday.session_vwap,
+                &instrument.intraday.anchored_vwap,
+                &instrument.intraday.opening_range_5,
+                &instrument.intraday.opening_range_15,
+                &instrument.intraday.opening_range_30,
+                &instrument.intraday.time_of_day_relative_volume,
+                &instrument.intraday.previous_session_levels,
+                &instrument.intraday.current_session_levels,
+            ] {
+                assert!(series.points.as_ref().unwrap().len() <= 180);
+            }
+            assert_eq!(
+                instrument
+                    .volume_profile
+                    .as_ref()
+                    .unwrap()
+                    .profile
+                    .as_ref()
+                    .unwrap()
+                    .buckets
+                    .len(),
+                200
+            );
+        }
+        assert!(
+            serialized_bytes < 64 * 1024 * 1024,
+            "bounded 20x4900 scalping response was {serialized_bytes} bytes"
+        );
+        eprintln!(
+            "20-instrument/98000-bar bounded response: {serialized_bytes} bytes in {:?}",
+            started.elapsed()
+        );
     }
 }

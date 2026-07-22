@@ -46,7 +46,7 @@ function validateTestUrl(value: string): string {
   return url.toString();
 }
 
-function buildRequest(seriesCount: number): AiForecastRequest {
+function buildRequest(seriesCount: number, timezone: "Asia/Seoul" | "America/New_York"): AiForecastRequest {
   const end = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
   const first = end - 79 * 60_000;
   const series = Array.from({ length: seriesCount }, (_, seriesIndex) => {
@@ -70,7 +70,7 @@ function buildRequest(seriesCount: number): AiForecastRequest {
     });
     return {
       instrument_key: `VERIFY:${String(seriesIndex + 1).padStart(4, "0")}`,
-      timezone: "Asia/Seoul",
+      timezone,
       input_end_at: bars.at(-1)!.timestamp,
       future_timestamps: Array.from({ length: 60 }, (_future, index) => (
         new Date(end + (index + 1) * 60_000).toISOString()
@@ -87,11 +87,20 @@ function buildRequest(seriesCount: number): AiForecastRequest {
 
 async function main(): Promise<void> {
   const seriesCount = boundedInteger("AI_VERIFY_SERIES_COUNT", 2, 1, 50);
+  const timezoneValue = process.env.AI_VERIFY_TIMEZONE?.trim() || "Asia/Seoul";
+  if (timezoneValue !== "Asia/Seoul" && timezoneValue !== "America/New_York") {
+    throw new Error("AI_VERIFY_TIMEZONE must be Asia/Seoul or America/New_York.");
+  }
   const reconnectBaseMs = boundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 100, 1, 60_000);
   const caPath = process.env.AI_COMPUTE_TLS_CA_FILE?.trim();
+  const configuredTokenFile = process.env.AI_COMPUTE_AUTH_TOKEN_FILE?.trim();
+  const hostSecretSource = process.env.AI_AUTH_SECRET_SOURCE?.trim();
+  const authTokenFile = configuredTokenFile
+    || (hostSecretSource?.startsWith("/") ? `${hostSecretSource.replace(/\/+$/, "")}/token` : undefined)
+    || "/tmp/toss-portfolio-lens-ai-auth-token";
   const client = new AiComputeClient({
     url: validateTestUrl(process.env.AI_COMPUTE_URL ?? "ws://127.0.0.1:18766/ws/scalping-ai/v1"),
-    authTokenFile: process.env.AI_COMPUTE_AUTH_TOKEN_FILE ?? "/tmp/toss-portfolio-lens-ai-auth-token",
+    authTokenFile,
     timeoutMs: boundedInteger("AI_COMPUTE_TIMEOUT_MS", 180_000, 1_000, 3_600_000),
     connectTimeoutMs: boundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000),
     reconnectBaseMs,
@@ -101,7 +110,7 @@ async function main(): Promise<void> {
     maximumResponseBytes: boundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     ...(caPath ? { tlsCa: readFileSync(caPath, "utf8") } : {}),
   });
-  const request = buildRequest(seriesCount);
+  const request = buildRequest(seriesCount, timezoneValue);
   const started = performance.now();
   try {
     const response = await client.request(request);
@@ -121,6 +130,7 @@ async function main(): Promise<void> {
       request_id: response.request_id,
       response_status: response.status,
       series_count: response.series.length,
+      timezone: timezoneValue,
       available_series: response.series.filter((item) => item.status === "available").length,
       horizons_per_available_series: response.series
         .filter((item) => item.status === "available")
