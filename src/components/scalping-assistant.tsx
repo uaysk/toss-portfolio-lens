@@ -775,7 +775,8 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   const [request, setRequest] = useState<ScalpingRequest>(DEFAULT_REQUEST);
   const [status, setStatus] = useState<ScalpingStatus>();
   const [workspace, setWorkspace] = useState<ScalpingWorkspace>();
-  const [loading, setLoading] = useState(true);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [forecastLoading, setForecastLoading] = useState(false);
   const [error, setError] = useState("");
   const [forecastError, setForecastError] = useState("");
@@ -824,7 +825,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
+    setStatusLoading(true);
     fetch("/api/portfolio/scalping/status", { headers: { Accept: "application/json" }, signal: controller.signal })
       .then(async (response) => {
         const payload = await readJson(response);
@@ -846,38 +847,34 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
             topCount: Math.min(maximum, Math.max(minimum, DEFAULT_REQUEST.topCount)),
           };
           setRequest(initialRequest);
-          return runWorkspace(initialRequest, nextStatus.limits);
         }
-        setLoading(false);
       })
       .catch((caught) => {
         if (controller.signal.aborted) return;
         setStatus({ enabled: false, message: caught instanceof Error ? caught.message : "상태 확인 실패", providers: [], capabilities: [], limitations: [] });
-        setLoading(false);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setStatusLoading(false);
       });
     return () => controller.abort();
-  }, [onUnauthorized, runWorkspace]);
+  }, [onUnauthorized]);
 
   const symbolsKey = workspace?.candidates.map(({ symbol }) => symbol).join(",") ?? "";
   const workspaceInterval = workspace?.interval;
   const workspacePreset = workspace?.preset;
-  const workspaceCriterion = workspace?.criterion;
   const workspaceMarketCountry = workspace?.marketCountry;
-  const workspaceTopCount = workspace?.requestedTopCount;
-  const workspaceLayoutColumns = workspace?.layoutColumns;
   const workspaceExchangeKey = workspace?.candidates.flatMap((candidate) => candidate.exchange ? [`${candidate.symbol}:${candidate.exchange}`] : []).join(",") ?? "";
   const workspaceExchanges = Object.fromEntries(workspaceExchangeKey.split(",").flatMap((entry) => {
     const [symbol, exchange] = entry.split(":");
     return symbol && exchange ? [[symbol, exchange as ScalpingUsExchange] as const] : [];
   }));
   useEffect(() => {
-    if (!status?.enabled || !symbolsKey || !workspaceInterval || !workspacePreset || !workspaceCriterion || !workspaceMarketCountry
-      || !workspaceTopCount || !workspaceLayoutColumns || typeof EventSource === "undefined") {
+    if (!status?.enabled || !symbolsKey || !workspaceInterval || !workspacePreset || !workspaceMarketCountry
+      || typeof EventSource === "undefined") {
       setStreamState(status?.enabled && symbolsKey ? "unavailable" : "idle");
       return;
     }
     const stream = new EventSource(scalpingStreamUrl(symbolsKey.split(","), workspaceInterval, workspacePreset, workspaceMarketCountry, workspaceExchanges));
-    let recoveryRefresh: number | undefined;
     setStreamState("reconnecting");
     stream.onopen = () => setStreamState("connected");
     stream.onerror = () => setStreamState("reconnecting");
@@ -889,20 +886,6 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
           if (event.type === "connection") {
             const payload = event.value && typeof event.value === "object" ? event.value as Record<string, unknown> : {};
             setStreamState(payload.state === "connected" ? "connected" : "reconnecting");
-          }
-          if (event.type === "recovery") {
-            const payload = event.value && typeof event.value === "object" ? event.value as Record<string, unknown> : {};
-            if (payload.status === "available" || payload.status === "partial") {
-              if (recoveryRefresh !== undefined) window.clearTimeout(recoveryRefresh);
-              recoveryRefresh = window.setTimeout(() => void runWorkspace({
-                marketCountry: workspaceMarketCountry,
-                criterion: workspaceCriterion,
-                topCount: workspaceTopCount,
-                interval: workspaceInterval,
-                layoutColumns: workspaceLayoutColumns,
-                preset: workspacePreset,
-              }, topCountLimits), 750);
-            }
           }
           setWorkspace((current) => current ? mergeScalpingStreamEvent(current, event) : current);
         }
@@ -916,22 +899,16 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     }
     stream.addEventListener("unavailable", () => setStreamState("unavailable"));
     return () => {
-      if (recoveryRefresh !== undefined) window.clearTimeout(recoveryRefresh);
       stream.close();
       setStreamState("idle");
     };
   }, [
-    runWorkspace,
     status?.enabled,
     symbolsKey,
-    topCountLimits,
-    workspaceCriterion,
     workspaceExchangeKey,
     workspaceInterval,
-    workspaceLayoutColumns,
     workspaceMarketCountry,
     workspacePreset,
-    workspaceTopCount,
   ]);
 
   const requestForecasts = async () => {
@@ -1015,8 +992,8 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         <fieldset className="mt-3 min-w-0"><legend className="text-[9px] font-black text-muted-foreground">지표 프리셋</legend><div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">{SCALPING_PRESETS.map((preset) => <button key={preset} type="button" aria-pressed={request.preset === preset} onClick={() => setPreset(preset)} className={cn("min-w-0 rounded-[18px] p-3 text-left transition-colors", request.preset === preset ? "bg-primary text-primary-foreground" : "bg-card")}><span className="block text-[11px] font-black">{PRESET_LABELS[preset].label}</span><span className={cn("mt-1 block truncate text-[9px]", request.preset === preset ? "text-primary-foreground/60" : "text-muted-foreground")}>{PRESET_LABELS[preset].description}</span></button>)}</div></fieldset>
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="text-[9px] text-muted-foreground">{requestIssues.length ? <span role="alert" className="font-black text-destructive">{requestIssues.join(" ")}</span> : <span>모든 종목·지표는 서버에서 한 번의 batch 요청으로 계산됩니다.</span>}</div>
-          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || forecastLoading || loading || !workspace?.candidates.length}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request, topCountLimits)} disabled={!status?.enabled || loading || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
+          <div className="text-[9px] text-muted-foreground">{requestIssues.length ? <span role="alert" className="font-black text-destructive">{requestIssues.join(" ")}</span> : <span>스캔은 이 버튼으로만 실행됩니다. 적용 후에는 선택된 종목의 실시간 데이터만 갱신합니다.</span>}</div>
+          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || statusLoading || forecastLoading || loading || !workspace?.candidates.length}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request, topCountLimits)} disabled={!status?.enabled || statusLoading || loading || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
         </div>
       </Card>
 
@@ -1035,9 +1012,17 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
             </div>
           )}
         </Card>
-      ) : loading ? <Card className="grid min-h-[360px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">후보와 분봉을 batch로 불러오는 중</p></div></Card> : null}
+      ) : loading ? <Card className="grid min-h-[360px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">후보와 분봉을 batch로 불러오는 중</p></div></Card> : (
+        <Card className="grid min-h-[280px] place-items-center bg-secondary px-5 text-center" data-scalping-scan-idle>
+          <div>
+            {statusLoading ? <LoaderCircle className="mx-auto size-6 animate-spin text-muted-foreground" /> : <CircleDashed className="mx-auto size-6 text-muted-foreground" />}
+            <p className="mt-3 font-black">{statusLoading ? "단타 보조 설정을 확인하는 중입니다." : "스캔 대기 중"}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{statusLoading ? "상태 확인만 수행하며 종목 스캔은 시작하지 않습니다." : "시장·순위·종목 수·분봉·프리셋을 선택한 뒤 스캔 적용 버튼을 눌러 주세요."}</p>
+          </div>
+        </Card>
+      )}
 
-      <EvaluationPanel candidates={workspace?.candidates ?? []} interval={workspace?.interval ?? request.interval} marketCountry={workspace?.marketCountry ?? request.marketCountry} disabled={!status?.enabled || loading} onUnauthorized={onUnauthorized} />
+      <EvaluationPanel candidates={workspace?.candidates ?? []} interval={workspace?.interval ?? request.interval} marketCountry={workspace?.marketCountry ?? request.marketCountry} disabled={!status?.enabled || statusLoading || loading} onUnauthorized={onUnauthorized} />
 
       <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" role="note">
         <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><p><strong className="text-foreground">안내:</strong> 이 화면은 매수·매도 주문 지시가 아닌 의사결정 보조입니다. AI는 거래 결정을 내리지 않으며, 예측이 없거나 과거 호가가 보존되지 않은 경우 unavailable로 표시합니다. 투자 결과와 손실은 사용자에게 귀속됩니다.</p></div>

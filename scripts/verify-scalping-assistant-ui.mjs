@@ -186,12 +186,32 @@ async function verify(browser, baseUrl, viewport, theme) {
     window.localStorage.setItem("portfolio-theme", selectedTheme);
     history.scrollRestoration = "manual";
     window.__scalpingEventSourceUrls = [];
+    window.__scalpingEventSourceInstances = [];
     class StaticEventSource {
       static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
       CONNECTING = 0; OPEN = 1; CLOSED = 2; readyState = 0; url; withCredentials = false;
       onopen = null; onmessage = null; onerror = null;
-      constructor(url) { this.url = String(url); window.__scalpingEventSourceUrls.push(this.url); setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0); }
-      addEventListener() {} removeEventListener() {} dispatchEvent() { return true; } close() { this.readyState = 2; }
+      listeners = new Map();
+      constructor(url) {
+        this.url = String(url);
+        window.__scalpingEventSourceUrls.push(this.url);
+        window.__scalpingEventSourceInstances.push(this);
+        setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0);
+      }
+      addEventListener(type, listener) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener); this.listeners.set(type, listeners);
+      }
+      removeEventListener(type, listener) { this.listeners.get(type)?.delete(listener); }
+      dispatchEvent(event) {
+        for (const listener of this.listeners.get(event.type) ?? []) {
+          if (typeof listener === "function") listener.call(this, event);
+          else listener.handleEvent?.(event);
+        }
+        return true;
+      }
+      emit(type, payload) { this.dispatchEvent(new MessageEvent(type, { data: JSON.stringify(payload) })); }
+      close() { this.readyState = 2; }
     }
     window.EventSource = StaticEventSource;
   }, { selectedTheme: theme });
@@ -207,11 +227,23 @@ async function verify(browser, baseUrl, viewport, theme) {
     const actualViewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     check(actualViewport.width === viewport.width && actualViewport.height === viewport.height, `viewport 불일치: ${JSON.stringify(actualViewport)}`);
     await page.getByRole("heading", { name: "단타 보조", exact: true }).waitFor();
+    await page.locator("[data-scalping-scan-idle]").waitFor();
+    await page.waitForTimeout(1_000);
+    check(state.workspaces.length === 0, "화면 진입만으로 workspace 스캔이 자동 실행됐습니다.");
+    check(await page.evaluate(() => window.__scalpingEventSourceUrls.length) === 0, "스캔 전 실시간 stream이 자동 연결됐습니다.");
+    await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "국내 · 거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForFunction(() => window.scrollY === 0);
     check(state.workspaces.length === 1 && state.workspaces[0]?.marketCountry === "KR", "초기 국내 workspace가 단일 batch 요청이 아닙니다.");
     check(await page.locator("[data-scalping-virtual-symbol]").count() === 10, "초기 후보 카드 수가 10개가 아닙니다.");
+    await page.waitForFunction(() => window.__scalpingEventSourceInstances.length > 0);
+    const scansBeforeRecovery = state.workspaces.length;
+    await page.evaluate(() => window.__scalpingEventSourceInstances.at(-1)?.emit("recovery", {
+      type: "recovery", symbol: "S001", marketCountry: "KR", data: { status: "partial", reason: "ui_verification_recovery" },
+    }));
+    await page.waitForTimeout(1_000);
+    check(state.workspaces.length === scansBeforeRecovery, "recovery 이벤트가 workspace 스캔을 자동 재실행했습니다.");
     const scanStartedAt = Date.now();
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
@@ -274,6 +306,11 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(Object.values(errors).every((items) => items.length === 0), `브라우저 오류: ${JSON.stringify(errors)}`);
     await page.goto(`${baseUrl}/?screenshot=${viewport.width}#scalping-assistant`, { waitUntil: "domcontentloaded" });
     await page.getByRole("heading", { name: "실시간 후보와 위험을 한눈에.", exact: true }).waitFor();
+    const scansBeforeScreenshot = state.workspaces.length;
+    await page.locator("[data-scalping-scan-idle]").waitFor();
+    await page.waitForTimeout(1_000);
+    check(state.workspaces.length === scansBeforeScreenshot, "스크린샷 재진입에서 workspace 스캔이 자동 실행됐습니다.");
+    await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "국내 · 거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
