@@ -25,6 +25,8 @@ export type ScalpingRequest = {
   layoutColumns: 1 | 2 | 3 | 4;
   preset: ScalpingPreset;
   symbols?: string[];
+  scanOnly?: boolean;
+  analysisSymbol?: string;
 };
 
 export type ScalpingStatus = {
@@ -223,6 +225,7 @@ export type ScalpingWorkspace = {
   interval: ScalpingInterval;
   layoutColumns: 1 | 2 | 3 | 4;
   preset: ScalpingPreset;
+  analysisSymbol?: string;
   candidates: ScalpingCandidate[];
   quality: ScalpingQuality;
 };
@@ -934,6 +937,7 @@ export function normalizeScalpingWorkspace(value: unknown, request: ScalpingRequ
     interval: oneOf(valueOf(workspace, "interval"), SCALPING_INTERVALS, request.interval),
     layoutColumns,
     preset: oneOf(valueOf(workspace, "preset"), SCALPING_PRESETS, request.preset),
+    analysisSymbol: string(valueOf(workspace, "analysisSymbol", "analysis_symbol"))?.toUpperCase(),
     candidates,
     quality: quality(valueOf(workspace, "quality"), candidates.length ? "partial" : "source_unavailable"),
   };

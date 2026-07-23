@@ -89,7 +89,7 @@ const DEFAULT_REQUEST: ScalpingRequest = {
   criterion: "trading_amount",
   topCount: 10,
   interval: "1m",
-  layoutColumns: 2,
+  layoutColumns: 1,
   preset: "trend",
 };
 
@@ -178,13 +178,6 @@ function chartTime(value: string): string {
 
 async function readJson(response: Response): Promise<unknown> {
   return response.json().catch(() => ({}));
-}
-
-function chartGridClass(columns: 1 | 2 | 3 | 4): string {
-  if (columns === 2) return "grid-cols-1 xl:grid-cols-2";
-  if (columns === 3) return "grid-cols-1 lg:grid-cols-2 xl:grid-cols-3";
-  if (columns === 4) return "grid-cols-1 lg:grid-cols-2 xl:grid-cols-4";
-  return "grid-cols-1";
 }
 
 function availabilityClass(status: string): string {
@@ -608,6 +601,62 @@ function VirtualizedCandidateCard({ candidate, theme, preset = "trend", layoutCo
 
 export const ScalpingVirtualizedCandidateCard = VirtualizedCandidateCard;
 
+function CandidateScanList({
+  candidates,
+  selectedSymbol,
+  analyzingSymbol,
+  onSelect,
+}: {
+  candidates: ScalpingCandidate[];
+  selectedSymbol?: string;
+  analyzingSymbol?: string;
+  onSelect: (symbol: string) => void;
+}) {
+  return (
+    <div className="mt-4 grid min-w-0 gap-2" data-scalping-candidate-list role="list">
+      {candidates.map((candidate) => {
+        const selected = candidate.symbol === selectedSymbol;
+        const analyzing = candidate.symbol === analyzingSymbol;
+        return (
+          <div
+            key={candidate.symbol}
+            className={cn(
+              "grid min-w-0 items-center gap-3 rounded-[20px] bg-card px-4 py-3 sm:grid-cols-[2.5rem_minmax(0,1.35fr)_repeat(4,minmax(5rem,0.75fr))_auto]",
+              selected && "bg-primary text-primary-foreground",
+            )}
+            data-scalping-candidate-row={candidate.symbol}
+            role="listitem"
+          >
+            <span className={cn("text-center text-xs font-black", selected ? "text-primary-foreground" : "text-muted-foreground")}>{candidate.rank ?? "–"}</span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-black">{candidate.name}</p>
+              <p className={cn("truncate text-[9px] font-bold", selected ? "text-primary-foreground/60" : "text-muted-foreground")}>
+                {candidate.symbol}{candidate.exchange ? ` · ${candidate.exchange}` : ""}{marketVenueLabel(candidate.venue) ? ` · ${marketVenueLabel(candidate.venue)}` : ""}
+              </p>
+            </div>
+            <Metric label="현재가" value={finite(candidate.price) ? formatMoney(candidate.price, candidate.currency) : "unavailable"} />
+            <Metric label="등락률" value={formatRatio(candidate.changeRateRatio, true)} />
+            <Metric label="거래대금" value={finite(candidate.tradingAmount) ? formatMoney(candidate.tradingAmount, candidate.currency, true) : "unavailable"} />
+            <Metric label="변동성" value={finite(candidate.volatilityScore) ? candidate.volatilityScore.toFixed(4) : "screening only"} />
+            <Button
+              type="button"
+              size="sm"
+              variant={selected ? "secondary" : "default"}
+              aria-label={`${candidate.name} 상세 분석`}
+              aria-pressed={selected}
+              disabled={Boolean(analyzingSymbol)}
+              onClick={() => onSelect(candidate.symbol)}
+              className="justify-center"
+            >
+              {analyzing ? <LoaderCircle className="animate-spin" /> : selected ? "분석 중" : "분석 보기"}
+            </Button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function StatusBanner({ status }: { status: ScalpingStatus }) {
   if (!status.enabled) {
     return (
@@ -629,12 +678,14 @@ function EvaluationPanel({
   candidates,
   interval,
   marketCountry,
+  preset,
   disabled,
   onUnauthorized,
 }: {
   candidates: ScalpingCandidate[];
   interval: ScalpingInterval;
   marketCountry: ScalpingMarketCountry;
+  preset: ScalpingPreset;
   disabled: boolean;
   onUnauthorized: () => void;
 }) {
@@ -657,6 +708,7 @@ function EvaluationPanel({
           marketCountry,
           symbols: candidates.map(({ symbol }) => symbol),
           interval,
+          preset,
           evaluation: { walkForward: true, retrospective: true, ...costs },
         }),
       });
@@ -775,12 +827,15 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   const [request, setRequest] = useState<ScalpingRequest>(DEFAULT_REQUEST);
   const [status, setStatus] = useState<ScalpingStatus>();
   const [workspace, setWorkspace] = useState<ScalpingWorkspace>();
+  const [selectedSymbol, setSelectedSymbol] = useState<string>();
+  const [analyzingSymbol, setAnalyzingSymbol] = useState<string>();
   const [statusLoading, setStatusLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [forecastLoading, setForecastLoading] = useState(false);
   const [error, setError] = useState("");
   const [forecastError, setForecastError] = useState("");
   const [streamState, setStreamState] = useState<"idle" | "connected" | "reconnecting" | "unavailable">("idle");
+  const analysisSequence = useRef(0);
   const minimumTopCount = status?.limits?.minimumTopCount ?? 5;
   const maximumTopCount = status?.limits?.maximumTopCount ?? 50;
   const topCountLimits = useMemo<ScalpingRequestLimits>(() => ({
@@ -801,13 +856,23 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       setError(issues.join(" "));
       return;
     }
+    analysisSequence.current += 1;
+    setSelectedSymbol(undefined);
+    setAnalyzingSymbol(undefined);
+    setForecastError("");
     setLoading(true);
     setError("");
     try {
+      const scanRequest: ScalpingRequest = {
+        ...nextRequest,
+        layoutColumns: 1,
+        scanOnly: true,
+        analysisSymbol: undefined,
+      };
       const response = await fetch("/api/portfolio/scalping/workspace", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(nextRequest),
+        body: JSON.stringify(scanRequest),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -815,13 +880,58 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         return;
       }
       if (!response.ok) throw new Error(scalpingErrorMessage(payload, "단타 후보를 불러오지 못했습니다."));
-      setWorkspace(normalizeScalpingWorkspace(payload, nextRequest));
+      setWorkspace(normalizeScalpingWorkspace(payload, scanRequest));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "단타 후보를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
   }, [onUnauthorized]);
+
+  const analyzeCandidate = useCallback(async (symbol: string) => {
+    if (!workspace || analyzingSymbol) return;
+    const sequence = ++analysisSequence.current;
+    const analysisRequest: ScalpingRequest = {
+      marketCountry: workspace.marketCountry,
+      criterion: workspace.criterion,
+      topCount: workspace.requestedTopCount,
+      interval: workspace.interval,
+      layoutColumns: 1,
+      preset: workspace.preset,
+      symbols: workspace.candidates.map((candidate) => candidate.symbol),
+      scanOnly: false,
+      analysisSymbol: symbol,
+    };
+    setSelectedSymbol(undefined);
+    setAnalyzingSymbol(symbol);
+    setError("");
+    setForecastError("");
+    try {
+      const response = await fetch("/api/portfolio/scalping/workspace", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(analysisRequest),
+      });
+      const payload = await readJson(response);
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      if (!response.ok) throw new Error(scalpingErrorMessage(payload, "선택 종목을 분석하지 못했습니다."));
+      const nextWorkspace = normalizeScalpingWorkspace(payload, analysisRequest);
+      if (!nextWorkspace.candidates.some((candidate) => candidate.symbol === symbol)) {
+        throw new Error("선택한 종목이 상세 분석 응답에 없습니다.");
+      }
+      if (analysisSequence.current !== sequence) return;
+      setWorkspace(nextWorkspace);
+      setSelectedSymbol(symbol);
+    } catch (caught) {
+      if (analysisSequence.current !== sequence) return;
+      setError(caught instanceof Error ? caught.message : "선택 종목을 분석하지 못했습니다.");
+    } finally {
+      if (analysisSequence.current === sequence) setAnalyzingSymbol(undefined);
+    }
+  }, [analyzingSymbol, onUnauthorized, workspace]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -859,11 +969,12 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     return () => controller.abort();
   }, [onUnauthorized]);
 
-  const symbolsKey = workspace?.candidates.map(({ symbol }) => symbol).join(",") ?? "";
+  const selectedCandidate = workspace?.candidates.find((candidate) => candidate.symbol === selectedSymbol);
+  const symbolsKey = selectedCandidate?.symbol ?? "";
   const workspaceInterval = workspace?.interval;
   const workspacePreset = workspace?.preset;
   const workspaceMarketCountry = workspace?.marketCountry;
-  const workspaceExchangeKey = workspace?.candidates.flatMap((candidate) => candidate.exchange ? [`${candidate.symbol}:${candidate.exchange}`] : []).join(",") ?? "";
+  const workspaceExchangeKey = selectedCandidate?.exchange ? `${selectedCandidate.symbol}:${selectedCandidate.exchange}` : "";
   const workspaceExchanges = Object.fromEntries(workspaceExchangeKey.split(",").flatMap((entry) => {
     const [symbol, exchange] = entry.split(":");
     return symbol && exchange ? [[symbol, exchange as ScalpingUsExchange] as const] : [];
@@ -912,14 +1023,14 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   ]);
 
   const requestForecasts = async () => {
-    if (!workspace?.candidates.length) return;
+    if (!workspace || !selectedCandidate) return;
     setForecastLoading(true);
     setForecastError("");
     try {
       const response = await fetch("/api/portfolio/scalping/forecast", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ marketCountry: workspace.marketCountry, symbols: workspace.candidates.map(({ symbol }) => symbol), interval: workspace.interval }),
+        body: JSON.stringify({ marketCountry: workspace.marketCountry, symbols: [selectedCandidate.symbol], interval: workspace.interval }),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -977,7 +1088,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
           <fieldset className="min-w-0 rounded-[20px] bg-card p-3 sm:col-span-2"><legend className="px-1 text-[9px] font-black text-muted-foreground">순위 기준</legend><div className="mt-1 grid grid-cols-3 gap-1">{SCALPING_CRITERIA.map((criterion) => <button key={criterion} type="button" aria-pressed={request.criterion === criterion} onClick={() => setCriterion(criterion)} className={cn("min-w-0 rounded-full px-2 py-2 text-[10px] font-black", request.criterion === criterion ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground")}>{CRITERION_LABELS[criterion]}</button>)}</div></fieldset>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">표시 종목 수 ({minimumTopCount}~{maximumTopCount})</span><Input aria-label="표시 종목 수" type="number" min={minimumTopCount} max={maximumTopCount} step={1} value={request.topCount} onChange={(event) => setRequest((current) => ({ ...current, topCount: Number(event.target.value) }))} aria-invalid={request.topCount < minimumTopCount || request.topCount > maximumTopCount || !Number.isInteger(request.topCount)} className="h-10 bg-secondary text-xs" /></label>
           <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">분봉</span><Select value={request.interval} onValueChange={(value) => setInterval(value as ScalpingInterval)}><SelectTrigger aria-label="분봉 간격" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{SCALPING_INTERVALS.map((interval) => <SelectItem key={interval} value={interval}>{interval.replace("m", "분봉")}</SelectItem>)}</SelectContent></Select></label>
-          <label className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">차트 열</span><Select value={String(request.layoutColumns)} onValueChange={(value) => setRequest((current) => ({ ...current, layoutColumns: Number(value) as 1 | 2 | 3 | 4 }))}><SelectTrigger aria-label="차트 열 수" className="h-10 w-full min-w-0 bg-secondary text-xs"><SelectValue /></SelectTrigger><SelectContent>{([1, 2, 3, 4] as const).map((columns) => <SelectItem key={columns} value={String(columns)}>{columns}열</SelectItem>)}</SelectContent></Select></label>
+          <div className="min-w-0 rounded-[20px] bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">상세 분석</span><p className="flex h-10 items-center text-xs font-black">선택한 1종목</p></div>
         </div>
 
         <div className="mt-3 rounded-2xl bg-card px-4 py-3 text-[9px] leading-4 text-muted-foreground" data-scalping-market-guidance={request.marketCountry} role="note">
@@ -992,8 +1103,8 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         <fieldset className="mt-3 min-w-0"><legend className="text-[9px] font-black text-muted-foreground">지표 프리셋</legend><div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">{SCALPING_PRESETS.map((preset) => <button key={preset} type="button" aria-pressed={request.preset === preset} onClick={() => setPreset(preset)} className={cn("min-w-0 rounded-[18px] p-3 text-left transition-colors", request.preset === preset ? "bg-primary text-primary-foreground" : "bg-card")}><span className="block text-[11px] font-black">{PRESET_LABELS[preset].label}</span><span className={cn("mt-1 block truncate text-[9px]", request.preset === preset ? "text-primary-foreground/60" : "text-muted-foreground")}>{PRESET_LABELS[preset].description}</span></button>)}</div></fieldset>
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="text-[9px] text-muted-foreground">{requestIssues.length ? <span role="alert" className="font-black text-destructive">{requestIssues.join(" ")}</span> : <span>스캔은 이 버튼으로만 실행됩니다. 적용 후에는 선택된 종목의 실시간 데이터만 갱신합니다.</span>}</div>
-          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || statusLoading || forecastLoading || loading || !workspace?.candidates.length}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request, topCountLimits)} disabled={!status?.enabled || statusLoading || loading || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
+          <div className="text-[9px] text-muted-foreground">{requestIssues.length ? <span role="alert" className="font-black text-destructive">{requestIssues.join(" ")}</span> : <span>스캔은 후보 목록만 만듭니다. 목록에서 한 종목을 선택해야 차트·Rust 지표·실시간 구독·AI 전망을 시작합니다.</span>}</div>
+          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void requestForecasts()} disabled={!status?.enabled || statusLoading || forecastLoading || loading || Boolean(analyzingSymbol) || !selectedCandidate}>{forecastLoading ? <LoaderCircle className="animate-spin" /> : <BrainCircuit />}AI 전망 요청</Button><Button onClick={() => void runWorkspace(request, topCountLimits)} disabled={!status?.enabled || statusLoading || loading || Boolean(analyzingSymbol) || requestIssues.length > 0}>{loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}스캔 적용</Button></div>
         </div>
       </Card>
 
@@ -1003,16 +1114,14 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       {workspace ? (
         <Card className="min-w-0 bg-secondary p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">LIVE BOARD</p><h2 className="mt-1 text-lg font-black">{MARKET_LABELS[workspace.marketCountry].label} · {CRITERION_LABELS[workspace.criterion]} 상위 {workspace.candidates.length}종목</h2><p className="mt-1 text-[9px] text-muted-foreground">생성 {formatTimestamp(workspace.generatedAt, true)} · {workspace.interval} · {PRESET_LABELS[workspace.preset].label} · {MARKET_LABELS[workspace.marketCountry].detail}</p></div>
-            <span className={cn("rounded-full px-3 py-1.5 text-[9px] font-black", availabilityClass(workspace.quality.status))}>batch {workspace.quality.status}</span>
+            <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">SCAN RESULTS</p><h2 className="mt-1 text-lg font-black">{MARKET_LABELS[workspace.marketCountry].label} · {CRITERION_LABELS[workspace.criterion]} 상위 {workspace.candidates.length}종목</h2><p className="mt-1 text-[9px] text-muted-foreground">생성 {formatTimestamp(workspace.generatedAt, true)} · 목록 전용 · 상세 분석 최대 1종목</p></div>
+            <span className={cn("rounded-full px-3 py-1.5 text-[9px] font-black", availabilityClass(workspace.quality.status))}>scanner {workspace.quality.status}</span>
           </div>
           {!workspace.candidates.length ? <div className="mt-4 grid min-h-[260px] place-items-center rounded-[24px] bg-card px-5 text-center"><div><ShieldAlert className="mx-auto size-6 text-muted-foreground" /><p className="mt-3 font-black">표시 가능한 후보가 없습니다.</p><p className="mt-1 text-xs text-muted-foreground">필터, 공급자 상태와 데이터 품질 사유를 확인해 주세요.</p></div></div> : (
-            <div className={cn("mt-4 grid min-w-0 gap-3", chartGridClass(request.layoutColumns))} style={{ overflowAnchor: "none" }} data-scalping-grid-columns={request.layoutColumns}>
-              {workspace.candidates.map((candidate) => <VirtualizedCandidateCard key={candidate.symbol} candidate={candidate} theme={theme} preset={request.preset} layoutColumns={request.layoutColumns} />)}
-            </div>
+            <CandidateScanList candidates={workspace.candidates} selectedSymbol={selectedSymbol} analyzingSymbol={analyzingSymbol} onSelect={(symbol) => void analyzeCandidate(symbol)} />
           )}
         </Card>
-      ) : loading ? <Card className="grid min-h-[360px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">후보와 분봉을 batch로 불러오는 중</p></div></Card> : (
+      ) : loading ? <Card className="grid min-h-[360px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">후보 목록을 스캔하는 중</p></div></Card> : (
         <Card className="grid min-h-[280px] place-items-center bg-secondary px-5 text-center" data-scalping-scan-idle>
           <div>
             {statusLoading ? <LoaderCircle className="mx-auto size-6 animate-spin text-muted-foreground" /> : <CircleDashed className="mx-auto size-6 text-muted-foreground" />}
@@ -1022,7 +1131,18 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         </Card>
       )}
 
-      <EvaluationPanel candidates={workspace?.candidates ?? []} interval={workspace?.interval ?? request.interval} marketCountry={workspace?.marketCountry ?? request.marketCountry} disabled={!status?.enabled || statusLoading || loading} onUnauthorized={onUnauthorized} />
+      {selectedCandidate ? (
+        <section className="min-w-0 space-y-3" data-scalping-analysis-symbol={selectedCandidate.symbol}>
+          <div className="px-1"><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">SINGLE INSTRUMENT ANALYSIS</p><h2 className="mt-1 text-lg font-black">{selectedCandidate.name} · {workspace?.interval} · {workspace ? PRESET_LABELS[workspace.preset].label : ""}</h2></div>
+          <ScalpingCandidateCard candidate={selectedCandidate} theme={theme} preset={workspace?.preset ?? request.preset} layoutColumns={1} />
+        </section>
+      ) : analyzingSymbol ? (
+        <Card className="grid min-h-[360px] place-items-center bg-secondary" data-scalping-analysis-loading={analyzingSymbol}><div className="text-center"><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-xs font-black">{analyzingSymbol} 분봉·지표를 계산하는 중</p></div></Card>
+      ) : workspace?.candidates.length ? (
+        <Card className="grid min-h-[220px] place-items-center bg-secondary px-5 text-center" data-scalping-analysis-idle><div><CircleDashed className="mx-auto size-6 text-muted-foreground" /><p className="mt-3 font-black">상세 분석할 종목을 선택해 주세요.</p><p className="mt-1 text-xs text-muted-foreground">차트와 실시간 구독은 동시에 한 종목에만 열립니다.</p></div></Card>
+      ) : null}
+
+      <EvaluationPanel candidates={selectedCandidate ? [selectedCandidate] : []} interval={workspace?.interval ?? request.interval} marketCountry={workspace?.marketCountry ?? request.marketCountry} preset={workspace?.preset ?? request.preset} disabled={!status?.enabled || statusLoading || loading || Boolean(analyzingSymbol)} onUnauthorized={onUnauthorized} />
 
       <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" role="note">
         <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><p><strong className="text-foreground">안내:</strong> 이 화면은 매수·매도 주문 지시가 아닌 의사결정 보조입니다. AI는 거래 결정을 내리지 않으며, 예측이 없거나 과거 호가가 보존되지 않은 경우 unavailable로 표시합니다. 투자 결과와 손실은 사용자에게 귀속됩니다.</p></div>

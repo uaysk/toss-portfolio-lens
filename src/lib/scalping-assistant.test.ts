@@ -102,6 +102,7 @@ describe("scalping assistant response normalization", () => {
         interval: "5m",
         layoutColumns: 3,
         preset: "breakout",
+        analysisSymbol: "005930",
         quality: { status: "partial", reasons: [], missing: ["kis"], sources: ["toss"] },
         candidates: [{
           symbol: "005930",
@@ -122,7 +123,7 @@ describe("scalping assistant response normalization", () => {
       },
     }, request);
 
-    expect(workspace).toMatchObject({ marketCountry: "KR", criterion: "volatility", interval: "5m", layoutColumns: 3, preset: "breakout" });
+    expect(workspace).toMatchObject({ marketCountry: "KR", criterion: "volatility", interval: "5m", layoutColumns: 3, preset: "breakout", analysisSymbol: "005930" });
     expect(workspace.candidates[0]?.bars).toHaveLength(1);
     expect(workspace.candidates[0]?.bars[0]?.sessionVwap).toBe(70020);
     expect(workspace.candidates[0]?.orderbook).toBeUndefined();

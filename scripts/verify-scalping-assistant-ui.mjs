@@ -95,9 +95,10 @@ function portfolio() {
 function workspace(body) {
   const marketCountry = body.marketCountry === "US" ? "US" : "KR";
   const selected = symbols.slice(0, body.topCount);
+  const analysisSymbols = body.scanOnly ? [] : body.analysisSymbol ? [body.analysisSymbol] : selected;
   return { workspace: {
     generatedAt: "2026-07-21T01:20:00.000Z", marketCountry, criterion: body.criterion, requestedTopCount: body.topCount,
-    interval: body.interval, layoutColumns: body.layoutColumns, preset: body.preset,
+    interval: body.interval, layoutColumns: body.layoutColumns, preset: body.preset, analysisSymbol: body.analysisSymbol,
     candidates: selected.map((symbol, index) => ({
       symbol, ...(marketCountry === "US" ? { exchange: ["NAS", "NYS", "AMS"][index % 3] } : {}),
       name: `${marketCountry === "US" ? "미국" : "국내"} 단타 후보 ${index + 1}`, currency: marketCountry === "US" ? "USD" : "KRW", price: 51_000 + index * 400,
@@ -106,7 +107,8 @@ function workspace(body) {
       spreadBps: 4 + index / 10, providerRanks: { toss: index + 1, kis: index + 2 }, warnings: [],
       quality: { status: "available", reasons: [], missing: [], sources: ["toss", "kis"], observedAt: "2026-07-21T01:20:00.000Z" },
     })),
-    instruments: selected.map((symbol, index) => {
+    instruments: analysisSymbols.map((symbol) => {
+      const index = Math.max(0, selected.indexOf(symbol));
       const series = bars(index);
       const latest = series.at(-1);
       return {
@@ -235,8 +237,15 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("heading", { name: "국내 · 거래대금 상위 10종목", exact: true }).waitFor({ timeout: 20_000 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForFunction(() => window.scrollY === 0);
-    check(state.workspaces.length === 1 && state.workspaces[0]?.marketCountry === "KR", "초기 국내 workspace가 단일 batch 요청이 아닙니다.");
-    check(await page.locator("[data-scalping-virtual-symbol]").count() === 10, "초기 후보 카드 수가 10개가 아닙니다.");
+    check(state.workspaces.length === 1 && state.workspaces[0]?.marketCountry === "KR" && state.workspaces[0]?.scanOnly === true, "초기 국내 요청이 목록 전용 단일 스캔이 아닙니다.");
+    check(await page.locator("[data-scalping-candidate-row]").count() === 10, "초기 후보 목록이 10개가 아닙니다.");
+    check(await page.locator("[data-scalping-price-chart]").count() === 0, "목록 스캔만으로 차트가 생성됐습니다.");
+    check(await page.evaluate(() => window.__scalpingEventSourceUrls.length) === 0, "상세 종목 선택 전에 실시간 stream이 연결됐습니다.");
+    await page.getByRole("button", { name: "국내 단타 후보 1 상세 분석" }).click();
+    await page.locator('[data-scalping-analysis-symbol="S001"]').waitFor({ timeout: 20_000 });
+    await page.locator('[data-scalping-analysis-symbol="S001"] [data-scalping-price-chart]').waitFor();
+    check(state.workspaces.length === 2 && state.workspaces[1]?.analysisSymbol === "S001" && state.workspaces[1]?.scanOnly === false, "상세 분석 요청이 S001 한 종목으로 제한되지 않았습니다.");
+    check(await page.locator("[data-scalping-price-chart]").count() === 1, "상세 차트가 정확히 한 개가 아닙니다.");
     await page.waitForFunction(() => window.__scalpingEventSourceInstances.length > 0);
     const scansBeforeRecovery = state.workspaces.length;
     await page.evaluate(() => window.__scalpingEventSourceInstances.at(-1)?.emit("recovery", {
@@ -248,40 +257,33 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "국내 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
-    await page.locator("[data-scalping-virtual-symbol]").nth(21).waitFor();
+    await page.locator("[data-scalping-candidate-row]").nth(21).waitFor();
     const twentyTwoRenderMs = Date.now() - scanStartedAt;
-    check(state.workspaces.length === 2 && state.workspaces[1]?.topCount === 22, "22종목 workspace가 단일 batch 요청이 아닙니다.");
-    check(await page.locator("[data-scalping-virtual-symbol]").count() === 22, "20개 이상 후보 카드가 렌더되지 않았습니다.");
-    const placeholders = await page.locator('[data-scalping-card-state="placeholder"]').count();
-    check(placeholders > 0, "viewport 밖 차트가 실제 placeholder로 unmount되지 않았습니다.");
-    const mounted = await page.locator('[data-scalping-card-state="mounted"]').count();
-    check(mounted < 22, "22종목 차트를 초기 viewport에서 모두 동시에 mount했습니다.");
+    check(state.workspaces.length === 3 && state.workspaces[2]?.topCount === 22 && state.workspaces[2]?.scanOnly === true, "22종목 요청이 목록 전용 단일 스캔이 아닙니다.");
+    check(await page.locator("[data-scalping-candidate-row]").count() === 22, "20개 이상 후보 목록이 렌더되지 않았습니다.");
+    check(await page.locator("[data-scalping-price-chart]").count() === 0, "재스캔 뒤 이전 상세 차트가 남았습니다.");
 
     await page.getByRole("button", { name: "미국 상장 종목 스캔" }).click();
     await page.locator('[data-scalping-market-guidance="US"]').waitFor();
     await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "미국 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
-    check(state.workspaces.length === 3 && state.workspaces[2]?.marketCountry === "US", "미국 workspace 요청에 marketCountry=US가 전달되지 않았습니다.");
+    check(state.workspaces.length === 4 && state.workspaces[3]?.marketCountry === "US" && state.workspaces[3]?.scanOnly === true, "미국 workspace 요청이 목록 전용으로 전달되지 않았습니다.");
     check(await page.getByText("USD · 데이·프리·정규·애프터마켓", { exact: false }).count() > 0, "미국 시장 통화·4개 거래 세션 안내가 표시되지 않았습니다.");
+    check(await page.locator("[data-scalping-price-chart]").count() === 0, "미국 목록 스캔만으로 차트가 생성됐습니다.");
+    await page.getByRole("button", { name: "미국 단타 후보 1 상세 분석" }).click();
+    await page.locator('[data-scalping-analysis-symbol="S001"]').waitFor({ timeout: 20_000 });
+    check(state.workspaces.length === 5 && state.workspaces[4]?.marketCountry === "US" && state.workspaces[4]?.analysisSymbol === "S001", "미국 상세 분석이 선택한 한 종목으로 제한되지 않았습니다.");
     await page.waitForFunction(() => window.__scalpingEventSourceUrls?.some((value) => {
       const url = new URL(value, location.origin);
-      return url.searchParams.get("marketCountry") === "US" && url.searchParams.get("exchanges")?.includes("S001:NAS");
+      return url.searchParams.get("marketCountry") === "US"
+        && url.searchParams.get("symbols") === "S001"
+        && url.searchParams.get("exchanges") === "S001:NAS";
     }));
-
-    await page.getByRole("combobox", { name: "차트 열 수" }).click();
-    await page.getByRole("option", { name: "4열" }).click();
-    await page.locator('[data-scalping-grid-columns="4"]').waitFor();
-    const firstRow = await page.locator("[data-scalping-virtual-symbol]").evaluateAll((items) => items.slice(0, 4).map((item) => ({ x: item.getBoundingClientRect().x, y: item.getBoundingClientRect().y })));
-    if (viewport.width === 1440) {
-      check(firstRow.length === 4 && firstRow.every((item) => Math.abs(item.y - firstRow[0].y) < 2), `1440px 4열 배치가 아닙니다: ${JSON.stringify(firstRow)}`);
-      check(new Set(firstRow.map((item) => Math.round(item.x))).size === 4, "1440px 4열 x 위치가 중복됩니다.");
-    } else {
-      check(firstRow.every((item) => Math.abs(item.x - firstRow[0].x) < 2), `390px에서 1열로 축소되지 않았습니다: ${JSON.stringify(firstRow)}`);
-    }
+    check(await page.locator("[data-scalping-price-chart]").count() === 1, "미국 상세 분석 차트가 한 개가 아닙니다.");
 
     await page.getByRole("button", { name: "AI 전망 요청" }).click();
     await page.locator('[data-scalping-ai="available"]').first().waitFor();
-    check(state.forecasts[0]?.symbols.length === 22, "AI 예측이 22종목 batch가 아닙니다.");
+    check(state.forecasts[0]?.symbols.length === 1 && state.forecasts[0]?.symbols[0] === "S001", "AI 예측이 선택한 한 종목으로 제한되지 않았습니다.");
     check(state.forecasts[0]?.marketCountry === "US", "AI 예측 요청에 적용된 미국 시장이 전달되지 않았습니다.");
     await page.getByRole("button", { name: "Walk-forward 검증 시작" }).click();
     await page.locator("[data-scalping-evaluation-results]").waitFor().catch(async (error) => {
@@ -290,12 +292,10 @@ async function verify(browser, baseUrl, viewport, theme) {
       throw new Error(`${error.message}\n평가 alerts=${JSON.stringify(alerts)} status=${JSON.stringify(status)}`);
     });
     check(state.evaluations[0]?.evaluation?.walkForward === true && state.evaluations[0]?.evaluation?.retrospective === true, "시간 순서 retrospective 평가 요청이 아닙니다.");
-    check(state.evaluations[0]?.symbols?.length === 22, "예측 검증이 22종목 batch가 아닙니다.");
+    check(state.evaluations[0]?.symbols?.length === 1 && state.evaluations[0]?.symbols?.[0] === "S001", "예측 검증이 선택한 한 종목으로 제한되지 않았습니다.");
     check(state.evaluations[0]?.marketCountry === "US", "예측 검증 요청에 적용된 미국 시장이 전달되지 않았습니다.");
+    check(state.evaluations[0]?.preset === "trend", "예측 검증 요청에 선택한 지표 프리셋이 전달되지 않았습니다.");
 
-    const last = page.locator("[data-scalping-virtual-symbol]").last();
-    await last.scrollIntoViewIfNeeded();
-    await last.locator("[data-scalping-price-chart]").waitFor({ timeout: 20_000 });
     const clippedCardDetails = await page.locator("[data-scalping-symbol]").evaluateAll((items) => items.flatMap((item) => item.scrollWidth > item.clientWidth + 1 ? [{ symbol: item.getAttribute("data-scalping-symbol"), clientWidth: item.clientWidth, scrollWidth: item.scrollWidth }] : []));
     const clippedCards = clippedCardDetails.length;
     check(clippedCards === 0, `${viewport.width}px에서 카드 내부 콘텐츠가 잘렸습니다: ${JSON.stringify(clippedCardDetails)}`);
@@ -315,9 +315,10 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("spinbutton", { name: "표시 종목 수" }).fill("22");
     await page.getByRole("button", { name: "스캔 적용" }).click();
     await page.getByRole("heading", { name: "국내 · 거래대금 상위 22종목", exact: true }).waitFor({ timeout: 20_000 });
-    await page.getByRole("combobox", { name: "차트 열 수" }).click();
-    await page.getByRole("option", { name: "4열" }).click();
-    await page.locator('[data-scalping-grid-columns="4"]').waitFor();
+    await page.getByRole("button", { name: "국내 단타 후보 1 상세 분석" }).click();
+    await page.locator('[data-scalping-analysis-symbol="S001"]').waitFor({ timeout: 20_000 });
+    check(await page.locator("[data-scalping-candidate-row]").count() === 22, "스크린샷에서 후보 목록 22개가 유지되지 않았습니다.");
+    check(await page.locator("[data-scalping-price-chart]").count() === 1, "스크린샷에서 상세 차트가 정확히 한 개가 아닙니다.");
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForFunction(() => window.scrollY === 0);
     await page.waitForTimeout(250);
@@ -326,7 +327,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     const screenshot = path.join(screenshotDirectory, `${viewport.width}x${viewport.height}-${theme}.png`);
     await page.screenshot({ path: screenshot, animations: "disabled" });
     check(Object.values(errors).every((items) => items.length === 0), `스크린샷 검증 중 브라우저 오류: ${JSON.stringify(errors)}`);
-    return { viewport: `${viewport.width}x${viewport.height}`, theme, cards: 22, layoutColumns: viewport.width === 1440 ? 4 : 1, twentyTwoRenderMs, initialMounted: mounted, initialPlaceholders: placeholders, clippedCards, zeroCharts, overflow, errors, screenshot };
+    return { viewport: `${viewport.width}x${viewport.height}`, theme, candidates: 22, detailCharts: 1, twentyTwoRenderMs, clippedCards, zeroCharts, overflow, errors, screenshot };
   } finally {
     await context.close();
   }

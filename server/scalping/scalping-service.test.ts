@@ -436,6 +436,76 @@ describe("ScalpingService", () => {
     );
   });
 
+  it("returns a scan-only candidate list without bars, Rust analysis, predictions, or trade markers", async () => {
+    const parts = dependencies();
+    const output = await service(parts).workspace({
+      criterion: "volume",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+      scanOnly: true,
+    });
+
+    expect(output.workspace.candidates.map(({ symbol }) => symbol)).toEqual(["005930"]);
+    expect(output.workspace.instruments).toEqual([]);
+    expect(output.workspace.diagnostics.analysisBatchInstrumentCount).toBe(0);
+    expect(output.workspace.diagnostics.analysisBatchRequestCount).toBe(0);
+    expect(parts.repository.listBars).not.toHaveBeenCalled();
+    expect(parts.repository.latestPredictions).not.toHaveBeenCalled();
+    expect(parts.rust.compute).not.toHaveBeenCalled();
+  });
+
+  it("uses a candidate-wide screening batch for volatility but returns no detailed instruments", async () => {
+    const parts = dependencies();
+    const output = await service(parts).workspace({
+      criterion: "volatility",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+      scanOnly: true,
+    });
+
+    expect(output.workspace.candidates).toHaveLength(1);
+    expect(output.workspace.instruments).toEqual([]);
+    expect(output.workspace.diagnostics.analysisBatchInstrumentCount).toBe(1);
+    expect(output.workspace.diagnostics.analysisBatchRequestCount).toBe(1);
+    expect(parts.rust.compute).toHaveBeenCalledTimes(1);
+  });
+
+  it("limits detailed bars, Rust analysis, prediction lookup, and output to the selected symbol", async () => {
+    const parts = dependencies();
+    const output = await service(parts).workspace({
+      criterion: "volume",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+      symbols: ["005930"],
+      analysisSymbol: "005930",
+    });
+
+    expect(output.workspace.analysisSymbol).toBe("005930");
+    expect(output.workspace.instruments.map(({ symbol }) => symbol)).toEqual(["005930"]);
+    expect(output.workspace.diagnostics.analysisBatchInstrumentCount).toBe(1);
+    expect(output.workspace.diagnostics.analysisBatchRequestCount).toBe(1);
+    expect(parts.rust.compute).toHaveBeenCalledTimes(1);
+    expect(parts.repository.latestPredictions).toHaveBeenCalledWith(["005930"], false, "KR");
+  });
+
+  it("rejects a request that mixes scan-only mode with a detailed analysis symbol", async () => {
+    await expect(service(dependencies()).workspace({
+      criterion: "volume",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+      scanOnly: true,
+      analysisSymbol: "005930",
+    })).rejects.toThrow("목록 스캔과 상세 분석 종목은 한 요청에서 함께 지정할 수 없습니다.");
+  });
+
   it("표시 수보다 많은 사용자 지정 종목 요청을 거부한다", async () => {
     await expect(service(dependencies()).workspace({
       criterion: "volume",
@@ -1340,7 +1410,7 @@ describe("ScalpingService", () => {
   it("constructs chronological rolling origins from observed future bar timestamps and forwards all costs", async () => {
     const parts = dependencies();
     const result = await service(parts).evaluate({
-      symbols: ["005930"], interval: "1m",
+      symbols: ["005930"], interval: "1m", preset: "breakout",
       evaluation: {
         walkForward: true, retrospective: true,
         commissionBpsPerSide: 1.5, taxBpsOnExit: 18, spreadBpsRoundTrip: 8, slippageBpsPerSide: 3,
@@ -1352,6 +1422,10 @@ describe("ScalpingService", () => {
       series_tail_points: 180,
       signal_snapshots: [{ instrument_key: "005930" }],
     });
+    expect(rustRequest.scalping_analysis.signal).toEqual({ enabled: true, preset: "breakout" });
+    expect(rustRequest.scalping_analysis.indicators).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "breakout-donchian", kind: "donchian_channel" }),
+    ]));
     expect(rustRequest.scalping_analysis.output_projection.signal_snapshots[0].timestamps).toHaveLength(3);
     expect(request.series[0].origins).toHaveLength(3);
     const originTimes = request.series[0].origins.map((origin: any) => origin.origin);

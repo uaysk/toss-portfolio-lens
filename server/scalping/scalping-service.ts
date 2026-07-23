@@ -137,6 +137,8 @@ export type ScalpingWorkspaceRequest = {
   layoutColumns: 1 | 2 | 3 | 4;
   preset: WorkspacePreset;
   symbols?: string[];
+  scanOnly?: boolean;
+  analysisSymbol?: string;
   accountId?: string;
 };
 
@@ -155,6 +157,7 @@ export type ScalpingRealtimeAnalysisRequest = {
 };
 
 export type ScalpingEvaluationRequest = ScalpingForecastRequest & {
+  preset?: WorkspacePreset;
   evaluation: {
     walkForward: true;
     retrospective: true;
@@ -730,6 +733,8 @@ export class ScalpingService {
       layoutColumns: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
       preset: WorkspacePresetSchema,
       symbols: z.array(z.string()).max(config.maximumTopCount).optional(),
+      scanOnly: z.boolean().optional(),
+      analysisSymbol: z.string().optional(),
       accountId: z.string().trim().min(1).max(128).optional(),
     }).superRefine((request, context) => {
       if ((request.symbols?.length ?? 0) > request.topCount) {
@@ -737,6 +742,13 @@ export class ScalpingService {
           code: "custom",
           path: ["symbols"],
           message: "사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.",
+        });
+      }
+      if (request.scanOnly && request.analysisSymbol) {
+        context.addIssue({
+          code: "custom",
+          path: ["analysisSymbol"],
+          message: "목록 스캔과 상세 분석 종목은 한 요청에서 함께 지정할 수 없습니다.",
         });
       }
     }) as z.ZodType<ScalpingWorkspaceRequest>;
@@ -802,7 +814,13 @@ export class ScalpingService {
   async workspace(input: ScalpingWorkspaceRequest) {
     const request = this.workspaceSchema.parse(input);
     const marketCountry = request.marketCountry ?? "KR";
-    const requestedSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
+    const analysisSymbol = request.analysisSymbol
+      ? normalizedSymbols([request.analysisSymbol], 1)[0]
+      : undefined;
+    const configuredSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
+    const requestedSymbols = analysisSymbol && !configuredSymbols.includes(analysisSymbol)
+      ? [analysisSymbol, ...configuredSymbols].slice(0, request.topCount)
+      : configuredSymbols;
     const rankingsAttempt = await this.safe(
       () => this.collectRankings(request.criterion, request.topCount, marketCountry),
       "ranking_collection_unavailable",
@@ -818,6 +836,9 @@ export class ScalpingService {
       request.topCount,
       request.criterion,
     );
+    const calculationSymbols = request.scanOnly
+      ? (request.criterion === "volatility" ? universe : [])
+      : analysisSymbol ? [analysisSymbol] : universe;
     const [pricesResult, instrumentsResult, portfolioResult, barsResult, enrichmentResult] = await Promise.all([
       this.safe(() => this.toss.getPrices(universe), "toss_prices"),
       this.portfolio
@@ -826,7 +847,9 @@ export class ScalpingService {
       this.portfolio
         ? this.safe(() => this.portfolio!.getPortfolio(request.accountId, false, false), "portfolio")
         : Promise.resolve<{ value?: Portfolio; error?: string }>({}),
-      this.loadBarsWithDiagnostics(universe, intervalMinutes(request.interval), marketCountry),
+      calculationSymbols.length
+        ? this.loadBarsWithDiagnostics(calculationSymbols, intervalMinutes(request.interval), marketCountry)
+        : Promise.resolve({ barsBySymbol: new Map<string, IntradayBarRecord[]>(), errors: [] as string[] }),
       this.safe(() => this.enrich(universe, marketCountry), "quote_enrichment_unavailable"),
     ]);
     const barsBySymbol = barsResult.barsBySymbol;
@@ -852,19 +875,21 @@ export class ScalpingService {
       metadata: new Map(metadata),
       holdings: new Map(holdings),
     };
-    const analysisResult = await this.safe(() => this.computeAnalysis({
-      symbols: universe,
-      interval: intervalMinutes(request.interval),
-      preset: request.preset,
-      barsBySymbol,
-      metadata,
-      holdings,
-      books: bookAndWarnings.books,
-      trades: bookAndWarnings.trades,
-      marketCountry,
-      responseMode: "full_series",
-      includeVolumeProfile: true,
-    }), "rust_analysis_unavailable");
+    const analysisResult = calculationSymbols.length
+      ? await this.safe(() => this.computeAnalysis({
+        symbols: calculationSymbols,
+        interval: intervalMinutes(request.interval),
+        preset: request.preset,
+        barsBySymbol,
+        metadata,
+        holdings,
+        books: bookAndWarnings.books,
+        trades: bookAndWarnings.trades,
+        marketCountry,
+        responseMode: "full_series",
+        includeVolumeProfile: !request.scanOnly,
+      }), "rust_analysis_unavailable")
+      : { value: undefined, error: undefined };
     const analysis = analysisResult.value;
     let scanError: string | undefined;
     let scan: ScannerResult;
@@ -908,11 +933,16 @@ export class ScalpingService {
       marketCountry,
       metadata,
     );
-    const selectedSymbols = candidates.map(({ symbol }) => symbol);
-    const predictions = await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => []);
+    const candidateSymbols = candidates.map(({ symbol }) => symbol);
+    const selectedSymbols = request.scanOnly
+      ? []
+      : analysisSymbol ? candidateSymbols.filter((symbol) => symbol === analysisSymbol) : candidateSymbols;
+    const predictions = selectedSymbols.length
+      ? await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => [])
+      : [];
     const predictionBySymbol = new Map(predictions.map((prediction) => [prediction.symbol, prediction]));
     const markerFromDate = Array.from(barsBySymbol.values()).flat().map((bar) => bar.sessionDate).sort()[0];
-    const markerResult = portfolioValue && this.tradeMarkers
+    const markerResult = selectedSymbols.length && portfolioValue && this.tradeMarkers
       ? await this.safe(() => this.tradeMarkers!.getMarkers({
         accountId: portfolioValue.selectedAccountId,
         symbols: selectedSymbols,
@@ -957,7 +987,8 @@ export class ScalpingService {
         interval: request.interval,
         layoutColumns: request.layoutColumns,
         preset: request.preset,
-        candidates: candidates.filter(({ symbol }) => selectedSymbols.includes(symbol)),
+        analysisSymbol,
+        candidates,
         excluded: scan.excluded,
         instruments: selectedSymbols.map((symbol) => ({
           symbol,
@@ -994,7 +1025,7 @@ export class ScalpingService {
         quality: degradedWorkspaceQuality(scan.quality, diagnosticCodes),
         diagnostics: {
           providerErrors: diagnosticCodes,
-          analysisBatchInstrumentCount: universe.length,
+          analysisBatchInstrumentCount: calculationSymbols.length,
           analysisBatchRequestCount: this.rust && analysis ? 1 : 0,
           browserIndicatorCalculation: false,
           tradingAmountUnit: marketCountry === "US" ? "USD" : "KRW",
@@ -1211,7 +1242,7 @@ export class ScalpingService {
       }
     }
     const analysis = await this.computeAnalysis({
-      symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
+      symbols: request.symbols, interval: 1, preset: request.preset, barsBySymbol, metadata,
       holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "full_series", includeVolumeProfile: false,
       marketCountry: request.marketCountry,
       signalSnapshotTimestamps,
@@ -1327,11 +1358,12 @@ export class ScalpingService {
 
   private evaluationSchema(
     input: ScalpingEvaluationRequest,
-  ): ScalpingEvaluationRequest & { marketCountry: MarketCountry } {
+  ): ScalpingEvaluationRequest & { marketCountry: MarketCountry; preset: WorkspacePreset } {
     const parsed = z.object({
       marketCountry: MarketCountrySchema.default("KR"),
       symbols: z.array(z.string()),
       interval: MinuteIntervalSchema,
+      preset: WorkspacePresetSchema.default("risk_management"),
       evaluation: z.object({
         walkForward: z.literal(true), retrospective: z.literal(true),
         commissionBpsPerSide: z.number().finite().min(0).max(1_000),

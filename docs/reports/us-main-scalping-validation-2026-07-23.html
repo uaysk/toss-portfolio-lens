@@ -1,0 +1,1011 @@
+<!doctype html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Toss Portfolio Lens 미국 정규장 단타 보조 기능 및 retrospective 예측 검증 보고서">
+  <title>미국 정규장 단타 보조 검증 보고서 · 2026-07-23</title>
+  <style>
+    :root {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 6% 8%;
+      --card-strong: 240 5% 12%;
+      --popover: 240 6% 10%;
+      --primary: 0 0% 98%;
+      --primary-foreground: 240 6% 10%;
+      --secondary: 240 4% 16%;
+      --secondary-foreground: 0 0% 98%;
+      --muted: 240 4% 16%;
+      --muted-foreground: 240 5% 65%;
+      --accent: 240 4% 20%;
+      --accent-foreground: 0 0% 98%;
+      --ring: 240 5% 65%;
+      --radius: 1.35rem;
+      --shadow: 0 18px 70px rgb(0 0 0 / 22%);
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 0; background: hsl(var(--background)); scroll-behavior: smooth; }
+    body {
+      min-width: 0;
+      margin: 0;
+      overflow-x: hidden;
+      background:
+        radial-gradient(circle at 88% -10%, rgb(255 255 255 / 7%), transparent 34rem),
+        hsl(var(--background));
+      color: hsl(var(--foreground));
+      font-family: Inter, Pretendard, "Noto Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "tnum" 1, "ss01" 1;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input { font: inherit; }
+    button { border: 0; }
+    button:focus-visible, [tabindex]:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px hsl(var(--ring) / 45%);
+    }
+
+    .shell {
+      width: min(1240px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 64px;
+    }
+
+    .topbar, .hero-actions, .inline, .legend, .chip-row, .section-title, .flow-step, .candidate-main {
+      display: flex;
+      align-items: center;
+    }
+
+    .topbar {
+      justify-content: space-between;
+      gap: 16px;
+      padding: 2px 4px 24px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      flex: none;
+      place-items: center;
+      border-radius: 11px;
+      background: hsl(var(--primary));
+      color: hsl(var(--primary-foreground));
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: -.05em;
+    }
+
+    .brand-copy strong { display: block; font-size: 13px; letter-spacing: -.02em; }
+    .brand-copy span, .timestamp, .eyebrow, .meta, .caption, .footnote {
+      color: hsl(var(--muted-foreground));
+    }
+    .brand-copy span { display: block; margin-top: 2px; font-size: 9px; }
+    .timestamp { text-align: right; font-size: 10px; line-height: 1.6; }
+
+    .card {
+      min-width: 0;
+      border-radius: var(--radius);
+      background: hsl(var(--card));
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(28px, 6vw, 64px);
+      background:
+        linear-gradient(135deg, rgb(255 255 255 / 7%), transparent 45%),
+        hsl(var(--card));
+    }
+
+    .hero::after {
+      position: absolute;
+      width: 460px;
+      height: 460px;
+      right: -220px;
+      bottom: -290px;
+      border-radius: 999px;
+      background: rgb(255 255 255 / 5%);
+      content: "";
+    }
+
+    .eyebrow {
+      margin: 0;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 920px;
+      margin: 15px 0 0;
+      font-size: clamp(2.25rem, 7vw, 5.7rem);
+      font-weight: 950;
+      line-height: .94;
+      letter-spacing: -.072em;
+    }
+
+    .hero-copy {
+      max-width: 760px;
+      margin: 24px 0 0;
+      color: hsl(var(--muted-foreground));
+      font-size: clamp(13px, 1.6vw, 16px);
+      line-height: 1.8;
+      word-break: keep-all;
+    }
+
+    .hero-actions { flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+    .badge, .chip, .status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      font-size: 9px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .badge { min-height: 30px; padding: 0 12px; background: hsl(var(--secondary)); }
+    .badge.strong { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .metric { min-height: 126px; padding: 22px; box-shadow: none; }
+    .metric-label {
+      margin: 0;
+      color: hsl(var(--muted-foreground));
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .metric-value {
+      margin: 24px 0 0;
+      font-size: clamp(1.45rem, 3.4vw, 2.5rem);
+      font-weight: 950;
+      letter-spacing: -.055em;
+    }
+    .metric-note { margin: 7px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.5; }
+
+    .tabs {
+      position: sticky;
+      z-index: 20;
+      top: 12px;
+      display: flex;
+      gap: 5px;
+      margin: 16px 0;
+      padding: 6px;
+      overflow-x: auto;
+      border-radius: 999px;
+      background: rgb(24 24 27 / 88%);
+      box-shadow: 0 12px 40px rgb(0 0 0 / 25%);
+      backdrop-filter: blur(18px);
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      min-height: 38px;
+      flex: 1 0 auto;
+      padding: 0 16px;
+      border-radius: 999px;
+      background: transparent;
+      color: hsl(var(--muted-foreground));
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 900;
+    }
+    .tab[aria-selected="true"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+
+    [data-panel][hidden] { display: none; }
+    .panel { min-width: 0; animation: appear .18s ease-out; }
+    @keyframes appear { from { opacity: 0; transform: translateY(4px); } }
+
+    .section { padding: clamp(22px, 4vw, 36px); box-shadow: none; }
+    .section + .section { margin-top: 10px; }
+    .section-title { justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+    .section-title h2 { margin: 3px 0 0; font-size: clamp(1.25rem, 3vw, 2rem); letter-spacing: -.045em; }
+    .section-title p { margin: 0; }
+    .section-title .meta { font-size: 9px; text-align: right; line-height: 1.6; }
+
+    .conclusion {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr);
+      gap: 10px;
+    }
+    .statement, .notice, .subcard { min-width: 0; border-radius: calc(var(--radius) - 4px); background: hsl(var(--card-strong)); }
+    .statement { padding: clamp(24px, 5vw, 42px); }
+    .statement h3 { max-width: 720px; margin: 0; font-size: clamp(1.65rem, 4vw, 3.4rem); line-height: 1.04; letter-spacing: -.055em; }
+    .statement p { max-width: 760px; margin: 18px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.8; }
+    .notice { padding: 24px; }
+    .notice strong { display: block; font-size: 12px; }
+    .notice p { margin: 12px 0 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.8; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .flow-step {
+      min-height: 116px;
+      align-items: flex-start;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 18px;
+      border-radius: calc(var(--radius) - 6px);
+      background: hsl(var(--card-strong));
+    }
+    .flow-step span { color: hsl(var(--muted-foreground)); font-size: 9px; font-weight: 900; }
+    .flow-step strong { font-size: 12px; line-height: 1.45; }
+    .flow-step small { color: hsl(var(--muted-foreground)); font-size: 8px; line-height: 1.5; }
+
+    .candidate-list { display: grid; gap: 7px; }
+    .candidate {
+      display: grid;
+      grid-template-columns: 32px minmax(150px, 1.2fr) repeat(3, minmax(90px, .7fr));
+      gap: 10px;
+      align-items: center;
+      min-width: 0;
+      padding: 12px 14px;
+      border-radius: 18px;
+      background: hsl(var(--card-strong));
+    }
+    .candidate:first-child { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+    .candidate-rank { text-align: center; font-size: 11px; font-weight: 950; }
+    .candidate-main { min-width: 0; gap: 10px; }
+    .candidate-main strong, .candidate-main small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .candidate-main strong { font-size: 12px; }
+    .candidate-main small { margin-top: 3px; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .candidate:first-child .candidate-main small, .candidate:first-child .candidate-stat span { color: rgb(24 24 27 / 58%); }
+    .candidate-stat span { display: block; color: hsl(var(--muted-foreground)); font-size: 7px; font-weight: 900; }
+    .candidate-stat strong { display: block; margin-top: 5px; font-size: 10px; }
+
+    .grid-2, .grid-3, .grid-4 {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .subcard { padding: 20px; }
+    .subcard h3 { margin: 0; font-size: 12px; letter-spacing: -.02em; }
+    .subcard p, .subcard li { color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.75; }
+    .subcard p { margin: 10px 0 0; }
+    .subcard ul { margin: 12px 0 0; padding-left: 16px; }
+    .subcard li + li { margin-top: 6px; }
+
+    .checkline {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 15px;
+      background: hsl(var(--card-strong));
+    }
+    .checkline + .checkline { margin-top: 6px; }
+    .checkline strong { font-size: 10px; }
+    .checkline span { color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .status { min-height: 26px; padding: 0 10px; background: hsl(var(--secondary)); color: hsl(var(--foreground)) !important; }
+
+    .model-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+      padding: 24px;
+      border-radius: calc(var(--radius) - 4px);
+      background: hsl(var(--primary));
+      color: hsl(var(--primary-foreground));
+    }
+    .model-header h3 { margin: 7px 0 0; font-size: clamp(1.4rem, 4vw, 2.8rem); letter-spacing: -.055em; }
+    .model-header p { margin: 10px 0 0; color: rgb(24 24 27 / 64%); font-size: 9px; line-height: 1.6; }
+    .model-header .status { background: rgb(24 24 27 / 12%); color: hsl(var(--primary-foreground)) !important; }
+
+    .segmented {
+      display: flex;
+      gap: 5px;
+      margin: 12px 0;
+      padding: 5px;
+      border-radius: 999px;
+      background: hsl(var(--card-strong));
+    }
+    .segment {
+      min-height: 36px;
+      flex: 1;
+      border-radius: 999px;
+      background: transparent;
+      color: hsl(var(--muted-foreground));
+      cursor: pointer;
+      font-size: 9px;
+      font-weight: 900;
+    }
+    .segment[aria-pressed="true"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+
+    .forecast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(260px, .7fr);
+      gap: 10px;
+    }
+    .forecast-range { padding: 24px; border-radius: calc(var(--radius) - 4px); background: hsl(var(--card-strong)); }
+    .range-values { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 22px; }
+    .range-value { padding: 14px; border-radius: 15px; background: hsl(var(--card)); }
+    .range-value span { display: block; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .range-value strong { display: block; margin-top: 7px; font-size: clamp(13px, 2vw, 18px); }
+    .range-track { position: relative; height: 10px; margin: 28px 4px 12px; border-radius: 999px; background: hsl(var(--secondary)); overflow: hidden; }
+    .range-fill { position: absolute; inset: 0 auto 0 0; width: 50%; border-radius: inherit; background: hsl(var(--primary)); transition: width .2s ease; }
+    .range-zero { position: absolute; z-index: 2; top: -4px; bottom: -4px; left: 50%; width: 2px; background: hsl(var(--muted-foreground)); }
+    .range-labels { display: flex; justify-content: space-between; color: hsl(var(--muted-foreground)); font-size: 7px; }
+    .forecast-side { display: grid; gap: 8px; }
+    .forecast-kpi { padding: 18px; border-radius: calc(var(--radius) - 6px); background: hsl(var(--card-strong)); }
+    .forecast-kpi span { display: block; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .forecast-kpi strong { display: block; margin-top: 10px; font-size: 21px; letter-spacing: -.04em; }
+
+    .table-scroll { max-width: 100%; overflow-x: auto; border-radius: 18px; scrollbar-width: thin; }
+    table { width: 100%; min-width: 760px; border-spacing: 0 6px; font-size: 9px; }
+    th { padding: 0 12px 7px; color: hsl(var(--muted-foreground)); font-weight: 900; text-align: left; white-space: nowrap; }
+    td { padding: 13px 12px; background: hsl(var(--card-strong)); white-space: nowrap; }
+    tr td:first-child { border-radius: 14px 0 0 14px; }
+    tr td:last-child { border-radius: 0 14px 14px 0; }
+    td strong { font-size: 10px; }
+
+    .chart-wrap { min-width: 0; height: 310px; margin-top: 12px; padding: 16px; border-radius: 18px; background: hsl(var(--card-strong)); }
+    canvas { display: block; width: 100%; height: 100%; }
+    .legend { flex-wrap: wrap; gap: 10px; margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 999px; background: hsl(var(--foreground)); }
+    .legend-dot.dim { background: hsl(var(--muted-foreground)); }
+
+    .cost-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+    .cost { padding: 15px; border-radius: 16px; background: hsl(var(--card-strong)); }
+    .cost span { display: block; color: hsl(var(--muted-foreground)); font-size: 7px; }
+    .cost strong { display: block; margin-top: 8px; font-size: 13px; }
+
+    .limitation {
+      padding: 20px;
+      border-radius: calc(var(--radius) - 4px);
+      background: hsl(var(--card-strong));
+    }
+    .limitation + .limitation { margin-top: 8px; }
+    .limitation strong { display: block; font-size: 11px; }
+    .limitation p { margin: 8px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.75; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 28px 4px 0;
+      color: hsl(var(--muted-foreground));
+      font-size: 8px;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 900px) {
+      .metrics, .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .conclusion, .forecast { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow-step:last-child { grid-column: span 2; }
+      .candidate { grid-template-columns: 26px minmax(130px, 1fr) repeat(2, minmax(80px, .7fr)); }
+      .candidate-stat:last-child { display: none; }
+      .grid-3 { grid-template-columns: 1fr; }
+      .cost-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 20px, 1240px); padding-top: 14px; }
+      .topbar { align-items: flex-start; padding-bottom: 14px; }
+      .timestamp span { display: none; }
+      .hero { padding: 25px 20px 28px; border-radius: 24px; }
+      h1 { font-size: clamp(2.35rem, 14vw, 3.55rem); }
+      .hero-copy { margin-top: 18px; font-size: 12px; }
+      .metrics { grid-template-columns: 1fr 1fr; gap: 6px; }
+      .metric { min-height: 108px; padding: 16px; border-radius: 18px; }
+      .metric-value { margin-top: 20px; font-size: 1.55rem; }
+      .tabs { top: 6px; margin: 10px 0; }
+      .tab { min-height: 36px; padding: 0 13px; }
+      .section { padding: 18px 14px; border-radius: 22px; }
+      .section-title { align-items: flex-start; }
+      .section-title .meta { display: none; }
+      .statement, .notice, .model-header, .forecast-range { padding: 20px 17px; border-radius: 18px; }
+      .statement h3 { font-size: 1.8rem; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step:last-child { grid-column: auto; }
+      .flow-step { min-height: 96px; }
+      .candidate {
+        grid-template-columns: 22px minmax(118px, 1fr) minmax(78px, .65fr);
+        gap: 7px;
+        padding: 11px 10px;
+      }
+      .candidate-stat:nth-last-child(-n+2) { display: none; }
+      .grid-2, .grid-4 { grid-template-columns: 1fr; }
+      .range-values { grid-template-columns: 1fr; }
+      .range-value { display: flex; align-items: center; justify-content: space-between; }
+      .range-value strong { margin: 0; }
+      .segmented { overflow-x: auto; }
+      .segment { flex: 0 0 72px; }
+      .chart-wrap { height: 260px; padding: 10px; }
+      .cost-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cost:last-child { grid-column: span 2; }
+      footer { flex-direction: column; }
+    }
+
+    @media print {
+      body { background: #09090b; }
+      .tabs { position: static; }
+      [data-panel][hidden] { display: block; }
+      [data-panel] { break-before: page; }
+      .card { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">PL</span>
+        <div class="brand-copy">
+          <strong>Toss Portfolio Lens</strong>
+          <span>SCALPING ASSISTANT · VALIDATION REPORT</span>
+        </div>
+      </div>
+      <div class="timestamp">
+        2026-07-23 23:16 KST
+        <span><br>미국 정규장 · 10:16 EDT</span>
+      </div>
+    </header>
+
+    <section class="hero card">
+      <p class="eyebrow">US Main Session · Live validation</p>
+      <h1>목록은 넓게.<br>분석은 한 종목만.</h1>
+      <p class="hero-copy">
+        미국 정규장 실데이터에서 후보 스캔과 상세 분석을 분리했다. 스캔은 종목 목록만 만들고,
+        사용자가 선택한 한 종목에만 분봉 차트·Rust 기술 지표·KIS 실시간 스트림·공개 AI 전망·Walk-forward 검증을 연결한다.
+      </p>
+      <div class="hero-actions">
+        <span class="badge strong">실데이터 경로 확인</span>
+        <span class="badge">자동 주문 없음</span>
+        <span class="badge">retrospective</span>
+        <span class="badge">수익 보장 아님</span>
+      </div>
+    </section>
+
+    <section class="metrics" aria-label="핵심 검증 수치">
+      <article class="metric card">
+        <p class="metric-label">Scan results</p>
+        <p class="metric-value">5</p>
+        <p class="metric-note">목록 행 · 스캔 직후 차트 0</p>
+      </article>
+      <article class="metric card">
+        <p class="metric-label">Active analysis</p>
+        <p class="metric-value">1</p>
+        <p class="metric-note">TSLA · 차트/SSE/AI 모두 단일</p>
+      </article>
+      <article class="metric card">
+        <p class="metric-label">Live path</p>
+        <p class="metric-value">10.70s</p>
+        <p class="metric-note">스캔 3.54s + 상세 7.16s</p>
+      </article>
+      <article class="metric card">
+        <p class="metric-label">Browser errors</p>
+        <p class="metric-value">0</p>
+        <p class="metric-note">console · page · request · response</p>
+      </article>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="보고서 섹션">
+      <button class="tab" role="tab" aria-selected="true" aria-controls="panel-summary" id="tab-summary" data-tab="summary">요약</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-live" id="tab-live" data-tab="live">실시간 경로</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-ai" id="tab-ai" data-tab="ai">AI 전망</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-evaluation" id="tab-evaluation" data-tab="evaluation">Walk-forward</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-limits" id="tab-limits" data-tab="limits">해석·한계</button>
+    </nav>
+
+    <div class="panel" role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" data-panel="summary">
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Decision</p>
+            <h2>검증 결론</h2>
+          </div>
+          <p class="meta">최신 로컬 빌드 · 실제 KIS/Toss 공급 경로<br>운영 배포가 아닌 격리 검증</p>
+        </div>
+        <div class="conclusion">
+          <div class="statement">
+            <h3>기능은 작동했다.<br>수익성은 확인되지 않았다.</h3>
+            <p>
+              미국 정규장에서 목록 전용 스캔과 단일 종목 분석 제약은 정상 동작했다.
+              반면 현재 모델을 과거 분봉에 재생한 결과, 추세·돌파·위험관리 프리셋은 거래 신호가 없었고
+              평균회귀 프리셋은 비용 차감 후 모든 평가 구간에서 음수였다.
+            </p>
+          </div>
+          <aside class="notice">
+            <strong>수익률을 “예상 수익”으로 읽지 말 것</strong>
+            <p>
+              아래 값은 당시 저장된 예측이 아니라 현재 Chronos-Bolt 모델을 시간순으로 재생한 retrospective 결과다.
+              한 종목·한 거래일 수준의 제한된 표본이며 투자 성과 전망이나 주문 지시가 아니다.
+            </p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Runtime shape</p>
+            <h2>변경된 실행 구조</h2>
+          </div>
+          <p class="meta">브라우저 재계산 없음<br>상세 계산은 선택 시점에만</p>
+        </div>
+        <div class="flow">
+          <div class="flow-step"><span>01 · SCAN</span><strong>미국 순위 후보</strong><small>Toss + KIS ranking</small></div>
+          <div class="flow-step"><span>02 · LIST</span><strong>목록만 렌더</strong><small>차트 0 · SSE 0</small></div>
+          <div class="flow-step"><span>03 · SELECT</span><strong>사용자 1종목 선택</strong><small>이번 검증 TSLA</small></div>
+          <div class="flow-step"><span>04 · ANALYZE</span><strong>Rust batch 1종목</strong><small>분봉·지표·신호</small></div>
+          <div class="flow-step"><span>05 · ASSIST</span><strong>SSE + P40 AI</strong><small>각각 선택 종목 1개</small></div>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Scan snapshot</p>
+            <h2>23:03 KST 후보 목록</h2>
+          </div>
+          <p class="meta">미국 · 거래대금 상위 5<br>화면 표기값 기준</p>
+        </div>
+        <div class="candidate-list" id="candidate-list"></div>
+      </section>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-live" aria-labelledby="tab-live" data-panel="live" hidden>
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Browser proof</p>
+            <h2>실제 화면 경로</h2>
+          </div>
+          <p class="meta">1440 × 1000 · dark<br>2026-07-23 23:03 KST</p>
+        </div>
+        <div class="grid-2">
+          <div>
+            <div class="checkline"><div><strong>페이지 진입</strong><br><span>상태 확인만 수행</span></div><span class="status">스캔 0회</span></div>
+            <div class="checkline"><div><strong>스캔 적용</strong><br><span>scanOnly=true</span></div><span class="status">목록 5 · 차트 0</span></div>
+            <div class="checkline"><div><strong>TSLA 선택</strong><br><span>analysisSymbol=TSLA</span></div><span class="status">차트 1</span></div>
+            <div class="checkline"><div><strong>실시간 구독</strong><br><span>symbols query 검증</span></div><span class="status">TSLA 1개</span></div>
+            <div class="checkline"><div><strong>AI 전망</strong><br><span>batch symbols 검증</span></div><span class="status">TSLA 1개</span></div>
+          </div>
+          <div class="grid-2">
+            <article class="subcard"><h3>스캔 지연</h3><p><strong style="color:hsl(var(--foreground));font-size:26px">3.54초</strong><br>실제 미국 거래대금 순위 상위 5개. 상세 분봉·Rust 계산 없이 목록 응답.</p></article>
+            <article class="subcard"><h3>상세 지연</h3><p><strong style="color:hsl(var(--foreground));font-size:26px">7.16초</strong><br>TSLA 분봉 복구, Rust 지표, 신호 및 단일 차트 구성.</p></article>
+            <article class="subcard"><h3>AI 응답</h3><p><strong style="color:hsl(var(--foreground));font-size:26px">1.07초</strong><br>14:16 UTC 입력 revision을 P40 CUDA worker에서 처리. 별도 최초 측정은 6.90초, 같은 revision 캐시는 58ms였다.</p></article>
+            <article class="subcard"><h3>렌더 건전성</h3><p><strong style="color:hsl(var(--foreground));font-size:26px">0 오류</strong><br>overflow 0px, zero-size chart 0, failed request 0.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Market data</p>
+            <h2>미국 정규장 공급 확인</h2>
+          </div>
+          <p class="meta">개장 직후 22:30 KST<br>후속 UI 검증 23:03 KST</p>
+        </div>
+        <div class="grid-3">
+          <article class="subcard">
+            <h3>KIS WebSocket 체결</h3>
+            <p>AAPL 정규장 체결 구독 승인 후 720ms 동안 9건 수신. 표준 체결·표준 최우선 호가 채널의 연결과 파싱 오류 0을 확인했다.</p>
+          </article>
+          <article class="subcard">
+            <h3>KIS 최우선 호가</h3>
+            <p>개장 시점 스냅샷에서 bid 322.00 / ask 322.45를 수신했다. 미국 호가는 전체 depth가 아닌 최우선 매수·매도 1호가 범위만 사용한다.</p>
+          </article>
+          <article class="subcard">
+            <h3>REST 복구·순위</h3>
+            <p>미국 거래량·거래대금 순위 각 100개와 1분봉 복구 10개를 확인했다. volume·turnover가 존재했고 파싱 진단은 0건이었다.</p>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-ai" aria-labelledby="tab-ai" data-panel="ai" hidden>
+      <section class="section card">
+        <div class="model-header">
+          <div>
+            <p class="eyebrow" style="color:rgb(24 24 27 / 58%)">Public model · P40 container</p>
+            <h3>amazon/chronos-bolt-small</h3>
+            <p>revision 772f3d25d38aec6d914c8949dab4462e2d46f5d8 · chronos-forecasting 2.1.0 · Apache-2.0</p>
+          </div>
+          <span class="status">CUDA · float32</span>
+        </div>
+
+        <div class="segmented" role="group" aria-label="AI 전망 기간">
+          <button class="segment" type="button" aria-pressed="true" data-horizon="5">5분</button>
+          <button class="segment" type="button" aria-pressed="false" data-horizon="15">15분</button>
+          <button class="segment" type="button" aria-pressed="false" data-horizon="30">30분</button>
+          <button class="segment" type="button" aria-pressed="false" data-horizon="60">60분</button>
+        </div>
+
+        <div class="forecast">
+          <div class="forecast-range">
+            <p class="eyebrow">TSLA return quantiles</p>
+            <h2 id="forecast-title" style="margin:8px 0 0;font-size:24px;letter-spacing:-.045em">향후 5분 분포</h2>
+            <div class="range-values">
+              <div class="range-value"><span>Q10</span><strong id="return-q10">−0.6779%</strong></div>
+              <div class="range-value"><span>MEDIAN</span><strong id="return-q50">−0.0587%</strong></div>
+              <div class="range-value"><span>Q90</span><strong id="return-q90">+0.4961%</strong></div>
+            </div>
+            <div class="range-track" aria-hidden="true">
+              <div class="range-zero"></div>
+              <div class="range-fill" id="range-fill"></div>
+            </div>
+            <div class="range-labels"><span>하락 꼬리</span><span>0%</span><span>상승 꼬리</span></div>
+            <p class="caption" id="price-range" style="margin:18px 0 0;font-size:9px;line-height:1.7">가격 분위수 $324.78 · $326.80 · $328.62</p>
+          </div>
+          <div class="forecast-side">
+            <div class="forecast-kpi"><span>상승 확률</span><strong id="up-probability">44.07%</strong></div>
+            <div class="forecast-kpi"><span>예상 변동성</span><strong id="expected-volatility">0.4585%</strong></div>
+            <div class="forecast-kpi"><span>불확실성 폭</span><strong id="uncertainty-width">1.1740%</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Forecast provenance</p>
+            <h2>예측 문맥</h2>
+          </div>
+          <p class="meta">입력 종료 2026-07-23 14:16 UTC<br>warm CUDA 응답 1.07초</p>
+        </div>
+        <div class="grid-3">
+          <article class="subcard"><h3>입력 품질 · partial</h3><p>200개 분봉, volume 누락 0, 불규칙 간격 0. 거래대금 필드 누락률은 21.5%였다. 모델 입력의 OHLCV와 보조 금액 필드 품질을 구분해 표시한다.</p></article>
+          <article class="subcard"><h3>분포 이탈 · unavailable</h3><p>모델 제공자가 reference statistics를 배포하지 않아 학습 분포 이탈을 수치화하지 않았다. 정상 범위라고 임의 판단하지 않는다.</p></article>
+          <article class="subcard"><h3>목표·손절 선도달 · unavailable</h3><p>주변 분위수만으로 경로의 first-passage 순서를 식별할 수 없어 확률을 만들지 않았다. 없는 정보를 50%로 대체하지 않는다.</p></article>
+        </div>
+      </section>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-evaluation" aria-labelledby="tab-evaluation" data-panel="evaluation" hidden>
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Retrospective walk-forward</p>
+            <h2>예측 정확도</h2>
+          </div>
+          <p class="meta">TSLA · 379 rolling origins<br>random split 사용 안 함</p>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>기간</th><th>표본</th><th>방향 정확도</th><th>MAE</th><th>RMSE</th><th>상승확률 Brier</th></tr>
+            </thead>
+            <tbody id="accuracy-table"></tbody>
+          </table>
+        </div>
+        <div class="chart-wrap"><canvas id="accuracy-chart" aria-label="기간별 방향 정확도와 50퍼센트 기준선 차트" role="img"></canvas></div>
+        <div class="legend"><span class="legend-dot"></span> 방향 정확도 <span class="legend-dot dim"></span> 무작위 방향 기준 50%</div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Strategy comparison</p>
+            <h2>지표 프리셋별 비용 차감 결과</h2>
+          </div>
+          <p class="meta">신호 다음 유효 분봉부터 적용<br>거래별 순수익 시간순 복리 연결</p>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>프리셋</th><th>기간</th><th>기술 신호</th><th>기술 순수익</th><th>AI 필터 거래</th><th>AI 필터 순수익</th></tr>
+            </thead>
+            <tbody id="strategy-table"></tbody>
+          </table>
+        </div>
+        <div class="chart-wrap"><canvas id="return-chart" aria-label="평균회귀 프리셋 기간별 비용 차감 수익률 차트" role="img"></canvas></div>
+        <div class="legend"><span class="legend-dot"></span> 기술 신호만 <span class="legend-dot dim"></span> AI 방향 필터 추가</div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Cost assumptions</p>
+            <h2>거래 비용 가정</h2>
+          </div>
+          <p class="meta">한 거래 왕복 30 bps<br>UI 기본값</p>
+        </div>
+        <div class="cost-grid">
+          <div class="cost"><span>편도 수수료</span><strong>1.5 bps × 2</strong></div>
+          <div class="cost"><span>청산 세금</span><strong>18 bps</strong></div>
+          <div class="cost"><span>왕복 스프레드</span><strong>5 bps</strong></div>
+          <div class="cost"><span>편도 슬리피지</span><strong>2 bps × 2</strong></div>
+          <div class="cost"><span>총 비용</span><strong>30 bps / 거래</strong></div>
+        </div>
+        <p class="footnote" style="margin:14px 2px 0;font-size:8px;line-height:1.7">
+          평균회귀의 기술 신호 74회는 단순 산술 기준 22.2%의 비용 노출에 해당한다.
+          실제 보고 수익률은 각 거래의 비용 차감 수익률을 시간순으로 복리 연결하므로 이 산술값과 동일하지 않다.
+        </p>
+      </section>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-limits" aria-labelledby="tab-limits" data-panel="limits" hidden>
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Interpretation</p>
+            <h2>읽어야 할 결론</h2>
+          </div>
+          <p class="meta">검증되지 않은 항목은<br>완료로 간주하지 않음</p>
+        </div>
+        <div class="limitation">
+          <strong>“0회 · 0%”는 수익률 0% 전망이 아니다</strong>
+          <p>추세·돌파·위험관리 프리셋은 이번 구간에서 진입 가능한 신호를 만들지 못했다. 따라서 수익성 표본이 없으며 기대수익을 추정할 수 없다.</p>
+        </div>
+        <div class="limitation">
+          <strong>평균회귀는 AI 필터를 붙여도 음수였다</strong>
+          <p>기술 신호만 사용한 복리 순수익은 5/15/30/60분에서 −22.52%/−26.90%/−33.89%/−50.07%였다. AI 방향 필터는 손실 폭을 줄였지만 −10.45%/−16.26%/−21.27%/−31.55%로 여전히 음수였다.</p>
+        </div>
+        <div class="limitation">
+          <strong>표본과 데이터 품질이 제한적이다</strong>
+          <p>379개 rolling origin에서 510개 진단 경고가 기록됐다. 그중 거래대금 누락 관련 379개, 세션 공백·불규칙 간격 관련 131개다. 한 종목·한 시점의 결과를 미국시장 전체로 일반화할 수 없다.</p>
+        </div>
+        <div class="limitation">
+          <strong>분봉 경계에서는 AI가 일시적으로 unavailable일 수 있다</strong>
+          <p>실시장 반복 검증 중 한 요청이 값을 만들지 않고 unavailable을 반환했고, 다음 확정 봉 요청에서 정상 복구됐다. GPU 로그에는 추론 예외가 없었다. 코드 경로상 최신 봉 지연으로 첫 미래 시각이 이미 지나간 경우를 차단한 것으로 추정되며, 연속 가용률 100%는 검증되지 않았다.</p>
+        </div>
+        <div class="limitation">
+          <strong>Chronos-Bolt의 q05·q95는 native quantile이 아니다</strong>
+          <p>worker 로그에서 모델 학습 분위수 범위가 q10~q90임을 확인했다. 현재 q05·q95 요청은 각각 q10·q90 경계로 clamp되므로 tail coverage 품질에 영향을 줄 수 있다. 이 보고서의 전망 카드는 q10·median·q90만 사용한다.</p>
+        </div>
+        <div class="limitation">
+          <strong>미국 호가 범위가 얕다</strong>
+          <p>KIS에서 확인한 미국 호가는 최우선 bid/ask 1호가 범위다. 전체 호가 depth나 과거 호가 이력 없이 호가 불균형을 완전한 주문장 지표처럼 해석하면 안 된다.</p>
+        </div>
+        <div class="limitation">
+          <strong>실거래 검증이 아니다</strong>
+          <p>실제 주문을 내지 않았고 자동 주문 기능도 없다. 체결 가능성, 부분 체결, 장중 급변 시 지연, 계좌별 세율·수수료 차이는 시뮬레이션 가정 밖에 남아 있다.</p>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Verification matrix</p>
+            <h2>이번 실행에서 확인한 범위</h2>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <div class="checkline"><strong>Vitest</strong><span class="status">689 / 689</span></div>
+            <div class="checkline"><strong>Rust</strong><span class="status">175 / 175</span></div>
+            <div class="checkline"><strong>Python AI worker</strong><span class="status">44 / 44</span></div>
+            <div class="checkline"><strong>TypeScript typecheck</strong><span class="status">PASS</span></div>
+          </div>
+          <div>
+            <div class="checkline"><strong>Production build</strong><span class="status">PASS</span></div>
+            <div class="checkline"><strong>UI 1440×1000 dark</strong><span class="status">PASS</span></div>
+            <div class="checkline"><strong>UI 390×844 light</strong><span class="status">PASS</span></div>
+            <div class="checkline"><strong>실제 미국 정규장</strong><span class="status">PASS</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer>
+      <span>독립 실행형 단일 HTML + JS · shadcn/ui CSS 변수와 컴포넌트 패턴을 정적 문서에 적용 · 외부 런타임/폰트/네트워크 요청 없음</span>
+      <span>보고서 기준일 2026-07-23 · 투자 조언 아님 · 주문 기능 없음</span>
+    </footer>
+  </main>
+
+  <script>
+    const report = {
+      candidates: [
+        { rank: 1, name: "테슬라", symbol: "TSLA · NAS", price: "$325.78", change: "−12.89%", amount: "$1.65조" },
+        { rank: 2, name: "MU", symbol: "MU · NAS", price: "$985.55", change: "+2.60%", amount: "$1.47조" },
+        { rank: 3, name: "GOOGL", symbol: "GOOGL · NAS", price: "$321.36", change: "−6.04%", amount: "$8,849.95억" },
+        { rank: 4, name: "SPY", symbol: "SPY · AMS", price: "$740.03", change: "−1.00%", amount: "$8,691.49억" },
+        { rank: 5, name: "NVDA", symbol: "NVDA · NAS", price: "$208.85", change: "−1.52%", amount: "$6,778.05억" }
+      ],
+      forecasts: {
+        5: { q10: -0.6779, q50: -0.0587, q90: 0.4961, prices: [324.7764, 326.8013, 328.6154], up: 44.07, volatility: 0.4585, width: 1.1740 },
+        15: { q10: -0.8428, q50: -0.0389, q90: 0.7591, prices: [324.2372, 326.8660, 329.4754], up: 46.99, volatility: 0.6253, width: 1.6019 },
+        30: { q10: -0.9749, q50: -0.0839, q90: 0.9517, prices: [323.8053, 326.7188, 330.1050], up: 45.12, volatility: 0.7518, width: 1.9265 },
+        60: { q10: -1.1484, q50: -0.1399, q90: 1.3335, prices: [323.2378, 326.5358, 331.3535], up: 43.89, volatility: 0.9675, width: 2.4819 }
+      },
+      accuracy: [
+        { horizon: 5, count: 379, direction: 53.298, mae: 0.1198, rmse: 0.2522, brier: 0.2524 },
+        { horizon: 15, count: 379, direction: 56.201, mae: 0.2077, rmse: 0.3856, brier: 0.2503 },
+        { horizon: 30, count: 379, direction: 53.562, mae: 0.3112, rmse: 0.5375, brier: 0.2612 },
+        { horizon: 60, count: 379, direction: 50.132, mae: 0.5106, rmse: 0.8138, brier: 0.2621 }
+      ],
+      strategies: [
+        { preset: "추세", horizon: "전체", technicalTrades: 0, technicalReturn: null, aiTrades: 0, aiReturn: null },
+        { preset: "돌파", horizon: "전체", technicalTrades: 0, technicalReturn: null, aiTrades: 0, aiReturn: null },
+        { preset: "위험관리", horizon: "전체", technicalTrades: 0, technicalReturn: null, aiTrades: 0, aiReturn: null },
+        { preset: "평균회귀", horizon: "5분", technicalTrades: 74, technicalReturn: -22.5181, aiTrades: 36, aiReturn: -10.4512 },
+        { preset: "평균회귀", horizon: "15분", technicalTrades: 74, technicalReturn: -26.9044, aiTrades: 45, aiReturn: -16.2618 },
+        { preset: "평균회귀", horizon: "30분", technicalTrades: 74, technicalReturn: -33.8851, aiTrades: 45, aiReturn: -21.2704 },
+        { preset: "평균회귀", horizon: "60분", technicalTrades: 74, technicalReturn: -50.0743, aiTrades: 44, aiReturn: -31.5537 }
+      ]
+    };
+
+    const percent = (value, digits = 2, signed = false) => {
+      if (value == null) return "표본 없음";
+      const sign = signed && value > 0 ? "+" : "";
+      return `${sign}${value.toFixed(digits)}%`;
+    };
+
+    document.getElementById("candidate-list").innerHTML = report.candidates.map((item) => `
+      <div class="candidate">
+        <span class="candidate-rank">${item.rank}</span>
+        <div class="candidate-main"><div><strong>${item.name}</strong><small>${item.symbol}</small></div></div>
+        <div class="candidate-stat"><span>현재가</span><strong>${item.price}</strong></div>
+        <div class="candidate-stat"><span>등락률</span><strong>${item.change}</strong></div>
+        <div class="candidate-stat"><span>거래대금</span><strong>${item.amount}</strong></div>
+      </div>
+    `).join("");
+
+    const tabs = [...document.querySelectorAll("[data-tab]")];
+    const panels = [...document.querySelectorAll("[data-panel]")];
+    function selectTab(name, focus = false) {
+      tabs.forEach((tab) => {
+        const selected = tab.dataset.tab === name;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected && focus) tab.focus();
+      });
+      panels.forEach((panel) => { panel.hidden = panel.dataset.panel !== name; });
+      if (name === "evaluation") requestAnimationFrame(drawCharts);
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        event.preventDefault();
+        const next = (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        selectTab(tabs[next].dataset.tab, true);
+      });
+    });
+
+    const signed = (value) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(4)}%`;
+    function renderForecast(horizon) {
+      const value = report.forecasts[horizon];
+      document.getElementById("forecast-title").textContent = `향후 ${horizon}분 분포`;
+      document.getElementById("return-q10").textContent = signed(value.q10);
+      document.getElementById("return-q50").textContent = signed(value.q50);
+      document.getElementById("return-q90").textContent = signed(value.q90);
+      document.getElementById("price-range").textContent = `가격 분위수 ${value.prices.map((price) => `$${price.toFixed(2)}`).join(" · ")}`;
+      document.getElementById("up-probability").textContent = `${value.up.toFixed(2)}%`;
+      document.getElementById("expected-volatility").textContent = `${value.volatility.toFixed(4)}%`;
+      document.getElementById("uncertainty-width").textContent = `${value.width.toFixed(4)}%`;
+      const total = Math.max(Math.abs(value.q10), Math.abs(value.q90), 0.001);
+      document.getElementById("range-fill").style.width = `${50 + (value.q50 / total) * 42}%`;
+      document.querySelectorAll("[data-horizon]").forEach((button) => button.setAttribute("aria-pressed", String(Number(button.dataset.horizon) === Number(horizon))));
+    }
+    document.querySelectorAll("[data-horizon]").forEach((button) => button.addEventListener("click", () => renderForecast(button.dataset.horizon)));
+
+    document.getElementById("accuracy-table").innerHTML = report.accuracy.map((item) => `
+      <tr>
+        <td><strong>${item.horizon}분</strong></td>
+        <td>${item.count}</td>
+        <td>${item.direction.toFixed(3)}%</td>
+        <td>${item.mae.toFixed(4)}%</td>
+        <td>${item.rmse.toFixed(4)}%</td>
+        <td>${item.brier.toFixed(4)}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("strategy-table").innerHTML = report.strategies.map((item) => `
+      <tr>
+        <td><strong>${item.preset}</strong></td>
+        <td>${item.horizon}</td>
+        <td>${item.technicalTrades}회</td>
+        <td>${percent(item.technicalReturn, 4, true)}</td>
+        <td>${item.aiTrades}회</td>
+        <td>${percent(item.aiReturn, 4, true)}</td>
+      </tr>
+    `).join("");
+
+    function setupCanvas(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+      const context = canvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return { context, width: rect.width, height: rect.height };
+    }
+
+    function drawAccuracy() {
+      const canvas = document.getElementById("accuracy-chart");
+      const { context, width, height } = setupCanvas(canvas);
+      const padding = { x: 42, top: 24, bottom: 34 };
+      const chartHeight = height - padding.top - padding.bottom;
+      context.clearRect(0, 0, width, height);
+      context.font = "9px ui-sans-serif, system-ui";
+      context.fillStyle = "hsl(240 5% 65%)";
+      const y = (value) => padding.top + (60 - value) / 20 * chartHeight;
+      [40, 50, 60].forEach((value) => {
+        context.fillText(`${value}%`, 5, y(value) + 3);
+        context.fillStyle = value === 50 ? "hsl(240 5% 65% / .55)" : "hsl(240 4% 20%)";
+        context.fillRect(padding.x, y(value), width - padding.x - 12, 1);
+        context.fillStyle = "hsl(240 5% 65%)";
+      });
+      const slot = (width - padding.x - 18) / report.accuracy.length;
+      report.accuracy.forEach((item, index) => {
+        const barWidth = Math.min(48, slot * .52);
+        const x = padding.x + slot * index + slot / 2 - barWidth / 2;
+        const top = y(item.direction);
+        context.fillStyle = "hsl(0 0% 98%)";
+        context.beginPath();
+        context.roundRect(x, top, barWidth, y(40) - top, 8);
+        context.fill();
+        context.fillStyle = "hsl(240 5% 65%)";
+        context.textAlign = "center";
+        context.fillText(`${item.horizon}분`, x + barWidth / 2, height - 9);
+        context.fillStyle = "hsl(0 0% 98%)";
+        context.fillText(item.direction.toFixed(1), x + barWidth / 2, top - 7);
+      });
+      context.textAlign = "start";
+    }
+
+    function drawReturns() {
+      const canvas = document.getElementById("return-chart");
+      const { context, width, height } = setupCanvas(canvas);
+      const values = report.strategies.filter((item) => item.preset === "평균회귀");
+      const padding = { x: 48, top: 24, bottom: 36 };
+      const chartHeight = height - padding.top - padding.bottom;
+      context.clearRect(0, 0, width, height);
+      context.font = "9px ui-sans-serif, system-ui";
+      const y = (value) => padding.top + (0 - value) / 55 * chartHeight;
+      [0, -10, -20, -30, -40, -50].forEach((value) => {
+        context.fillStyle = "hsl(240 5% 65%)";
+        context.fillText(`${value}%`, 5, y(value) + 3);
+        context.fillStyle = "hsl(240 4% 20%)";
+        context.fillRect(padding.x, y(value), width - padding.x - 12, 1);
+      });
+      const slot = (width - padding.x - 18) / values.length;
+      values.forEach((item, index) => {
+        const groupWidth = Math.min(70, slot * .7);
+        const barWidth = groupWidth / 2 - 3;
+        const x = padding.x + slot * index + slot / 2 - groupWidth / 2;
+        [
+          { value: item.technicalReturn, color: "hsl(0 0% 98%)" },
+          { value: item.aiReturn, color: "hsl(240 5% 65%)" }
+        ].forEach((series, seriesIndex) => {
+          context.fillStyle = series.color;
+          context.beginPath();
+          context.roundRect(x + seriesIndex * (barWidth + 6), y(0), barWidth, y(series.value) - y(0), 6);
+          context.fill();
+        });
+        context.fillStyle = "hsl(240 5% 65%)";
+        context.textAlign = "center";
+        context.fillText(item.horizon, x + groupWidth / 2, height - 9);
+      });
+      context.textAlign = "start";
+    }
+
+    function drawCharts() {
+      if (document.getElementById("panel-evaluation").hidden) return;
+      drawAccuracy();
+      drawReturns();
+    }
+
+    let resizeFrame;
+    window.addEventListener("resize", () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(drawCharts);
+    });
+    renderForecast(5);
+  </script>
+</body>
+</html>
