@@ -705,8 +705,17 @@ export class ScalpingLiveRuntime {
         void this.recover(reference.symbol, reference.marketCountry, reference.exchange);
       }
     } catch (error) {
+      const cleanupErrors: unknown[] = [];
       for (const reference of newlyAdded) {
-        this.unsubscribeReference(reference);
+        try {
+          this.unsubscribeReference(reference);
+        } catch (firstCleanupError) {
+          try {
+            this.unsubscribeReference(reference);
+          } catch (secondCleanupError) {
+            cleanupErrors.push(firstCleanupError, secondCleanupError);
+          }
+        }
         this.references.delete(marketSymbolKey(reference.symbol, reference.marketCountry));
       }
       for (const key of retainedKeys) {
@@ -714,26 +723,46 @@ export class ScalpingLiveRuntime {
         const reference = this.references.get(key);
         if (reference) reference.count -= 1;
       }
+      if (cleanupErrors.length) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "실시간 연결 실패 후 구독 정리도 완료하지 못했습니다.",
+        );
+      }
       throw error;
     }
     let released = false;
+    const pendingReleaseKeys = new Set(retainedKeys);
     return () => {
       if (released) return;
-      released = true;
-      for (const key of retainedKeys) {
+      const errors: unknown[] = [];
+      for (const key of [...pendingReleaseKeys]) {
         const reference = this.references.get(key);
-        if (!reference) continue;
+        if (!reference) {
+          pendingReleaseKeys.delete(key);
+          continue;
+        }
         if (reference.count <= 1) {
+          try {
+            this.unsubscribeReference(reference);
+          } catch (error) {
+            errors.push(error);
+            continue;
+          }
           this.references.delete(key);
-          this.unsubscribeReference(reference);
           for (const closeKey of this.observedSessionCloses.keys()) {
             if (closeKey.startsWith(`${key}:`)) this.observedSessionCloses.delete(closeKey);
           }
         } else {
           reference.count -= 1;
         }
+        pendingReleaseKeys.delete(key);
       }
-      if (this.config.disconnectWhenIdle && this.references.size === 0) this.socket.disconnect();
+      released = pendingReleaseKeys.size === 0;
+      if (released && this.config.disconnectWhenIdle && this.references.size === 0) {
+        this.socket.disconnect();
+      }
+      if (errors.length) throw new AggregateError(errors, "일부 실시간 구독 해제에 실패했습니다.");
     };
   }
 
@@ -1012,7 +1041,18 @@ export class ScalpingLiveRuntime {
   }
 
   private unsubscribeReference(reference: LiveReference): void {
-    for (const subscription of reference.subscriptions.splice(0)) this.socket.unsubscribe(subscription);
+    const failed: KisSubscription[] = [];
+    const errors: unknown[] = [];
+    for (const subscription of reference.subscriptions.splice(0)) {
+      try {
+        this.socket.unsubscribe(subscription);
+      } catch (error) {
+        failed.push(subscription);
+        errors.push(error);
+      }
+    }
+    reference.subscriptions.unshift(...failed);
+    if (errors.length) throw new AggregateError(errors, "실시간 소켓 구독 해제에 실패했습니다.");
   }
 
   private async performRecovery(

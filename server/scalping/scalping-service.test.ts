@@ -1121,6 +1121,77 @@ describe("ScalpingService", () => {
     expect(payload.scalping_analysis.instruments[0].next_valid_quote_timestamp).toBe(nextQuote);
   });
 
+  it("isolated workspace 스캔은 실제 포트폴리오를 조회하거나 공유 보유 문맥을 덮어쓰지 않는다", async () => {
+    const parts = dependencies();
+    const portfolio = {
+      getInstruments: vi.fn().mockResolvedValue([]),
+      getPortfolio: vi.fn().mockResolvedValue({
+        selectedAccountId: "account-1",
+        asOf: parts.series.at(-1)!.closeTime,
+        holdings: [{ symbol: "005930", quantity: 99, averagePrice: 1 }],
+      }),
+    };
+    const subject = new ScalpingService(
+      parts.toss as never, parts.kis as never, parts.scanner as never, parts.live as never,
+      parts.repository as never, parts.rust as never, parts.ai as never,
+      portfolio as never, undefined, config(),
+    );
+    await subject.workspace({
+      criterion: "volume",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+      scanOnly: true,
+      includePortfolioContext: false,
+    });
+    expect(portfolio.getPortfolio).not.toHaveBeenCalled();
+    const realtime = await subject.realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    }) as Record<string, any>;
+    expect(realtime.diagnostics.positionContext).toBe("unavailable");
+  });
+
+  it("실시간 Rust 분석은 공유 실제 holdings 대신 명시한 가상 포지션만 사용한다", async () => {
+    const parts = dependencies();
+    const portfolio = {
+      getInstruments: vi.fn().mockResolvedValue([]),
+      getPortfolio: vi.fn().mockResolvedValue({
+        selectedAccountId: "account-1",
+        asOf: parts.series.at(-1)!.closeTime,
+        holdings: [{ symbol: "005930", quantity: 99, averagePrice: 1 }],
+      }),
+    };
+    const subject = new ScalpingService(
+      parts.toss as never, parts.kis as never, parts.scanner as never, parts.live as never,
+      parts.repository as never, parts.rust as never, parts.ai as never,
+      portfolio as never, undefined, config(),
+    );
+    await subject.workspace({
+      criterion: "volume", topCount: 1, interval: "1m", layoutColumns: 1, preset: "trend",
+    });
+    parts.rust.compute.mockClear();
+    const asOf = parts.series.at(-1)!.closeTime;
+    const realtime = await subject.realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "risk_management",
+      positionContext: {
+        mode: "isolated",
+        positions: [{ symbol: "005930", quantity: 3, averagePrice: 190, asOf }],
+      },
+    }) as Record<string, any>;
+    const payload = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    expect(payload.scalping_analysis.instruments[0].position).toEqual({
+      as_of_timestamp: asOf,
+      quantity: 3,
+      average_price: 190,
+    });
+    expect(realtime.diagnostics.positionContext).toBe("isolated_request");
+  });
+
   it("builds a batch forecast from finalized bar close times and never uses the same close as a future timestamp", async () => {
     const parts = dependencies();
     const output = await service(parts).forecast({ symbols: ["005930"], interval: "5m" });

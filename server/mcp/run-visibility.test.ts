@@ -4,7 +4,9 @@ import { MCP_VISIBLE_RUN_KINDS, isMcpVisibleRunKind, mcpVisibleRun } from "./run
 describe("MCP run visibility", () => {
   it("단타 예측 검증 run은 generic MCP run/resource 표면에서도 숨긴다", () => {
     expect(MCP_VISIBLE_RUN_KINDS).not.toContain("scalping_prediction_evaluation");
+    expect(MCP_VISIBLE_RUN_KINDS).not.toContain("ai_trading_simulation");
     expect(isMcpVisibleRunKind("scalping_prediction_evaluation")).toBe(false);
+    expect(isMcpVisibleRunKind("ai_trading_simulation")).toBe(false);
     expect(mcpVisibleRun({ kind: "scalping_prediction_evaluation", id: "hidden" } as never)).toBeUndefined();
     expect(mcpVisibleRun({ kind: "technical_analysis", id: "visible" } as never)).toMatchObject({ id: "visible" });
   });

@@ -120,11 +120,18 @@ export type ScalpingAiConfig = {
   tlsCa?: string;
 };
 
+export type AiTradingSimulationConfig = {
+  maximumDurationMinutes: number;
+  decisionIntervalMinutes: number;
+  maximumActiveSessions: number;
+};
+
 export type ScalpingConfig = {
   enabled: false;
   minimumTopCount: number;
   maximumTopCount: number;
   ai: ScalpingAiConfig;
+  simulation: AiTradingSimulationConfig;
 } | {
   enabled: true;
   minimumTopCount: number;
@@ -136,6 +143,7 @@ export type ScalpingConfig = {
   service: Omit<ScalpingServiceConfig, "now">;
   aggregator: IntradayBarAggregatorConfig;
   ai: ScalpingAiConfig;
+  simulation: AiTradingSimulationConfig;
   sseHeartbeatMs: number;
   realtimeAnalysisDebounceMs: number;
   sseReplayEvents: number;
@@ -692,7 +700,27 @@ function readScalpingConfig(): ScalpingConfig {
     maximumRequestBytes: readBoundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     maximumResponseBytes: readBoundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
   };
-  if (!enabled) return { enabled: false, minimumTopCount, maximumTopCount, ai: aiBase };
+  const simulation: AiTradingSimulationConfig = {
+    maximumDurationMinutes: readBoundedInteger(
+      "SCALPING_SIMULATION_MAX_DURATION_MINUTES",
+      390,
+      1,
+      1_440,
+    ),
+    decisionIntervalMinutes: readBoundedInteger(
+      "SCALPING_SIMULATION_DECISION_INTERVAL_MINUTES",
+      5,
+      1,
+      60,
+    ),
+    maximumActiveSessions: readBoundedInteger(
+      "SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS",
+      2,
+      1,
+      20,
+    ),
+  };
+  if (!enabled) return { enabled: false, minimumTopCount, maximumTopCount, ai: aiBase, simulation };
 
   const appKey = required("KI_APP_KEY");
   const appSecret = required("KI_APP_SECRET");
@@ -995,6 +1023,7 @@ function readScalpingConfig(): ScalpingConfig {
       higherIntervalsMinutes: [5, 15, 30, 60],
     },
     ai,
+    simulation,
     sseHeartbeatMs: readBoundedInteger("SCALPING_SSE_HEARTBEAT_MS", 15_000, 1_000, 60_000),
     realtimeAnalysisDebounceMs: readBoundedInteger("SCALPING_REALTIME_ANALYSIS_DEBOUNCE_MS", 250, 50, 5_000),
     sseReplayEvents: readBoundedInteger("SCALPING_SSE_REPLAY_EVENTS", 2_000, 100, 100_000),

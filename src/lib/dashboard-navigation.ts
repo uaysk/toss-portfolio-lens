@@ -1,10 +1,11 @@
-export type DashboardView = "overview" | "analysis" | "technical" | "scalping" | "backtest" | "optimization" | "library";
+export type DashboardView = "overview" | "analysis" | "technical" | "scalping" | "simulation" | "backtest" | "optimization" | "library";
 
 const hashes: Record<DashboardView, string> = {
   overview: "#overview",
   analysis: "#analysis",
   technical: "#technical-analysis",
   scalping: "#scalping-assistant",
+  simulation: "#simulation",
   backtest: "#backtest",
   optimization: "#optimization",
   library: "#library",

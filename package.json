@@ -22,6 +22,8 @@
     "test:kis-us-rest": "tsx scripts/verify-kis-us-rest.ts",
     "test:technical-ui": "node scripts/verify-technical-analysis-ui.mjs",
     "test:scalping-ui": "node scripts/verify-scalping-assistant-ui.mjs",
+    "test:simulation-ui": "node scripts/verify-ai-simulation-ui.mjs",
+    "test:simulation-live": "node scripts/verify-ai-simulation-live.mjs",
     "test:rust-worker-postgres": "tsx scripts/verify-rust-worker-postgres.ts",
     "test:python-worker": "tsx scripts/verify-python-worker-postgres.ts",
     "benchmark:python-worker": "tsx scripts/benchmark-python-worker.ts",

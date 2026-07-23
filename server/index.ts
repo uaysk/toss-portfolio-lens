@@ -83,6 +83,8 @@ import { ScalpingScanner } from "./scalping/scanner-service.js";
 import { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
 import { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
+import { AiTradingSimulationService } from "./simulation/simulation-service.js";
+import { createSimulationRouter } from "./simulation/router.js";
 import { krIntegratedSessionWindows } from "./scalping/market-session.js";
 import {
   createDashboardAnalysisExecutor,
@@ -206,6 +208,7 @@ const technicalStrategyService = new TechnicalStrategyService(
 const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
 let scalpingService: ScalpingService | undefined;
+let simulationService: AiTradingSimulationService | undefined;
 let aiComputeClient: AiComputeClient | undefined;
 if (config.scalping.enabled && scalpingRepository) {
   const tossScalping = new TossScalpingProvider(toss, config.scalping.toss);
@@ -263,6 +266,21 @@ if (config.scalping.enabled && scalpingRepository) {
     technicalTradeMarkerService,
     config.scalping.service,
   );
+  if (config.scalping.maximumTopCount >= 2) {
+    simulationService = new AiTradingSimulationService(
+      scalpingService,
+      scalpingLiveRuntime,
+      runService,
+      runRepository,
+      artifactService,
+      {
+        maximumDurationMinutes: config.scalping.simulation.maximumDurationMinutes,
+        decisionIntervalMinutes: config.scalping.simulation.decisionIntervalMinutes,
+        maximumActiveSessions: config.scalping.simulation.maximumActiveSessions,
+        candidatePoolSize: Math.max(2, config.scalping.minimumTopCount),
+      },
+    );
+  }
 }
 const resources = new McpResourceRegistry(artifactService, runService, config.mcp.authMode);
 const computeToolDependencies = {
@@ -406,6 +424,15 @@ app.use("/api/portfolio/scalping", createScalpingRouter({
     backpressureEventLimit: config.scalping.enabled ? config.scalping.sseReplayEvents : 100,
   },
 }));
+app.use("/api/portfolio/simulation", createSimulationRouter({
+  authenticate: requireSession,
+  service: simulationService,
+  config: {
+    enabled: Boolean(simulationService),
+    maxDurationMinutes: config.scalping.simulation.maximumDurationMinutes,
+    ownerSubject: "owner",
+  },
+}));
 
 function requireReadOnlyApiToken(request: Request, response: Response, next: NextFunction): void {
   if (!hasValidReadOnlyApiSecret(request.get("authorization"), config.dashboardPassword)) {
@@ -438,6 +465,11 @@ app.get("/api/health", (_request, response) => {
       executionMode: config.compute.executionMode,
       rustSocket: config.compute.executionMode === "rust_socket" ? config.compute.rustSocketPath : undefined,
       eventLoopLagMs: eventLoopLag.snapshot(),
+    },
+    simulation: {
+      enabled: Boolean(simulationService),
+      realOrder: false,
+      mcp: false,
     },
   });
 });
@@ -1534,10 +1566,12 @@ function shutdown(signal: string): void {
   clearTimeout(initialCollectionTimer);
   eventLoopLag.stop();
   clearInterval(collectionInterval);
+  const simulationClose = simulationService?.close(signal);
   scalpingLiveRuntime?.close();
   if (mcpCleanupTimer) clearInterval(mcpCleanupTimer);
   if (mcpAuditCleanupTimer) clearInterval(mcpAuditCleanupTimer);
   server.close(async () => {
+    await simulationClose;
     await mcpHttpRuntime?.close();
     await mcpOAuthRuntime?.cleanup().catch(() => undefined);
     aiComputeClient?.close();

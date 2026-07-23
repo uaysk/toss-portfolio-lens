@@ -140,6 +140,7 @@ export type ScalpingWorkspaceRequest = {
   scanOnly?: boolean;
   analysisSymbol?: string;
   accountId?: string;
+  includePortfolioContext?: boolean;
 };
 
 export type ScalpingForecastRequest = {
@@ -154,6 +155,15 @@ export type ScalpingRealtimeAnalysisRequest = {
   interval: "1m" | "5m" | "15m" | "30m" | "60m";
   preset: WorkspacePreset;
   accountId?: string;
+  positionContext?: {
+    mode: "isolated";
+    positions: Array<{
+      symbol: string;
+      quantity: number;
+      averagePrice: number;
+      asOf: string;
+    }>;
+  };
 };
 
 export type ScalpingEvaluationRequest = ScalpingForecastRequest & {
@@ -169,6 +179,7 @@ export type ScalpingEvaluationRequest = ScalpingForecastRequest & {
 };
 
 type UnknownRecord = Record<string, unknown>;
+type AnalysisPosition = Pick<CausalPosition, "symbol" | "quantity" | "averagePrice" | "asOf">;
 
 function record(value: unknown): UnknownRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : undefined;
@@ -736,6 +747,7 @@ export class ScalpingService {
       scanOnly: z.boolean().optional(),
       analysisSymbol: z.string().optional(),
       accountId: z.string().trim().min(1).max(128).optional(),
+      includePortfolioContext: z.boolean().optional(),
     }).superRefine((request, context) => {
       if ((request.symbols?.length ?? 0) > request.topCount) {
         context.addIssue({
@@ -844,7 +856,7 @@ export class ScalpingService {
       this.portfolio
         ? this.safe(() => this.portfolio!.getInstruments(universe), "toss_instruments")
         : Promise.resolve<{ value?: InstrumentInfo[]; error?: string }>({ value: [] }),
-      this.portfolio
+      request.includePortfolioContext !== false && this.portfolio
         ? this.safe(() => this.portfolio!.getPortfolio(request.accountId, false, false), "portfolio")
         : Promise.resolve<{ value?: Portfolio; error?: string }>({}),
       calculationSymbols.length
@@ -869,12 +881,14 @@ export class ScalpingService {
         item.symbol.toUpperCase(),
         { ...item, asOf: portfolioValue!.asOf },
       ]));
-    this.latestWorkspaceContext = {
-      ...(request.accountId ? { accountId: request.accountId } : {}),
-      marketCountry,
-      metadata: new Map(metadata),
-      holdings: new Map(holdings),
-    };
+    if (request.includePortfolioContext !== false) {
+      this.latestWorkspaceContext = {
+        ...(request.accountId ? { accountId: request.accountId } : {}),
+        marketCountry,
+        metadata: new Map(metadata),
+        holdings: new Map(holdings),
+      };
+    }
     const analysisResult = calculationSymbols.length
       ? await this.safe(() => this.computeAnalysis({
         symbols: calculationSymbols,
@@ -1137,7 +1151,38 @@ export class ScalpingService {
       interval: MinuteIntervalSchema,
       preset: WorkspacePresetSchema,
       accountId: z.string().trim().min(1).max(128).optional(),
-    }).strict().parse(input);
+      positionContext: z.object({
+        mode: z.literal("isolated"),
+        positions: z.array(z.object({
+          symbol: z.string(),
+          quantity: z.number().finite().positive(),
+          averagePrice: z.number().finite().positive(),
+          asOf: z.string().datetime({ offset: true }),
+        }).strict()).max(this.config.maximumTopCount),
+      }).strict().optional(),
+    }).strict().superRefine((request, context) => {
+      if (!request.positionContext) return;
+      const requested = new Set(request.symbols.map((symbol) => symbol.trim().toUpperCase()));
+      const seen = new Set<string>();
+      for (const [index, position] of request.positionContext.positions.entries()) {
+        const symbol = position.symbol.trim().toUpperCase();
+        if (!requested.has(symbol)) {
+          context.addIssue({
+            code: "custom",
+            path: ["positionContext", "positions", index, "symbol"],
+            message: "격리 포지션은 분석 요청 종목에 포함되어야 합니다.",
+          });
+        }
+        if (seen.has(symbol)) {
+          context.addIssue({
+            code: "custom",
+            path: ["positionContext", "positions", index, "symbol"],
+            message: "격리 포지션 종목은 중복될 수 없습니다.",
+          });
+        }
+        seen.add(symbol);
+      }
+    }).parse(input);
     const symbols = normalizedSymbols(parsed.symbols, this.config.maximumTopCount);
     const interval = intervalMinutes(parsed.interval);
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
@@ -1149,7 +1194,19 @@ export class ScalpingService {
       const latest = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], parsed.marketCountry).bars.at(-1);
       return `${symbol}:${latest?.closeTime ?? "unavailable"}:${latest?.updatedAt ?? 0}`;
     }).join("|");
-    const key = `${parsed.marketCountry}:${parsed.interval}:${parsed.preset}:${parsed.accountId ?? "default"}:${revision}`;
+    const isolatedHoldings = parsed.positionContext
+      ? new Map<string, AnalysisPosition>(parsed.positionContext.positions.map((position) => {
+          const symbol = position.symbol.trim().toUpperCase();
+          return [symbol, { ...position, symbol, asOf: new Date(position.asOf).toISOString() }];
+        }))
+      : undefined;
+    const positionRevision = isolatedHoldings
+      ? [...isolatedHoldings.values()]
+          .sort((left, right) => left.symbol.localeCompare(right.symbol))
+          .map((position) => `${position.symbol}:${position.quantity}:${position.averagePrice}:${position.asOf}`)
+          .join("|") || "empty"
+      : `workspace:${parsed.accountId ?? "default"}`;
+    const key = `${parsed.marketCountry}:${parsed.interval}:${parsed.preset}:${positionRevision}:${revision}`;
     const existing = this.realtimeAnalysisInFlight.get(key);
     if (existing) return existing;
     const task = (async () => {
@@ -1171,7 +1228,7 @@ export class ScalpingService {
         preset: parsed.preset,
         barsBySymbol,
         metadata: context?.metadata ?? new Map(),
-        holdings: context?.holdings ?? new Map(),
+        holdings: isolatedHoldings ?? context?.holdings ?? new Map(),
         books,
         trades,
         marketCountry: parsed.marketCountry,
@@ -1194,7 +1251,9 @@ export class ScalpingService {
           analysisBatchInstrumentCount: symbols.length,
           finalizedBarsOnly: true,
           providerRescan: false,
-          positionContext: context ? "latest_workspace_snapshot" : "unavailable",
+          positionContext: isolatedHoldings
+            ? "isolated_request"
+            : context ? "latest_workspace_snapshot" : "unavailable",
         },
       };
     })();
@@ -1740,7 +1799,7 @@ export class ScalpingService {
     preset: WorkspacePreset;
     barsBySymbol: ReadonlyMap<string, IntradayBarRecord[]>;
     metadata: ReadonlyMap<string, InstrumentInfo>;
-    holdings: ReadonlyMap<string, CausalPosition>;
+    holdings: ReadonlyMap<string, AnalysisPosition>;
     books: ReadonlyMap<string, NormalizedOrderbook>;
     trades: ReadonlyMap<string, NormalizedTrade[]>;
     marketCountry: MarketCountry;

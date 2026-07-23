@@ -17,6 +17,7 @@ export type PortfolioRunKind =
   | "technical_strategy"
   | "scalping_prediction_evaluation"
   | "scalping_analysis"
+  | "ai_trading_simulation"
   | "exposure_analysis"
   | "pareto_frontier"
   | "research_report";

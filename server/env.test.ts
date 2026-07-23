@@ -61,6 +61,11 @@ describe("database environment configuration", () => {
         maximumRequestBytes: 64 * 1024 * 1024,
         maximumResponseBytes: 128 * 1024 * 1024,
       },
+      simulation: {
+        maximumDurationMinutes: 390,
+        decisionIntervalMinutes: 5,
+        maximumActiveSessions: 2,
+      },
     });
   });
 
@@ -132,7 +137,26 @@ describe("database environment configuration", () => {
         afterMarketCloseMinuteKst: 1_200,
       },
       ai: { maximumRequestBytes: 33_554_432, maximumResponseBytes: 67_108_864 },
+      simulation: {
+        maximumDurationMinutes: 390,
+        decisionIntervalMinutes: 5,
+        maximumActiveSessions: 2,
+      },
     });
+
+    process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES = "720";
+    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_MINUTES = "15";
+    process.env.SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS = "3";
+    expect(loadConfig().scalping.simulation).toEqual({
+      maximumDurationMinutes: 720,
+      decisionIntervalMinutes: 15,
+      maximumActiveSessions: 3,
+    });
+    process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES = "1441";
+    expect(() => loadConfig()).toThrow("SCALPING_SIMULATION_MAX_DURATION_MINUTES");
+    delete process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES;
+    delete process.env.SCALPING_SIMULATION_DECISION_INTERVAL_MINUTES;
+    delete process.env.SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS;
 
     process.env.KI_SCALPING_REST_ENV = "demo";
     process.env.KI_SCALPING_WS_ENV = "real";

@@ -407,6 +407,76 @@ describe("ScalpingLiveRuntime", () => {
     runtime.close();
   });
 
+  it("retries only the subscriptions that failed during a multi-symbol release", async () => {
+    const socket = new FakeSocket();
+    const originalUnsubscribe = socket.unsubscribe.bind(socket);
+    let failedOnce = false;
+    vi.spyOn(socket, "unsubscribe").mockImplementation((subscription) => {
+      if (!failedOnce && subscription.symbol === "005930") {
+        failedOnce = true;
+        throw new Error("temporary unsubscribe failure");
+      }
+      return originalUnsubscribe(subscription);
+    });
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 10,
+      disconnectWhenIdle: true,
+      watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3,
+      recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T01:00:00.000Z"),
+    });
+
+    const release = await runtime.retain(["005930", "000660"]);
+    expect(socket.subscriptionCount).toBe(4);
+    expect(() => release()).toThrow("일부 실시간 구독 해제에 실패했습니다.");
+    expect(runtime.state.symbols).toEqual([
+      expect.objectContaining({ symbol: "005930", marketCountry: "KR" }),
+    ]);
+    expect(socket.subscriptionCount).toBe(1);
+
+    expect(() => release()).not.toThrow();
+    expect(socket.subscriptionCount).toBe(0);
+    expect(runtime.state.symbols).toEqual([]);
+    expect(runtime.state.connection).toBe("idle");
+    runtime.close();
+  });
+
+  it("continues retain cleanup when connect and the first unsubscribe both fail", async () => {
+    const socket = new FakeSocket();
+    vi.spyOn(socket, "connect").mockRejectedValue(new Error("connect unavailable"));
+    const originalUnsubscribe = socket.unsubscribe.bind(socket);
+    let failedOnce = false;
+    vi.spyOn(socket, "unsubscribe").mockImplementation((subscription) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error("temporary unsubscribe failure");
+      }
+      return originalUnsubscribe(subscription);
+    });
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 10,
+      disconnectWhenIdle: true,
+      watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3,
+      recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T01:00:00.000Z"),
+    });
+
+    await expect(runtime.retain(["005930"])).rejects.toThrow("connect unavailable");
+    expect(runtime.state.symbols).toEqual([]);
+    expect(socket.subscriptionCount).toBe(0);
+    runtime.close();
+  });
+
   it("requires explicit US exchanges and creates HDFS subscriptions without guessing", async () => {
     const socket = new FakeSocket();
     const runtime = new ScalpingLiveRuntime(socket as never, {

@@ -14,6 +14,8 @@ export const ARTIFACT_TYPES = [
   "technical-indicators", "technical-signals", "technical-diagnostics",
   "scalping-evaluation-summary", "scalping-prediction-replay", "scalping-signal-comparison",
   "scalping-cost-ledger", "scalping-evaluation-diagnostics",
+  "simulation-selection", "simulation-decisions", "simulation-equity",
+  "simulation-trades", "simulation-diagnostics",
   "portfolio-exposures", "pareto-frontier", "research-report", "worker-metrics", "result",
 ] as const;
 

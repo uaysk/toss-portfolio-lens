@@ -3,6 +3,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  Bot,
   CandlestickChart,
   ChartNoAxesCombined,
   CircleGauge,
@@ -51,6 +52,7 @@ import {
 import type { ApiError, Holding, Portfolio, PortfolioHistorySeries, Theme } from "@/types";
 
 const ScalpingAssistant = lazy(() => import("@/components/scalping-assistant").then((module) => ({ default: module.ScalpingAssistant })));
+const AiSimulation = lazy(() => import("@/components/ai-simulation").then((module) => ({ default: module.AiSimulation })));
 
 type DashboardProps = {
   onLogout: () => void;
@@ -114,6 +116,7 @@ function Sidebar({
           { value: "analysis" as const, label: "포트폴리오 분석", icon: BarChart3 },
           { value: "technical" as const, label: "기술적 분석", icon: CandlestickChart },
           { value: "scalping" as const, label: "단타 보조", icon: TimerReset },
+          { value: "simulation" as const, label: "시뮬레이션", icon: Bot },
           { value: "backtest" as const, label: "백테스트", icon: FlaskConical },
           { value: "optimization" as const, label: "최적화", icon: Sparkles },
           { value: "library" as const, label: "실행·프리셋", icon: LibraryBig },
@@ -193,10 +196,10 @@ function DashboardHeader({
     <header className="dashboard-header">
       <div>
         <p className="mb-1 text-xs font-bold tracking-[0.14em] text-muted-foreground">
-          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", technical: "TECHNICAL ANALYSIS", scalping: "SCALPING ASSISTANT", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION", library: "RUNS & PRESETS" }[view]}
+          {{ overview: "PORTFOLIO OVERVIEW", analysis: "PORTFOLIO ANALYSIS", technical: "TECHNICAL ANALYSIS", scalping: "SCALPING ASSISTANT", simulation: "AI PAPER SIMULATION", backtest: "PORTFOLIO BACKTEST", optimization: "PORTFOLIO OPTIMIZATION", library: "RUNS & PRESETS" }[view]}
         </p>
         <h1 className="text-[clamp(1.8rem,3vw,2.55rem)] font-black tracking-[-0.05em]">
-          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", technical: "기술적 분석", scalping: "단타 보조", backtest: "백테스트", optimization: "포트폴리오 최적화", library: "실행·프리셋" }[view]}
+          {{ overview: "안녕하세요.", analysis: "포트폴리오 분석", technical: "기술적 분석", scalping: "단타 보조", simulation: "시뮬레이션", backtest: "백테스트", optimization: "포트폴리오 최적화", library: "실행·프리셋" }[view]}
         </h1>
       </div>
 
@@ -251,6 +254,7 @@ function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (vi
         { value: "analysis" as const, label: "분석" },
         { value: "technical" as const, label: "기술 분석" },
         { value: "scalping" as const, label: "단타 보조" },
+        { value: "simulation" as const, label: "시뮬레이션" },
         { value: "backtest" as const, label: "백테스트" },
         { value: "optimization" as const, label: "최적화" },
         { value: "library" as const, label: "실행·프리셋" },
@@ -907,6 +911,10 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
         ) : view === "scalping" ? (
           <Suspense fallback={<Card className="grid min-h-[420px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-5 animate-spin" /><p className="mt-3 text-xs font-black">단타 보조 화면을 불러오는 중</p></div></Card>}>
             <ScalpingAssistant key={`${portfolio.selectedAccountId}:scalping`} portfolio={portfolio} theme={theme} onUnauthorized={onUnauthorized} />
+          </Suspense>
+        ) : view === "simulation" ? (
+          <Suspense fallback={<Card className="grid min-h-[420px] place-items-center bg-secondary"><div className="text-center"><LoaderCircle className="mx-auto size-5 animate-spin" /><p className="mt-3 text-xs font-black">시뮬레이션 화면을 불러오는 중</p></div></Card>}>
+            <AiSimulation key={`${portfolio.selectedAccountId}:simulation`} onUnauthorized={onUnauthorized} />
           </Suspense>
         ) : view === "backtest" ? (
           <PortfolioBacktestView
