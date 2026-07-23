@@ -101,6 +101,16 @@ assert(status.enabled === true, "AI 시뮬레이션이 비활성 상태입니다
 assert(status.capabilities?.realOrder === false, "realOrder capability가 false가 아닙니다.");
 assert(status.capabilities?.orderApiDependency === false, "orderApiDependency capability가 false가 아닙니다.");
 assert(status.capabilities?.mcp === false, "mcp capability가 false가 아닙니다.");
+const decisionIntervalSeconds = Number(
+  status.policy?.decisionIntervalSeconds
+  ?? status.limits?.decisionIntervalSeconds,
+);
+assert(
+  Number.isSafeInteger(decisionIntervalSeconds)
+    && decisionIntervalSeconds >= 10
+    && decisionIntervalSeconds <= 30,
+  "AI 판단 간격이 10~30초 범위를 벗어났습니다.",
+);
 
 const start = await json(await fetch(`${baseUrl}/api/portfolio/simulation/runs`, {
   method: "POST",
@@ -156,15 +166,48 @@ try {
   assert(latest.snapshot.capabilities?.realOrder === false, "run snapshot realOrder가 false가 아닙니다.");
   assert(latest.snapshot.capabilities?.orderApiDependency === false, "run snapshot orderApiDependency가 false가 아닙니다.");
   assert(latest.snapshot.capabilities?.mcp === false, "run snapshot mcp가 false가 아닙니다.");
+  assert(
+    latest.snapshot.decisionIntervalSeconds === decisionIntervalSeconds,
+    "run snapshot 판단 간격이 status 설정과 다릅니다.",
+  );
   assertCausalTrades(latest.snapshot);
 
   if (!terminal(latest) && observeMs > 0) {
+    const decisionCountBeforeObserve = latest.snapshot.decisions?.length || 0;
+    const scheduledTicksBeforeObserve = Number(
+      latest.snapshot.decisionCadence?.scheduledTicks ?? 0,
+    );
+    const coalescedTicksBeforeObserve = Number(
+      latest.snapshot.decisionCadence?.coalescedTicks ?? 0,
+    );
+    const lastStartedAtBeforeObserve = latest.snapshot.decisionCadence?.lastStartedAt;
     await sleep(observeMs);
     latest = await json(await fetch(
       `${baseUrl}/api/portfolio/simulation/runs/${encodeURIComponent(runId)}`,
       { headers },
     ), "시뮬레이션 관찰 조회 실패");
     assertCausalTrades(latest.snapshot);
+    if (!terminal(latest) && observeMs >= (decisionIntervalSeconds + 10) * 1_000) {
+      assert(
+        Number(latest.snapshot?.decisionCadence?.scheduledTicks ?? 0) > scheduledTicksBeforeObserve,
+        `${decisionIntervalSeconds}초 판단 주기 timer가 실행되지 않았습니다.`,
+      );
+      assert(
+        latest.snapshot?.decisionCadence?.lastStartedAt !== lastStartedAtBeforeObserve
+          || latest.snapshot?.decisionCadence?.inFlight === true
+          || Number(latest.snapshot?.decisionCadence?.coalescedTicks ?? 0) > coalescedTicksBeforeObserve,
+        "판단 tick이 예약됐지만 실제 분석 시작 또는 coalescing 근거가 없습니다.",
+      );
+      const decisionCountAfterObserve = latest.snapshot?.decisions?.length || 0;
+      if (decisionCountAfterObserve === decisionCountBeforeObserve) {
+        assert(
+          latest.snapshot?.decisionCadence?.inFlight === true
+            || (latest.snapshot?.warnings?.length || 0) > 0
+            || latest.snapshot?.decisionCadence?.lastFinishedAt !== undefined,
+          "판단 tick은 실행됐지만 진행·완료·unavailable 근거가 없습니다.",
+        );
+      }
+    }
   }
 } finally {
   if (!terminal(latest)) {
@@ -189,6 +232,8 @@ console.log(JSON.stringify({
     device: item.model?.device,
   })),
   decisionCount: snapshot.decisions?.length || 0,
+  decisionIntervalSeconds: snapshot.decisionIntervalSeconds,
+  decisionCadence: snapshot.decisionCadence,
   decisions: (snapshot.decisions || []).map((item) => ({
     symbol: item.symbol,
     action: item.action,

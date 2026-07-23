@@ -275,7 +275,7 @@ if (config.scalping.enabled && scalpingRepository) {
       artifactService,
       {
         maximumDurationMinutes: config.scalping.simulation.maximumDurationMinutes,
-        decisionIntervalMinutes: config.scalping.simulation.decisionIntervalMinutes,
+        decisionIntervalSeconds: config.scalping.simulation.decisionIntervalSeconds,
         maximumActiveSessions: config.scalping.simulation.maximumActiveSessions,
         candidatePoolSize: Math.max(2, config.scalping.minimumTopCount),
         selectionMaximumAttempts: config.scalping.simulation.selectionMaximumAttempts,

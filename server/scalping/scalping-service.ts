@@ -630,6 +630,19 @@ type BarLoadOptions = {
   skipAutomaticRefresh?: boolean;
 };
 
+type ScalpingComputationOptions = {
+  signal?: AbortSignal;
+  skipAutomaticRefresh?: boolean;
+};
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("Scalping computation was cancelled.");
+  error.name = "AbortError";
+  throw error;
+}
+
 function calendarDateAfter(sessionDate: string, days: number): string | undefined {
   const epoch = Date.parse(`${sessionDate}T00:00:00.000Z`);
   if (!Number.isFinite(epoch) || !Number.isInteger(days) || days < 1) return undefined;
@@ -1091,7 +1104,8 @@ export class ScalpingService {
     };
   }
 
-  async forecast(input: ScalpingForecastRequest) {
+  async forecast(input: ScalpingForecastRequest, options: ScalpingComputationOptions = {}) {
+    throwIfAborted(options.signal);
     const request = this.forecastSchema(input);
     if (!this.ai || !this.rust) {
       return { forecast: { status: "unavailable", code: !this.ai ? "ai_worker_unavailable" : "rust_worker_unavailable" }, predictions: [] };
@@ -1101,6 +1115,7 @@ export class ScalpingService {
       maximumBars: forecastHistoryLimit,
       skipAutomaticRefresh: true,
     });
+    throwIfAborted(options.signal);
     const refreshCutoff = this.now();
     const refreshSymbols = request.symbols.filter((symbol) => {
       const latestFinal = this.instrumentSessionBars(
@@ -1120,6 +1135,7 @@ export class ScalpingService {
         barsBySymbol.set(symbol, refreshed.get(symbol) ?? []);
       }
     }
+    throwIfAborted(options.signal);
     // A provider's "final" flag alone does not prove that a candle has closed.
     // Freeze one batch-wide cutoff and exclude future closes from both Rust
     // technical analysis and the AI request.
@@ -1132,8 +1148,9 @@ export class ScalpingService {
     const analysis = await this.computeAnalysis({
       symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
       holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "latest_summary", includeVolumeProfile: false,
-      marketCountry: request.marketCountry,
+      marketCountry: request.marketCountry, signal: options.signal,
     });
+    throwIfAborted(options.signal);
     // Capture a new cutoff after Rust. A final dispatch-wide check below also
     // covers slow calendar calls and a minute boundary crossed while building
     // a multi-symbol request.
@@ -1153,6 +1170,7 @@ export class ScalpingService {
       return pending;
     };
     for (const symbol of request.symbols) {
+      throwIfAborted(options.signal);
       const session = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
       const finalBars = session.bars.slice(-this.config.forecastMaximumBars);
       if (finalBars.length < this.config.forecastMinimumBars) {
@@ -1204,6 +1222,7 @@ export class ScalpingService {
         unavailable: { code, message: code },
       })),
     };
+    throwIfAborted(options.signal);
     const output = await this.ai.forecast({
       schema_version: SCALPING_AI_SCHEMA_VERSION,
       request_id: `forecast:${randomUUID()}`,
@@ -1212,7 +1231,8 @@ export class ScalpingService {
       quantiles: [...SCALPING_AI_QUANTILES],
       seed: 0,
       series: freshSeries,
-    }, undefined, request.marketCountry);
+    }, options.signal, request.marketCountry);
+    throwIfAborted(options.signal);
     return {
       forecast: output.response,
       predictions: [
@@ -1227,7 +1247,11 @@ export class ScalpingService {
     };
   }
 
-  async realtimeAnalysis(input: ScalpingRealtimeAnalysisRequest): Promise<unknown> {
+  async realtimeAnalysis(
+    input: ScalpingRealtimeAnalysisRequest,
+    options: ScalpingComputationOptions = {},
+  ): Promise<unknown> {
+    throwIfAborted(options.signal);
     const parsed = z.object({
       marketCountry: MarketCountrySchema.default("KR"),
       symbols: z.array(z.string()),
@@ -1270,9 +1294,22 @@ export class ScalpingService {
     const interval = intervalMinutes(parsed.interval);
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
     await Promise.all(symbols.map(async (symbol) => {
-      const loaded = await this.loadBarsForSymbol(symbol, interval, parsed.marketCountry);
+      const loaded = await this.loadBarsForSymbol(symbol, interval, parsed.marketCountry, {
+        skipAutomaticRefresh: options.skipAutomaticRefresh,
+      });
       barsBySymbol.set(symbol, loaded.bars);
     }));
+    throwIfAborted(options.signal);
+    // Some providers mark the current candle as final before its close time.
+    // Freeze one batch-wide wall-clock cutoff so the Rust analysis cannot see
+    // a candle that has not actually closed yet.
+    const dataCutoff = this.now();
+    for (const [symbol, bars] of barsBySymbol) {
+      barsBySymbol.set(
+        symbol,
+        bars.filter((bar) => Date.parse(bar.closeTime) <= dataCutoff),
+      );
+    }
     const revision = symbols.map((symbol) => {
       const latest = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], parsed.marketCountry).bars.at(-1);
       return `${symbol}:${latest?.closeTime ?? "unavailable"}:${latest?.updatedAt ?? 0}`;
@@ -1289,10 +1326,22 @@ export class ScalpingService {
           .map((position) => `${position.symbol}:${position.quantity}:${position.averagePrice}:${position.asOf}`)
           .join("|") || "empty"
       : `workspace:${parsed.accountId ?? "default"}`;
-    const key = `${parsed.marketCountry}:${parsed.interval}:${parsed.preset}:${positionRevision}:${revision}`;
+    // A cancellable simulation request must not share its promise with another
+    // caller: cancelling one run must never abort a dashboard analysis. The
+    // retained-feed and provider-refresh paths are also intentionally isolated.
+    const key = [
+      parsed.marketCountry,
+      parsed.interval,
+      parsed.preset,
+      positionRevision,
+      revision,
+      options.skipAutomaticRefresh ? "retained" : "refresh",
+      options.signal ? `cancelable:${randomUUID()}` : "shared",
+    ].join(":");
     const existing = this.realtimeAnalysisInFlight.get(key);
     if (existing) return existing;
     const task = (async () => {
+      throwIfAborted(options.signal);
       const context = this.latestWorkspaceContext
         && this.latestWorkspaceContext.accountId === parsed.accountId
         && this.latestWorkspaceContext.marketCountry === parsed.marketCountry
@@ -1317,7 +1366,9 @@ export class ScalpingService {
         marketCountry: parsed.marketCountry,
         responseMode: "latest_summary",
         includeVolumeProfile: false,
+        signal: options.signal,
       });
+      throwIfAborted(options.signal);
       return {
         schemaVersion: SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
         generatedAt: new Date(this.now()).toISOString(),
@@ -1933,6 +1984,7 @@ export class ScalpingService {
     responseMode: "full_series" | "latest_summary";
     includeVolumeProfile: boolean;
     signalSnapshotTimestamps?: ReadonlyMap<string, readonly string[]>;
+    signal?: AbortSignal;
   }): Promise<unknown> {
     if (!this.rust) return undefined;
     const prepared = input.symbols.map((symbol) => ({
@@ -2110,7 +2162,7 @@ export class ScalpingService {
             })),
         },
       },
-    }, { includeArtifacts: false });
+    }, { includeArtifacts: false, signal: input.signal });
     if (!unavailableTechnical.length) return output.result;
     const result = record(output.result);
     const resultInstruments = Array.isArray(result?.instruments) ? result.instruments : [];

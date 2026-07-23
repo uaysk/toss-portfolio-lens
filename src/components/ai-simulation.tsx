@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -68,6 +68,7 @@ const PHASE_LABELS: Record<string, string> = {
   completed: "완료",
   cancelled: "취소됨",
   cancel_requested: "취소 처리 중",
+  finalizing: "종료 처리 중",
   failed: "실패",
 };
 
@@ -328,14 +329,14 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
   );
 }
 
+export function simulationDecisionIntervalLabel(value: number | undefined): string {
+  return value === undefined ? "기록 없음" : `${value}초`;
+}
+
 function RunPanel({
   run,
-  cancelling,
-  onCancel,
 }: {
   run: AiSimulationRunResponse;
-  cancelling: boolean;
-  onCancel: () => void;
 }) {
   const snapshot = run.snapshot;
   if (!snapshot) {
@@ -352,7 +353,6 @@ function RunPanel({
   }
   const pnl = snapshot.equity - snapshot.initialCash;
   const returnRatio = snapshot.initialCash > 0 ? pnl / snapshot.initialCash : undefined;
-  const active = ACTIVE_RUN_STATUSES.has(run.status);
 
   return (
     <div className="space-y-3" data-simulation-run={run.runId ?? "unknown"}>
@@ -360,7 +360,13 @@ function RunPanel({
         <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5 text-[10px] font-black">{phaseLabel(snapshot.phase)}</span>
+              <span
+                className="rounded-full bg-primary-foreground/10 px-3 py-1.5 text-[10px] font-black"
+                role="status"
+                aria-live="polite"
+              >
+                {phaseLabel(snapshot.phase)}
+              </span>
               <span className="text-[10px] text-primary-foreground/60">run {run.runId ?? "ID unavailable"}</span>
             </div>
             <p className="mt-5 text-[10px] font-black tracking-[0.12em] text-primary-foreground/60">VIRTUAL EQUITY</p>
@@ -375,20 +381,15 @@ function RunPanel({
             <div className="col-span-2 rounded-2xl bg-primary-foreground/10 p-4 text-[10px] text-primary-foreground/70">
               <p>시작 {formatTimestamp(snapshot.startedAt)}</p>
               <p className="mt-1">종료 예정 {formatTimestamp(snapshot.expiresAt)}</p>
+              <p className="mt-1">
+                판단 간격 {simulationDecisionIntervalLabel(snapshot.decisionIntervalSeconds)}
+              </p>
             </div>
           </div>
         </div>
         <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-primary-foreground/10" aria-label={`진행률 ${(snapshot.progress * 100).toFixed(0)}%`}>
           <div className="h-full rounded-full bg-primary-foreground transition-[width]" style={{ width: `${snapshot.progress * 100}%` }} />
         </div>
-        {active ? (
-          <div className="mt-5 flex justify-end">
-            <Button type="button" variant="quiet" onClick={onCancel} disabled={cancelling}>
-              {cancelling ? <LoaderCircle className="animate-spin" /> : <Square />}
-              시뮬레이션 취소
-            </Button>
-          </div>
-        ) : null}
       </Card>
 
       <div className="grid gap-3 xl:grid-cols-2">
@@ -416,6 +417,8 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const [run, setRun] = useState<AiSimulationRunResponse>();
+  const cancellingRef = useRef(false);
+  const pollingGeneration = useRef(0);
 
   const issues = useMemo(
     () => validateAiSimulationRequest(request, status?.limits),
@@ -470,7 +473,8 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
   useEffect(() => {
     const runId = run?.runId;
-    if (!runId) return;
+    if (!runId || !runActive || cancelling) return;
+    const generation = ++pollingGeneration.current;
     const controller = new AbortController();
     let timer: number | undefined;
     const poll = async () => {
@@ -486,12 +490,12 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         }
         if (!response.ok) throw new Error(aiSimulationErrorMessage(payload, "시뮬레이션 상태를 불러오지 못했습니다."));
         const next = normalizeAiSimulationRun(payload);
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError("");
         setRun({ ...next, runId: next.runId ?? runId });
         if (ACTIVE_RUN_STATUSES.has(next.status)) timer = window.setTimeout(() => void poll(), 1_000);
       } catch (caught) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError(caught instanceof Error ? caught.message : "시뮬레이션 상태를 불러오지 못했습니다.");
         timer = window.setTimeout(() => void poll(), 2_500);
       }
@@ -500,8 +504,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     return () => {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
+      if (pollingGeneration.current === generation) pollingGeneration.current += 1;
     };
-  }, [run?.runId, onUnauthorized]);
+  }, [run?.runId, runActive, cancelling, onUnauthorized]);
 
   const startSimulation = useCallback(async () => {
     const validation = validateAiSimulationRequest(request, status?.limits);
@@ -534,7 +539,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   }, [onUnauthorized, request, status?.limits]);
 
   const cancelSimulation = useCallback(async () => {
-    if (!run?.runId) return;
+    if (!run?.runId || cancellingRef.current) return;
+    cancellingRef.current = true;
+    pollingGeneration.current += 1;
     setCancelling(true);
     setError("");
     try {
@@ -553,6 +560,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "시뮬레이션을 취소하지 못했습니다.");
     } finally {
+      cancellingRef.current = false;
       setCancelling(false);
     }
   }, [onUnauthorized, run?.runId]);
@@ -596,7 +604,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">AI · 최대 2개</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">신호 적용</p><p className="mt-1 text-sm font-black">다음 유효 체결</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단 간격</p><p className="mt-1 text-sm font-black">{status?.decisionIntervalSeconds ?? 20}초 · 다음 체결</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">자금</p><p className="mt-1 text-sm font-black">가상 예수금</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">성과</p><p className="mt-1 text-sm font-black">비용 차감 원장</p></div>
           </div>
@@ -614,7 +622,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             <p className="mt-2 text-xs leading-5 text-muted-foreground">시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.</p>
           </div>
           <span className="rounded-full bg-secondary px-3 py-1.5 text-[10px] font-black">
-            {request.symbolCount}종목 · {request.durationMinutes}분 · {currency}
+            {request.symbolCount}종목 · {request.durationMinutes}분 · {status?.decisionIntervalSeconds ?? 20}초 판단 · {currency}
           </span>
         </div>
 
@@ -726,18 +734,32 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-[10px] leading-4 text-muted-foreground">
-              AI 출력이 unavailable이면 임의 판단이나 체결을 만들지 않습니다. 진행 중인 run 설정은 변경할 수 없습니다.
+              AI 출력이 unavailable이면 임의 판단이나 체결을 만들지 않습니다. 초 단위 재판단도 최신 확정 분봉만 사용하며 진행 중인 run 설정은 변경할 수 없습니다.
             </p>
-            <Button type="submit" size="lg" disabled={statusLoading || !status?.enabled || issues.length > 0 || starting || runActive}>
-              {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
-              AI 시뮬레이션 시작
-            </Button>
+            {runActive ? (
+              <Button
+                type="button"
+                size="lg"
+                variant="secondary"
+                onClick={() => void cancelSimulation()}
+                disabled={cancelling || run?.status === "cancel_requested"}
+                data-simulation-stop
+              >
+                {cancelling || run?.status === "cancel_requested" ? <LoaderCircle className="animate-spin" /> : <Square />}
+                {cancelling || run?.status === "cancel_requested" ? "중단 처리 중" : "테스트 중단"}
+              </Button>
+            ) : (
+              <Button type="submit" size="lg" disabled={statusLoading || !status?.enabled || issues.length > 0 || starting}>
+                {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
+                AI 시뮬레이션 시작
+              </Button>
+            )}
           </div>
         </form>
       </Card>
 
       {run ? (
-        <RunPanel run={run} cancelling={cancelling} onCancel={() => void cancelSimulation()} />
+        <RunPanel run={run} />
       ) : (
         <Card className="grid min-h-48 place-items-center bg-secondary p-6 text-center" data-simulation-empty>
           <div>

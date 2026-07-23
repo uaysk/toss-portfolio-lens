@@ -213,6 +213,7 @@ function harness(options: {
   artifactFailureAfter?: number;
   artifactGate?: Promise<void>;
   createGate?: Promise<void>;
+  decisionIntervalSeconds?: number;
   now?: () => number;
   releaseFailureCalls?: number[];
   selectionMaximumAttempts?: number;
@@ -307,7 +308,18 @@ function harness(options: {
     list: vi.fn(async ({ ownerSubject }: { ownerSubject: string }) => ({
       items: currentRun?.ownerSubject === ownerSubject ? [currentRun] : [],
     })),
-    isCancellationRequested: vi.fn().mockResolvedValue(false),
+    requestCancellation: vi.fn(async (id: string, ownerSubject: string, now = Date.now()) => {
+      if (!currentRun
+        || currentRun.id !== id
+        || currentRun.ownerSubject !== ownerSubject
+        || !["queued", "running"].includes(currentRun.status)) {
+        return false;
+      }
+      currentRun.status = "cancel_requested";
+      currentRun.updatedAt = now;
+      return true;
+    }),
+    isCancellationRequested: vi.fn(async () => currentRun?.status === "cancel_requested"),
     complete: vi.fn(async (
       _id: string,
       summary: unknown,
@@ -315,7 +327,7 @@ function harness(options: {
       warnings: string[],
       now = Date.now(),
     ) => {
-      if (!currentRun) return false;
+      if (!currentRun || !["queued", "running"].includes(currentRun.status)) return false;
       currentRun.status = "completed";
       currentRun.progress = 1;
       currentRun.summary = clone(summary);
@@ -380,7 +392,7 @@ function harness(options: {
     artifactService as unknown as ArtifactService,
     {
       maximumDurationMinutes: 390,
-      decisionIntervalMinutes: 1,
+      decisionIntervalSeconds: options.decisionIntervalSeconds ?? 10,
       maximumActiveSessions: 2,
       candidatePoolSize: 3,
       selectionMaximumAttempts: options.selectionMaximumAttempts ?? 3,
@@ -404,6 +416,15 @@ function harness(options: {
     emit(event: ScalpingLiveEvent) {
       if (!liveListener) throw new Error("live listener was not registered");
       liveListener(event);
+    },
+    triggerDecision(scheduledAt = "2026-07-24T00:07:00.000Z") {
+      const internals = service as unknown as {
+        active: Map<string, unknown>;
+        queueAnalysis(session: unknown, scheduledAtMs: number): void;
+      };
+      const session = internals.active.get(RUN_ID);
+      if (!session) throw new Error("simulation session is not active");
+      internals.queueAnalysis(session, Date.parse(scheduledAt));
     },
     run: () => currentRun,
     latestArtifact(type: ArtifactType) {
@@ -448,6 +469,98 @@ describe("AI trading simulation service", () => {
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
   });
 
+  it("runs one batch on the configured 10-second cadence and stops the timer on cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(CREATED_AT));
+      const setup = harness({
+        decisionIntervalSeconds: 10,
+        now: () => Date.now(),
+      });
+      const started = await setup.service.start(request(2), "owner");
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await setup.service.get(started.runId, "owner") as {
+        snapshot: { phase: string };
+      }).snapshot.phase).toBe("running");
+      expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+      expect(setup.market.forecast).toHaveBeenLastCalledWith({
+        marketCountry: "KR",
+        symbols: ["BBB", "AAA"],
+        interval: "1m",
+      }, { signal: expect.any(AbortSignal) });
+
+      const running = await setup.service.get(started.runId, "owner") as {
+        snapshot: {
+          decisionIntervalSeconds: number;
+          decisionCadence: {
+            scheduledTicks: number;
+            inFlight: boolean;
+            lastScheduledAt: string;
+          };
+        };
+      };
+      expect(running.snapshot).toMatchObject({
+        decisionIntervalSeconds: 10,
+        decisionCadence: {
+          scheduledTicks: 1,
+          inFlight: false,
+          lastScheduledAt: "2026-07-24T00:00:10.000Z",
+        },
+      });
+
+      const decisionSignal = setup.market.forecast.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
+      await setup.service.cancel(started.runId, "owner");
+      expect(decisionSignal.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+      expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces slow cadence ticks without overlapping AI requests", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(CREATED_AT));
+      const setup = harness({
+        decisionIntervalSeconds: 10,
+        now: () => Date.now(),
+      });
+      const started = await setup.service.start(request(1), "owner");
+      await vi.advanceTimersByTimeAsync(0);
+      const gate = deferred<ReturnType<typeof forecast>>();
+      setup.market.forecast.mockReturnValueOnce(gate.promise);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+
+      gate.resolve(forecast(true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setup.market.forecast).toHaveBeenCalledTimes(3);
+      const running = await setup.service.get(started.runId, "owner") as {
+        snapshot: {
+          decisionCadence: {
+            coalescedTicks: number;
+            skippedTicks: number;
+          };
+        };
+      };
+      expect(running.snapshot.decisionCadence.coalescedTicks).toBeGreaterThanOrEqual(1);
+      expect(running.snapshot.decisionCadence.skippedTicks).toBeGreaterThanOrEqual(1);
+      await setup.service.cancel(started.runId, "owner");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     { symbolCount: 1 as const, selected: ["BBB"] },
     { symbolCount: 2 as const, selected: ["BBB", "AAA"] },
@@ -470,7 +583,7 @@ describe("AI trading simulation service", () => {
       marketCountry: "KR",
       symbols: ["AAA", "BBB", "CCC"],
       interval: "1m",
-    });
+    }, { signal: expect.any(AbortSignal) });
     expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(selected);
     expect(setup.live.retain).toHaveBeenCalledWith(["AAA", "BBB", "CCC"], "KR", undefined);
     expect(setup.live.retain).toHaveBeenCalledWith(selected, "KR", undefined);
@@ -481,6 +594,9 @@ describe("AI trading simulation service", () => {
       interval: "1m",
       preset: "risk_management",
       positionContext: { mode: "isolated", positions: [] },
+    }, {
+      signal: expect.any(AbortSignal),
+      skipAutomaticRefresh: true,
     });
 
     await setup.service.cancel(started.runId, "owner");
@@ -663,15 +779,18 @@ describe("AI trading simulation service", () => {
     );
 
     expect(setup.run()?.input).toMatchObject({
+      decision_interval_seconds: 10,
       selection_maximum_attempts: 4,
       selection_retry_delay_ms: 1_234,
     });
     expect(diagnostics?.content).toMatchObject({
+      decision_interval_seconds: 10,
       selection_maximum_attempts: 4,
       selection_retry_delay_ms: 1_234,
     });
     expect(setup.service.status()).toMatchObject({
       limits: {
+        decisionIntervalSeconds: 10,
         selectionMaximumAttempts: 4,
         selectionRetryDelayMs: 1_234,
       },
@@ -853,6 +972,7 @@ describe("AI trading simulation service", () => {
       101,
       102,
     ));
+    setup.triggerDecision();
     await eventually(
       () => setup.service.get(started.runId, "owner"),
       (value) => (value as {
@@ -869,7 +989,7 @@ describe("AI trading simulation service", () => {
           asOf: "2026-07-24T00:05:05.000Z",
         })],
       },
-    }));
+    }), expect.objectContaining({ skipAutomaticRefresh: true }));
     setup.emit(tradeEvent("2026-07-24T00:07:03.000Z", 103));
     const sold = await eventually(
       () => setup.service.get(started.runId, "owner"),
@@ -902,6 +1022,7 @@ describe("AI trading simulation service", () => {
       0,
       100,
     ));
+    setup.triggerDecision();
     await eventually(
       () => setup.market.forecast.mock.calls.length,
       (count) => count === 2,
@@ -929,7 +1050,7 @@ describe("AI trading simulation service", () => {
           asOf: "2026-07-24T00:07:03.000Z",
         })],
       },
-    }));
+    }), expect.objectContaining({ skipAutomaticRefresh: true }));
     await setup.service.cancel(started.runId, "owner");
   });
 
@@ -965,6 +1086,7 @@ describe("AI trading simulation service", () => {
       100,
       "AAA",
     ));
+    setup.triggerDecision();
     await eventually(
       () => setup.service.get(started.runId, "owner"),
       (value) => (value as {
@@ -1047,6 +1169,65 @@ describe("AI trading simulation service", () => {
     });
   });
 
+  it("does not install cadence timers when cancellation races initial checkpoint persistence", async () => {
+    const gate = deferred();
+    const setup = harness({ artifactGate: gate.promise });
+    const started = await setup.service.start(request(1), "owner");
+    const running = await waitForPhase(setup, started.runId, "running");
+    expect(running.snapshot.phase).toBe("running");
+    const session = (setup.service as unknown as {
+      active: Map<string, {
+        phase: string;
+        endTimer?: NodeJS.Timeout;
+        progressTimer?: NodeJS.Timeout;
+        decisionTimer?: NodeJS.Timeout;
+      }>;
+    }).active.get(started.runId)!;
+
+    const cancelling = setup.service.cancel(started.runId, "owner");
+    await vi.waitFor(() => expect(setup.repository.requestCancellation).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(["finalizing", "cancelled"]).toContain(session.phase);
+    gate.resolve();
+    const cancelled = await cancelling as { run: { status: string } };
+
+    expect(cancelled.run.status).toBe("cancelled");
+    expect(session.endTimer).toBeUndefined();
+    expect(session.progressTimer).toBeUndefined();
+    expect(session.decisionTimer).toBeUndefined();
+  });
+
+  it("terminalizes an owned active database run even when no in-memory session exists", async () => {
+    const setup = harness();
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const internals = setup.service as unknown as {
+      active: Map<string, {
+        decisionTimer?: NodeJS.Timeout;
+        decisionAbort: AbortController;
+        release?: () => void;
+      }>;
+    };
+    const detached = internals.active.get(started.runId)!;
+    if (detached.decisionTimer) clearTimeout(detached.decisionTimer);
+    detached.decisionAbort.abort(new Error("synthetic restart"));
+    detached.release?.();
+    internals.active.delete(started.runId);
+
+    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+      run: { status: string };
+      snapshot?: { phase?: string };
+    };
+    expect(cancelled.run.status).toBe("cancelled");
+    expect(cancelled.snapshot?.phase).toBe("cancelled");
+    expect(setup.repository.cancel).toHaveBeenCalledWith(
+      started.runId,
+      expect.objectContaining({ phase: "cancelled", real_order_api_used: false }),
+      ["사용자가 시뮬레이션 테스트를 중단했습니다."],
+      Date.parse(CREATED_AT),
+    );
+  });
+
   it("terminalizes cancellation even when final artifact persistence fails", async () => {
     const setup = harness({ artifactFailureAfter: 5 });
     const started = await setup.service.start(request(1), "owner");
@@ -1103,6 +1284,75 @@ describe("AI trading simulation service", () => {
     expect(setup.repository.cancel).toHaveBeenCalledTimes(1);
     expect(setup.run()?.status).toBe("cancelled");
     expect(setup.repository.fail).not.toHaveBeenCalled();
+  });
+
+  it("fails terminally when the cancellation-state read fails during completion", async () => {
+    const setup = harness();
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    setup.repository.isCancellationRequested.mockRejectedValueOnce(
+      new Error("cancellation state unavailable"),
+    );
+    const session = (setup.service as unknown as {
+      active: Map<string, unknown>;
+      finish(value: unknown, terminal: "completed", reason: string): Promise<void>;
+    }).active.get(started.runId);
+
+    await (setup.service as unknown as {
+      finish(value: unknown, terminal: "completed", reason: string): Promise<void>;
+    }).finish(session, "completed", "기간 종료");
+
+    expect(setup.run()?.status).toBe("failed");
+    expect(setup.run()?.error).toMatchObject({
+      code: "AI_SIMULATION_TERMINALIZATION_FAILED",
+      message: "cancellation state unavailable",
+      intended_status: "completed",
+    });
+    expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+  });
+
+  it("persists cancellation intent when completion is already finalizing", async () => {
+    const gate = deferred();
+    const setup = harness({ artifactGate: gate.promise });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const session = (setup.service as unknown as {
+      active: Map<string, { phase: string }>;
+      finish(value: unknown, terminal: "completed", reason: string): Promise<void>;
+    }).active.get(started.runId)!;
+
+    const completing = (setup.service as unknown as {
+      finish(value: unknown, terminal: "completed", reason: string): Promise<void>;
+    }).finish(session, "completed", "기간 종료");
+    expect(["finalizing", "completed"]).toContain(session.phase);
+    const cancelling = setup.service.cancel(started.runId, "owner");
+    await eventually(
+      () => setup.run()?.status,
+      (status) => status === "cancel_requested",
+      "persisted cancellation intent",
+    );
+    gate.resolve();
+    await Promise.all([completing, cancelling]);
+
+    expect(setup.repository.requestCancellation).toHaveBeenCalledWith(
+      started.runId,
+      "owner",
+      Date.parse(CREATED_AT),
+    );
+    expect(setup.run()?.status).toBe("cancelled");
+    expect(setup.repository.complete).toHaveBeenCalledTimes(1);
+    expect(setup.run()?.summary).toMatchObject({
+      phase: "cancelled",
+      snapshot: { phase: "cancelled" },
+    });
+    await expect(setup.service.current("owner")).resolves.toMatchObject({
+      run: { status: "cancelled" },
+      snapshot: { phase: "cancelled" },
+    });
+    expect(setup.latestArtifact("simulation-diagnostics")?.content).toMatchObject({
+      phase: "cancelled",
+      snapshot: { phase: "cancelled" },
+    });
   });
 
   it("rejects marks and executions beyond the configured session expiry", async () => {

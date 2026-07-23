@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AiSimulation, SimulationDisclosure } from "./ai-simulation";
+import {
+  AiSimulation,
+  SimulationDisclosure,
+  simulationDecisionIntervalLabel,
+} from "./ai-simulation";
 
 describe("AI simulation disclosure", () => {
   it("states the virtual-only and next-valid-fill boundary verbatim", () => {
@@ -11,6 +15,11 @@ describe("AI simulation disclosure", () => {
 });
 
 describe("AiSimulation", () => {
+  it("does not relabel a legacy run with an unknown cadence as 20 seconds", () => {
+    expect(simulationDecisionIntervalLabel(undefined)).toBe("기록 없음");
+    expect(simulationDecisionIntervalLabel(20)).toBe("20초");
+  });
+
   it("renders a manual start flow with cash, duration, and a one-or-two symbol choice", () => {
     const markup = renderToStaticMarkup(<AiSimulation onUnauthorized={() => undefined} />);
     expect(markup).toContain('data-ai-simulation="true"');
@@ -20,6 +29,7 @@ describe("AiSimulation", () => {
     expect(markup).toContain("1종목");
     expect(markup).toContain("2종목");
     expect(markup).toContain("AI 시뮬레이션 시작");
+    expect(markup).toContain("20초 판단");
     expect(markup).toContain("시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.");
     expect(markup).toContain('data-simulation-empty="true"');
   });

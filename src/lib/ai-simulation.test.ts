@@ -74,10 +74,12 @@ describe("AI simulation response normalization", () => {
         durationMinutes: { minimum: 10, maximum: 390 },
       },
       capabilities: { realOrders: false, mcp: false, symbolCountMaximum: 2 },
+      policy: { decisionIntervalSeconds: 20 },
       limitations: ["실시간 데이터가 없으면 시작할 수 없습니다."],
     })).toEqual({
       enabled: false,
       message: "AI worker unavailable",
+      decisionIntervalSeconds: 20,
       limits: {
         minimumInitialCash: 100_000,
         maximumInitialCash: 50_000_000,
@@ -100,6 +102,7 @@ describe("AI simulation response normalization", () => {
       cash: 4_990,
       equity: 10_120,
       progress: 0.5,
+      decisionIntervalSeconds: 20,
       selected: [
         {
           symbol: "NVDA",
@@ -131,6 +134,7 @@ describe("AI simulation response normalization", () => {
       phase: "monitoring",
       currency: "USD",
       progress: 0.5,
+      decisionIntervalSeconds: 20,
       selected: [{ symbol: "NVDA", model: "chronos · pinned" }],
       positions: [{ symbol: "NVDA", quantity: 3 }],
       trades: [{ symbol: "NVDA", source: "next_valid_quote" }],

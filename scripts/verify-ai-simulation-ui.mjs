@@ -67,6 +67,7 @@ function snapshot({
     cash: 1_482_000,
     equity: cancelled ? 2_525_000 : 2_536_000,
     progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
+    decisionIntervalSeconds: 20,
     selected: phase === "selecting" ? [] : selected,
     positions: phase === "selecting" || cancelled ? [] : [{
       symbol: "SIM1",
@@ -145,6 +146,7 @@ async function routeApi(page) {
             mcp: false,
             autonomousPaperTrading: true,
           },
+          policy: { decisionIntervalSeconds: 20 },
           limitations: ["가상 체결만 생성합니다."],
         }),
       });
@@ -167,7 +169,6 @@ async function routeApi(page) {
         body: JSON.stringify({
           runId,
           status: "running",
-          snapshot: snapshot({ phase: "selecting", symbolCount: body.symbolCount }),
         }),
       });
     }
@@ -278,13 +279,29 @@ async function verify(browser, baseUrl, viewport, theme) {
       await page.getByRole("option", { name: "2종목" }).click();
     }
     await startButton.click();
-    await page.getByText("AI 종목 선정", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
+    const stopButton = page.getByRole("button", { name: "테스트 중단", exact: true });
+    await stopButton.waitFor();
     check(state.starts.length === 1, "시작 버튼 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
     check(state.starts[0]?.initialCash === 2_500_000, "시작 예수금이 요청 body에 보존되지 않았습니다.");
     check(state.starts[0]?.durationMinutes === 45, "테스트 기간이 요청 body에 보존되지 않았습니다.");
     check(state.starts[0]?.symbolCount === requestedSymbolCount, "AI 선정 종목 수가 요청 body에 보존되지 않았습니다.");
     check(state.starts[0]?.marketCountry === "KR", "기본 국내 시장이 요청 body에 보존되지 않았습니다.");
     check(state.starts[0]?.preset === "risk_management", "위험관리 프리셋이 요청 body에 보존되지 않았습니다.");
+
+    await stopButton.click();
+    await page.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
+    check(state.cancels.length === 1, "준비 단계 테스트 중단이 정확히 한 번 호출되지 않았습니다.");
+
+    await startButton.waitFor();
+    await page.waitForFunction(() => {
+      const button = Array.from(document.querySelectorAll("button"))
+        .find((item) => item.textContent?.includes("AI 시뮬레이션 시작"));
+      return button instanceof HTMLButtonElement && !button.disabled;
+    });
+    await startButton.click();
+    await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
+    check(state.starts.length === 2, "준비 단계 중단 후 새 테스트를 다시 시작하지 못했습니다.");
 
     await page.getByText("시뮬레이션 진행", { exact: true }).waitFor({ timeout: 10_000 });
     await page.locator("[data-simulation-selected] article").first().waitFor();
@@ -323,9 +340,9 @@ async function verify(browser, baseUrl, viewport, theme) {
     ));
     check(overflow === 0, `${viewport.width}px에서 가로 overflow ${overflow}px`);
 
-    await page.getByRole("button", { name: "시뮬레이션 취소", exact: true }).click();
+    await page.getByRole("button", { name: "테스트 중단", exact: true }).click();
     await page.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
-    check(state.cancels.length === 1, "취소 버튼이 정확히 한 번 cancel API를 호출하지 않았습니다.");
+    check(state.cancels.length === 2, "각 테스트 중단이 정확히 한 번씩 cancel API를 호출하지 않았습니다.");
     check(
       Object.values(errors).every((items) => items.length === 0),
       `브라우저 오류: ${JSON.stringify(errors)}`,
@@ -342,6 +359,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       viewport: `${viewport.width}x${viewport.height}`,
       theme,
       manualStart: true,
+      preparationStop: true,
       requestedSymbolCount,
       selectedCount,
       polls: state.polls,

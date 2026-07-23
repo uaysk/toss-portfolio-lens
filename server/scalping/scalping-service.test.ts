@@ -324,6 +324,17 @@ describe("rerankDomesticKisRankings", () => {
 });
 
 describe("ScalpingService", () => {
+  it("propagates a cancelled simulation signal without dispatching AI work", async () => {
+    const parts = dependencies();
+    const controller = new AbortController();
+    controller.abort(new Error("simulation stopped"));
+    await expect(service(parts).forecast({
+      symbols: ["005930"],
+      interval: "1m",
+    }, { signal: controller.signal })).rejects.toThrow("simulation stopped");
+    expect(parts.ai.forecast).not.toHaveBeenCalled();
+  });
+
   it("exposes the evidence-based KRX/NXT and calendar-confirmed US session policies", () => {
     const status = service(dependencies()).status();
     expect(status.limits).toMatchObject({
@@ -1283,6 +1294,67 @@ describe("ScalpingService", () => {
     expect(aiRequest.series[0].bars.some(
       ({ timestamp }: { timestamp: string }) => timestamp === unclosedFinal.closeTime,
     )).toBe(false);
+  });
+
+  it("excludes a future-close final candle from realtime Rust analysis", async () => {
+    const parts = dependencies();
+    const last = parts.series.at(-1)!;
+    const unclosedFinal = {
+      ...last,
+      openTime: last.closeTime,
+      closeTime: new Date(Date.parse(last.closeTime) + 60_000).toISOString(),
+      open: last.close,
+      high: last.close + 2,
+      low: last.close - 1,
+      close: last.close + 1,
+      state: "final" as const,
+    };
+    parts.repository.listBars.mockResolvedValue([...parts.series, unclosedFinal]);
+
+    await service(parts).realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    }, { skipAutomaticRefresh: true });
+
+    const rustRequest = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    expect(rustRequest.scalping_analysis.instruments[0].bars.at(-1).timestamp)
+      .toBe(marketLocalTimestamp(last.closeTime, "KR"));
+    expect(rustRequest.scalping_analysis.instruments[0].bars).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          timestamp: marketLocalTimestamp(unclosedFinal.closeTime, "KR"),
+        }),
+      ]),
+    );
+  });
+
+  it("propagates cancellation into realtime Rust computation", async () => {
+    const parts = dependencies();
+    let rustSignal: AbortSignal | undefined;
+    parts.rust.compute.mockImplementation((
+      _kind: unknown,
+      _payload: unknown,
+      options: { signal?: AbortSignal },
+    ) => new Promise((_resolve, reject) => {
+      rustSignal = options.signal;
+      options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const pending = service(parts).realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    }, {
+      signal: controller.signal,
+      skipAutomaticRefresh: true,
+    });
+    await vi.waitFor(() => expect(rustSignal).toBe(controller.signal));
+
+    controller.abort(new Error("simulation stopped during Rust analysis"));
+
+    await expect(pending).rejects.toThrow("simulation stopped during Rust analysis");
+    expect(rustSignal?.aborted).toBe(true);
   });
 
   it("keeps full KR session evidence while bounding the model context", async () => {

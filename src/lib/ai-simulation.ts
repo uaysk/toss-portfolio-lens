@@ -33,6 +33,7 @@ export type AiSimulationLimits = {
 export type AiSimulationStatus = {
   enabled: boolean;
   message?: string;
+  decisionIntervalSeconds?: number;
   limits: AiSimulationLimits;
   capabilities: Record<string, boolean | number | string>;
   limitations: string[];
@@ -87,6 +88,7 @@ export type AiSimulationSnapshot = {
   cash: number;
   equity: number;
   progress: number;
+  decisionIntervalSeconds?: number;
   selected: AiSimulationSelection[];
   positions: AiSimulationPosition[];
   trades: AiSimulationTrade[];
@@ -183,11 +185,22 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const limits = asRecord(source.limits);
   const initialCash = asRecord(first(limits, "initialCash", "initial_cash"));
   const duration = asRecord(first(limits, "durationMinutes", "duration_minutes", "duration"));
+  const policy = asRecord(source.policy);
+  const decisionIntervalSeconds = finiteNumber(first(
+    policy,
+    "decisionIntervalSeconds",
+    "decision_interval_seconds",
+  )) ?? finiteNumber(first(
+    limits,
+    "decisionIntervalSeconds",
+    "decision_interval_seconds",
+  ));
   const enabled = typeof source.enabled === "boolean" ? source.enabled : true;
 
   return {
     enabled,
     message: textValue(first(source, "message", "reason")),
+    ...(decisionIntervalSeconds !== undefined ? { decisionIntervalSeconds } : {}),
     limits: {
       minimumInitialCash: finiteNumber(first(
         limits,
@@ -323,6 +336,11 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
   const market = textValue(first(source, "marketCountry", "market_country"));
   const currency = textValue(source.currency);
   const rawProgress = finiteNumber(source.progress) ?? 0;
+  const decisionIntervalSeconds = finiteNumber(first(
+    source,
+    "decisionIntervalSeconds",
+    "decision_interval_seconds",
+  ));
 
   return {
     phase: textValue(source.phase) ?? "queued",
@@ -334,6 +352,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     cash: finiteNumber(source.cash) ?? 0,
     equity: finiteNumber(source.equity) ?? 0,
     progress: Math.max(0, Math.min(1, rawProgress)),
+    ...(decisionIntervalSeconds !== undefined ? { decisionIntervalSeconds } : {}),
     selected: mapValid(source.selected, normalizeSelection),
     positions: mapValid(source.positions, normalizePosition),
     trades: mapValid(source.trades, normalizeTrade),

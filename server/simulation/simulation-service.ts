@@ -23,6 +23,7 @@ import {
 } from "./policy.js";
 
 const MINUTE_MS = 60_000;
+const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
 const MAX_DECISIONS = 5_000;
 const MAX_EQUITY_POINTS = 5_000;
 const MAX_MARK_HISTORY_PER_SYMBOL = 4_096;
@@ -171,6 +172,8 @@ type SimulationMarketSource = {
     marketCountry: MarketCountry;
     symbols: string[];
     interval: "1m";
+  }, options?: {
+    signal?: AbortSignal;
   }): Promise<unknown>;
   realtimeAnalysis(input: {
     marketCountry: MarketCountry;
@@ -186,6 +189,9 @@ type SimulationMarketSource = {
         asOf: string;
       }>;
     };
+  }, options?: {
+    signal?: AbortSignal;
+    skipAutomaticRefresh?: boolean;
   }): Promise<unknown>;
 };
 
@@ -204,7 +210,7 @@ type SimulationLiveSource = {
 
 export type AiTradingSimulationConfig = {
   maximumDurationMinutes: number;
-  decisionIntervalMinutes: number;
+  decisionIntervalSeconds: number;
   maximumActiveSessions: number;
   candidatePoolSize: number;
   selectionMaximumAttempts: number;
@@ -284,9 +290,18 @@ type ActiveSession = {
   selectionRetryResolve?: () => void;
   endTimer?: NodeJS.Timeout;
   progressTimer?: NodeJS.Timeout;
+  decisionTimer?: NodeJS.Timeout;
+  decisionAbort: AbortController;
+  nextDecisionAtMs?: number;
+  lastDecisionScheduledAt?: string;
+  lastDecisionStartedAt?: string;
+  lastDecisionFinishedAt?: string;
+  decisionScheduledTicks: number;
+  decisionCoalescedTicks: number;
+  decisionSkippedTicks: number;
+  lastArtifactPersistedAtMs?: number;
   analysisRunning: boolean;
   analysisQueued: boolean;
-  lastAnalysisBar?: string;
   persistenceTail: Promise<void>;
 };
 
@@ -444,7 +459,9 @@ export class AiTradingSimulationService {
     private readonly config: AiTradingSimulationConfig,
   ) {
     if (!Number.isInteger(config.maximumDurationMinutes) || config.maximumDurationMinutes < 1
-      || !Number.isInteger(config.decisionIntervalMinutes) || config.decisionIntervalMinutes < 1
+      || !Number.isInteger(config.decisionIntervalSeconds)
+      || config.decisionIntervalSeconds < 10
+      || config.decisionIntervalSeconds > 30
       || !Number.isInteger(config.maximumActiveSessions) || config.maximumActiveSessions < 1
       || !Number.isInteger(config.candidatePoolSize) || config.candidatePoolSize < 2) {
       throw new Error("AI simulation configuration is invalid.");
@@ -484,6 +501,7 @@ export class AiTradingSimulationService {
         selectedSymbolCount: [1, 2],
         candidatePoolSize: this.config.candidatePoolSize,
         maximumActiveSessions: this.config.maximumActiveSessions,
+        decisionIntervalSeconds: this.config.decisionIntervalSeconds,
         selectionMaximumAttempts: this.selectionMaximumAttempts,
         selectionRetryDelayMs: this.selectionRetryDelayMs,
       },
@@ -502,13 +520,16 @@ export class AiTradingSimulationService {
         version: AI_PAPER_POLICY_VERSION,
         side: "long_only",
         quantity: "whole_share",
-        decisionIntervalMinutes: this.config.decisionIntervalMinutes,
+        decisionIntervalSeconds: this.config.decisionIntervalSeconds,
+        cadence: "wall_clock_timer_using_latest_final_bars_and_realtime_snapshot",
         execution: "strictly_after_ai_generation_on_next_observed_trade_or_later_final_bar_open",
       },
       activeSessions: this.active.size,
       limitations: [
         "실제 주문 API를 호출하지 않는 가상 원장입니다.",
         "AI 전망은 투자 지시나 수익 보장이 아니며 모델이 unavailable이면 임의 신호를 만들지 않습니다.",
+        `AI 판단은 ${this.config.decisionIntervalSeconds}초 주기로 예약하지만 이전 추론이 끝나지 않으면 중첩하지 않고 한 번만 합쳐서 실행합니다.`,
+        "초 단위 판단도 진행 중인 봉을 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
@@ -559,7 +580,7 @@ export class AiTradingSimulationService {
       preset: input.preset,
       costs: input.costs,
       candidate_pool_size: this.config.candidatePoolSize,
-      decision_interval_minutes: this.config.decisionIntervalMinutes,
+      decision_interval_seconds: this.config.decisionIntervalSeconds,
       selection_maximum_attempts: this.selectionMaximumAttempts,
       selection_retry_delay_ms: this.selectionRetryDelayMs,
       session_nonce: createdAt,
@@ -618,6 +639,10 @@ export class AiTradingSimulationService {
       trades: [],
       equity: [{ timestamp: createdAt, equity: input.initialCash, cash: input.initialCash, invested: 0 }],
       warnings: [],
+      decisionAbort: new AbortController(),
+      decisionScheduledTicks: 0,
+      decisionCoalescedTicks: 0,
+      decisionSkippedTicks: 0,
       analysisRunning: false,
       analysisQueued: false,
       persistenceTail: Promise.resolve(),
@@ -666,9 +691,12 @@ export class AiTradingSimulationService {
     const checkpoint = active || result?.snapshot || summary?.snapshot
       ? undefined
       : await this.checkpointSnapshot(run);
+    const activeSnapshot = active ? this.snapshot(active) : undefined;
     return {
       run: runView(run),
-      snapshot: active ? this.snapshot(active) : result?.snapshot ?? summary?.snapshot ?? checkpoint,
+      snapshot: run.status === "cancel_requested" && activeSnapshot
+        ? { ...activeSnapshot, phase: "finalizing" }
+        : activeSnapshot ?? result?.snapshot ?? summary?.snapshot ?? checkpoint,
     };
   }
 
@@ -700,15 +728,23 @@ export class AiTradingSimulationService {
   async cancel(runId: string, ownerSubject: string) {
     const run = await this.repository.get(runId, ownerSubject);
     if (!run || run.kind !== "ai_trading_simulation") return undefined;
+    if (["queued", "running"].includes(run.status)) {
+      // Persist cancellation intent before touching in-memory state. This makes
+      // cancel win even when a concurrent completion is already finalizing.
+      await this.repository.requestCancellation(runId, ownerSubject, this.now());
+    }
     const session = this.active.get(runId);
-    if (session) await this.finish(session, "cancelled", "사용자가 시뮬레이션을 중단했습니다.");
-    const stored = await this.repository.get(runId, ownerSubject);
-    return stored ? {
-      run: runView(stored),
-      snapshot: record(stored.result)?.snapshot
-        ?? record(stored.summary)?.snapshot
-        ?? (session ? this.snapshot(session) : undefined),
-    } : undefined;
+    const reason = "사용자가 시뮬레이션 테스트를 중단했습니다.";
+    if (session) {
+      await this.finish(session, "cancelled", reason);
+    } else if (["queued", "running", "cancel_requested"].includes(run.status)) {
+      await this.repository.cancel(runId, {
+        phase: "cancelled",
+        cancelled: true,
+        real_order_api_used: false,
+      }, [reason], this.now());
+    }
+    return this.get(runId, ownerSubject);
   }
 
   async close(reason = "server_shutdown"): Promise<void> {
@@ -766,6 +802,8 @@ export class AiTradingSimulationService {
         marketCountry: session.request.marketCountry,
         symbols: candidateSymbols,
         interval: "1m",
+      }, {
+        signal: session.decisionAbort.signal,
       });
       if (session.phase !== "selecting") return;
       selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
@@ -837,13 +875,19 @@ export class AiTradingSimulationService {
       interval: "1m",
       preset: session.request.preset,
       positionContext: isolatedPositionContext(session),
+    }, {
+      signal: session.decisionAbort.signal,
+      skipAutomaticRefresh: true,
     });
     if (session.phase !== "selecting") return;
     const startedAtMs = this.now();
     session.startedAt = new Date(startedAtMs).toISOString();
     session.expiresAt = new Date(startedAtMs + session.request.durationMinutes * MINUTE_MS).toISOString();
     session.phase = "running";
+    session.lastDecisionScheduledAt = session.startedAt;
+    session.lastDecisionStartedAt = session.startedAt;
     const decisionRecordedAt = this.recordActions(session, selection, technicalStates(technical));
+    session.lastDecisionFinishedAt = decisionRecordedAt;
     this.recordEquity(session, decisionRecordedAt);
     await this.repository.addEvent(session.id, "simulation_ready", {
       symbols,
@@ -851,13 +895,16 @@ export class AiTradingSimulationService {
       model_revision: selection.model?.modelRevision,
       expires_at: session.expiresAt,
     }, startedAtMs);
+    if (session.phase !== "running") return;
     await this.repository.updateProgress(session.id, {
       progress: 0,
       completedCandidates: symbols.length,
       totalCandidates: session.request.symbolCount,
       currentValidationWindow: session.startedAt,
     }, startedAtMs);
+    if (session.phase !== "running") return;
     await this.persistArtifacts(session);
+    if (session.phase !== "running") return;
     const remainingMs = Math.max(0, Date.parse(session.expiresAt) - this.now());
     session.endTimer = setTimeout(() => {
       void this.finish(session, "completed", "설정한 시뮬레이션 기간이 종료되었습니다.")
@@ -869,6 +916,10 @@ export class AiTradingSimulationService {
     session.endTimer.unref();
     session.progressTimer = setInterval(() => void this.progress(session), this.progressUpdateMs);
     session.progressTimer.unref();
+    this.scheduleNextDecision(
+      session,
+      startedAtMs + this.config.decisionIntervalSeconds * 1_000,
+    );
   }
 
   private recordActions(
@@ -912,7 +963,12 @@ export class AiTradingSimulationService {
       if ((action.action === "buy" || action.action === "sell")
         && insideSessionBoundary(session, eligibleAfter)
         && eligibleAfter !== session.expiresAt) {
-        session.pending.set(action.symbol, executableAction);
+        const existing = session.pending.get(action.symbol);
+        // A repeated decision must not postpone an already-valid virtual action.
+        // Keeping the earlier eligibility preserves the next-observed-fill rule.
+        if (!existing || existing.action !== executableAction.action) {
+          session.pending.set(action.symbol, executableAction);
+        }
       } else {
         session.pending.delete(action.symbol);
       }
@@ -991,51 +1047,82 @@ export class AiTradingSimulationService {
           && close !== undefined && close > 0) {
           updateMark(session, event.symbol, close, closeTime);
         }
-        if (closeTime && insideSessionBoundary(session, closeTime)
-          && closeTime !== session.expiresAt
-          && this.shouldAnalyze(session, closeTime)) {
-          this.queueAnalysis(session, closeTime);
-        }
       }
     }
   }
 
-  private shouldAnalyze(session: ActiveSession, closeTime: string): boolean {
-    if (session.lastAnalysisBar && Date.parse(closeTime) <= Date.parse(session.lastAnalysisBar)) return false;
-    const minute = Math.floor(Date.parse(closeTime) / MINUTE_MS);
-    return minute % this.config.decisionIntervalMinutes === 0;
+  private scheduleNextDecision(session: ActiveSession, scheduledAtMs: number): void {
+    if (session.phase !== "running" || !Number.isFinite(scheduledAtMs)) return;
+    const expiresAtMs = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN;
+    if (Number.isFinite(expiresAtMs) && scheduledAtMs >= expiresAtMs) return;
+    if (session.decisionTimer) clearTimeout(session.decisionTimer);
+    session.nextDecisionAtMs = scheduledAtMs;
+    const delayMs = Math.max(0, scheduledAtMs - this.now());
+    session.decisionTimer = setTimeout(() => {
+      session.decisionTimer = undefined;
+      if (session.phase !== "running") return;
+      const intervalMs = this.config.decisionIntervalSeconds * 1_000;
+      const observedAtMs = this.now();
+      const missedTicks = Math.max(0, Math.floor((observedAtMs - scheduledAtMs) / intervalMs));
+      if (missedTicks > 0) session.decisionSkippedTicks += missedTicks;
+      const effectiveScheduledAtMs = scheduledAtMs + missedTicks * intervalMs;
+      this.queueAnalysis(session, effectiveScheduledAtMs);
+      this.scheduleNextDecision(session, effectiveScheduledAtMs + intervalMs);
+    }, delayMs);
+    session.decisionTimer.unref();
   }
 
-  private queueAnalysis(session: ActiveSession, closeTime: string): void {
-    session.lastAnalysisBar = closeTime;
+  private queueAnalysis(session: ActiveSession, scheduledAtMs: number): void {
+    session.decisionScheduledTicks += 1;
+    session.lastDecisionScheduledAt = new Date(scheduledAtMs).toISOString();
+    const alreadyQueued = session.analysisQueued;
     session.analysisQueued = true;
-    if (session.analysisRunning) return;
+    if (session.analysisRunning) {
+      if (alreadyQueued) session.decisionSkippedTicks += 1;
+      else session.decisionCoalescedTicks += 1;
+      return;
+    }
     session.analysisRunning = true;
     void (async () => {
       try {
         while (session.analysisQueued && session.phase === "running") {
           session.analysisQueued = false;
-          await this.refreshDecision(session);
+          session.lastDecisionStartedAt = new Date(this.now()).toISOString();
+          try {
+            await this.refreshDecision(session);
+          } catch (error) {
+            if (session.phase !== "running" || session.decisionAbort.signal.aborted) return;
+            this.warn(session, `판단 갱신 실패: ${error instanceof Error ? error.message : "unknown"}`);
+          } finally {
+            session.lastDecisionFinishedAt = new Date(this.now()).toISOString();
+          }
         }
       } finally {
         session.analysisRunning = false;
       }
     })().catch((error) => {
-      this.warn(session, `판단 갱신 실패: ${error instanceof Error ? error.message : "unknown"}`);
+      if (session.phase === "running" && !session.decisionAbort.signal.aborted) {
+        this.warn(session, `판단 queue 실패: ${error instanceof Error ? error.message : "unknown"}`);
+      }
     });
   }
 
   private async refreshDecision(session: ActiveSession): Promise<void> {
     const symbols = selectedSymbols(session);
     if (!symbols.length) return;
+    const signal = session.decisionAbort.signal;
+    if (signal.aborted) return;
     const ledgerRevision = session.ledgerRevision;
     const positionContext = isolatedPositionContext(session);
     await this.live.waitForIdle();
+    if (signal.aborted || session.phase !== "running") return;
     const [forecastResult, technical] = await Promise.all([
       this.market.forecast({
         marketCountry: session.request.marketCountry,
         symbols,
         interval: "1m",
+      }, {
+        signal,
       }),
       this.market.realtimeAnalysis({
         marketCountry: session.request.marketCountry,
@@ -1043,9 +1130,12 @@ export class AiTradingSimulationService {
         interval: "1m",
         preset: session.request.preset,
         positionContext,
+      }, {
+        signal,
+        skipAutomaticRefresh: true,
       }),
     ]);
-    if (session.phase !== "running") return;
+    if (signal.aborted || session.phase !== "running") return;
     if (session.expiresAt && this.now() >= Date.parse(session.expiresAt)) return;
     if (session.ledgerRevision !== ledgerRevision) {
       session.analysisQueued = true;
@@ -1075,7 +1165,10 @@ export class AiTradingSimulationService {
         symbol, action, eligible_after: eligibleAfter,
       })),
     });
-    await this.persistArtifacts(session);
+    if (this.now() - (session.lastArtifactPersistedAtMs ?? Number.NEGATIVE_INFINITY)
+      >= DECISION_ARTIFACT_CHECKPOINT_MS) {
+      await this.persistArtifacts(session);
+    }
   }
 
   private async tryFill(
@@ -1201,6 +1294,21 @@ export class AiTradingSimulationService {
       realizedPnl: session.ledger.realizedPnl,
       totalCosts: session.ledger.totalCosts,
       progress,
+      decisionIntervalSeconds: this.config.decisionIntervalSeconds,
+      decisionCadence: {
+        scheduledTicks: session.decisionScheduledTicks,
+        coalescedTicks: session.decisionCoalescedTicks,
+        skippedTicks: session.decisionSkippedTicks,
+        // Terminal snapshots describe the persisted run state. An aborted task
+        // may still be unwinding locally, but it is no longer active work.
+        inFlight: session.phase === "running" && session.analysisRunning,
+        ...(session.nextDecisionAtMs !== undefined && session.phase === "running"
+          ? { nextScheduledAt: new Date(session.nextDecisionAtMs).toISOString() }
+          : {}),
+        ...(session.lastDecisionScheduledAt ? { lastScheduledAt: session.lastDecisionScheduledAt } : {}),
+        ...(session.lastDecisionStartedAt ? { lastStartedAt: session.lastDecisionStartedAt } : {}),
+        ...(session.lastDecisionFinishedAt ? { lastFinishedAt: session.lastDecisionFinishedAt } : {}),
+      },
       selected: (session.selection?.selected ?? []).map((candidate) => ({
         symbol: candidate.symbol,
         name: session.metadata.get(candidate.symbol)?.name,
@@ -1297,6 +1405,9 @@ export class AiTradingSimulationService {
             later_final_bar_open_fallback: true,
             open_positions_are_not_force_filled_at_end: true,
             selected_symbol_limit: session.request.symbolCount,
+            decision_interval_seconds: this.config.decisionIntervalSeconds,
+            decision_cadence: snapshot.decisionCadence,
+            decision_artifact_checkpoint_seconds: DECISION_ARTIFACT_CHECKPOINT_MS / 1_000,
             selection_maximum_attempts: this.selectionMaximumAttempts,
             selection_retry_delay_ms: this.selectionRetryDelayMs,
             costs: session.request.costs,
@@ -1310,6 +1421,7 @@ export class AiTradingSimulationService {
     });
     session.persistenceTail = task.catch(() => undefined);
     await task;
+    session.lastArtifactPersistedAtMs = this.now();
   }
 
   private async finish(
@@ -1322,6 +1434,13 @@ export class AiTradingSimulationService {
     this.clearSelectionRetry(session);
     if (session.endTimer) clearTimeout(session.endTimer);
     if (session.progressTimer) clearInterval(session.progressTimer);
+    if (session.decisionTimer) clearTimeout(session.decisionTimer);
+    session.decisionTimer = undefined;
+    session.nextDecisionAtMs = undefined;
+    session.analysisQueued = false;
+    if (!session.decisionAbort.signal.aborted) {
+      session.decisionAbort.abort(new Error(`AI simulation ${terminal}.`));
+    }
     try {
       if (session.release) releaseWithRetry(session.release);
     } catch (error) {
@@ -1332,72 +1451,92 @@ export class AiTradingSimulationService {
       this.warn(session, "기간 종료 후 유효한 신규 체결을 만들지 않아 보유분을 마지막 관측가로만 평가했습니다.");
     }
     this.warn(session, reason);
-    session.phase = terminal;
-    this.recordEquity(
-      session,
-      terminal === "completed" && session.expiresAt
-        ? session.expiresAt
-        : new Date(this.now()).toISOString(),
-    );
+    const preTerminalEquityLength = session.equity.length;
+    let effectiveTerminal = terminal;
     try {
-      try {
-        await this.persistArtifacts(session);
-      } catch (error) {
-        this.warn(session, `최종 artifact 저장 실패: ${error instanceof Error ? error.message : "unknown"}`);
+      if (terminal === "completed" && await this.repository.isCancellationRequested(session.id)) {
+        effectiveTerminal = "cancelled";
+        this.warn(session, "완료 처리와 동시에 도착한 취소 요청을 반영했습니다.");
       }
-      const snapshot = this.snapshot(session);
-      const summary = {
-        phase: terminal,
-        market_country: session.request.marketCountry,
-        initial_cash: session.request.initialCash,
-        final_equity: snapshot.equity,
-        net_profit_loss: snapshot.equity - session.request.initialCash,
-        return_ratio: session.request.initialCash > 0
-          ? snapshot.equity / session.request.initialCash - 1
-          : null,
-        trade_count: session.trades.length,
-        selected_symbols: selectedSymbols(session),
-        open_position_count: Object.keys(session.ledger.positions).length,
-        total_costs: session.ledger.totalCosts,
-        real_order_api_used: false,
-        snapshot,
+      const terminalPayload = async (phase: "completed" | "cancelled") => {
+        session.phase = phase;
+        session.equity.length = preTerminalEquityLength;
+        this.recordEquity(
+          session,
+          phase === "completed" && session.expiresAt
+            ? session.expiresAt
+            : new Date(this.now()).toISOString(),
+        );
+        try {
+          await this.persistArtifacts(session);
+        } catch (error) {
+          this.warn(session, `최종 artifact 저장 실패: ${error instanceof Error ? error.message : "unknown"}`);
+        }
+        const snapshot = this.snapshot(session);
+        return {
+          snapshot,
+          summary: {
+            phase,
+            market_country: session.request.marketCountry,
+            initial_cash: session.request.initialCash,
+            final_equity: snapshot.equity,
+            net_profit_loss: snapshot.equity - session.request.initialCash,
+            return_ratio: session.request.initialCash > 0
+              ? snapshot.equity / session.request.initialCash - 1
+              : null,
+            trade_count: session.trades.length,
+            selected_symbols: selectedSymbols(session),
+            open_position_count: Object.keys(session.ledger.positions).length,
+            total_costs: session.ledger.totalCosts,
+            real_order_api_used: false,
+            snapshot,
+          },
+        };
       };
-      try {
-        if (terminal === "completed") {
+      let payload = await terminalPayload(effectiveTerminal);
+      if (effectiveTerminal === "completed") {
+        const completed = await this.repository.complete(
+          session.id,
+          payload.summary,
+          { snapshot: payload.snapshot },
+          session.warnings,
+          this.now(),
+        );
+        if (!completed) {
           if (await this.repository.isCancellationRequested(session.id)) {
-            await this.repository.cancel(session.id, summary, session.warnings, this.now());
-          } else {
-            const completed = await this.repository.complete(
+            effectiveTerminal = "cancelled";
+            this.warn(session, "완료 상태 전환 전에 도착한 취소 요청을 반영했습니다.");
+            payload = await terminalPayload(effectiveTerminal);
+            await this.repository.cancel(
               session.id,
-              summary,
-              { snapshot },
+              payload.summary,
               session.warnings,
               this.now(),
             );
-            if (!completed) {
-              if (await this.repository.isCancellationRequested(session.id)) {
-                await this.repository.cancel(session.id, summary, session.warnings, this.now());
-              } else {
-                const stored = await this.repository.get(session.id, session.ownerSubject);
-                if (!stored || !["completed", "cancelled", "failed"].includes(stored.status)) {
-                  throw new Error("완료 상태 전환이 적용되지 않았습니다.");
-                }
-              }
+          } else {
+            const stored = await this.repository.get(session.id, session.ownerSubject);
+            if (!stored || !["completed", "cancelled", "failed"].includes(stored.status)) {
+              throw new Error("완료 상태 전환이 적용되지 않았습니다.");
             }
           }
-        } else {
-          await this.repository.cancel(session.id, summary, session.warnings, this.now());
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown terminal persistence error";
-        await this.repository.fail(session.id, {
-          code: "AI_SIMULATION_TERMINALIZATION_FAILED",
-          message,
-          retryable: true,
-          intended_status: terminal,
-          real_order_api_used: false,
-        }, uniqueWarnings([...session.warnings, `run 종료 상태 저장 실패: ${message}`]), this.now());
+      } else {
+        await this.repository.cancel(
+          session.id,
+          payload.summary,
+          session.warnings,
+          this.now(),
+        );
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown terminal persistence error";
+      await this.repository.fail(session.id, {
+        code: "AI_SIMULATION_TERMINALIZATION_FAILED",
+        message,
+        retryable: true,
+        intended_status: effectiveTerminal,
+        real_order_api_used: false,
+      }, uniqueWarnings([...session.warnings, `run 종료 상태 저장 실패: ${message}`]), this.now());
     } finally {
       this.active.delete(session.id);
     }
@@ -1409,6 +1548,13 @@ export class AiTradingSimulationService {
     this.clearSelectionRetry(session);
     if (session.endTimer) clearTimeout(session.endTimer);
     if (session.progressTimer) clearInterval(session.progressTimer);
+    if (session.decisionTimer) clearTimeout(session.decisionTimer);
+    session.decisionTimer = undefined;
+    session.nextDecisionAtMs = undefined;
+    session.analysisQueued = false;
+    if (!session.decisionAbort.signal.aborted) {
+      session.decisionAbort.abort(new Error("AI simulation failed."));
+    }
     try {
       if (session.release) releaseWithRetry(session.release);
     } catch (releaseError) {

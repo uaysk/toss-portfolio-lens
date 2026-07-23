@@ -4,7 +4,7 @@ import {
   ScannerCriterionSchema,
 } from "../scalping/contracts.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v1" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v2" as const;
 
 export const SimulationPresetSchema = z.enum([
   "trend",
