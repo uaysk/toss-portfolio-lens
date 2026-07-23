@@ -1000,6 +1000,16 @@ export class ScalpingService {
       marketCountry,
       metadata,
     );
+    const scannedBySymbol = new Map(
+      [...scan.candidates, ...scan.excluded].map((candidate) => [candidate.symbol, candidate]),
+    );
+    const exchangeMetadataFallbackCount = marketCountry === "US"
+      ? candidates.filter((candidate) => (
+          candidate.exchange !== undefined
+          && scannedBySymbol.get(candidate.symbol)?.exchange === undefined
+          && normalizeUsExchange(metadata.get(candidate.symbol)?.market) === candidate.exchange
+        )).length
+      : 0;
     const candidateSymbols = candidates.map(({ symbol }) => symbol);
     const selectedSymbols = request.scanOnly
       ? []
@@ -1097,6 +1107,8 @@ export class ScalpingService {
           browserIndicatorCalculation: false,
           tradingAmountUnit: marketCountry === "US" ? "USD" : "KRW",
           ...(marketCountry === "US" ? {
+            exchangeEligibleCandidateCount: candidates.filter(({ exchange }) => exchange !== undefined).length,
+            exchangeMetadataFallbackCount,
             orderbookPolicy: "fresh_kis_standard_feed_top_of_book_only; day_market_unavailable; no_toss_fallback",
           } : {}),
         },
@@ -2183,11 +2195,26 @@ export class ScalpingService {
     const scanned = new Map(
       [...scan.candidates, ...scan.excluded].map((candidate) => [candidate.symbol, candidate]),
     );
+    const withInstrumentMetadata = (candidate: ScannerCandidate): ScannerCandidate => {
+      if (marketCountry !== "US" || candidate.exchange !== undefined) return candidate;
+      const instrument = metadata.get(candidate.symbol);
+      const exchange = normalizeUsExchange(instrument?.market);
+      if (!exchange) return candidate;
+      return {
+        ...candidate,
+        ...(candidate.name || !instrument?.name ? {} : { name: instrument.name }),
+        exchange,
+        quality: {
+          ...candidate.quality,
+          sources: Array.from(new Set([...candidate.quality.sources, "toss"])),
+        },
+      };
+    };
     const output: ScannerCandidate[] = [];
     for (const symbol of requested) {
       const existing = scanned.get(symbol);
       if (existing) {
-        output.push(existing);
+        output.push(withInstrumentMetadata(existing));
         continue;
       }
       const price = prices.get(symbol);
@@ -2205,7 +2232,7 @@ export class ScalpingService {
     }
     for (const candidate of scan.candidates) {
       if (output.some(({ symbol }) => symbol === candidate.symbol)) continue;
-      output.push(candidate);
+      output.push(withInstrumentMetadata(candidate));
       if (output.length >= visibleCount) break;
     }
     return output.slice(0, visibleCount);

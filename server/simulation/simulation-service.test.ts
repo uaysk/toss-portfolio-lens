@@ -602,6 +602,171 @@ describe("AI trading simulation service", () => {
     await setup.service.cancel(started.runId, "owner");
   });
 
+  it("keeps explicit US exchanges through scan, AI selection, and live subscriptions", async () => {
+    const setup = harness();
+    setup.market.workspace.mockResolvedValue({
+      workspace: {
+        candidates: [
+          { symbol: "AAA", name: "Alpha", exchange: "NAS", price: 99, filtered: false },
+          { symbol: "BBB", name: "Beta", exchange: "NYS", price: 100, filtered: false },
+          { symbol: "CCC", name: "Gamma", exchange: "AMS", price: 101, filtered: false },
+        ],
+      },
+    } as never);
+
+    const started = await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
+    const running = await waitForPhase(setup, started.runId, "running") as {
+      snapshot: { selected: Array<{ symbol: string }> };
+    };
+
+    expect(running.snapshot.selected).toEqual([
+      expect.objectContaining({ symbol: "BBB", exchange: "NYS" }),
+    ]);
+    expect(setup.live.retain).toHaveBeenNthCalledWith(1, ["AAA", "BBB", "CCC"], "US", {
+      AAA: "NAS",
+      BBB: "NYS",
+      CCC: "AMS",
+    });
+    expect(setup.live.retain).toHaveBeenNthCalledWith(2, ["BBB"], "US", { BBB: "NYS" });
+    expect(setup.market.forecast).toHaveBeenCalledWith({
+      marketCountry: "US",
+      symbols: ["AAA", "BBB", "CCC"],
+      interval: "1m",
+    }, { signal: expect.any(AbortSignal) });
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith(
+      expect.objectContaining({ marketCountry: "US", symbols: ["BBB"] }),
+      expect.objectContaining({ skipAutomaticRefresh: true }),
+    );
+    await setup.service.cancel(started.runId, "owner");
+  });
+
+  it("retries an insufficient workspace candidate set before retaining or forecasting", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 2,
+      selectionRetryDelayMs: 1,
+    });
+    setup.market.workspace
+      .mockResolvedValueOnce({
+        workspace: {
+          candidates: [
+            { symbol: "AAA", name: "Alpha", price: 99, filtered: false },
+          ],
+        },
+      } as never)
+      .mockResolvedValueOnce({
+        workspace: {
+          candidates: [
+            { symbol: "AAA", name: "Alpha", price: 99, filtered: false },
+            { symbol: "BBB", name: "Beta", price: 100, filtered: false },
+            { symbol: "CCC", name: "Gamma", price: 101, filtered: false },
+          ],
+        },
+      } as never);
+
+    const started = await setup.service.start(request(2), "owner");
+    const running = await waitForPhase(setup, started.runId, "running") as {
+      snapshot: { selected: Array<{ symbol: string }>; warnings: string[] };
+    };
+
+    expect(setup.market.workspace).toHaveBeenCalledTimes(2);
+    expect(setup.live.retain).toHaveBeenCalledTimes(2);
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+    expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(["BBB", "AAA"]);
+    expect(running.snapshot.warnings).toContain(
+      "유효 스캔 후보가 부족해 공급자 데이터를 제한 재조회합니다 "
+      + "(1/2; market=KR, requested=2, scanned=1, exchangeEligible=1).",
+    );
+    await setup.service.cancel(started.runId, "owner");
+  });
+
+  it("fails with bounded scan diagnostics after every US candidate lacks an exchange", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 3,
+      selectionRetryDelayMs: 1,
+    });
+    setup.market.workspace.mockResolvedValue({
+      workspace: {
+        candidates: [
+          { symbol: "AAA", name: "Alpha", price: 99, filtered: false },
+          { symbol: "BBB", name: "Beta", price: 100, filtered: false },
+          { symbol: "CCC", name: "Gamma", price: 101, filtered: false },
+        ],
+      },
+    } as never);
+
+    await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
+    await eventually(
+      setup.run,
+      (run) => run?.status === "failed",
+      "maximum-attempt US scan failure",
+    );
+    await eventually(
+      () => setup.service.status(),
+      (status) => status.activeSessions === 0,
+      "US scan failure active-session cleanup",
+    );
+
+    expect(setup.market.workspace).toHaveBeenCalledTimes(3);
+    expect(setup.live.retain).not.toHaveBeenCalled();
+    expect(setup.market.forecast).not.toHaveBeenCalled();
+    expect(setup.run()?.error).toMatchObject({
+      code: "AI_SIMULATION_FAILED",
+      message: "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다: "
+        + "market=US, requested=1, scanned=3, exchangeEligible=0, attempts=3",
+    });
+    expect(setup.run()?.warnings).toEqual(expect.arrayContaining([
+      "거래소 식별자가 없는 미국 후보를 AI 선정 대상에서 제외했습니다.",
+      expect.stringContaining("(1/3; market=US, requested=1, scanned=3, exchangeEligible=0)"),
+      expect.stringContaining("(2/3; market=US, requested=1, scanned=3, exchangeEligible=0)"),
+    ]));
+  });
+
+  it("cancels an insufficient-workspace retry without retaining or forecasting", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 3,
+      selectionRetryDelayMs: 60_000,
+    });
+    setup.market.workspace.mockResolvedValue({
+      workspace: {
+        candidates: [],
+      },
+    } as never);
+
+    const started = await setup.service.start(request(1), "owner");
+    await eventually(
+      () => setup.service.get(started.runId, "owner"),
+      (value) => (value as {
+        snapshot?: { warnings?: string[] };
+      } | undefined)?.snapshot?.warnings?.some((warning) => (
+        warning.includes("유효 스캔 후보가 부족해")
+      )) === true,
+      "pending workspace retry",
+    );
+    const session = (setup.service as unknown as {
+      active: Map<string, {
+        selectionRetryTimer?: NodeJS.Timeout;
+        selectionRetryResolve?: () => void;
+      }>;
+    }).active.get(started.runId);
+    expect(session?.selectionRetryTimer).toBeDefined();
+
+    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+      run: { status: string };
+      snapshot: { phase: string };
+    };
+
+    expect(cancelled).toMatchObject({
+      run: { status: "cancelled" },
+      snapshot: { phase: "cancelled" },
+    });
+    expect(session?.selectionRetryTimer).toBeUndefined();
+    expect(session?.selectionRetryResolve).toBeUndefined();
+    expect(setup.market.workspace).toHaveBeenCalledTimes(1);
+    expect(setup.live.retain).not.toHaveBeenCalled();
+    expect(setup.market.forecast).not.toHaveBeenCalled();
+    expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+  });
+
   it("retries only transient stale-final-bar selection and succeeds with the next complete batch", async () => {
     const setup = harness({
       selectionMaximumAttempts: 2,

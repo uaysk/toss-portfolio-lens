@@ -758,26 +758,58 @@ export class AiTradingSimulationService {
   }
 
   private async initialize(session: ActiveSession): Promise<void> {
-    const workspaceResult = await this.market.workspace({
-      marketCountry: session.request.marketCountry,
-      criterion: session.request.criterion,
-      topCount: this.config.candidatePoolSize,
-      interval: "1m",
-      layoutColumns: 1,
-      preset: session.request.preset,
-      scanOnly: true,
-      includePortfolioContext: false,
-    });
-    if (session.phase !== "selecting") return;
-    const scannedCandidates = workspaceCandidates(workspaceResult).slice(0, this.config.candidatePoolSize);
-    const candidates = session.request.marketCountry === "US"
-      ? scannedCandidates.filter(({ exchange }) => exchange !== undefined)
-      : scannedCandidates;
-    if (candidates.length !== scannedCandidates.length) {
-      this.warn(session, "거래소 식별자가 없는 미국 후보를 AI 선정 대상에서 제외했습니다.");
+    let candidates: CandidateMetadata[] = [];
+    let scannedCandidateCount = 0;
+    let exchangeEligibleCount = 0;
+    let scanAttempts = 0;
+    for (let attempt = 1; attempt <= this.selectionMaximumAttempts; attempt += 1) {
+      scanAttempts = attempt;
+      const workspaceResult = await this.market.workspace({
+        marketCountry: session.request.marketCountry,
+        criterion: session.request.criterion,
+        topCount: this.config.candidatePoolSize,
+        interval: "1m",
+        layoutColumns: 1,
+        preset: session.request.preset,
+        scanOnly: true,
+        includePortfolioContext: false,
+      });
+      if (session.phase !== "selecting") return;
+      const scannedCandidates = workspaceCandidates(workspaceResult).slice(0, this.config.candidatePoolSize);
+      candidates = session.request.marketCountry === "US"
+        ? scannedCandidates.filter(({ exchange }) => exchange !== undefined)
+        : scannedCandidates;
+      scannedCandidateCount = scannedCandidates.length;
+      exchangeEligibleCount = candidates.length;
+      if (candidates.length !== scannedCandidates.length) {
+        this.warn(session, "거래소 식별자가 없는 미국 후보를 AI 선정 대상에서 제외했습니다.");
+      }
+      if (candidates.length >= session.request.symbolCount) break;
+      if (attempt >= this.selectionMaximumAttempts) {
+        throw new Error(
+          "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다: "
+          + `market=${session.request.marketCountry}, requested=${session.request.symbolCount}, `
+          + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
+          + `attempts=${scanAttempts}`,
+        );
+      }
+      this.warn(
+        session,
+        "유효 스캔 후보가 부족해 공급자 데이터를 제한 재조회합니다 "
+        + `(${attempt}/${this.selectionMaximumAttempts}; market=${session.request.marketCountry}, `
+        + `requested=${session.request.symbolCount}, scanned=${scannedCandidateCount}, `
+        + `exchangeEligible=${exchangeEligibleCount}).`,
+      );
+      await this.waitForSelectionRetry(session);
+      if (session.phase !== "selecting") return;
     }
     if (candidates.length < session.request.symbolCount) {
-      throw new Error("AI가 선택할 수 있는 유효 스캔 후보가 부족합니다.");
+      throw new Error(
+        "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다: "
+        + `market=${session.request.marketCountry}, requested=${session.request.symbolCount}, `
+        + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
+        + `attempts=${scanAttempts}`,
+      );
     }
     session.metadata = new Map(candidates.map((candidate) => [candidate.symbol, candidate]));
     const candidateSymbols = candidates.map(({ symbol }) => symbol);

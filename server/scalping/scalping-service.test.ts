@@ -1154,6 +1154,122 @@ describe("ScalpingService", () => {
     });
   });
 
+  it("enriches a regular US scan candidate with an explicit instrument-metadata exchange", async () => {
+    const parts = dependencies();
+    parts.toss.getRankings.mockResolvedValue([{
+      provider: "toss", symbol: "AAPL", name: "Apple", marketCountry: "US", currency: "USD",
+      rank: 1, rankedAt: new Date(NOW).toISOString(), price: 220,
+      volume: 1_000_000, tradingAmount: 220_000_000,
+    }]);
+    parts.toss.getPrices.mockResolvedValue([{
+      provider: "toss", symbol: "AAPL", currency: "USD", observedAt: new Date(NOW).toISOString(),
+      price: 220, volume: 1_000_000, tradingAmount: 220_000_000,
+    }]);
+    parts.scanner.scan.mockReturnValue({
+      generatedAt: new Date(NOW).toISOString(),
+      criterion: "volume",
+      requestedTopCount: 1,
+      candidates: [{
+        symbol: "AAPL", name: "Apple", currency: "USD", price: 220, volume: 1_000_000,
+        tradingAmount: 220_000_000, providerRanks: { toss: 1 }, warnings: [],
+        filtered: false, filterReasons: [], quality: {
+          status: "available", missing: [], reasons: [], sources: ["toss"],
+          observedAt: new Date(NOW).toISOString(),
+        },
+      }],
+      excluded: [],
+      quality: {
+        status: "available", missing: [], reasons: [], sources: ["toss"],
+        observedAt: new Date(NOW).toISOString(),
+      },
+    });
+    const portfolio = {
+      getInstruments: vi.fn().mockResolvedValue([{
+        symbol: "AAPL", name: "Apple", market: "NASDAQ", currency: "USD", securityType: "stock",
+      }]),
+      getPortfolio: vi.fn(),
+    };
+    const subject = new ScalpingService(
+      parts.toss as never, parts.kis as never, parts.scanner as never, parts.live as never,
+      parts.repository as never, parts.rust as never, parts.ai as never,
+      portfolio as never, undefined, config(),
+    );
+
+    const output = await subject.workspace({
+      marketCountry: "US", criterion: "volume", topCount: 1, interval: "1m", layoutColumns: 1,
+      preset: "trend", scanOnly: true, includePortfolioContext: false,
+    });
+
+    expect(output.workspace.candidates).toEqual([
+      expect.objectContaining({ symbol: "AAPL", exchange: "NAS", filtered: false }),
+    ]);
+    expect(output.workspace.diagnostics).toMatchObject({
+      exchangeEligibleCandidateCount: 1,
+      exchangeMetadataFallbackCount: 1,
+    });
+    expect(portfolio.getPortfolio).not.toHaveBeenCalled();
+  });
+
+  it("does not guess a US exchange from generic metadata or overwrite a ranked exchange", async () => {
+    const parts = dependencies();
+    parts.toss.getRankings.mockResolvedValue([
+      {
+        provider: "toss", symbol: "UNKNOWN", marketCountry: "US", currency: "USD",
+        rank: 1, rankedAt: new Date(NOW).toISOString(), price: 10,
+        volume: 1_000_000, tradingAmount: 10_000_000,
+      },
+      {
+        provider: "toss", symbol: "IBM", marketCountry: "US", exchange: "NYS", currency: "USD",
+        rank: 2, rankedAt: new Date(NOW).toISOString(), price: 200,
+        volume: 1_000_000, tradingAmount: 200_000_000,
+      },
+    ]);
+    parts.toss.getPrices.mockResolvedValue([]);
+    const candidate = (symbol: string, exchange?: "NYS") => ({
+      symbol, ...(exchange ? { exchange } : {}), currency: "USD", price: 100,
+      volume: 1_000_000, tradingAmount: 100_000_000, providerRanks: { toss: 1 }, warnings: [],
+      filtered: false, filterReasons: [], quality: {
+        status: "available" as const, missing: [], reasons: [], sources: ["toss" as const],
+        observedAt: new Date(NOW).toISOString(),
+      },
+    });
+    parts.scanner.scan.mockReturnValue({
+      generatedAt: new Date(NOW).toISOString(),
+      criterion: "volume",
+      requestedTopCount: 2,
+      candidates: [candidate("UNKNOWN"), candidate("IBM", "NYS")],
+      excluded: [],
+      quality: {
+        status: "available", missing: [], reasons: [], sources: ["toss"],
+        observedAt: new Date(NOW).toISOString(),
+      },
+    });
+    const portfolio = {
+      getInstruments: vi.fn().mockResolvedValue([
+        { symbol: "UNKNOWN", name: "Unknown", market: "US", currency: "USD" },
+        { symbol: "IBM", name: "IBM", market: "NASDAQ", currency: "USD" },
+      ]),
+      getPortfolio: vi.fn(),
+    };
+    const subject = new ScalpingService(
+      parts.toss as never, parts.kis as never, parts.scanner as never, parts.live as never,
+      parts.repository as never, parts.rust as never, parts.ai as never,
+      portfolio as never, undefined, config(),
+    );
+
+    const output = await subject.workspace({
+      marketCountry: "US", criterion: "volume", topCount: 2, interval: "1m", layoutColumns: 1,
+      preset: "trend", scanOnly: true, includePortfolioContext: false,
+    });
+
+    expect(output.workspace.candidates.find(({ symbol }) => symbol === "UNKNOWN")?.exchange).toBeUndefined();
+    expect(output.workspace.candidates.find(({ symbol }) => symbol === "IBM")?.exchange).toBe("NYS");
+    expect(output.workspace.diagnostics).toMatchObject({
+      exchangeEligibleCandidateCount: 1,
+      exchangeMetadataFallbackCount: 0,
+    });
+  });
+
   it("확정 봉 뒤 포지션은 다음 유효 호가 이전 스냅샷일 때만 label 보조 입력으로 전달한다", async () => {
     const parts = dependencies();
     const lastClose = parts.series.at(-1)!.closeTime;
