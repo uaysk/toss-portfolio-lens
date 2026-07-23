@@ -126,6 +126,7 @@ describe("AI paper policy selection", () => {
     expect(one.selected[0]).toMatchObject({
       inputEndAt,
       generatedAt,
+      targetTimestamp: "2026-07-24T00:10:00.000Z",
       horizonMinutes: 5,
       medianReturn: 0.025,
       q10Return: 0.02,
@@ -191,6 +192,29 @@ describe("AI paper policy selection", () => {
     item.horizons[1]!.up_probability = 0;
     const config = { symbolCount: 1 as const, roundTripCostRate: 0.001 };
     expect(selectAiForecastSeries(forged, config)).toEqual(selectAiForecastSeries(clean, config));
+  });
+
+  it("5분 목표 시각이 생성·판단 시각을 지나면 오래된 예측을 거래 후보로 사용하지 않는다", () => {
+    const expiredAtGeneration = response([series("AAA", 0.02)]);
+    expiredAtGeneration.generated_at = "2026-07-24T00:10:00.000Z";
+    expect(selectAiForecastSeries(expiredAtGeneration, {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+    })).toMatchObject({
+      status: "unavailable",
+      reason: "stale_forecast_horizon",
+      selected: [],
+    });
+
+    expect(selectAiForecastSeries(response([series("AAA", 0.02)]), {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+      notBeforeMs: Date.parse("2026-07-24T00:10:00.000Z"),
+    })).toMatchObject({
+      status: "unavailable",
+      reason: "stale_forecast_horizon",
+      selected: [],
+    });
   });
 });
 

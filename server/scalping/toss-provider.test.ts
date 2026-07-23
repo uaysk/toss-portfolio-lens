@@ -384,6 +384,44 @@ describe("TossScalpingProvider", () => {
     expect(getReadOnlyMarketData.mock.calls.map(([, query]) => query.symbols)).toEqual(["A,B", "C,D", "E"]);
   });
 
+  it("bypasses only the requested latest candle cache entry during recovery", async () => {
+    let requestCount = 0;
+    const getReadOnlyMarketData = vi.fn(async (feature) => {
+      requestCount += 1;
+      const close = 100 + requestCount;
+      return response(feature, { result: { candles: [{
+        timestamp: "2026-07-21T09:00:00+09:00",
+        status: "final",
+        open: 100,
+        high: close,
+        low: 99,
+        close,
+        volume: 10,
+      }] } });
+    });
+    const provider = new TossScalpingProvider(
+      { getReadOnlyMarketData } as TossRawMarketClient,
+      config(),
+    );
+
+    await expect(provider.getMinuteCandles("005930", 1)).resolves.toEqual([
+      expect.objectContaining({ close: 101 }),
+    ]);
+    await expect(provider.getMinuteCandles("005930", 1)).resolves.toEqual([
+      expect.objectContaining({ close: 101 }),
+    ]);
+    await expect(provider.getMinuteCandles(
+      "005930",
+      1,
+      undefined,
+      "KR",
+      { bypassCache: true },
+    )).resolves.toEqual([
+      expect.objectContaining({ close: 102 }),
+    ]);
+    expect(getReadOnlyMarketData).toHaveBeenCalledTimes(2);
+  });
+
   it("applies configured retry policy without logging provider errors", async () => {
     const sleep = vi.fn().mockResolvedValue(undefined);
     let attempts = 0;

@@ -63,7 +63,7 @@
 - 기간 종료 때 새 체결이 없으면 임의 청산하지 않고 마지막 관측가 평가와 open-position 경고를 보존
 - 종목 선정, AI·모델 provenance, 판단, 가상 체결, 자산곡선과 진단을 전용 run/artifact로 저장
 - 새로고침 뒤 최근 실행을 복원하며 서버 재시작 중이던 forward session은 재개하지 않고 fail-closed 처리
-- 미국 당일 분봉·거래일 캘린더가 부족하면 종목 수를 임의로 채우지 않고 `future_market_schedule_unavailable` 등 공급자 원인을 반환
+- 신규 실시간 구독 직후 완전한 확정봉이 늦게 도착하면 `stale_final_bar`로 구분하고 설정된 횟수만 재동기화하며, 미국 거래일 캘린더가 확인되지 않으면 `future_market_schedule_unavailable`로 fail-closed 처리
 - 실제 주문 API dependency와 MCP 노출이 모두 없으며 투자 지시 또는 수익 보장으로 표시하지 않음
 
 ### 전략 연구와 최적화

@@ -278,6 +278,8 @@ if (config.scalping.enabled && scalpingRepository) {
         decisionIntervalMinutes: config.scalping.simulation.decisionIntervalMinutes,
         maximumActiveSessions: config.scalping.simulation.maximumActiveSessions,
         candidatePoolSize: Math.max(2, config.scalping.minimumTopCount),
+        selectionMaximumAttempts: config.scalping.simulation.selectionMaximumAttempts,
+        selectionRetryDelayMs: config.scalping.simulation.selectionRetryDelayMs,
       },
     );
   }

@@ -531,8 +531,11 @@ export class TossScalpingProvider {
     query: MarketQuery,
     group: TossRateLimitGroup,
     ttlMs: number,
+    bypassCache = false,
   ): Promise<TossRawMarketResponse> {
-    return this.cache.getOrLoad(stableKey(feature, query), ttlMs, async () => retryWithBackoff(async () => {
+    const cacheKey = stableKey(feature, query);
+    if (bypassCache) this.cache.delete(cacheKey);
+    return this.cache.getOrLoad(cacheKey, ttlMs, async () => retryWithBackoff(async () => {
       const limiter = this.limiters[group];
       await limiter.acquire();
       try {
@@ -591,6 +594,7 @@ export class TossScalpingProvider {
     count: number,
     before?: string,
     marketCountry: MarketCountry = "KR",
+    options: { bypassCache?: boolean } = {},
   ): Promise<NormalizedMinuteCandle[]> {
     if (!Number.isInteger(count) || count <= 0 || count > this.config.candlesMaximumCount) {
       throw new Error(`Candle count must be between 1 and ${this.config.candlesMaximumCount}.`);
@@ -602,7 +606,7 @@ export class TossScalpingProvider {
       count: String(count),
       adjusted: "false",
       ...(before ? { before } : {}),
-    }, "chart", this.config.cacheTtlMs.candles);
+    }, "chart", this.config.cacheTtlMs.candles, options.bypassCache === true);
     return normalizeTossMinuteCandles(response.data, symbol, marketCountry);
   }
 

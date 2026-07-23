@@ -602,9 +602,33 @@ type ConfirmedUsSessionSchedule = {
   }[];
 };
 
+type ConfirmedUsCalendarSession =
+  | { status: "closed" }
+  | { status: "open"; schedule: ConfirmedUsSessionSchedule };
+
 type ConfirmedKrCalendarSession =
   | { status: "closed" }
   | { status: "open"; minuteCloses: string[] };
+
+type FutureTimestampUnavailableCode =
+  | "future_market_schedule_unavailable"
+  | "stale_final_bar";
+
+type FutureTimestampResult =
+  | {
+      status: "available";
+      timestamps: AiForecastRequest["series"][number]["future_timestamps"];
+    }
+  | {
+      status: "unavailable";
+      code: FutureTimestampUnavailableCode;
+    };
+
+type BarLoadOptions = {
+  maximumBars?: number;
+  forceLatestRefresh?: boolean;
+  skipAutomaticRefresh?: boolean;
+};
 
 function calendarDateAfter(sessionDate: string, days: number): string | undefined {
   const epoch = Date.parse(`${sessionDate}T00:00:00.000Z`);
@@ -678,6 +702,22 @@ function confirmedUsSessionSchedule(
     return undefined;
   }
   return { windows, periods: available };
+}
+
+function confirmedUsCalendarSession(
+  calendar: TossMarketCalendarDay | undefined,
+  sessionDate: string,
+): ConfirmedUsCalendarSession | undefined {
+  if (calendar?.marketCountry !== "US" || calendar.sessionDate !== sessionDate) return undefined;
+  const periods = [
+    calendar.dayMarket,
+    calendar.preMarket,
+    calendar.regularMarket,
+    calendar.afterMarket,
+  ];
+  if (periods.every((period) => period === null)) return { status: "closed" };
+  const schedule = confirmedUsSessionSchedule(calendar, sessionDate);
+  return schedule ? { status: "open", schedule } : undefined;
 }
 
 function configuredKrSessionWindows(config: ScalpingServiceConfig): readonly MarketSessionWindow[] {
@@ -1056,13 +1096,48 @@ export class ScalpingService {
     if (!this.ai || !this.rust) {
       return { forecast: { status: "unavailable", code: !this.ai ? "ai_worker_unavailable" : "rust_worker_unavailable" }, predictions: [] };
     }
-    const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
+    const forecastHistoryLimit = this.forecastHistoryBarLimit(request.marketCountry);
+    let barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry, {
+      maximumBars: forecastHistoryLimit,
+      skipAutomaticRefresh: true,
+    });
+    const refreshCutoff = this.now();
+    const refreshSymbols = request.symbols.filter((symbol) => {
+      const latestFinal = this.instrumentSessionBars(
+        barsBySymbol.get(symbol) ?? [],
+        request.marketCountry,
+      ).bars.at(-1);
+      const nextMinute = latestFinal ? Date.parse(latestFinal.closeTime) + MINUTE_MS : Number.NaN;
+      return !Number.isFinite(nextMinute) || nextMinute <= refreshCutoff;
+    });
+    if (refreshSymbols.length) {
+      const refreshed = await this.loadBars(refreshSymbols, 1, request.marketCountry, {
+        maximumBars: forecastHistoryLimit,
+        forceLatestRefresh: true,
+      });
+      barsBySymbol = new Map(barsBySymbol);
+      for (const symbol of refreshSymbols) {
+        barsBySymbol.set(symbol, refreshed.get(symbol) ?? []);
+      }
+    }
+    // A provider's "final" flag alone does not prove that a candle has closed.
+    // Freeze one batch-wide cutoff and exclude future closes from both Rust
+    // technical analysis and the AI request.
+    const dataCutoff = this.now();
+    barsBySymbol = new Map([...barsBySymbol].map(([symbol, values]) => [
+      symbol,
+      values.filter((bar) => Date.parse(bar.closeTime) <= dataCutoff),
+    ]));
     const metadata = await this.instrumentMetadata(request.symbols);
     const analysis = await this.computeAnalysis({
       symbols: request.symbols, interval: 1, preset: "risk_management", barsBySymbol, metadata,
       holdings: new Map(), books: new Map(), trades: new Map(), responseMode: "latest_summary", includeVolumeProfile: false,
       marketCountry: request.marketCountry,
     });
+    // Capture a new cutoff after Rust. A final dispatch-wide check below also
+    // covers slow calendar calls and a minute boundary crossed while building
+    // a multi-symbol request.
+    const forecastCutoff = this.now();
     const unavailable: Array<{ symbol: string; code: string }> = [];
     const series: AiForecastRequest["series"] = [];
     const calendarByMarketDate = new Map<string, Promise<TossMarketCalendarDay | undefined>>();
@@ -1087,11 +1162,12 @@ export class ScalpingService {
       let usSchedule: ConfirmedUsSessionSchedule | undefined;
       if (request.marketCountry === "US") {
         const calendar = await loadMarketCalendar("US", finalBars.at(-1)!.sessionDate);
-        usSchedule = confirmedUsSessionSchedule(calendar, finalBars.at(-1)!.sessionDate);
-        if (!usSchedule) {
+        const confirmed = confirmedUsCalendarSession(calendar, finalBars.at(-1)!.sessionDate);
+        if (confirmed?.status !== "open") {
           unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
           continue;
         }
+        usSchedule = confirmed.schedule;
       }
       const future = await this.liveFutureTimestamps(
         finalBars.at(-1)!,
@@ -1099,21 +1175,28 @@ export class ScalpingService {
         usSchedule,
         session.windows,
         (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+        forecastCutoff,
       );
-      if (!future) {
-        unavailable.push({ symbol, code: "future_market_schedule_unavailable" });
+      if (future.status === "unavailable") {
+        unavailable.push({ symbol, code: future.code });
         continue;
       }
       series.push({
         instrument_key: symbol,
         timezone: marketTimeZone(request.marketCountry),
         input_end_at: finalBars.at(-1)!.closeTime,
-        future_timestamps: future,
+        future_timestamps: future.timestamps,
         bars: finalBars.map((bar) => this.aiBar(bar)),
         target_stop: targetStopFromAnalysis(analysis, symbol) ?? null,
       });
     }
-    if (!series.length) return {
+    const dispatchCutoff = this.now();
+    const freshSeries = series.filter((item) => {
+      if (Date.parse(item.future_timestamps[0]!) > dispatchCutoff) return true;
+      unavailable.push({ symbol: item.instrument_key, code: "stale_final_bar" });
+      return false;
+    });
+    if (!freshSeries.length) return {
       forecast: { status: "unavailable", series: unavailable },
       predictions: unavailable.map(({ symbol, code }) => ({
         symbol,
@@ -1128,7 +1211,7 @@ export class ScalpingService {
       horizons_minutes: [...SCALPING_AI_HORIZONS],
       quantiles: [...SCALPING_AI_QUANTILES],
       seed: 0,
-      series,
+      series: freshSeries,
     }, undefined, request.marketCountry);
     return {
       forecast: output.response,
@@ -1585,24 +1668,34 @@ export class ScalpingService {
     symbols: readonly string[],
     interval: ScalpingInterval,
     marketCountry: MarketCountry = "KR",
+    options: BarLoadOptions = {},
   ): Promise<Map<string, IntradayBarRecord[]>> {
-    return (await this.loadBarsWithDiagnostics(symbols, interval, marketCountry)).barsBySymbol;
+    return (await this.loadBarsWithDiagnostics(symbols, interval, marketCountry, options)).barsBySymbol;
   }
 
-  private historyBarLimit(marketCountry: MarketCountry): number {
-    return marketCountry === "US" ? this.config.usWorkspaceBarLimit : this.config.workspaceBarLimit;
+  private historyBarLimit(marketCountry: MarketCountry, maximumBars?: number): number {
+    const configured = marketCountry === "US" ? this.config.usWorkspaceBarLimit : this.config.workspaceBarLimit;
+    return maximumBars === undefined ? configured : Math.max(1, Math.min(configured, maximumBars));
+  }
+
+  private forecastHistoryBarLimit(marketCountry: MarketCountry): number {
+    if (marketCountry === "US") return this.config.forecastMaximumBars;
+    const sessionEvidenceBars = configuredKrSessionWindows(this.config)
+      .reduce((sum, window) => sum + Math.max(0, window.closeMinute - window.openMinute), 0);
+    return Math.max(this.config.forecastMaximumBars, sessionEvidenceBars);
   }
 
   private async loadBarsWithDiagnostics(
     symbols: readonly string[],
     interval: ScalpingInterval,
     marketCountry: MarketCountry = "KR",
+    options: BarLoadOptions = {},
   ): Promise<{ barsBySymbol: Map<string, IntradayBarRecord[]>; errors: string[] }> {
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
     const errors: string[] = [];
     await Promise.all(symbols.map(async (symbol) => {
       try {
-        const loaded = await this.loadBarsForSymbol(symbol, interval, marketCountry);
+        const loaded = await this.loadBarsForSymbol(symbol, interval, marketCountry, options);
         barsBySymbol.set(symbol, loaded.bars);
         errors.push(...loaded.errors);
       } catch {
@@ -1617,19 +1710,35 @@ export class ScalpingService {
     symbol: string,
     interval: ScalpingInterval,
     marketCountry: MarketCountry,
+    options: BarLoadOptions = {},
   ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
     const errors: string[] = [];
-    const historyBarLimit = this.historyBarLimit(marketCountry);
+    const historyBarLimit = this.historyBarLimit(marketCountry, options.maximumBars);
+    const queryLimit = options.maximumBars === undefined
+      ? historyBarLimit
+      : Math.min(50_000, historyBarLimit + Math.min(32, historyBarLimit));
     const sessionWindows = marketSessionWindows(
       marketCountry,
       configuredKrSessionWindows(this.config),
     );
     let oneMinute = await this.repository.listBars({
-      marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: historyBarLimit,
+      marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: queryLimit,
     });
-    const latest = oneMinute.at(-1);
-    if (!latest || this.now() - Date.parse(latest.openTime) > this.config.barRefreshAfterMs) {
-      const history = await this.fetchMinuteHistoryWithDiagnostics(symbol, oneMinute, marketCountry);
+    const latestFinal = [...oneMinute].reverse().find((bar) => (
+      bar.state === "final" && bar.quality !== "partial" && bar.quality !== "stale"
+    ));
+    if (options.forceLatestRefresh
+      || (!options.skipAutomaticRefresh && (
+        !latestFinal
+        || this.now() - Date.parse(latestFinal.closeTime) > this.config.barRefreshAfterMs
+      ))) {
+      const history = await this.fetchMinuteHistoryWithDiagnostics(
+        symbol,
+        oneMinute,
+        marketCountry,
+        historyBarLimit,
+        options.forceLatestRefresh === true,
+      );
       errors.push(...history.errors);
       if (history.bars.length) {
         const sessions = groupBarsBySession(history.bars);
@@ -1648,7 +1757,7 @@ export class ScalpingService {
         ];
         await this.repository.putBars(aggregated);
         oneMinute = await this.repository.listBars({
-          marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: historyBarLimit,
+          marketCountry, symbol, intervalMinutes: 1, includeForming: true, limit: queryLimit,
         });
       }
     }
@@ -1700,18 +1809,25 @@ export class ScalpingService {
     symbol: string,
     existing: readonly IntradayBarRecord[],
     marketCountry: MarketCountry = "KR",
+    maximumBars?: number,
   ): Promise<IntradayBarRecord[]> {
-    return (await this.fetchMinuteHistoryWithDiagnostics(symbol, existing, marketCountry)).bars;
+    return (await this.fetchMinuteHistoryWithDiagnostics(
+      symbol,
+      existing,
+      marketCountry,
+      maximumBars,
+    )).bars;
   }
 
   private minuteCoverageIsSufficient(
     bars: readonly IntradayBarRecord[],
     marketCountry: MarketCountry,
+    maximumBars?: number,
   ): boolean {
     // Before the raw window reaches the target it cannot possibly contain the
     // required number of canonical one-minute bars. Avoid repeatedly sorting
     // and timezone-normalizing the growing history after every provider page.
-    const historyBarLimit = this.historyBarLimit(marketCountry);
+    const historyBarLimit = this.historyBarLimit(marketCountry, maximumBars);
     if (bars.length < historyBarLimit) return false;
     const sessionWindows = marketSessionWindows(
       marketCountry,
@@ -1742,8 +1858,10 @@ export class ScalpingService {
     symbol: string,
     existing: readonly IntradayBarRecord[],
     marketCountry: MarketCountry = "KR",
+    maximumBars?: number,
+    bypassLatestCache = false,
   ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
-    const historyBarLimit = this.historyBarLimit(marketCountry);
+    const historyBarLimit = this.historyBarLimit(marketCountry, maximumBars);
     const sessionWindows = marketSessionWindows(
       marketCountry,
       configuredKrSessionWindows(this.config),
@@ -1760,9 +1878,18 @@ export class ScalpingService {
     const seenProviderTimestamps = new Set<number>();
     const errors: string[] = [];
     let before: string | undefined;
+    const pageSize = Math.min(this.config.candlePageSize, historyBarLimit);
     while (fetched.size < historyBarLimit) {
       const page = await this.safe(
-        () => this.toss.getMinuteCandles(symbol, this.config.candlePageSize, before, marketCountry),
+        () => bypassLatestCache && before === undefined
+          ? this.toss.getMinuteCandles(
+              symbol,
+              pageSize,
+              before,
+              marketCountry,
+              { bypassCache: true },
+            )
+          : this.toss.getMinuteCandles(symbol, pageSize, before, marketCountry),
         `toss_candles_unavailable:${symbol}`,
       );
       if (page.error) errors.push(page.error);
@@ -1782,7 +1909,7 @@ export class ScalpingService {
       if (!oldest || providerTimestampsAdded === 0) break;
       before = new Date(Date.parse(oldest) - 1).toISOString();
       if (isSeededWorkspace) break;
-      if (this.minuteCoverageIsSufficient([...known.values()], marketCountry)) break;
+      if (this.minuteCoverageIsSufficient([...known.values()], marketCountry, historyBarLimit)) break;
       if (fetched.size >= historyBarLimit) break;
     }
     return {
@@ -2143,15 +2270,24 @@ export class ScalpingService {
     confirmedUsSchedule?: ConfirmedUsSessionSchedule,
     sessionWindows?: readonly MarketSessionWindow[],
     loadMarketCalendar?: (sessionDate: string) => Promise<TossMarketCalendarDay | undefined>,
-  ): Promise<AiForecastRequest["series"][number]["future_timestamps"] | undefined> {
+    notBefore: number = this.now(),
+  ): Promise<FutureTimestampResult> {
+    const scheduleUnavailable = (): FutureTimestampResult => ({
+      status: "unavailable",
+      code: "future_market_schedule_unavailable",
+    });
+    const staleFinalBar = (): FutureTimestampResult => ({
+      status: "unavailable",
+      code: "stale_final_bar",
+    });
     if (marketCountry === "US") {
-      if (!confirmedUsSchedule || !loadMarketCalendar) return undefined;
+      if (!confirmedUsSchedule || !loadMarketCalendar) return scheduleUnavailable();
       if (!sessionWindowForBarClose(
         last.closeTime,
         "US",
         confirmedUsSchedule.windows,
         last.sessionDate,
-      )) return undefined;
+      )) return scheduleUnavailable();
       const output: string[] = [];
       const appendSchedule = (schedule: ConfirmedUsSessionSchedule, after: number) => {
         for (const period of schedule.periods) {
@@ -2166,24 +2302,29 @@ export class ScalpingService {
         }
       };
       const inputEnd = Date.parse(last.closeTime);
-      if (!Number.isFinite(inputEnd)) return undefined;
+      if (!Number.isFinite(inputEnd)) return scheduleUnavailable();
       appendSchedule(confirmedUsSchedule, inputEnd);
       for (let days = 1; output.length < 60 && days <= MARKET_CALENDAR_LOOKAHEAD_DAYS; days += 1) {
         const sessionDate = calendarDateAfter(last.sessionDate, days);
-        if (!sessionDate) return undefined;
-        const schedule = confirmedUsSessionSchedule(await loadMarketCalendar(sessionDate), sessionDate);
-        if (!schedule) continue;
-        appendSchedule(schedule, inputEnd);
+        if (!sessionDate) return scheduleUnavailable();
+        const confirmed = confirmedUsCalendarSession(await loadMarketCalendar(sessionDate), sessionDate);
+        if (!confirmed) return scheduleUnavailable();
+        if (confirmed.status === "closed") continue;
+        appendSchedule(confirmed.schedule, inputEnd);
       }
-      if (output.length !== 60 || Date.parse(output[0]!) <= this.now()) return undefined;
-      return output as AiForecastRequest["series"][number]["future_timestamps"];
+      if (output.length !== 60) return scheduleUnavailable();
+      if (Date.parse(output[0]!) <= notBefore) return staleFinalBar();
+      return {
+        status: "available",
+        timestamps: output as AiForecastRequest["series"][number]["future_timestamps"],
+      };
     }
     const windows = sessionWindows ?? this.evidenceBasedSessionWindows([last], marketCountry);
     const local = marketMinute(last.closeTime, marketCountry);
     const currentWindowIndex = windows.findIndex((window) => (
       local.minute > window.openMinute && local.minute <= window.closeMinute
     ));
-    if (local.date !== last.sessionDate || currentWindowIndex < 0) return undefined;
+    if (local.date !== last.sessionDate || currentWindowIndex < 0) return scheduleUnavailable();
     const output: string[] = [];
     let windowIndex = currentWindowIndex;
     let minute = local.minute;
@@ -2200,18 +2341,22 @@ export class ScalpingService {
       const deltaMinutes = minute - local.minute;
       output.push(new Date(Date.parse(last.closeTime) + deltaMinutes * MINUTE_MS).toISOString());
     }
-    if (output[0] && Date.parse(output[0]) <= this.now()) return undefined;
-    if (output.length < 60 && !loadMarketCalendar) return undefined;
+    if (output[0] && Date.parse(output[0]) <= notBefore) return staleFinalBar();
+    if (output.length < 60 && !loadMarketCalendar) return scheduleUnavailable();
     for (let days = 1; output.length < 60 && days <= MARKET_CALENDAR_LOOKAHEAD_DAYS; days += 1) {
       const sessionDate = calendarDateAfter(last.sessionDate, days);
-      if (!sessionDate) return undefined;
+      if (!sessionDate) return scheduleUnavailable();
       const confirmed = confirmedKrCalendarSession(await loadMarketCalendar!(sessionDate), sessionDate);
-      if (!confirmed) return undefined;
+      if (!confirmed) return scheduleUnavailable();
       if (confirmed.status === "closed") continue;
       output.push(...confirmed.minuteCloses.slice(0, 60 - output.length));
     }
-    if (output.length !== 60 || Date.parse(output[0]!) <= this.now()) return undefined;
-    return output as AiForecastRequest["series"][number]["future_timestamps"];
+    if (output.length !== 60) return scheduleUnavailable();
+    if (Date.parse(output[0]!) <= notBefore) return staleFinalBar();
+    return {
+      status: "available",
+      timestamps: output as AiForecastRequest["series"][number]["future_timestamps"],
+    };
   }
 
   private async safe<T>(task: () => Promise<T>, code: string): Promise<{ value?: T; error?: string }> {

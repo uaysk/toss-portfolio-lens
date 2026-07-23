@@ -775,7 +775,8 @@ describe("ScalpingService", () => {
     parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => (
       fullUsCalendar(sessionDate)
     ));
-    await service(parts).forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+    await service(parts, { now: () => Date.parse("2026-07-21T16:50:30.000Z") })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
     const rustPayload = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
     expect(rustPayload.scalping_analysis.instruments[0].session_windows).toEqual([
       { kind: "day_market", open_minute: 1_200, close_minute: 1_440, local_date_offset: -1 },
@@ -835,6 +836,56 @@ describe("ScalpingService", () => {
     expect(request.series[0].future_timestamps[0]).toBe("2026-07-22T00:01:00.000Z");
     expect(request.series[0].future_timestamps.at(-1)).toBe("2026-07-22T01:00:00.000Z");
     expect(request.series[0].future_timestamps).not.toContain("2026-07-21T23:51:00.000Z");
+  });
+
+  it("skips only an explicitly closed US calendar day when extending a forecast", async () => {
+    const parts = dependencies();
+    parts.repository.listBars.mockResolvedValue(
+      usBarsFromClose("2026-07-21T23:31:00.000Z", 20, "2026-07-21"),
+    );
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => (
+      sessionDate === "2026-07-22"
+        ? {
+            marketCountry: "US" as const,
+            sessionDate,
+            dayMarket: null,
+            preMarket: null,
+            regularMarket: null,
+            afterMarket: null,
+          }
+        : fullUsCalendar(sessionDate, sessionDate === "2026-07-21" ? 23 * 60 + 50 : 24 * 60)
+    ));
+
+    await service(parts, { now: () => Date.parse("2026-07-21T23:50:30.000Z") })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+
+    expect(parts.ai.forecast).toHaveBeenCalledTimes(1);
+    expect(parts.toss.getMarketCalendar.mock.calls.map(([, date]) => date)).toEqual([
+      "2026-07-21", "2026-07-21", "2026-07-22", "2026-07-23",
+    ]);
+    const request = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(request.series[0].future_timestamps[0]).toBe("2026-07-23T00:01:00.000Z");
+  });
+
+  it("fails closed instead of treating a missing US calendar response as a holiday", async () => {
+    const parts = dependencies();
+    parts.repository.listBars.mockResolvedValue(
+      usBarsFromClose("2026-07-21T23:31:00.000Z", 20, "2026-07-21"),
+    );
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => {
+      if (sessionDate === "2026-07-22") throw new Error("calendar offline");
+      return fullUsCalendar(sessionDate, 23 * 60 + 50);
+    });
+
+    const output = await service(parts, { now: () => Date.parse("2026-07-21T23:50:30.000Z") })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+
+    expect(parts.ai.forecast).not.toHaveBeenCalled();
+    expect(output.predictions[0]).toMatchObject({
+      symbol: "AAPL",
+      unavailable: { code: "future_market_schedule_unavailable" },
+    });
+    expect(parts.toss.getMarketCalendar).toHaveBeenCalledTimes(3);
   });
 
   it("uses a confirmed US early-close window and limits Rust input to the latest session", async () => {
@@ -1018,7 +1069,8 @@ describe("ScalpingService", () => {
       marketCountry: "US", sessionDate: "2026-07-21",
       regularMarket: { startAt: "2026-07-21T13:30:00.000Z", endAt: "2026-07-21T17:00:00.000Z" },
     });
-    const output = await service(parts).forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+    const output = await service(parts, { now: () => Date.parse("2026-07-21T16:50:30.000Z") })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
     expect(parts.ai.forecast).not.toHaveBeenCalled();
     expect(output).toMatchObject({
       forecast: { status: "unavailable" },
@@ -1032,7 +1084,8 @@ describe("ScalpingService", () => {
     parts.toss.getMarketCalendar.mockResolvedValue({
       marketCountry: "US", sessionDate: "2026-07-21", regularMarket: null,
     });
-    const output = await service(parts).forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+    const output = await service(parts, { now: () => Date.parse("2026-07-21T16:50:30.000Z") })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
     expect(parts.ai.forecast).not.toHaveBeenCalled();
     expect(output.predictions[0]).toMatchObject({
       symbol: "AAPL", status: "unavailable", unavailable: { code: "future_market_schedule_unavailable" },
@@ -1203,6 +1256,80 @@ describe("ScalpingService", () => {
     expect(Date.parse(request.series[0].future_timestamps[0])).toBeGreaterThan(Date.parse(request.series[0].input_end_at));
     expect(request.series[0].target_stop).toEqual({ side: "long", stop_price: 190, target_price: 220 });
     expect(output.forecast).toEqual({ status: "available" });
+  });
+
+  it("excludes a provider-labeled final candle whose close is still in the future", async () => {
+    const parts = dependencies();
+    const last = parts.series.at(-1)!;
+    const unclosedFinal = {
+      ...last,
+      openTime: last.closeTime,
+      closeTime: new Date(Date.parse(last.closeTime) + 60_000).toISOString(),
+      open: last.close,
+      high: last.close + 2,
+      low: last.close - 1,
+      close: last.close + 1,
+      state: "final" as const,
+    };
+    parts.repository.listBars.mockResolvedValue([...parts.series, unclosedFinal]);
+
+    await service(parts).forecast({ symbols: ["005930"], interval: "1m" });
+
+    const rustRequest = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    const aiRequest = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(rustRequest.scalping_analysis.instruments[0].bars.at(-1).timestamp)
+      .toBe(marketLocalTimestamp(last.closeTime, "KR"));
+    expect(aiRequest.series[0].input_end_at).toBe(last.closeTime);
+    expect(aiRequest.series[0].bars.some(
+      ({ timestamp }: { timestamp: string }) => timestamp === unclosedFinal.closeTime,
+    )).toBe(false);
+  });
+
+  it("keeps full KR session evidence while bounding the model context", async () => {
+    const parts = dependencies();
+    parts.repository.listBars.mockResolvedValue([
+      ...krBarsFromClose("2026-07-21T08:01:00+09:00", 1),
+      ...krBarsFromClose("2026-07-21T13:51:00+09:00", 100),
+    ]);
+
+    await service(parts, {
+      forecastMaximumBars: 100,
+      now: () => Date.parse("2026-07-21T15:30:30+09:00"),
+    }).forecast({ marketCountry: "KR", symbols: ["005930"], interval: "1m" });
+
+    const rustRequest = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    expect(rustRequest.scalping_analysis.instruments[0].session_windows).toEqual([
+      { kind: "pre_market", open_minute: 480, close_minute: 530, local_date_offset: 0 },
+      { kind: "regular_market", open_minute: 540, close_minute: 930, local_date_offset: 0 },
+      { kind: "after_market", open_minute: 940, close_minute: 1_200, local_date_offset: 0 },
+    ]);
+    const aiRequest = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(aiRequest.series[0].bars).toHaveLength(100);
+    expect(aiRequest.series[0].future_timestamps[0]).toBe("2026-07-21T06:41:00.000Z");
+  });
+
+  it("rechecks the batch immediately before AI dispatch after a slow calendar call", async () => {
+    const parts = dependencies();
+    let now = Date.parse("2026-07-21T13:50:30.000Z");
+    let calendarCalls = 0;
+    parts.repository.listBars.mockResolvedValue(
+      usBarsFromClose("2026-07-21T13:31:00.000Z", 20, "2026-07-21"),
+    );
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => {
+      calendarCalls += 1;
+      if (calendarCalls >= 2) now = Date.parse("2026-07-21T13:51:30.000Z");
+      return fullUsCalendar(sessionDate);
+    });
+
+    const output = await service(parts, { now: () => now })
+      .forecast({ marketCountry: "US", symbols: ["AAPL"], interval: "1m" });
+
+    expect(parts.rust.compute).toHaveBeenCalledTimes(1);
+    expect(parts.ai.forecast).not.toHaveBeenCalled();
+    expect(output.predictions[0]).toMatchObject({
+      symbol: "AAPL",
+      unavailable: { code: "stale_final_bar" },
+    });
   });
 
   it("uses finalized NXT after-market bars for Rust analysis and live AI forecasts", async () => {
@@ -1474,8 +1601,52 @@ describe("ScalpingService", () => {
     const output = await service(parts).forecast({ symbols: ["005930"], interval: "1m" });
     expect(parts.ai.forecast).not.toHaveBeenCalled();
     expect(output.predictions[0]).toMatchObject({
-      symbol: "005930", unavailable: { code: "future_market_schedule_unavailable" },
+      symbol: "005930", unavailable: { code: "stale_final_bar" },
     });
+  });
+
+  it("re-reads a stale forecast batch after REST recovery and bounds cold history to the AI context", async () => {
+    const parts = dependencies();
+    const stale = parts.series.slice(0, -5);
+    parts.repository.listBars
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValue(parts.series);
+    parts.toss.getMinuteCandles.mockResolvedValue(parts.series.slice(-20).map((bar) => ({
+      provider: "toss" as const,
+      symbol: bar.symbol,
+      timestamp: bar.openTime,
+      sessionDate: bar.sessionDate,
+      interval: "1m" as const,
+      status: "final" as const,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume,
+      tradingAmount: bar.turnover,
+    })));
+
+    await service(parts, {
+      barRefreshAfterMs: 3_600_000,
+      workspaceBarLimit: 500,
+      forecastMaximumBars: 100,
+    }).forecast({ symbols: ["005930"], interval: "1m" });
+
+    expect(parts.repository.listBars.mock.calls.every(([request]) => request.limit === 532)).toBe(true);
+    expect(parts.toss.getMinuteCandles).toHaveBeenCalledWith(
+      "005930",
+      200,
+      undefined,
+      "KR",
+      { bypassCache: true },
+    );
+    expect(parts.ai.forecast).toHaveBeenCalledTimes(1);
+    const request = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(request.series[0].bars).toHaveLength(100);
+    expect(request.series[0].input_end_at).toBe(parts.series.at(-1)!.closeTime);
+    expect(Date.parse(request.series[0].future_timestamps[0]))
+      .toBeGreaterThan(NOW);
   });
 
   it("constructs chronological rolling origins from observed future bar timestamps and forwards all costs", async () => {

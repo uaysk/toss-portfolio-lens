@@ -86,6 +86,24 @@ function forecast(loaded = true) {
   };
 }
 
+function staleForecast() {
+  return {
+    forecast: {
+      status: "unavailable",
+      series: [
+        { symbol: "AAA", code: "stale_final_bar" },
+        { symbol: "BBB", code: "stale_final_bar" },
+        { symbol: "CCC", code: "stale_final_bar" },
+      ],
+    },
+    predictions: ["AAA", "BBB", "CCC"].map((symbol) => ({
+      symbol,
+      status: "unavailable",
+      unavailable: { code: "stale_final_bar", message: "stale_final_bar" },
+    })),
+  };
+}
+
 function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
   return {
     marketCountry: "KR",
@@ -197,6 +215,8 @@ function harness(options: {
   createGate?: Promise<void>;
   now?: () => number;
   releaseFailureCalls?: number[];
+  selectionMaximumAttempts?: number;
+  selectionRetryDelayMs?: number;
 } = {}) {
   let currentRun: PortfolioRunRecord | undefined;
   let liveListener: ((event: ScalpingLiveEvent) => void) | undefined;
@@ -363,6 +383,8 @@ function harness(options: {
       decisionIntervalMinutes: 1,
       maximumActiveSessions: 2,
       candidatePoolSize: 3,
+      selectionMaximumAttempts: options.selectionMaximumAttempts ?? 3,
+      selectionRetryDelayMs: options.selectionRetryDelayMs ?? 15_000,
       progressUpdateMs: 60_000,
       now: options.now ?? (() => Date.parse(CREATED_AT)),
     },
@@ -461,6 +483,199 @@ describe("AI trading simulation service", () => {
       positionContext: { mode: "isolated", positions: [] },
     });
 
+    await setup.service.cancel(started.runId, "owner");
+  });
+
+  it("retries only transient stale-final-bar selection and succeeds with the next complete batch", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 2,
+      selectionRetryDelayMs: 1,
+    });
+    setup.market.forecast
+      .mockResolvedValueOnce(staleForecast() as never)
+      .mockResolvedValueOnce(forecast() as never);
+
+    const started = await setup.service.start(request(1), "owner");
+    const running = await waitForPhase(setup, started.runId, "running") as {
+      snapshot: { selected: Array<{ symbol: string }>; warnings: string[] };
+    };
+
+    expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+    expect(running.snapshot.selected).toEqual([
+      expect.objectContaining({ symbol: "BBB" }),
+    ]);
+    expect(running.snapshot.warnings).toContain(
+      "최신 완전 확정봉을 기다린 뒤 AI 종목 선정을 재시도합니다 (1/2).",
+    );
+    await setup.service.cancel(started.runId, "owner");
+  });
+
+  it("cancels a selection retry immediately, clears its timer, and permits the same owner to restart", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 3,
+      selectionRetryDelayMs: 60_000,
+    });
+    setup.market.forecast
+      .mockResolvedValueOnce(staleForecast() as never)
+      .mockResolvedValue(forecast() as never);
+
+    const started = await setup.service.start(request(1), "owner");
+    await eventually(
+      () => setup.service.get(started.runId, "owner"),
+      (value) => (value as {
+        snapshot?: { warnings?: string[] };
+      } | undefined)?.snapshot?.warnings?.some((warning) => warning.includes("재시도합니다")) === true,
+      "pending selection retry",
+    );
+    const session = (setup.service as unknown as {
+      active: Map<string, {
+        selectionRetryTimer?: NodeJS.Timeout;
+        selectionRetryResolve?: () => void;
+      }>;
+    }).active.get(started.runId);
+    expect(session?.selectionRetryTimer).toBeDefined();
+    expect(session?.selectionRetryResolve).toBeTypeOf("function");
+
+    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+      run: { status: string };
+      snapshot: { phase: string };
+    };
+    expect(cancelled).toMatchObject({
+      run: { status: "cancelled" },
+      snapshot: { phase: "cancelled" },
+    });
+    expect(session?.selectionRetryTimer).toBeUndefined();
+    expect(session?.selectionRetryResolve).toBeUndefined();
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+    expect(setup.release).toHaveBeenCalledTimes(1);
+    expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+
+    const restarted = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, restarted.runId, "running");
+    expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+    expect(setup.runService.create).toHaveBeenCalledTimes(2);
+    await setup.service.cancel(restarted.runId, "owner");
+  });
+
+  it("keeps cancellation terminal when an in-flight selection forecast rejects afterward", async () => {
+    const setup = harness();
+    const forecastGate = deferred<ReturnType<typeof forecast>>();
+    setup.market.forecast.mockImplementationOnce(() => forecastGate.promise);
+
+    const started = await setup.service.start(request(1), "owner");
+    await eventually(
+      () => setup.market.forecast.mock.calls.length,
+      (count) => count === 1,
+      "in-flight selection forecast",
+    );
+    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+      run: { status: string };
+      snapshot: { phase: string };
+    };
+    forecastGate.reject(new Error("late forecast failure"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(cancelled).toMatchObject({
+      run: { status: "cancelled" },
+      snapshot: { phase: "cancelled" },
+    });
+    expect(setup.run()?.status).toBe("cancelled");
+    expect(setup.repository.cancel).toHaveBeenCalledTimes(1);
+    expect(setup.repository.fail).not.toHaveBeenCalled();
+    expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+  });
+
+  it("fails after the configured maximum number of all-stale selection attempts", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 3,
+      selectionRetryDelayMs: 1,
+    });
+    setup.market.forecast.mockResolvedValue(staleForecast() as never);
+
+    await setup.service.start(request(1), "owner");
+    await eventually(
+      setup.run,
+      (run) => run?.status === "failed",
+      "maximum-attempt stale selection failure",
+    );
+    await eventually(
+      () => setup.service.status(),
+      (status) => status.activeSessions === 0,
+      "stale selection active-session cleanup",
+    );
+
+    expect(setup.market.forecast).toHaveBeenCalledTimes(3);
+    expect(setup.run()?.warnings).toEqual(expect.arrayContaining([
+      "최신 완전 확정봉을 기다린 뒤 AI 종목 선정을 재시도합니다 (1/3).",
+      "최신 완전 확정봉을 기다린 뒤 AI 종목 선정을 재시도합니다 (2/3).",
+      expect.stringContaining("AI 종목 선정이 unavailable입니다"),
+    ]));
+    expect(setup.release).toHaveBeenCalledTimes(1);
+    expect(setup.repository.fail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a model-unavailable selection even when another candidate is stale", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 3,
+      selectionRetryDelayMs: 1,
+    });
+    const mixed = {
+      ...forecast(false),
+      predictions: [{
+        symbol: "CCC",
+        status: "unavailable",
+        unavailable: { code: "stale_final_bar", message: "stale_final_bar" },
+      }],
+    };
+    setup.market.forecast.mockResolvedValue(mixed as never);
+
+    await setup.service.start(request(1), "owner");
+    await eventually(
+      setup.run,
+      (run) => run?.status === "failed",
+      "hard model-unavailable selection failure",
+    );
+    await eventually(
+      () => setup.service.status(),
+      (status) => status.activeSessions === 0,
+      "model-unavailable active-session cleanup",
+    );
+
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+    expect(setup.run()?.error).toMatchObject({
+      code: "AI_SIMULATION_FAILED",
+      message: expect.stringContaining("model_unavailable"),
+    });
+    expect(setup.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists selection retry configuration in the run and diagnostics provenance", async () => {
+    const setup = harness({
+      selectionMaximumAttempts: 4,
+      selectionRetryDelayMs: 1_234,
+    });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const diagnostics = await eventually(
+      () => setup.latestArtifact("simulation-diagnostics"),
+      (artifact) => artifact !== undefined,
+      "simulation diagnostics provenance",
+    );
+
+    expect(setup.run()?.input).toMatchObject({
+      selection_maximum_attempts: 4,
+      selection_retry_delay_ms: 1_234,
+    });
+    expect(diagnostics?.content).toMatchObject({
+      selection_maximum_attempts: 4,
+      selection_retry_delay_ms: 1_234,
+    });
+    expect(setup.service.status()).toMatchObject({
+      limits: {
+        selectionMaximumAttempts: 4,
+        selectionRetryDelayMs: 1_234,
+      },
+    });
     await setup.service.cancel(started.runId, "owner");
   });
 

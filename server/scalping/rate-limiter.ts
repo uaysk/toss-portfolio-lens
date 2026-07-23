@@ -255,6 +255,10 @@ export class TtlCache<K, V> {
     }
   }
 
+  delete(key: K): void {
+    this.values.delete(key);
+  }
+
   async getOrLoad(key: K, ttlMs: number, loader: () => Promise<V>): Promise<V> {
     const cached = this.get(key);
     if (cached !== undefined) return cached;

@@ -25,6 +25,7 @@ export type AiPaperForecastCandidate = {
   symbol: string;
   inputEndAt: string;
   generatedAt: string;
+  targetTimestamp: string;
   horizonMinutes: typeof AI_PAPER_FORECAST_HORIZON_MINUTES;
   medianReturn: number;
   q10Return: number;
@@ -43,7 +44,11 @@ export type AiPaperSelection = {
   generatedAt?: string;
   model?: AiPaperModelProvenance;
   selected: AiPaperForecastCandidate[];
-  reason?: "invalid_forecast_response" | "model_unavailable" | "insufficient_available_forecasts";
+  reason?:
+    | "invalid_forecast_response"
+    | "model_unavailable"
+    | "insufficient_available_forecasts"
+    | "stale_forecast_horizon";
 };
 
 export type PaperTechnicalState = "watch" | "entry_candidate" | "hold" | "exit_candidate";
@@ -243,6 +248,7 @@ function parseCandidate(
   generatedAt: string,
   model: AiPaperModelProvenance,
   roundTripCostRate: number,
+  notBeforeMs: number,
 ): AiPaperForecastCandidate | undefined {
   const source = record(value);
   const symbol = nonemptyString(source?.instrument_key, 128);
@@ -252,9 +258,15 @@ function parseCandidate(
   const fiveMinute = source.horizons.filter((item) => record(item)?.horizon_minutes === 5);
   if (fiveMinute.length !== 1) return undefined;
   const horizon = record(fiveMinute[0]);
+  const targetTimestamp = isoTimestamp(horizon?.target_timestamp);
   const quantiles = parseQuantiles(horizon?.return_quantiles);
   const upProbability = finite(horizon?.up_probability);
-  if (!quantiles || upProbability === undefined || upProbability < 0 || upProbability > 1) return undefined;
+  if (!targetTimestamp
+    || Date.parse(targetTimestamp) <= Math.max(Date.parse(generatedAt), notBeforeMs)
+    || !quantiles
+    || upProbability === undefined
+    || upProbability < 0
+    || upProbability > 1) return undefined;
   const score = quantiles.median
     - AI_PAPER_RISK_PENALTY * (quantiles.q90 - quantiles.q10)
     - roundTripCostRate;
@@ -263,6 +275,7 @@ function parseCandidate(
     symbol,
     inputEndAt,
     generatedAt,
+    targetTimestamp,
     horizonMinutes: AI_PAPER_FORECAST_HORIZON_MINUTES,
     medianReturn: quantiles.median,
     q10Return: quantiles.q10,
@@ -276,12 +289,15 @@ function parseCandidate(
 
 export function selectAiForecastSeries(
   input: unknown,
-  config: { symbolCount: 1 | 2; roundTripCostRate: number },
+  config: { symbolCount: 1 | 2; roundTripCostRate: number; notBeforeMs?: number },
 ): AiPaperSelection {
   if (config.symbolCount !== 1 && config.symbolCount !== 2) {
     throw new RangeError("symbolCount must be exactly 1 or 2.");
   }
   const roundTripCostRate = validatedRoundTripCostRate(config.roundTripCostRate);
+  if (config.notBeforeMs !== undefined && !Number.isFinite(config.notBeforeMs)) {
+    throw new RangeError("notBeforeMs must be a finite epoch timestamp.");
+  }
   const response = record(input);
   const model = parseModel(response?.model);
   const generatedAt = isoTimestamp(response?.generated_at);
@@ -304,8 +320,23 @@ export function selectAiForecastSeries(
       reason: "model_unavailable",
     };
   }
+  const notBeforeMs = config.notBeforeMs ?? Date.parse(generatedAt);
+  const freshnessCutoff = Math.max(Date.parse(generatedAt), notBeforeMs);
+  let staleForecastCount = 0;
   const parsed = response.series
-    .map((series) => parseCandidate(series, generatedAt, model, roundTripCostRate))
+    .map((series) => {
+      const source = record(series);
+      const horizon = Array.isArray(source?.horizons)
+        ? source.horizons.find((item) => record(item)?.horizon_minutes === 5)
+        : undefined;
+      const targetTimestamp = isoTimestamp(record(horizon)?.target_timestamp);
+      if (source?.status === "available"
+        && targetTimestamp
+        && Date.parse(targetTimestamp) <= freshnessCutoff) {
+        staleForecastCount += 1;
+      }
+      return parseCandidate(series, generatedAt, model, roundTripCostRate, notBeforeMs);
+    })
     .filter((candidate): candidate is AiPaperForecastCandidate => candidate !== undefined);
   const duplicateSymbols = new Set<string>();
   const seen = new Set<string>();
@@ -323,7 +354,9 @@ export function selectAiForecastSeries(
       availableCandidateCount: candidates.length,
       generatedAt,
       model,
-      reason: "insufficient_available_forecasts",
+      reason: staleForecastCount > 0
+        ? "stale_forecast_horizon"
+        : "insufficient_available_forecasts",
     };
   }
   return {

@@ -65,7 +65,22 @@ function forecastUnavailableCodes(value: unknown): string[] {
     const symbol = nonempty(source?.symbol, 32);
     const code = nonempty(source?.code, 128) ?? nonempty(unavailable?.code, 128);
     return code ? [`${symbol ? `${symbol}:` : ""}${code}`] : [];
-  }))).slice(0, 20);
+  })));
+}
+
+function isRetryableStaleness(value: string): boolean {
+  return ["stale_final_bar", "stale_forecast_horizon"].includes(value.split(":").at(-1) ?? "");
+}
+
+function canRetryStaleSelection(
+  selection: AiPaperSelection,
+  values: readonly string[],
+): boolean {
+  if (selection.reason === "stale_forecast_horizon") return true;
+  return (selection.reason === "insufficient_available_forecasts"
+      || selection.reason === "invalid_forecast_response")
+    && values.length > 0
+    && values.every(isRetryableStaleness);
 }
 
 function roundTripCostRate(costs: SimulationCosts): number {
@@ -192,6 +207,8 @@ export type AiTradingSimulationConfig = {
   decisionIntervalMinutes: number;
   maximumActiveSessions: number;
   candidatePoolSize: number;
+  selectionMaximumAttempts: number;
+  selectionRetryDelayMs: number;
   progressUpdateMs?: number;
   now?: () => number;
 };
@@ -263,6 +280,8 @@ type ActiveSession = {
   equity: EquityPoint[];
   warnings: string[];
   release?: () => void;
+  selectionRetryTimer?: NodeJS.Timeout;
+  selectionRetryResolve?: () => void;
   endTimer?: NodeJS.Timeout;
   progressTimer?: NodeJS.Timeout;
   analysisRunning: boolean;
@@ -411,6 +430,8 @@ export class AiTradingSimulationService {
   private readonly startTasksByOwner = new Map<string, Promise<unknown>>();
   private readonly now: () => number;
   private readonly progressUpdateMs: number;
+  private readonly selectionMaximumAttempts: number;
+  private readonly selectionRetryDelayMs: number;
   private readonly removeLiveListener: () => void;
   private closed = false;
 
@@ -430,8 +451,18 @@ export class AiTradingSimulationService {
     }
     this.now = config.now ?? Date.now;
     this.progressUpdateMs = config.progressUpdateMs ?? 5_000;
+    this.selectionMaximumAttempts = config.selectionMaximumAttempts;
+    this.selectionRetryDelayMs = config.selectionRetryDelayMs;
     if (!Number.isInteger(this.progressUpdateMs) || this.progressUpdateMs < 100 || this.progressUpdateMs > 60_000) {
       throw new Error("AI simulation progress interval must be in 100..=60000ms.");
+    }
+    if (!Number.isInteger(this.selectionMaximumAttempts)
+      || this.selectionMaximumAttempts < 1
+      || this.selectionMaximumAttempts > 10
+      || !Number.isInteger(this.selectionRetryDelayMs)
+      || this.selectionRetryDelayMs < 1
+      || this.selectionRetryDelayMs > 120_000) {
+      throw new Error("AI simulation selection retry configuration is invalid.");
     }
     this.removeLiveListener = live.onEvent((event) => {
       void this.handleLiveEvent(event).catch((error) => {
@@ -453,6 +484,8 @@ export class AiTradingSimulationService {
         selectedSymbolCount: [1, 2],
         candidatePoolSize: this.config.candidatePoolSize,
         maximumActiveSessions: this.config.maximumActiveSessions,
+        selectionMaximumAttempts: this.selectionMaximumAttempts,
+        selectionRetryDelayMs: this.selectionRetryDelayMs,
       },
       providers: provider?.providers,
       capabilities: {
@@ -527,6 +560,8 @@ export class AiTradingSimulationService {
       costs: input.costs,
       candidate_pool_size: this.config.candidatePoolSize,
       decision_interval_minutes: this.config.decisionIntervalMinutes,
+      selection_maximum_attempts: this.selectionMaximumAttempts,
+      selection_retry_delay_ms: this.selectionRetryDelayMs,
       session_nonce: createdAt,
       real_order_api: false,
       mcp: false,
@@ -723,24 +758,43 @@ export class AiTradingSimulationService {
       return;
     }
     session.release = releaseCandidates;
-    await this.live.waitForIdle();
-    if (session.phase !== "selecting") return;
-    const forecastResult = await this.market.forecast({
-      marketCountry: session.request.marketCountry,
-      symbols: candidateSymbols,
-      interval: "1m",
-    });
-    if (session.phase !== "selecting") return;
-    const selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
-      symbolCount: session.request.symbolCount,
-      roundTripCostRate: roundTripCostRate(session.request.costs),
-    });
-    if (selection.status !== "available") {
+    let selection: AiPaperSelection | undefined;
+    for (let attempt = 1; attempt <= this.selectionMaximumAttempts; attempt += 1) {
+      await this.live.waitForIdle();
+      if (session.phase !== "selecting") return;
+      const forecastResult = await this.market.forecast({
+        marketCountry: session.request.marketCountry,
+        symbols: candidateSymbols,
+        interval: "1m",
+      });
+      if (session.phase !== "selecting") return;
+      selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
+        symbolCount: session.request.symbolCount,
+        roundTripCostRate: roundTripCostRate(session.request.costs),
+        notBeforeMs: this.now(),
+      });
+      if (selection.status === "available") break;
       const unavailable = forecastUnavailableCodes(forecastResult);
-      throw new Error(
-        `AI 종목 선정이 unavailable입니다: ${selection.reason ?? "unknown"}`
-        + (unavailable.length ? ` (${unavailable.join(", ")})` : ""),
+      if (!canRetryStaleSelection(selection, unavailable)
+        || attempt >= this.selectionMaximumAttempts) {
+        const visibleUnavailable = unavailable.slice(0, 20);
+        const hiddenCount = unavailable.length - visibleUnavailable.length;
+        throw new Error(
+          `AI 종목 선정이 unavailable입니다: ${selection.reason ?? "unknown"}`
+          + (visibleUnavailable.length ? ` (${visibleUnavailable.join(", ")}`
+            + (hiddenCount > 0 ? `, 외 ${hiddenCount}건` : "")
+            + ")" : ""),
+        );
+      }
+      this.warn(
+        session,
+        `최신 완전 확정봉을 기다린 뒤 AI 종목 선정을 재시도합니다 (${attempt}/${this.selectionMaximumAttempts}).`,
       );
+      await this.waitForSelectionRetry(session);
+      if (session.phase !== "selecting") return;
+    }
+    if (!selection || selection.status !== "available") {
+      throw new Error("AI 종목 선정 결과가 준비되지 않았습니다.");
     }
     if (selection.selected.some(({ symbol }) => !session.metadata.has(symbol))) {
       throw new Error("AI 종목 선정 결과가 요청한 스캔 후보 집합을 벗어났습니다.");
@@ -866,6 +920,34 @@ export class AiTradingSimulationService {
     return observedAt;
   }
 
+  private waitForSelectionRetry(session: ActiveSession): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (session.selectionRetryTimer === timer) {
+          session.selectionRetryTimer = undefined;
+          session.selectionRetryResolve = undefined;
+        }
+        resolve();
+      };
+      timer = setTimeout(finish, this.selectionRetryDelayMs);
+      timer.unref();
+      session.selectionRetryTimer = timer;
+      session.selectionRetryResolve = finish;
+    });
+  }
+
+  private clearSelectionRetry(session: ActiveSession): void {
+    if (session.selectionRetryTimer) clearTimeout(session.selectionRetryTimer);
+    const resolve = session.selectionRetryResolve;
+    session.selectionRetryTimer = undefined;
+    session.selectionRetryResolve = undefined;
+    resolve?.();
+  }
+
   private async handleLiveEvent(event: ScalpingLiveEvent): Promise<void> {
     if (!event.symbol || !event.marketCountry) return;
     const sessions = [...this.active.values()].filter((session) => (
@@ -972,6 +1054,7 @@ export class AiTradingSimulationService {
     const selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
       symbolCount: session.request.symbolCount,
       roundTripCostRate: roundTripCostRate(session.request.costs),
+      notBeforeMs: this.now(),
     });
     if (selection.status !== "available") {
       this.warn(session, `AI 판단 unavailable: ${selection.reason ?? "unknown"}`);
@@ -1214,6 +1297,8 @@ export class AiTradingSimulationService {
             later_final_bar_open_fallback: true,
             open_positions_are_not_force_filled_at_end: true,
             selected_symbol_limit: session.request.symbolCount,
+            selection_maximum_attempts: this.selectionMaximumAttempts,
+            selection_retry_delay_ms: this.selectionRetryDelayMs,
             costs: session.request.costs,
             warnings: snapshot.warnings,
             snapshot,
@@ -1234,6 +1319,7 @@ export class AiTradingSimulationService {
   ): Promise<void> {
     if (!["selecting", "running"].includes(session.phase)) return;
     session.phase = "finalizing";
+    this.clearSelectionRetry(session);
     if (session.endTimer) clearTimeout(session.endTimer);
     if (session.progressTimer) clearInterval(session.progressTimer);
     try {
@@ -1318,7 +1404,9 @@ export class AiTradingSimulationService {
   }
 
   private async fail(session: ActiveSession, error: unknown): Promise<void> {
-    if (session.phase === "completed" || session.phase === "cancelled" || session.phase === "failed") return;
+    if (session.phase !== "selecting" && session.phase !== "running") return;
+    session.phase = "finalizing";
+    this.clearSelectionRetry(session);
     if (session.endTimer) clearTimeout(session.endTimer);
     if (session.progressTimer) clearInterval(session.progressTimer);
     try {
@@ -1327,9 +1415,9 @@ export class AiTradingSimulationService {
       this.warn(session, `실시간 구독 해제 실패: ${releaseError instanceof Error ? releaseError.message : "unknown"}`);
     }
     session.release = undefined;
-    session.phase = "failed";
     const message = error instanceof Error ? error.message : "unknown simulation error";
     this.warn(session, message);
+    session.phase = "failed";
     try {
       await this.persistArtifacts(session).catch(() => undefined);
       await this.repository.fail(session.id, {
