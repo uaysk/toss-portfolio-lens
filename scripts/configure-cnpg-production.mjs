@@ -78,7 +78,7 @@ const values = new Map([
   ["POSTGRES_DATABASE", database],
   ["POSTGRES_CONNECT_TIMEOUT_MS", "5000"],
   ["POSTGRES_SSL", "true"],
-  ["POSTGRES_CA_HOST_PATH", "./data/certs/cnpg-ca.crt"],
+  ["POSTGRES_CA_HOST_PATH", path.join(root, "data/certs/cnpg-ca.crt")],
   ["POSTGRES_SSL_CA_PATH", "/app/certs/cnpg-ca.crt"],
   ["POSTGRES_SSL_REJECT_UNAUTHORIZED", "true"],
   ["CANDLE_CACHE_LATEST_TTL_MS", "300000"],
