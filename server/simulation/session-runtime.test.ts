@@ -22,7 +22,6 @@ describe("simulation runtime handles", () => {
     vi.useFakeTimers();
     const endCallback = vi.fn();
     const progressCallback = vi.fn();
-    const decisionCallback = vi.fn();
     const retryCallback = vi.fn();
     const retryResolve = vi.fn();
     let releaseCalls = 0;
@@ -37,9 +36,7 @@ describe("simulation runtime handles", () => {
       selectionRetryResolve: retryResolve,
       endTimer: nodeTimeout(endCallback, 10),
       progressTimer: nodeInterval(progressCallback, 10),
-      decisionTimer: nodeTimeout(decisionCallback, 10),
       decisionAbort: abort,
-      nextDecisionAtMs: 10,
       analysisQueued: true,
     };
 
@@ -52,8 +49,6 @@ describe("simulation runtime handles", () => {
       selectionRetryResolve: undefined,
       endTimer: undefined,
       progressTimer: undefined,
-      decisionTimer: undefined,
-      nextDecisionAtMs: undefined,
       analysisQueued: false,
       release: undefined,
     });
@@ -62,7 +57,6 @@ describe("simulation runtime handles", () => {
     expect(retryCallback).not.toHaveBeenCalled();
     expect(endCallback).not.toHaveBeenCalled();
     expect(progressCallback).not.toHaveBeenCalled();
-    expect(decisionCallback).not.toHaveBeenCalled();
 
     expect(cleanupSimulationRuntime(handles, new Error("duplicate cleanup"))).toEqual({});
     expect(release).toHaveBeenCalledTimes(2);

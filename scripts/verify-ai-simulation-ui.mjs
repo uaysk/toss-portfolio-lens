@@ -42,11 +42,17 @@ function portfolio() {
 
 function snapshot({
   phase,
-  symbolCount,
+  request,
   cancelled = false,
 }) {
-  const selected = Array.from({ length: symbolCount }, (_, index) => ({
-    symbol: index === 0 ? "SIM1" : "SIM2",
+  const symbols = request.selection.mode === "manual"
+    ? request.selection.symbols
+    : Array.from(
+        { length: request.selection.symbolCount },
+        (_, index) => index === 0 ? "SIM1" : "SIM2",
+      );
+  const selected = symbols.map((symbol, index) => ({
+    symbol,
     name: index === 0 ? "가상 성장주" : "가상 모멘텀주",
     score: 0.81 - index * 0.08,
     upProbability: 0.64 - index * 0.03,
@@ -56,6 +62,125 @@ function snapshot({
       modelRevision: "ui-fixture",
       device: "cuda",
     },
+  }));
+  const historyCount = phase === "selecting" ? 0 : 28;
+  const trades = Array.from({ length: historyCount }, (_, index) => {
+    const symbol = symbols[index % symbols.length];
+    const side = index % 2 === 0 ? "buy" : "sell";
+    const executedAt = new Date(Date.parse("2026-07-24T00:22:05.000Z") + index * 1_000).toISOString();
+    const price = 50_000 + index * 5;
+    const quantity = index % 3 + 1;
+    return {
+      symbol,
+      side,
+      executedAt,
+      signalEligibleAfter: new Date(Date.parse(executedAt) - 1_000).toISOString(),
+      price,
+      quantity,
+      amount: price * quantity,
+      cost: 2_000,
+      totalCosts: 2_000,
+      source: "next_valid_quote",
+    };
+  });
+  const decisions = Array.from({ length: historyCount }, (_, index) => {
+    const decidedAt = new Date(Date.parse("2026-07-24T00:21:00.000Z") + index * 1_000).toISOString();
+    return {
+      symbol: symbols[index % symbols.length],
+      action: index % 2 === 0 ? "buy" : "hold",
+      decidedAt,
+      eligibleAfter: new Date(Date.parse(decidedAt) + 1_000).toISOString(),
+      inputEndAt: decidedAt,
+      reason: index === 0
+        ? "positive_risk_adjusted_score · entry_probability_threshold"
+        : `event_driven_final_bar · fixture_${index}`,
+      score: 0.81 - index * 0.001,
+      upProbability: 0.64,
+      chartPatternBias: index % 3 === 0 ? "bullish" : "neutral",
+      chartPatterns: index % 3 === 0 ? ["bullish_engulfing"] : ["inside_bar"],
+      model: "amazon/chronos-bolt-small · ui-fixture",
+    };
+  });
+  const charts = symbols.map((symbol, symbolIndex) => ({
+    symbol,
+    name: symbolIndex === 0 ? "가상 성장주" : "가상 모멘텀주",
+    currency: "KRW",
+    bars: [
+      {
+        timestamp: "2026-07-24T00:20:00.000Z",
+        open: 49_800,
+        high: 50_050,
+        low: 49_700,
+        close: 50_000,
+        volume: 12_000,
+        status: "final",
+        indicatorValues: {
+          "trend-ema:value": 49_900,
+          "session-vwap:session_vwap": 49_880,
+          "anchored-vwap:anchored_vwap": 49_850,
+        },
+      },
+      {
+        timestamp: "2026-07-24T00:21:00.000Z",
+        open: 50_000,
+        high: 50_300,
+        low: 49_950,
+        close: 50_220,
+        volume: 15_000,
+        status: "final",
+        indicatorValues: {
+          "trend-ema:value": 50_060,
+          "session-vwap:session_vwap": 49_990,
+          "anchored-vwap:anchored_vwap": 49_940,
+        },
+      },
+      {
+        timestamp: "2026-07-24T00:22:00.000Z",
+        open: 50_220,
+        high: 50_650,
+        low: 50_150,
+        close: 50_550,
+        volume: 18_000,
+        status: "final",
+        indicatorValues: {
+          "trend-ema:value": 50_240,
+          "session-vwap:session_vwap": 50_160,
+          "anchored-vwap:anchored_vwap": 50_050,
+        },
+      },
+      {
+        timestamp: "2026-07-24T00:23:00.000Z",
+        open: 50_550,
+        high: 50_700,
+        low: 50_400,
+        close: 50_600,
+        volume: 8_000,
+        status: "forming",
+        indicatorValues: {
+          "trend-ema:value": 50_400,
+          "session-vwap:session_vwap": 50_250,
+          "anchored-vwap:anchored_vwap": 50_120,
+        },
+      },
+    ],
+    indicators: [{
+      id: "trend-ema",
+      kind: "ema",
+      status: "available",
+      values: { value: 50_400 },
+    }, {
+      id: "momentum-rsi",
+      kind: "rsi",
+      status: "available",
+      values: { value: 61.25 },
+    }],
+    patterns: [{
+      detectedAt: "2026-07-24T00:22:00.000Z",
+      name: "bullish_engulfing",
+      bias: "bullish",
+      strength: 0.82,
+    }],
+    updatedAt: "2026-07-24T00:23:00.000Z",
   }));
   return {
     phase,
@@ -67,40 +192,43 @@ function snapshot({
     cash: 1_482_000,
     equity: cancelled ? 2_525_000 : 2_536_000,
     progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
-    decisionIntervalSeconds: 20,
+    selection: request.selection,
+    criterion: request.selection.mode === "auto" ? request.selection.criterion : "trading_amount",
+    preset: request.preset,
+    riskTolerance: request.riskTolerance,
+    policyProfile: {
+      targetAllocationRate: request.riskTolerance / 125,
+      cashReserveRate: 1 - request.riskTolerance / 125,
+      technicalConfirmation: request.riskTolerance <= 50 ? "entry_candidate" : "non_exit",
+      patternConfirmation: request.riskTolerance <= 50 ? "bullish" : "non_bearish",
+    },
+    decisionCadence: {
+      trigger: "finalized_one_minute_bar",
+      triggeredEvents: historyCount,
+      coalescedEvents: 1,
+      duplicateEvents: 2,
+      inFlight: false,
+      lastTriggeredAt: "2026-07-24T00:22:00.000Z",
+      lastStartedAt: "2026-07-24T00:22:00.050Z",
+      lastFinishedAt: "2026-07-24T00:22:00.400Z",
+    },
     selected: phase === "selecting" ? [] : selected,
     positions: phase === "selecting" || cancelled ? [] : [{
-      symbol: "SIM1",
+      symbol: symbols[0],
       quantity: 20,
       averagePrice: 50_000,
       marketPrice: 50_900,
       unrealizedPnl: 18_000,
     }],
-    trades: phase === "selecting" ? [] : [{
-      symbol: "SIM1",
-      side: "buy",
-      executedAt: "2026-07-24T00:22:00.000Z",
-      price: 50_000,
-      quantity: 20,
-      amount: 1_000_000,
-      cost: 2_000,
-      source: "next_valid_quote",
-    }],
-    decisions: phase === "selecting" ? [] : [{
-      symbol: "SIM1",
-      action: "buy",
-      decidedAt: "2026-07-24T00:21:00.000Z",
-      eligibleAfter: "2026-07-24T00:22:00.000Z",
-      reason: "positive_risk_adjusted_score · entry_probability_threshold",
-      score: 0.81,
-      upProbability: 0.64,
-      model: "amazon/chronos-bolt-small · ui-fixture",
-    }],
+    charts: phase === "selecting" ? [] : charts,
+    trades,
+    decisions,
     warnings: ["UI fixture는 실제 주문을 생성하지 않습니다."],
     capabilities: {
       realOrder: false,
       mcp: false,
       nextValidFillOnly: true,
+      eventDrivenDecisions: true,
     },
   };
 }
@@ -110,6 +238,7 @@ export async function routeSimulationUiApi(page) {
     starts: [],
     polls: 0,
     cancels: [],
+    searches: [],
     active: new Map(),
   };
   await page.route("**/api/**", async (route) => {
@@ -145,9 +274,31 @@ export async function routeSimulationUiApi(page) {
             realOrder: false,
             mcp: false,
             autonomousPaperTrading: true,
+            manualSymbolSelection: true,
+            deterministicChartPatterns: true,
+            eventDrivenDecisions: true,
           },
-          policy: { decisionIntervalSeconds: 20 },
+          policy: {
+            initialPortfolio: "cash_only_zero_holdings",
+            cadence: "event_driven_immediately_after_each_new_finalized_one_minute_bar",
+          },
           limitations: ["가상 체결만 생성합니다."],
+        }),
+      });
+    }
+    if (url.pathname === "/api/portfolio/tools/search_instruments" && request.method() === "POST") {
+      const body = request.postDataJSON();
+      state.searches.push(body);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          result: {
+            instruments: [
+              { symbol: "SIM1", name: "가상 성장주", market: "KRX", currency: "KRW" },
+              { symbol: "SIM2", name: "가상 모멘텀주", market: "KRX", currency: "KRW" },
+            ],
+          },
         }),
       });
     }
@@ -193,7 +344,7 @@ export async function routeSimulationUiApi(page) {
             run: { id: runId, status: "cancel_requested" },
             snapshot: snapshot({
               phase: "cancel_requested",
-              symbolCount: active.body.symbolCount,
+              request: active.body,
             }),
           }),
         });
@@ -207,7 +358,7 @@ export async function routeSimulationUiApi(page) {
             run: { id: runId, status: active.cancelled ? "cancelled" : "running" },
             snapshot: snapshot({
               phase: active.cancelled ? "cancelled" : "monitoring",
-              symbolCount: active.body.symbolCount,
+              request: active.body,
               cancelled: active.cancelled,
             }),
           }),
@@ -240,7 +391,9 @@ async function verify(browser, baseUrl, viewport, theme) {
     if (response.status() >= 400) errors.response.push(`${response.status()} ${response.url()}`);
   });
   const state = await routeSimulationUiApi(page);
-  const requestedSymbolCount = viewport.width >= 1_000 ? 2 : 1;
+  const selectionMode = viewport.width >= 1_000 ? "auto" : "manual";
+  const requestedSymbolCount = selectionMode === "auto" ? 2 : 1;
+  const requestedRiskTolerance = selectionMode === "auto" ? 73 : 27;
   try {
     await page.goto(`${baseUrl}/?simulation-ui=${viewport.width}#simulation`, {
       waitUntil: "domcontentloaded",
@@ -274,20 +427,67 @@ async function verify(browser, baseUrl, viewport, theme) {
 
     await page.getByRole("spinbutton", { name: "시작 예수금" }).fill("2500000");
     await page.getByRole("spinbutton", { name: "테스트 기간" }).fill("45");
-    if (requestedSymbolCount === 2) {
+
+    const presetSelect = page.getByRole("combobox", { name: "AI 판단 프리셋" });
+    await presetSelect.click();
+    for (const presetLabel of ["추세 수익", "돌파 가속", "반등 수익", "방어 수익"]) {
+      await page.getByRole("option", { name: presetLabel, exact: true }).waitFor();
+    }
+    await page.getByRole("option", { name: "돌파 가속", exact: true }).click();
+
+    const riskSlider = page.getByRole("slider", { name: "공격 방어 성향" });
+    await riskSlider.evaluate((element, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!setter) throw new Error("range input value setter unavailable");
+      setter.call(element, String(value));
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }, requestedRiskTolerance);
+    check(
+      await riskSlider.inputValue() === String(requestedRiskTolerance),
+      "공격·방어 성향 slider 값이 반영되지 않았습니다.",
+    );
+
+    if (selectionMode === "auto") {
       await page.getByRole("combobox", { name: "AI 선정 종목 수" }).click();
       await page.getByRole("option", { name: "2종목" }).click();
+      await page.getByRole("combobox", { name: "AI 종목 선정 기준" }).click();
+      await page.getByRole("option", { name: "변동성", exact: true }).click();
+    } else {
+      await page.getByRole("combobox", { name: "시뮬레이션 종목 선택 방식" }).click();
+      await page.getByRole("option", { name: "사용자가 직접 선택", exact: true }).click();
+      await page.locator("[data-simulation-manual-selection]").waitFor();
+      await page.getByRole("textbox", { name: "시뮬레이션 종목 검색" }).fill("SIM1");
+      const result = page.locator("[data-simulation-instrument-results]")
+        .getByRole("button", { name: /가상 성장주/ });
+      await result.waitFor({ timeout: 10_000 });
+      await result.click();
+      await page.locator("[data-simulation-manual-symbols]").getByText(/SIM1/).waitFor();
+      check(state.searches.length >= 1, "직접 종목 선택 검색 API가 호출되지 않았습니다.");
     }
     await startButton.click();
     await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
     const stopButton = page.getByRole("button", { name: "테스트 중단", exact: true });
     await stopButton.waitFor();
     check(state.starts.length === 1, "시작 버튼 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
-    check(state.starts[0]?.initialCash === 2_500_000, "시작 예수금이 요청 body에 보존되지 않았습니다.");
-    check(state.starts[0]?.durationMinutes === 45, "테스트 기간이 요청 body에 보존되지 않았습니다.");
-    check(state.starts[0]?.symbolCount === requestedSymbolCount, "AI 선정 종목 수가 요청 body에 보존되지 않았습니다.");
-    check(state.starts[0]?.marketCountry === "KR", "기본 국내 시장이 요청 body에 보존되지 않았습니다.");
-    check(state.starts[0]?.preset === "risk_management", "위험관리 프리셋이 요청 body에 보존되지 않았습니다.");
+    const firstRequest = state.starts[0];
+    check(firstRequest?.initialCash === 2_500_000, "시작 예수금이 요청 body에 보존되지 않았습니다.");
+    check(firstRequest?.durationMinutes === 45, "테스트 기간이 요청 body에 보존되지 않았습니다.");
+    check(firstRequest?.marketCountry === "KR", "기본 국내 시장이 요청 body에 보존되지 않았습니다.");
+    check(firstRequest?.preset === "breakout", "선택한 돌파 프리셋이 요청 body에 보존되지 않았습니다.");
+    check(firstRequest?.riskTolerance === requestedRiskTolerance, "공격·방어 성향이 요청 body에 보존되지 않았습니다.");
+    check(firstRequest?.selection?.mode === selectionMode, "종목 선택 방식이 nested selection에 보존되지 않았습니다.");
+    if (selectionMode === "auto") {
+      check(firstRequest.selection.symbolCount === requestedSymbolCount, "자동 선정 종목 수가 nested selection에 보존되지 않았습니다.");
+      check(firstRequest.selection.criterion === "volatility", "자동 선정 기준이 nested selection에 보존되지 않았습니다.");
+    } else {
+      check(
+        JSON.stringify(firstRequest.selection.symbols) === JSON.stringify(["SIM1"]),
+        "직접 선택 종목이 nested selection에 보존되지 않았습니다.",
+      );
+    }
+    check(!("symbolCount" in firstRequest), "legacy top-level symbolCount가 요청 body에 남아 있습니다.");
+    check(!("criterion" in firstRequest), "legacy top-level criterion이 요청 body에 남아 있습니다.");
 
     await stopButton.click();
     await page.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
@@ -302,8 +502,13 @@ async function verify(browser, baseUrl, viewport, theme) {
     await startButton.click();
     await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
     check(state.starts.length === 2, "준비 단계 중단 후 새 테스트를 다시 시작하지 못했습니다.");
+    check(
+      JSON.stringify(state.starts[1]) === JSON.stringify(firstRequest),
+      "중단 후 재시작하면서 v3 설정 요청이 달라졌습니다.",
+    );
 
     await page.getByText("시뮬레이션 진행", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.getByText("새 확정 1분봉 즉시", { exact: false }).waitFor({ timeout: 10_000 });
     await page.locator("[data-simulation-selected] article").first().waitFor();
     const selectedCount = await page.locator("[data-simulation-selected] article").count();
     check(
@@ -314,15 +519,62 @@ async function verify(browser, baseUrl, viewport, theme) {
       requestedSymbolCount === 1 || requestedSymbolCount === 2,
       "AI 선택 수는 1개 또는 2개여야 합니다.",
     );
+    if (selectionMode === "manual") {
+      await page.getByRole("heading", { name: "직접 선택 종목", exact: true }).waitFor();
+    } else {
+      await page.getByRole("heading", { name: "AI 선정 종목", exact: true }).waitFor();
+    }
     await page.getByText("SIM1 · 가상 매수", { exact: true }).first().waitFor();
     await page.getByText("positive_risk_adjusted_score · entry_probability_threshold", { exact: true }).waitFor();
-    await page.getByText(/next_valid_quote/).waitFor();
+    await page.getByText(/next_valid_quote/).first().waitFor();
     check(state.polls >= 1, "시작 후 run snapshot을 polling하지 않았습니다.");
+
+    const chartGrid = page.locator("[data-simulation-charts]");
+    await chartGrid.waitFor();
+    const chartCount = await chartGrid.locator("[data-ai-simulation-chart]").count();
+    check(
+      chartCount === requestedSymbolCount,
+      `시뮬레이션 캔들 차트가 ${requestedSymbolCount}개가 아니라 ${chartCount}개입니다.`,
+    );
+    await chartGrid.locator("[data-ai-simulation-price-chart]").first().waitFor();
+    await chartGrid.locator('[data-ai-simulation-indicator-badge="rsi"]').first().waitFor();
+    await chartGrid.locator('[data-ai-simulation-price-overlay="trend-ema:value"]').first().waitFor();
+    await chartGrid.locator('[data-ai-simulation-pattern="bullish"]').first().waitFor();
+    await chartGrid.locator('[data-ai-simulation-trade-marker="buy"]').first().waitFor();
+
+    const scrollMetrics = {};
+    for (const [name, selector] of [
+      ["trades", "[data-simulation-trades-scroll]"],
+      ["decisions", "[data-simulation-decisions-scroll]"],
+    ]) {
+      const scrollArea = page.locator(selector);
+      await scrollArea.waitFor();
+      const before = await scrollArea.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      }));
+      check(
+        before.scrollHeight > before.clientHeight,
+        `${name} 기록이 페이지를 늘리는 대신 내부 스크롤 영역을 만들지 않았습니다: ${JSON.stringify(before)}`,
+      );
+      await scrollArea.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      const after = await scrollArea.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      }));
+      check(after.scrollTop > 0, `${name} 기록 내부 스크롤이 동작하지 않습니다.`);
+      scrollMetrics[name] = after;
+    }
 
     const measured = await page.locator([
       "[data-simulation-run]",
       "[data-simulation-selected]",
       "[data-simulation-positions]",
+      "[data-simulation-charts]",
       "[data-simulation-trades]",
       "[data-simulation-decisions]",
     ].join(",")).evaluateAll((items) => items.map((item) => ({
@@ -360,8 +612,12 @@ async function verify(browser, baseUrl, viewport, theme) {
       theme,
       manualStart: true,
       preparationStop: true,
+      selectionMode,
       requestedSymbolCount,
+      requestedRiskTolerance,
       selectedCount,
+      chartCount,
+      scrollMetrics,
       polls: state.polls,
       cancels: state.cancels.length,
       zeroSize: zeroSize.length,

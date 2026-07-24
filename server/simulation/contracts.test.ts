@@ -7,30 +7,34 @@ import {
 describe("AI paper simulation contracts", () => {
   const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
 
-  it("applies explicit market, scanner, strategy, and cost defaults", () => {
+  it("applies market, strategy, risk, scanner, and cost defaults", () => {
     expect(schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
     })).toEqual({
       marketCountry: "KR",
-      criterion: "trading_amount",
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: {
+        mode: "auto",
+        criterion: "trading_amount",
+        symbolCount: 1,
+      },
       preset: "risk_management",
+      riskTolerance: 50,
       costs: DEFAULT_SIMULATION_COSTS,
     });
   });
 
-  it("accepts both markets, all scanner criteria and one or two symbols", () => {
+  it("accepts both markets, every scanner criterion, one or two auto symbols, and risk endpoints", () => {
     expect(schema.parse({
       marketCountry: "US",
-      criterion: "volatility",
       initialCash: 10_000_000,
       durationMinutes: 390,
-      symbolCount: 2,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
       preset: "breakout",
+      riskTolerance: 100,
       costs: {
         commissionBpsPerSide: 0,
         taxBpsOnExit: 0,
@@ -39,10 +43,45 @@ describe("AI paper simulation contracts", () => {
       },
     })).toMatchObject({
       marketCountry: "US",
-      criterion: "volatility",
-      symbolCount: 2,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
       preset: "breakout",
+      riskTolerance: 100,
     });
+    expect(schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 1,
+      selection: { mode: "auto", criterion: "volume", symbolCount: 1 },
+      preset: "trend",
+      riskTolerance: 0,
+    })).toMatchObject({
+      selection: { criterion: "volume", symbolCount: 1 },
+      riskTolerance: 0,
+    });
+  });
+
+  it("normalizes one or two manually selected symbols and rejects duplicates after normalization", () => {
+    expect(schema.parse({
+      marketCountry: "US",
+      initialCash: 100_000,
+      durationMinutes: 30,
+      selection: { mode: "manual", symbols: [" nvda ", "brk.b"] },
+    }).selection).toEqual({
+      mode: "manual",
+      symbols: ["NVDA", "BRK.B"],
+    });
+    expect(schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 30,
+      selection: { mode: "manual", symbols: ["005930"] },
+    }).selection).toEqual({
+      mode: "manual",
+      symbols: ["005930"],
+    });
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 30,
+      selection: { mode: "manual", symbols: ["nvda", " NVDA "] },
+    })).toThrow();
   });
 
   it("defaults omitted US exit tax to zero while preserving explicit overrides", () => {
@@ -50,7 +89,7 @@ describe("AI paper simulation contracts", () => {
       marketCountry: "US",
       initialCash: 100_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "manual", symbols: ["AAPL"] },
     }).costs).toEqual({
       ...DEFAULT_SIMULATION_COSTS,
       taxBpsOnExit: 0,
@@ -59,34 +98,76 @@ describe("AI paper simulation contracts", () => {
       marketCountry: "US",
       initialCash: 100_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
       costs: { taxBpsOnExit: 7 },
     }).costs.taxBpsOnExit).toBe(7);
   });
 
-  it("rejects missing core values, unknown keys, non-finite values and configured limit violations", () => {
-    expect(() => schema.parse({ durationMinutes: 60, symbolCount: 1 })).toThrow();
-    expect(() => schema.parse({ initialCash: 1_000_000, symbolCount: 1 })).toThrow();
+  it("strictly discriminates auto and manual selection without accepting mixed or legacy fields", () => {
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "auto", symbolCount: 1, symbols: ["AAA"] },
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["AAA"], criterion: "volume" },
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: [] },
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["AAA", "BBB", "CCC"] },
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      criterion: "volume",
+      symbolCount: 1,
+    })).toThrow();
+  });
+
+  it("rejects missing core values, invalid risk, symbols, non-finite values and duration limits", () => {
+    expect(() => schema.parse({
+      durationMinutes: 60,
+      selection: { mode: "auto", symbolCount: 1 },
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      selection: { mode: "auto", symbolCount: 1 },
+    })).toThrow();
     expect(() => schema.parse({ initialCash: 1_000_000, durationMinutes: 60 })).toThrow();
     expect(() => schema.parse({
       initialCash: Number.POSITIVE_INFINITY,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
     })).toThrow();
     expect(() => schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 391,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
     })).toThrow();
     expect(() => schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 3,
+      selection: { mode: "auto", symbolCount: 1 },
+      riskTolerance: 101,
     })).toThrow();
     expect(() => schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
+      riskTolerance: 49.5,
+    })).toThrow();
+    expect(() => schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["-BAD"] },
       autoOrder: true,
     })).toThrow();
   });
@@ -95,7 +176,7 @@ describe("AI paper simulation contracts", () => {
     expect(schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
       costs: { spreadBpsRoundTrip: 10 },
     }).costs).toEqual({
       ...DEFAULT_SIMULATION_COSTS,
@@ -104,13 +185,13 @@ describe("AI paper simulation contracts", () => {
     expect(() => schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
       costs: { spreadBpsRoundTrip: 5_001 },
     })).toThrow();
     expect(() => schema.parse({
       initialCash: 1_000_000,
       durationMinutes: 60,
-      symbolCount: 1,
+      selection: { mode: "auto", symbolCount: 1 },
       costs: { commissionBpsPerSide: 1, hiddenFee: 1 },
     })).toThrow();
   });

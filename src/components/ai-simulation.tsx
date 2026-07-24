@@ -4,13 +4,18 @@ import {
   BarChart3,
   Bot,
   BrainCircuit,
+  Check,
   Clock,
   LoaderCircle,
+  Plus,
   Play,
+  Search,
   ShieldCheck,
   Square,
   Wallet,
+  X,
 } from "lucide-react";
+import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -31,6 +36,11 @@ import {
   type AiSimulationStatus,
 } from "@/lib/ai-simulation";
 import { formatMoney, formatQuantity } from "@/lib/format";
+import {
+  searchTechnicalInstruments,
+  TechnicalAnalysisApiError,
+} from "@/lib/technical-analysis-api";
+import type { TechnicalInstrumentChoice } from "@/lib/technical-analysis";
 import { cn } from "@/lib/utils";
 
 type AiSimulationProps = {
@@ -51,11 +61,31 @@ const CRITERION_LABELS: Record<AiSimulationCriterion, string> = {
   volatility: "변동성",
 };
 
-const PRESET_LABELS: Record<AiSimulationPreset, string> = {
-  trend: "추세",
-  breakout: "돌파",
-  mean_reversion: "평균회귀",
-  risk_management: "위험관리",
+const PRESET_DETAILS: Record<AiSimulationPreset, {
+  label: string;
+  description: string;
+  recommendedRisk: number;
+}> = {
+  trend: {
+    label: "추세 수익",
+    description: "EMA·MACD·ADX로 상승 추세를 따라 현금에서 진입합니다.",
+    recommendedRisk: 60,
+  },
+  breakout: {
+    label: "돌파 가속",
+    description: "거래량과 가격 돌파를 빠르게 포착하는 가장 공격적인 구성입니다.",
+    recommendedRisk: 80,
+  },
+  mean_reversion: {
+    label: "반등 수익",
+    description: "과매도·밴드 이탈 뒤 상승 반전 패턴을 확인해 진입합니다.",
+    recommendedRisk: 50,
+  },
+  risk_management: {
+    label: "방어 수익",
+    description: "현금 비중을 남기고 더 강한 AI·기술 확인 뒤 기회를 취합니다.",
+    recommendedRisk: 25,
+  },
 };
 
 const PHASE_LABELS: Record<string, string> = {
@@ -80,6 +110,36 @@ const ACTION_LABELS: Record<string, string> = {
   skip: "건너뜀",
   cash: "현금 유지",
 };
+
+const PATTERN_LABELS: Record<string, string> = {
+  bullish_engulfing: "상승 장악형",
+  bearish_engulfing: "하락 장악형",
+  hammer: "망치형",
+  shooting_star: "유성형",
+  inside_bar: "인사이드 바",
+  bullish_outside_bar: "상승 아웃사이드 바",
+  bearish_outside_bar: "하락 아웃사이드 바",
+};
+
+function requestedSymbolCount(request: AiSimulationRequest): number {
+  return request.selection.mode === "manual"
+    ? request.selection.symbols.length
+    : request.selection.symbolCount;
+}
+
+function selectionModeLabel(request: AiSimulationRequest): string {
+  return request.selection.mode === "manual" ? "직접 선택" : "자동 선정";
+}
+
+function riskDispositionLabel(value: number): string {
+  if (value <= 33) return "방어";
+  if (value >= 67) return "공격";
+  return "균형";
+}
+
+function chartPatternLabel(value: string): string {
+  return PATTERN_LABELS[value] ?? value.replaceAll("_", " ");
+}
 
 async function readJson(response: Response): Promise<unknown> {
   return response.json().catch(() => ({}));
@@ -204,11 +264,15 @@ function SelectedSymbols({ snapshot }: { snapshot: AiSimulationSnapshot }) {
     <Card className="bg-card p-5 sm:p-6" data-simulation-selected>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">AI SELECTION</p>
-          <h2 className="mt-1 text-lg font-black">AI 선정 종목</h2>
+          <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">SIMULATION UNIVERSE</p>
+          <h2 className="mt-1 text-lg font-black">
+            {snapshot.selection?.mode === "manual" ? "직접 선택 종목" : "AI 선정 종목"}
+          </h2>
         </div>
         <span className="rounded-full bg-secondary px-3 py-1.5 text-[10px] font-black">
-          {snapshot.selected.length} / 2
+          {snapshot.selected.length} / {snapshot.selection?.mode === "manual"
+            ? snapshot.selection.symbols.length
+            : snapshot.selection?.symbolCount ?? 2}
         </span>
       </div>
       {snapshot.selected.length ? (
@@ -232,7 +296,9 @@ function SelectedSymbols({ snapshot }: { snapshot: AiSimulationSnapshot }) {
         </div>
       ) : (
         <p className="mt-4 rounded-2xl bg-secondary p-4 text-xs leading-5 text-muted-foreground">
-          스캐너 후보를 평가하고 있습니다. 점수와 모델 예측이 검증된 종목만 최대 2개까지 표시합니다.
+          {snapshot.selection?.mode === "manual"
+            ? "선택한 종목의 AI 예측과 시장 데이터를 검증하고 있습니다."
+            : "스캐너 후보를 평가하고 있습니다. 점수와 모델 예측이 검증된 종목만 최대 2개까지 표시합니다."}
         </p>
       )}
     </Card>
@@ -272,9 +338,9 @@ function Positions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
   );
 }
 
-function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
-  const trades = [...snapshot.trades].reverse().slice(0, 20);
-  const decisions = [...snapshot.decisions].reverse().slice(0, 20);
+export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
+  const trades = [...snapshot.trades].reverse();
+  const decisions = [...snapshot.decisions].reverse();
   return (
     <div className="grid gap-3 xl:grid-cols-2">
       <Card className="min-w-0 bg-card p-5 sm:p-6" data-simulation-trades>
@@ -282,8 +348,14 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
           <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">FILLS</p><h2 className="mt-1 text-lg font-black">가상 체결</h2></div>
           <span className="text-[10px] font-black text-muted-foreground">{snapshot.trades.length}건</span>
         </div>
-        {trades.length ? (
-          <div className="mt-4 space-y-2">
+        <div
+          className="mt-4 max-h-[28rem] min-h-0 overflow-y-auto overscroll-contain pr-1"
+          data-simulation-trades-scroll
+          tabIndex={0}
+          aria-label="가상 체결 스크롤 목록"
+        >
+          {trades.length ? (
+          <div className="space-y-2">
             {trades.map((trade, index) => (
               <article key={`${trade.symbol}:${trade.executedAt}:${index}`} className="rounded-2xl bg-secondary p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -299,7 +371,8 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
               </article>
             ))}
           </div>
-        ) : <p className="mt-4 text-xs text-muted-foreground">아직 가상 체결이 없습니다.</p>}
+          ) : <p className="text-xs text-muted-foreground">아직 가상 체결이 없습니다.</p>}
+        </div>
       </Card>
 
       <Card className="min-w-0 bg-card p-5 sm:p-6" data-simulation-decisions>
@@ -307,8 +380,14 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
           <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">DECISIONS</p><h2 className="mt-1 text-lg font-black">AI 판단 기록</h2></div>
           <span className="text-[10px] font-black text-muted-foreground">{snapshot.decisions.length}건</span>
         </div>
-        {decisions.length ? (
-          <div className="mt-4 space-y-2">
+        <div
+          className="mt-4 max-h-[28rem] min-h-0 overflow-y-auto overscroll-contain pr-1"
+          data-simulation-decisions-scroll
+          tabIndex={0}
+          aria-label="AI 판단 기록 스크롤 목록"
+        >
+          {decisions.length ? (
+          <div className="space-y-2">
             {decisions.map((decision, index) => (
               <article key={`${decision.symbol}:${decision.decidedAt}:${index}`} className="rounded-2xl bg-secondary p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -316,6 +395,25 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
                   <p className="text-[9px] text-muted-foreground">{formatTimestamp(decision.decidedAt)}</p>
                 </div>
                 <p className="mt-2 break-words text-xs leading-5">{decision.reason}</p>
+                {decision.chartPatterns.length ? (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {decision.chartPatterns.map((pattern) => (
+                      <span
+                        key={pattern}
+                        className={cn(
+                          "rounded-full px-2 py-1 text-[9px] font-black",
+                          decision.chartPatternBias === "bullish"
+                            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                            : decision.chartPatternBias === "bearish"
+                              ? "bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                              : "bg-card text-muted-foreground",
+                        )}
+                      >
+                        {chartPatternLabel(pattern)}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <p className="mt-2 text-[9px] text-muted-foreground">
                   적용 가능 {formatTimestamp(decision.eligibleAfter)} · score {formatScore(decision.score)} · 상승 {formatRatio(decision.upProbability)}
                 </p>
@@ -323,14 +421,17 @@ function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
               </article>
             ))}
           </div>
-        ) : <p className="mt-4 text-xs text-muted-foreground">AI 판단을 기다리고 있습니다.</p>}
+          ) : <p className="text-xs text-muted-foreground">AI 판단을 기다리고 있습니다.</p>}
+        </div>
       </Card>
     </div>
   );
 }
 
-export function simulationDecisionIntervalLabel(value: number | undefined): string {
-  return value === undefined ? "기록 없음" : `${value}초`;
+export function simulationDecisionCadenceLabel(trigger?: string): string {
+  return trigger === "finalized_one_minute_bar"
+    ? "새 확정 1분봉 즉시"
+    : "확정봉 이벤트 즉시";
 }
 
 function RunPanel({
@@ -382,7 +483,10 @@ function RunPanel({
               <p>시작 {formatTimestamp(snapshot.startedAt)}</p>
               <p className="mt-1">종료 예정 {formatTimestamp(snapshot.expiresAt)}</p>
               <p className="mt-1">
-                판단 간격 {simulationDecisionIntervalLabel(snapshot.decisionIntervalSeconds)}
+                판단 {simulationDecisionCadenceLabel(snapshot.decisionCadence?.trigger)}
+                {snapshot.decisionCadence?.triggeredEvents !== undefined
+                  ? ` · ${snapshot.decisionCadence.triggeredEvents}회`
+                  : ""}
               </p>
             </div>
           </div>
@@ -390,12 +494,52 @@ function RunPanel({
         <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-primary-foreground/10" aria-label={`진행률 ${(snapshot.progress * 100).toFixed(0)}%`}>
           <div className="h-full rounded-full bg-primary-foreground transition-[width]" style={{ width: `${snapshot.progress * 100}%` }} />
         </div>
+        <div className="mt-4 flex flex-wrap gap-2 text-[9px] font-black text-primary-foreground/70">
+          <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">보유 0주 · 현금 100% 시작</span>
+          {snapshot.preset ? <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">{PRESET_DETAILS[snapshot.preset].label}</span> : null}
+          {snapshot.riskTolerance !== undefined ? (
+            <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
+              {riskDispositionLabel(snapshot.riskTolerance)} {snapshot.riskTolerance}
+            </span>
+          ) : null}
+          {snapshot.policyProfile?.targetAllocationRate !== undefined ? (
+            <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
+              목표 투자 {(snapshot.policyProfile.targetAllocationRate * 100).toFixed(0)}% · 현금 {((snapshot.policyProfile.cashReserveRate ?? 1 - snapshot.policyProfile.targetAllocationRate) * 100).toFixed(0)}%
+            </span>
+          ) : null}
+        </div>
       </Card>
 
       <div className="grid gap-3 xl:grid-cols-2">
         <SelectedSymbols snapshot={snapshot} />
         <Positions snapshot={snapshot} />
       </div>
+      {snapshot.charts.length ? (
+        <div className="grid gap-3 xl:grid-cols-2" data-simulation-charts>
+          {snapshot.charts.map((chart) => (
+            <AiSimulationChart
+              key={chart.symbol}
+              symbol={chart.symbol}
+              name={chart.name}
+              currency={chart.currency}
+              bars={chart.bars}
+              indicators={chart.indicators}
+              patterns={chart.patterns}
+              trades={snapshot.trades.flatMap((trade) => {
+                if (trade.symbol !== chart.symbol) return [];
+                const side = trade.side.toLowerCase();
+                if (side !== "buy" && side !== "sell") return [];
+                return [{
+                  executedAt: trade.executedAt,
+                  price: trade.price,
+                  side,
+                  quantity: trade.quantity,
+                }];
+              })}
+            />
+          ))}
+        </div>
+      ) : null}
       <TradesAndDecisions snapshot={snapshot} />
       {snapshot.warnings.length ? (
         <Card className="bg-secondary p-5" role="status">
@@ -417,6 +561,11 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const [run, setRun] = useState<AiSimulationRunResponse>();
+  const [manualInstruments, setManualInstruments] = useState<TechnicalInstrumentChoice[]>([]);
+  const [instrumentQuery, setInstrumentQuery] = useState("");
+  const [instrumentResults, setInstrumentResults] = useState<TechnicalInstrumentChoice[]>([]);
+  const [instrumentSearching, setInstrumentSearching] = useState(false);
+  const [instrumentError, setInstrumentError] = useState("");
   const cancellingRef = useRef(false);
   const pollingGeneration = useRef(0);
 
@@ -425,6 +574,55 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     [request, status?.limits],
   );
   const runActive = Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
+
+  useEffect(() => {
+    const query = instrumentQuery.trim();
+    if (request.selection.mode !== "manual" || query.length < 1 || runActive) {
+      setInstrumentResults([]);
+      setInstrumentSearching(false);
+      setInstrumentError("");
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setInstrumentSearching(true);
+      setInstrumentError("");
+      void searchTechnicalInstruments(query, { signal: controller.signal })
+        .then((results) => {
+          if (controller.signal.aborted) return;
+          const currency = request.marketCountry === "US" ? "USD" : "KRW";
+          const selected = new Set(manualInstruments.map(({ symbol }) => symbol));
+          setInstrumentResults(
+            results
+              .filter((instrument) => instrument.currency === currency && !selected.has(instrument.symbol))
+              .slice(0, 8),
+          );
+        })
+        .catch((caught) => {
+          if (controller.signal.aborted) return;
+          if (caught instanceof TechnicalAnalysisApiError && caught.status === 401) {
+            onUnauthorized();
+            return;
+          }
+          setInstrumentError(caught instanceof Error ? caught.message : "종목을 검색하지 못했습니다.");
+          setInstrumentResults([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setInstrumentSearching(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    instrumentQuery,
+    manualInstruments,
+    onUnauthorized,
+    request.marketCountry,
+    request.selection.mode,
+    runActive,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -565,7 +763,46 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     }
   }, [onUnauthorized, run?.runId]);
 
+  const changeSelectionMode = (mode: "auto" | "manual") => {
+    setInstrumentQuery("");
+    setInstrumentResults([]);
+    setInstrumentError("");
+    setRequest((current) => ({
+      ...current,
+      selection: mode === "manual"
+        ? { mode, symbols: manualInstruments.map(({ symbol }) => symbol) }
+        : { mode, criterion: "trading_amount", symbolCount: 1 },
+    }));
+  };
+
+  const addManualInstrument = (instrument: TechnicalInstrumentChoice) => {
+    if (manualInstruments.length >= 2 || manualInstruments.some(({ symbol }) => symbol === instrument.symbol)) {
+      return;
+    }
+    const next = [...manualInstruments, instrument];
+    setManualInstruments(next);
+    setRequest((current) => ({
+      ...current,
+      selection: { mode: "manual", symbols: next.map(({ symbol }) => symbol) },
+    }));
+    setInstrumentQuery("");
+    setInstrumentResults([]);
+  };
+
+  const removeManualInstrument = (symbol: string) => {
+    const next = manualInstruments.filter((instrument) => instrument.symbol !== symbol);
+    setManualInstruments(next);
+    setRequest((current) => ({
+      ...current,
+      selection: { mode: "manual", symbols: next.map((instrument) => instrument.symbol) },
+    }));
+  };
+
   const changeMarket = (marketCountry: AiSimulationMarketCountry) => {
+    setManualInstruments([]);
+    setInstrumentQuery("");
+    setInstrumentResults([]);
+    setInstrumentError("");
     setRequest((current) => {
       const switchingToUsDefaults = current.marketCountry === "KR" && marketCountry === "US"
         && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
@@ -575,6 +812,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       return {
         ...current,
         marketCountry,
+        selection: current.selection.mode === "manual"
+          ? { mode: "manual", symbols: [] }
+          : current.selection,
         initialCash: switchingToUsDefaults ? 100_000 : switchingToKrDefaults ? DEFAULT_AI_SIMULATION_REQUEST.initialCash : current.initialCash,
         costs: {
           ...current.costs,
@@ -599,14 +839,14 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               AI가 고르고,<br />가상 원장으로 검증합니다.
             </h2>
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
-              현재 스캐너 후보를 AI가 평가해 1~2개 종목만 선정합니다. 사용자가 정한 예수금과 시간 동안 기술 신호와 공개 모델 예측을 함께 보되, 자금과 주문은 외부로 전송하지 않습니다.
+              보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 GPU AI 예측, 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">AI · 최대 2개</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단 간격</p><p className="mt-1 text-sm font-black">{status?.decisionIntervalSeconds ?? 20}초 · 다음 체결</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">자금</p><p className="mt-1 text-sm font-black">가상 예수금</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">성과</p><p className="mt-1 text-sm font-black">비용 차감 원장</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">AI 또는 직접 선택</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">현금 100% · 0주</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">AI · 지표 · 패턴</p></div>
           </div>
         </div>
       </Card>
@@ -622,12 +862,12 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             <p className="mt-2 text-xs leading-5 text-muted-foreground">시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.</p>
           </div>
           <span className="rounded-full bg-secondary px-3 py-1.5 text-[10px] font-black">
-            {request.symbolCount}종목 · {request.durationMinutes}분 · {status?.decisionIntervalSeconds ?? 20}초 판단 · {currency}
+            {selectionModeLabel(request)} · {requestedSymbolCount(request)}종목 · {request.durationMinutes}분 · {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance} · {currency}
           </span>
         </div>
 
         <form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); void startSimulation(); }}>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
               <Select value={request.marketCountry} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive}>
@@ -639,35 +879,181 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               </Select>
             </label>
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
-              <span className="mb-2 block text-[10px] font-black text-muted-foreground">AI 후보 기준</span>
-              <Select value={request.criterion} onValueChange={(value) => setRequest((current) => ({ ...current, criterion: value as AiSimulationCriterion }))} disabled={runActive}>
-                <SelectTrigger aria-label="AI 종목 선정 기준" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
+              <span className="mb-2 block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
+              <Select value={request.selection.mode} onValueChange={(value) => changeSelectionMode(value as "auto" | "manual")} disabled={runActive}>
+                <SelectTrigger aria-label="시뮬레이션 종목 선택 방식" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {Object.entries(CRITERION_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+                  <SelectItem value="auto">거래 지표로 자동 선정</SelectItem>
+                  <SelectItem value="manual">사용자가 직접 선택</SelectItem>
                 </SelectContent>
               </Select>
-            </label>
-            <label className="min-w-0 rounded-2xl bg-secondary p-3">
-              <span className="mb-2 block text-[10px] font-black text-muted-foreground">선정 종목 수</span>
-              <Select value={String(request.symbolCount)} onValueChange={(value) => setRequest((current) => ({ ...current, symbolCount: Number(value) as 1 | 2 }))} disabled={runActive}>
-                <SelectTrigger aria-label="AI 선정 종목 수" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">1종목</SelectItem>
-                  <SelectItem value="2">2종목</SelectItem>
-                </SelectContent>
-              </Select>
-              <span className="mt-2 block text-[9px] text-muted-foreground">AI는 1종목 또는 2종목만 선정합니다.</span>
             </label>
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">판단 프리셋</span>
-              <Select value={request.preset} onValueChange={(value) => setRequest((current) => ({ ...current, preset: value as AiSimulationPreset }))} disabled={runActive}>
+              <Select
+                value={request.preset}
+                onValueChange={(value) => {
+                  const preset = value as AiSimulationPreset;
+                  setRequest((current) => ({
+                    ...current,
+                    preset,
+                    riskTolerance: PRESET_DETAILS[preset].recommendedRisk,
+                  }));
+                }}
+                disabled={runActive}
+              >
                 <SelectTrigger aria-label="AI 판단 프리셋" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {Object.entries(PRESET_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+                  {Object.entries(PRESET_DETAILS).map(([value, details]) => <SelectItem key={value} value={value}>{details.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </label>
           </div>
+
+          <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="rounded-2xl bg-secondary p-4">
+              <div className="flex items-start gap-3">
+                <BrainCircuit className="mt-0.5 size-4 shrink-0" />
+                <div>
+                  <p className="text-xs font-black">{PRESET_DETAILS[request.preset].label}</p>
+                  <p className="mt-1 text-[10px] leading-4 text-muted-foreground">{PRESET_DETAILS[request.preset].description}</p>
+                </div>
+              </div>
+            </div>
+            <label className="rounded-2xl bg-secondary p-4">
+              <span className="flex items-center justify-between gap-3 text-[10px] font-black text-muted-foreground">
+                <span>공격·방어 성향</span>
+                <span className="rounded-full bg-card px-2.5 py-1 text-foreground">
+                  {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance}
+                </span>
+              </span>
+              <input
+                aria-label="공격 방어 성향"
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={request.riskTolerance}
+                disabled={runActive}
+                onChange={(event) => setRequest((current) => ({
+                  ...current,
+                  riskTolerance: Number(event.target.value),
+                }))}
+                className="mt-4 h-2 w-full cursor-pointer accent-primary disabled:cursor-not-allowed"
+              />
+              <span className="mt-2 flex justify-between text-[9px] font-black text-muted-foreground">
+                <span>방어 · 더 많은 현금</span>
+                <span>공격 · 더 큰 배분</span>
+              </span>
+            </label>
+          </div>
+
+          {request.selection.mode === "auto" ? (
+            <div className="grid gap-3 rounded-2xl bg-secondary p-4 sm:grid-cols-2" data-simulation-auto-selection>
+              <label className="min-w-0">
+                <span className="mb-2 block text-[10px] font-black text-muted-foreground">자동 선정 기준</span>
+                <Select
+                  value={request.selection.criterion}
+                  onValueChange={(value) => setRequest((current) => current.selection.mode === "auto"
+                    ? {
+                        ...current,
+                        selection: { ...current.selection, criterion: value as AiSimulationCriterion },
+                      }
+                    : current)}
+                  disabled={runActive}
+                >
+                  <SelectTrigger aria-label="AI 종목 선정 기준" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(CRITERION_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="min-w-0">
+                <span className="mb-2 block text-[10px] font-black text-muted-foreground">선정 종목 수</span>
+                <Select
+                  value={String(request.selection.symbolCount)}
+                  onValueChange={(value) => setRequest((current) => current.selection.mode === "auto"
+                    ? {
+                        ...current,
+                        selection: { ...current.selection, symbolCount: Number(value) as 1 | 2 },
+                      }
+                    : current)}
+                  disabled={runActive}
+                >
+                  <SelectTrigger aria-label="AI 선정 종목 수" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1종목</SelectItem>
+                    <SelectItem value="2">2종목</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <p className="text-[9px] leading-4 text-muted-foreground sm:col-span-2">
+                기존 거래대금·거래량·변동성 스캐너를 유지하며 AI 예측 가능성과 비용 차감 기대수익을 함께 평가합니다.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-2xl bg-secondary p-4" data-simulation-manual-selection>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black">직접 선택 종목</p>
+                  <p className="mt-1 text-[9px] text-muted-foreground">현재 시장에서 1~2개를 검색해 선택하세요.</p>
+                </div>
+                <span className="rounded-full bg-card px-2.5 py-1 text-[9px] font-black">{manualInstruments.length} / 2</span>
+              </div>
+              {manualInstruments.length ? (
+                <div className="mt-3 flex flex-wrap gap-2" data-simulation-manual-symbols>
+                  {manualInstruments.map((instrument) => (
+                    <span key={instrument.symbol} className="inline-flex items-center gap-2 rounded-full bg-card px-3 py-2 text-[10px] font-black">
+                      <Check className="size-3.5" />
+                      {instrument.name} · {instrument.symbol}
+                      <button
+                        type="button"
+                        aria-label={`${instrument.symbol} 선택 해제`}
+                        className="rounded-full p-0.5 hover:bg-secondary"
+                        disabled={runActive}
+                        onClick={() => removeManualInstrument(instrument.symbol)}
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <div className="relative mt-3">
+                <Search className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
+                <Input
+                  aria-label="시뮬레이션 종목 검색"
+                  value={instrumentQuery}
+                  disabled={runActive || manualInstruments.length >= 2}
+                  placeholder={manualInstruments.length >= 2 ? "최대 2종목을 선택했습니다" : "종목명 또는 종목 코드"}
+                  onChange={(event) => setInstrumentQuery(event.target.value)}
+                  className="bg-card pl-10"
+                />
+                {instrumentSearching ? <LoaderCircle className="absolute right-3 top-3 size-4 animate-spin text-muted-foreground" /> : null}
+              </div>
+              {instrumentError ? <p className="mt-2 text-[10px] text-destructive" role="alert">{instrumentError}</p> : null}
+              {instrumentResults.length ? (
+                <div className="mt-2 max-h-56 overflow-y-auto rounded-2xl bg-card p-2" data-simulation-instrument-results>
+                  {instrumentResults.map((instrument) => (
+                    <button
+                      key={`${instrument.market}:${instrument.symbol}`}
+                      type="button"
+                      className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left hover:bg-secondary"
+                      onClick={() => addManualInstrument(instrument)}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-black">{instrument.name}</span>
+                        <span className="mt-0.5 block text-[9px] text-muted-foreground">{instrument.symbol} · {instrument.market}</span>
+                      </span>
+                      <Plus className="size-4 shrink-0" />
+                    </button>
+                  ))}
+                </div>
+              ) : instrumentQuery.trim() && !instrumentSearching && !instrumentError ? (
+                <p className="mt-2 text-[10px] text-muted-foreground">현재 시장에서 일치하는 종목이 없습니다.</p>
+              ) : null}
+            </div>
+          )}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="rounded-2xl bg-secondary p-3">
@@ -734,7 +1120,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-[10px] leading-4 text-muted-foreground">
-              AI 출력이 unavailable이면 임의 판단이나 체결을 만들지 않습니다. 초 단위 재판단도 최신 확정 분봉만 사용하며 진행 중인 run 설정은 변경할 수 없습니다.
+              AI 출력이 unavailable이면 임의 판단이나 체결을 만들지 않습니다. 고정 초 타이머 없이 선택 종목의 새 확정 1분봉 이벤트에 즉시 반응하며, 판단 이후의 다음 유효 체결만 가상 원장에 반영합니다.
             </p>
             {runActive ? (
               <Button

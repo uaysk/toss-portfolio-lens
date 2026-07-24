@@ -67,23 +67,11 @@ describe("database environment configuration", () => {
       },
       simulation: {
         maximumDurationMinutes: 390,
-        decisionIntervalSeconds: 20,
         maximumActiveSessions: 2,
         selectionMaximumAttempts: 3,
         selectionRetryDelayMs: 15_000,
       },
     });
-  });
-
-  it("AI 시뮬레이션 판단 간격을 10~30초로 제한한다", () => {
-    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS = "10";
-    expect(loadConfig().scalping.simulation.decisionIntervalSeconds).toBe(10);
-    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS = "30";
-    expect(loadConfig().scalping.simulation.decisionIntervalSeconds).toBe(30);
-    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS = "9";
-    expect(() => loadConfig()).toThrow("SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS");
-    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS = "31";
-    expect(() => loadConfig()).toThrow("SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS");
   });
 
   it("단타 기능은 provider 실측 한도를 명시해야만 활성화한다", () => {
@@ -156,19 +144,16 @@ describe("database environment configuration", () => {
       ai: { maximumRequestBytes: 33_554_432, maximumResponseBytes: 67_108_864 },
       simulation: {
         maximumDurationMinutes: 390,
-        decisionIntervalSeconds: 20,
         maximumActiveSessions: 2,
       },
     });
 
     process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES = "720";
-    process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS = "15";
     process.env.SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS = "3";
     process.env.SCALPING_SIMULATION_SELECTION_MAX_ATTEMPTS = "4";
     process.env.SCALPING_SIMULATION_SELECTION_RETRY_DELAY_MS = "20000";
     expect(loadConfig().scalping.simulation).toEqual({
       maximumDurationMinutes: 720,
-      decisionIntervalSeconds: 15,
       maximumActiveSessions: 3,
       selectionMaximumAttempts: 4,
       selectionRetryDelayMs: 20_000,
@@ -176,7 +161,6 @@ describe("database environment configuration", () => {
     process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES = "1441";
     expect(() => loadConfig()).toThrow("SCALPING_SIMULATION_MAX_DURATION_MINUTES");
     delete process.env.SCALPING_SIMULATION_MAX_DURATION_MINUTES;
-    delete process.env.SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS;
     delete process.env.SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS;
     delete process.env.SCALPING_SIMULATION_SELECTION_MAX_ATTEMPTS;
     delete process.env.SCALPING_SIMULATION_SELECTION_RETRY_DELAY_MS;

@@ -100,16 +100,24 @@ describe("AI paper simulation session-only router", () => {
     const created = router({ service: api });
     const response = mockResponse();
     await routeHandler(created.value, "/runs", "post")({
-      body: { initialCash: 1_000_000, durationMinutes: 30, symbolCount: 2 },
+      body: {
+        initialCash: 1_000_000,
+        durationMinutes: 30,
+        selection: { mode: "auto", symbolCount: 2 },
+      },
     }, response);
 
     expect(api.start).toHaveBeenCalledWith({
       marketCountry: "KR",
-      criterion: "trading_amount",
       initialCash: 1_000_000,
       durationMinutes: 30,
-      symbolCount: 2,
+      selection: {
+        mode: "auto",
+        criterion: "trading_amount",
+        symbolCount: 2,
+      },
       preset: "risk_management",
+      riskTolerance: 50,
       costs: {
         commissionBpsPerSide: 1.5,
         taxBpsOnExit: 18,
@@ -128,7 +136,7 @@ describe("AI paper simulation session-only router", () => {
       body: {
         initialCash: 99_999,
         durationMinutes: 391,
-        symbolCount: 3,
+        selection: { mode: "auto", symbolCount: 3 },
         realOrder: true,
       },
     }, response);

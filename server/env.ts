@@ -123,7 +123,6 @@ export type ScalpingAiConfig = {
 
 export type AiTradingSimulationConfig = {
   maximumDurationMinutes: number;
-  decisionIntervalSeconds: number;
   maximumActiveSessions: number;
   selectionMaximumAttempts: number;
   selectionRetryDelayMs: number;
@@ -739,12 +738,6 @@ function readScalpingConfig(): ScalpingConfig {
       390,
       1,
       1_440,
-    ),
-    decisionIntervalSeconds: readBoundedInteger(
-      "SCALPING_SIMULATION_DECISION_INTERVAL_SECONDS",
-      20,
-      10,
-      30,
     ),
     maximumActiveSessions: readBoundedInteger(
       "SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS",

@@ -2836,6 +2836,19 @@ fn assistance_signals(
                 .is_some_and(|position| position.quantity > 0.0);
         let bullish_alignment = agreement == "aligned_bullish";
         let bearish_alignment = agreement == "aligned_bearish";
+        let available_timeframes = trends[index]
+            .values()
+            .filter(|direction| direction.is_some())
+            .count();
+        let defensively_bullish_alignment = available_timeframes >= 2
+            && trends[index]
+                .values()
+                .flatten()
+                .all(|direction| *direction != TrendDirection::Bearish)
+            && trends[index]
+                .values()
+                .flatten()
+                .any(|direction| *direction == TrendDirection::Bullish);
         let (mut entry_condition, exit_condition, mut rationale) = match config.preset {
             SignalPreset::Trend => (
                 session_vwap.is_some_and(|value| bar.close > value) && bullish_alignment,
@@ -2868,12 +2881,15 @@ fn assistance_signals(
                             .map(|average| average * (1.0 - config.stop_loss_bps / 10_000.0))
                     });
                 (
-                    false,
+                    session_vwap.is_some_and(|value| bar.close > value)
+                        && defensively_bullish_alignment,
                     position_stop.is_some_and(|stop| bar.close <= stop)
                         || session_vwap.is_some_and(|value| bar.close < value),
                     vec![
                         "position_average_price_stop_candidate".into(),
                         "finalized_close_vs_session_vwap".into(),
+                        "completed_multi_timeframe_no_bearish_direction_with_bullish_confirmation"
+                            .into(),
                     ],
                 )
             }
@@ -2960,10 +2976,6 @@ fn assistance_signals(
                 },
             }
         };
-        let available_timeframes = trends[index]
-            .values()
-            .filter(|value| value.is_some())
-            .count();
         let confidence = round(
             (0.35
                 + if session_vwap.is_some() { 0.2 } else { 0.0 }
@@ -3823,6 +3835,136 @@ mod tests {
         assert_eq!(signal.status, AssistanceStatus::EntryCandidate);
         assert!(!signal.position_known);
         assert!(signal.disclaimer.contains("not_an_order_instruction"));
+    }
+
+    #[test]
+    fn risk_management_allows_cash_only_entry_on_a_defensively_bullish_finalized_bar() {
+        let mut request = request(ResponseMode::LatestSummary, false);
+        request.volume_profile = None;
+        request.signal.as_mut().unwrap().preset = SignalPreset::RiskManagement;
+
+        let result = analyze_scalping(&request, None).unwrap();
+        let signal = result.instruments[0]
+            .signals
+            .as_ref()
+            .unwrap()
+            .latest
+            .as_ref()
+            .unwrap();
+        let directions = signal
+            .multi_timeframe_trends
+            .values()
+            .copied()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert_eq!(signal.status, AssistanceStatus::EntryCandidate);
+        assert!(signal.position_known);
+        assert!(directions.len() >= 2);
+        assert!(
+            directions
+                .iter()
+                .all(|direction| *direction != TrendDirection::Bearish)
+        );
+        assert!(directions.contains(&TrendDirection::Bullish));
+        assert!(signal.rationale.iter().any(|reason| {
+            reason == "completed_multi_timeframe_no_bearish_direction_with_bullish_confirmation"
+        }));
+        assert!(signal.eligibility_basis.contains("not_an_assumed_fill"));
+        assert!(signal.disclaimer.contains("not_an_order_instruction"));
+        assert!(
+            parse_timestamp(signal.earliest_eligible_timestamp.as_deref().unwrap())
+                .unwrap()
+                .epoch_millis
+                > parse_timestamp(&signal.calculation_timestamp)
+                    .unwrap()
+                    .epoch_millis
+        );
+    }
+
+    #[test]
+    fn risk_management_watches_cash_below_vwap_and_exits_a_held_position() {
+        let mut request = request(ResponseMode::LatestSummary, false);
+        request.volume_profile = None;
+        request.signal.as_mut().unwrap().preset = SignalPreset::RiskManagement;
+        let last = request.instruments[0].bars.last_mut().unwrap();
+        let weak_close = last.close * 0.5;
+        last.open = weak_close;
+        last.high = weak_close * 1.01;
+        last.low = weak_close * 0.99;
+        last.close = weak_close;
+        last.amount = last.volume.map(|volume| volume * weak_close);
+
+        let cash_result = analyze_scalping(&request, None).unwrap();
+        let cash_instrument = &cash_result.instruments[0];
+        let cash_signal = cash_instrument
+            .signals
+            .as_ref()
+            .unwrap()
+            .latest
+            .as_ref()
+            .unwrap();
+        let session_vwap = cash_instrument
+            .intraday
+            .session_vwap
+            .latest
+            .as_ref()
+            .unwrap()
+            .values["session_vwap"]
+            .unwrap();
+        assert!(cash_signal.basis_price < session_vwap);
+        assert_eq!(cash_signal.status, AssistanceStatus::Watch);
+
+        request.instruments[0].position = Some(PositionSnapshot {
+            as_of_timestamp: request.instruments[0].bars[0].timestamp.clone(),
+            quantity: 10.0,
+            average_price: Some(weak_close),
+        });
+        let held_result = analyze_scalping(&request, None).unwrap();
+        let held_signal = held_result.instruments[0]
+            .signals
+            .as_ref()
+            .unwrap()
+            .latest
+            .as_ref()
+            .unwrap();
+        assert_eq!(held_signal.status, AssistanceStatus::ExitCandidate);
+        assert!(held_signal.position_known);
+        assert!(held_signal.stop_candidate_price.unwrap() < held_signal.basis_price);
+    }
+
+    #[test]
+    fn risk_management_retains_the_position_average_price_stop_exit() {
+        let mut request = request(ResponseMode::LatestSummary, false);
+        request.volume_profile = None;
+        request.signal.as_mut().unwrap().preset = SignalPreset::RiskManagement;
+        let latest_close = request.instruments[0].bars.last().unwrap().close;
+        request.instruments[0].position = Some(PositionSnapshot {
+            as_of_timestamp: request.instruments[0].bars[0].timestamp.clone(),
+            quantity: 10.0,
+            average_price: Some(latest_close * 1.05),
+        });
+
+        let result = analyze_scalping(&request, None).unwrap();
+        let instrument = &result.instruments[0];
+        let signal = instrument
+            .signals
+            .as_ref()
+            .unwrap()
+            .latest
+            .as_ref()
+            .unwrap();
+        let session_vwap = instrument
+            .intraday
+            .session_vwap
+            .latest
+            .as_ref()
+            .unwrap()
+            .values["session_vwap"]
+            .unwrap();
+        assert!(signal.basis_price > session_vwap);
+        assert!(signal.stop_candidate_price.unwrap() > signal.basis_price);
+        assert_eq!(signal.status, AssistanceStatus::ExitCandidate);
     }
 
     #[test]

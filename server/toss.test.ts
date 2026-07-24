@@ -71,7 +71,6 @@ function staticBearerConfig(): AppConfig {
       },
       simulation: {
         maximumDurationMinutes: 390,
-        decisionIntervalSeconds: 20,
         maximumActiveSessions: 2,
         selectionMaximumAttempts: 3,
         selectionRetryDelayMs: 15_000,

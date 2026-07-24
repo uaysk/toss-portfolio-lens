@@ -107,16 +107,90 @@ function staleForecast() {
 function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
   return {
     marketCountry: "KR",
-    criterion: "trading_amount",
     initialCash: 100_000,
     durationMinutes: 60,
-    symbolCount,
+    selection: {
+      mode: "auto",
+      criterion: "trading_amount",
+      symbolCount,
+    },
     preset: "risk_management",
+    riskTolerance: 50,
     costs: {
       commissionBpsPerSide: 10,
       taxBpsOnExit: 20,
       spreadBpsRoundTrip: 20,
       slippageBpsPerSide: 10,
+    },
+  };
+}
+
+function workspaceCandidates(country: "KR" | "US" = "KR") {
+  return [
+    {
+      symbol: "AAA",
+      name: "Alpha",
+      ...(country === "US" ? { exchange: "NAS" as const, currency: "USD" } : {}),
+      price: 99,
+      filtered: false,
+    },
+    {
+      symbol: "BBB",
+      name: "Beta",
+      ...(country === "US" ? { exchange: "NYS" as const, currency: "USD" } : {}),
+      price: 100,
+      filtered: false,
+    },
+    {
+      symbol: "CCC",
+      name: "Gamma",
+      ...(country === "US" ? { exchange: "AMS" as const, currency: "USD" } : {}),
+      price: 101,
+      filtered: false,
+    },
+  ];
+}
+
+function fullWorkspace(
+  symbols: readonly string[],
+  candidates = workspaceCandidates(),
+) {
+  return {
+    workspace: {
+      generatedAt: TECHNICAL_AT,
+      candidates,
+      instruments: symbols.map((symbol) => ({
+        symbol,
+        bars: [
+          {
+            timestamp: "2026-07-24T00:03:00.000Z",
+            open: 102,
+            high: 103,
+            low: 98,
+            close: 99,
+            volume: 1_000,
+            status: "final",
+          },
+          {
+            timestamp: "2026-07-24T00:04:00.000Z",
+            open: 98,
+            high: 104,
+            low: 97,
+            close: 103,
+            volume: 1_200,
+            status: "final",
+          },
+        ],
+        technical: {
+          instrument_key: symbol,
+          signals: {
+            latest: {
+              status: symbol === "CCC" ? "watch" : "entry_candidate",
+              calculation_timestamp: TECHNICAL_AT,
+            },
+          },
+        },
+      })),
     },
   };
 }
@@ -213,7 +287,6 @@ function harness(options: {
   artifactFailureAfter?: number;
   artifactGate?: Promise<void>;
   createGate?: Promise<void>;
-  decisionIntervalSeconds?: number;
   fillEventGate?: Promise<void>;
   now?: () => number;
   releaseFailureCalls?: number[];
@@ -235,15 +308,11 @@ function harness(options: {
 
   const market = {
     status: vi.fn(() => ({ providers: { ai: { status: options.aiAvailable === false ? "unavailable" : "configured" } } })),
-    workspace: vi.fn().mockResolvedValue({
-      workspace: {
-        candidates: [
-          { symbol: "AAA", name: "Alpha", price: 99, filtered: false },
-          { symbol: "BBB", name: "Beta", price: 100, filtered: false },
-          { symbol: "CCC", name: "Gamma", price: 101, filtered: false },
-        ],
-      },
-    }),
+    workspace: vi.fn((input: { scanOnly: boolean; symbols?: string[] }) => Promise.resolve(
+      input.scanOnly
+        ? { workspace: { candidates: workspaceCandidates() } }
+        : fullWorkspace(input.symbols ?? [], workspaceCandidates()),
+    )),
     forecast: vi.fn().mockResolvedValue(forecast(options.aiAvailable !== false)),
     realtimeAnalysis: vi.fn().mockResolvedValue({
       generatedAt: TECHNICAL_AT,
@@ -394,7 +463,6 @@ function harness(options: {
     artifactService as unknown as ArtifactService,
     {
       maximumDurationMinutes: 390,
-      decisionIntervalSeconds: options.decisionIntervalSeconds ?? 10,
       maximumActiveSessions: 2,
       candidatePoolSize: 3,
       selectionMaximumAttempts: options.selectionMaximumAttempts ?? 3,
@@ -418,15 +486,6 @@ function harness(options: {
     emit(event: ScalpingLiveEvent) {
       if (!liveListener) throw new Error("live listener was not registered");
       liveListener(event);
-    },
-    triggerDecision(scheduledAt = "2026-07-24T00:07:00.000Z") {
-      const internals = service as unknown as {
-        active: Map<string, unknown>;
-        queueAnalysis(session: unknown, scheduledAtMs: number): void;
-      };
-      const session = internals.active.get(RUN_ID);
-      if (!session) throw new Error("simulation session is not active");
-      internals.queueAnalysis(session, Date.parse(scheduledAt));
     },
     run: () => currentRun,
     latestArtifact(type: ArtifactType) {
@@ -471,96 +530,146 @@ describe("AI trading simulation service", () => {
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
   });
 
-  it("runs one batch on the configured 10-second cadence and stops the timer on cancellation", async () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date(CREATED_AT));
-      const setup = harness({
-        decisionIntervalSeconds: 10,
-        now: () => Date.now(),
-      });
-      const started = await setup.service.start(request(2), "owner");
-      await vi.advanceTimersByTimeAsync(0);
-      expect((await setup.service.get(started.runId, "owner") as {
-        snapshot: { phase: string };
-      }).snapshot.phase).toBe("running");
-      expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+  it("runs immediately on a new finalized bar, ignores its duplicate, and aborts on cancellation", async () => {
+    let now = Date.parse(CREATED_AT);
+    const setup = harness({ now: () => now });
+    const started = await setup.service.start(request(2), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
-      expect(setup.market.forecast).toHaveBeenLastCalledWith({
-        marketCountry: "KR",
-        symbols: ["BBB", "AAA"],
-        interval: "1m",
-      }, { signal: expect.any(AbortSignal) });
+    now = Date.parse("2026-07-24T00:07:00.000Z");
+    const finalized = finalBarEvent(
+      "2026-07-24T00:06:00.000Z",
+      "2026-07-24T00:07:00.000Z",
+      101,
+      102,
+    );
+    setup.emit(finalized);
+    await eventually(
+      () => setup.market.forecast.mock.calls.length,
+      (count) => count === 2,
+      "immediate finalized-bar forecast",
+    );
+    expect(setup.market.forecast).toHaveBeenLastCalledWith({
+      marketCountry: "KR",
+      symbols: ["BBB", "AAA"],
+      interval: "1m",
+    }, { signal: expect.any(AbortSignal) });
 
-      const running = await setup.service.get(started.runId, "owner") as {
-        snapshot: {
-          decisionIntervalSeconds: number;
-          decisionCadence: {
-            scheduledTicks: number;
-            inFlight: boolean;
-            lastScheduledAt: string;
-          };
+    const afterFinalizedBar = await eventually(
+      () => setup.service.get(started.runId, "owner"),
+      (value) => (value as {
+        snapshot?: { decisionCadence?: { inFlight?: boolean } };
+      } | undefined)?.snapshot?.decisionCadence?.inFlight === false,
+      "completed finalized-bar analysis",
+    ) as {
+      snapshot: {
+        decisionCadence: {
+          trigger: string;
+          triggeredEvents: number;
+          duplicateEvents: number;
+          inFlight: boolean;
+          lastTriggeredAt: string;
         };
       };
-      expect(running.snapshot).toMatchObject({
-        decisionIntervalSeconds: 10,
-        decisionCadence: {
-          scheduledTicks: 1,
-          inFlight: false,
-          lastScheduledAt: "2026-07-24T00:00:10.000Z",
-        },
-      });
+    };
+    expect(afterFinalizedBar.snapshot.decisionCadence).toMatchObject({
+      trigger: "finalized_one_minute_bar",
+      triggeredEvents: 1,
+      duplicateEvents: 0,
+      inFlight: false,
+      lastTriggeredAt: "2026-07-24T00:07:00.000Z",
+    });
 
-      const decisionSignal = setup.market.forecast.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
-      await setup.service.cancel(started.runId, "owner");
-      expect(decisionSignal.aborted).toBe(true);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
-      expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
-    } finally {
-      vi.useRealTimers();
-    }
+    setup.emit(finalized);
+    await eventually(
+      () => setup.service.get(started.runId, "owner"),
+      (value) => (value as {
+        snapshot?: { decisionCadence?: { duplicateEvents?: number } };
+      } | undefined)?.snapshot?.decisionCadence?.duplicateEvents === 1,
+      "duplicate finalized-bar accounting",
+    );
+    expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+
+    const decisionSignal = setup.market.forecast.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
+    await setup.service.cancel(started.runId, "owner");
+    expect(decisionSignal.aborted).toBe(true);
+    setup.emit(finalBarEvent(
+      "2026-07-24T00:07:00.000Z",
+      "2026-07-24T00:08:00.000Z",
+      102,
+      103,
+    ));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+    expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
   });
 
-  it("coalesces slow cadence ticks without overlapping AI requests", async () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date(CREATED_AT));
-      const setup = harness({
-        decisionIntervalSeconds: 10,
-        now: () => Date.now(),
-      });
-      const started = await setup.service.start(request(1), "owner");
-      await vi.advanceTimersByTimeAsync(0);
-      const gate = deferred<ReturnType<typeof forecast>>();
-      setup.market.forecast.mockReturnValueOnce(gate.promise);
+  it("coalesces finalized bars arriving during slow inference without overlapping AI requests", async () => {
+    let now = Date.parse(CREATED_AT);
+    const setup = harness({ now: () => now });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const gate = deferred<ReturnType<typeof forecast>>();
+    setup.market.forecast.mockReturnValueOnce(gate.promise);
 
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+    now = Date.parse("2026-07-24T00:07:00.000Z");
+    setup.emit(finalBarEvent(
+      "2026-07-24T00:06:00.000Z",
+      "2026-07-24T00:07:00.000Z",
+      100,
+      101,
+    ));
+    await eventually(
+      () => setup.market.forecast.mock.calls.length,
+      (count) => count === 2,
+      "blocked finalized-bar forecast",
+    );
 
-      gate.resolve(forecast(true));
-      await vi.advanceTimersByTimeAsync(0);
-      expect(setup.market.forecast).toHaveBeenCalledTimes(3);
-      const running = await setup.service.get(started.runId, "owner") as {
-        snapshot: {
-          decisionCadence: {
-            coalescedTicks: number;
-            skippedTicks: number;
-          };
+    now = Date.parse("2026-07-24T00:08:00.000Z");
+    setup.emit(finalBarEvent(
+      "2026-07-24T00:07:00.000Z",
+      "2026-07-24T00:08:00.000Z",
+      101,
+      102,
+    ));
+    now = Date.parse("2026-07-24T00:09:00.000Z");
+    setup.emit(finalBarEvent(
+      "2026-07-24T00:08:00.000Z",
+      "2026-07-24T00:09:00.000Z",
+      102,
+      103,
+    ));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(setup.market.forecast).toHaveBeenCalledTimes(2);
+
+    gate.resolve(forecast(true));
+    await eventually(
+      () => setup.market.forecast.mock.calls.length,
+      (count) => count === 3,
+      "single coalesced finalized-bar forecast",
+    );
+    const running = await eventually(
+      () => setup.service.get(started.runId, "owner"),
+      (value) => (value as {
+        snapshot?: { decisionCadence?: { inFlight?: boolean } };
+      } | undefined)?.snapshot?.decisionCadence?.inFlight === false,
+      "coalesced analysis completion",
+    ) as {
+      snapshot: {
+        decisionCadence: {
+          triggeredEvents: number;
+          coalescedEvents: number;
+          inFlight: boolean;
         };
       };
-      expect(running.snapshot.decisionCadence.coalescedTicks).toBeGreaterThanOrEqual(1);
-      expect(running.snapshot.decisionCadence.skippedTicks).toBeGreaterThanOrEqual(1);
-      await setup.service.cancel(started.runId, "owner");
-    } finally {
-      vi.useRealTimers();
-    }
+    };
+    expect(running.snapshot.decisionCadence).toMatchObject({
+      triggeredEvents: 3,
+      coalescedEvents: 2,
+      inFlight: false,
+    });
+    await setup.service.cancel(started.runId, "owner");
   });
 
   it.each([
@@ -570,16 +679,30 @@ describe("AI trading simulation service", () => {
     const setup = harness();
     const started = await setup.service.start(request(symbolCount), "owner");
     const running = await waitForPhase(setup, started.runId, "running") as {
-      snapshot: { selected: Array<{ symbol: string }> };
+      snapshot: {
+        selected: Array<{ symbol: string }>;
+        charts: Array<{ symbol: string; bars: unknown[]; patterns: Array<{ bias: string }> }>;
+      };
     };
 
-    expect(setup.market.workspace).toHaveBeenCalledTimes(1);
-    expect(setup.market.workspace).toHaveBeenCalledWith(expect.objectContaining({
+    expect(setup.market.workspace).toHaveBeenCalledTimes(2);
+    expect(setup.market.workspace).toHaveBeenNthCalledWith(1, expect.objectContaining({
       topCount: 3,
       scanOnly: true,
       marketCountry: "KR",
       includePortfolioContext: false,
     }));
+    expect(setup.market.workspace).toHaveBeenNthCalledWith(2, {
+      marketCountry: "KR",
+      criterion: "trading_amount",
+      topCount: 3,
+      symbols: selected,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "risk_management",
+      scanOnly: false,
+      includePortfolioContext: false,
+    });
     expect(setup.market.forecast).toHaveBeenCalledTimes(1);
     expect(setup.market.forecast).toHaveBeenCalledWith({
       marketCountry: "KR",
@@ -587,18 +710,69 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, { signal: expect.any(AbortSignal) });
     expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(selected);
+    expect(running.snapshot.charts.map(({ symbol }) => symbol)).toEqual(selected);
+    expect(running.snapshot.charts.every(({ bars }) => bars.length === 2)).toBe(true);
+    expect(running.snapshot.charts.every(({ patterns }) => (
+      patterns.some(({ bias }) => bias === "bullish")
+    ))).toBe(true);
     expect(setup.live.retain).toHaveBeenCalledWith(["AAA", "BBB", "CCC"], "KR", undefined);
     expect(setup.live.retain).toHaveBeenCalledWith(selected, "KR", undefined);
-    expect(setup.market.realtimeAnalysis).toHaveBeenCalledTimes(1);
-    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith({
+    expect(setup.market.realtimeAnalysis).not.toHaveBeenCalled();
+
+    await setup.service.cancel(started.runId, "owner");
+  });
+
+  it("validates and retains exactly the manually requested symbols without scanner substitution", async () => {
+    const setup = harness();
+    const manualForecast = forecast(true);
+    manualForecast.forecast.series = [
+      forecastSeries("AAA", 0.03, 0.01, 0.05),
+      forecastSeries("CCC", 0.01, 0, 0.02),
+    ];
+    setup.market.forecast.mockResolvedValue(manualForecast);
+    const input: SimulationStartRequest = {
+      ...request(1),
+      selection: { mode: "manual", symbols: ["AAA", "CCC"] },
+      riskTolerance: 75,
+    };
+
+    const started = await setup.service.start(input, "owner");
+    const running = await waitForPhase(setup, started.runId, "running") as {
+      snapshot: {
+        selection: SimulationStartRequest["selection"];
+        riskTolerance: number;
+        selected: Array<{ symbol: string }>;
+        charts: Array<{ symbol: string }>;
+      };
+    };
+
+    expect(setup.market.workspace).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      criterion: "trading_amount",
+      symbols: ["AAA", "CCC"],
+      scanOnly: true,
+    }));
+    expect(setup.market.forecast).toHaveBeenCalledWith({
       marketCountry: "KR",
-      symbols: selected,
+      symbols: ["AAA", "CCC"],
       interval: "1m",
-      preset: "risk_management",
-      positionContext: { mode: "isolated", positions: [] },
-    }, {
-      signal: expect.any(AbortSignal),
-      skipAutomaticRefresh: true,
+    }, { signal: expect.any(AbortSignal) });
+    expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      symbols: ["AAA", "CCC"],
+      scanOnly: false,
+    }));
+    expect(setup.live.retain).toHaveBeenNthCalledWith(1, ["AAA", "CCC"], "KR", undefined);
+    expect(setup.live.retain).toHaveBeenNthCalledWith(2, ["AAA", "CCC"], "KR", undefined);
+    expect(running.snapshot).toMatchObject({
+      selection: { mode: "manual", symbols: ["AAA", "CCC"] },
+      riskTolerance: 75,
+    });
+    expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(["AAA", "CCC"]);
+    expect(running.snapshot.charts.map(({ symbol }) => symbol)).toEqual(["AAA", "CCC"]);
+    expect(running.snapshot.selected.some(({ symbol }) => symbol === "BBB")).toBe(false);
+    expect(setup.run()?.input).toMatchObject({
+      selection: { mode: "manual", symbols: ["AAA", "CCC"] },
+      risk_tolerance: 75,
+      selected_symbol_count: 2,
     });
 
     await setup.service.cancel(started.runId, "owner");
@@ -606,15 +780,12 @@ describe("AI trading simulation service", () => {
 
   it("keeps explicit US exchanges through scan, AI selection, and live subscriptions", async () => {
     const setup = harness();
-    setup.market.workspace.mockResolvedValue({
-      workspace: {
-        candidates: [
-          { symbol: "AAA", name: "Alpha", exchange: "NAS", price: 99, filtered: false },
-          { symbol: "BBB", name: "Beta", exchange: "NYS", price: 100, filtered: false },
-          { symbol: "CCC", name: "Gamma", exchange: "AMS", price: 101, filtered: false },
-        ],
-      },
-    } as never);
+    const candidates = workspaceCandidates("US");
+    setup.market.workspace.mockImplementation((input) => Promise.resolve(
+      input.scanOnly
+        ? { workspace: { candidates } }
+        : fullWorkspace(input.symbols ?? [], candidates),
+    ) as never);
 
     const started = await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
     const running = await waitForPhase(setup, started.runId, "running") as {
@@ -635,10 +806,12 @@ describe("AI trading simulation service", () => {
       symbols: ["AAA", "BBB", "CCC"],
       interval: "1m",
     }, { signal: expect.any(AbortSignal) });
-    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith(
-      expect.objectContaining({ marketCountry: "US", symbols: ["BBB"] }),
-      expect.objectContaining({ skipAutomaticRefresh: true }),
-    );
+    expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      marketCountry: "US",
+      symbols: ["BBB"],
+      scanOnly: false,
+    }));
+    expect(setup.market.realtimeAnalysis).not.toHaveBeenCalled();
     await setup.service.cancel(started.runId, "owner");
   });
 
@@ -670,14 +843,15 @@ describe("AI trading simulation service", () => {
       snapshot: { selected: Array<{ symbol: string }>; warnings: string[] };
     };
 
-    expect(setup.market.workspace).toHaveBeenCalledTimes(2);
+    expect(setup.market.workspace).toHaveBeenCalledTimes(3);
     expect(setup.live.retain).toHaveBeenCalledTimes(2);
     expect(setup.market.forecast).toHaveBeenCalledTimes(1);
     expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(["BBB", "AAA"]);
-    expect(running.snapshot.warnings).toContain(
-      "유효 스캔 후보가 부족해 공급자 데이터를 제한 재조회합니다 "
-      + "(1/2; market=KR, requested=2, scanned=1, exchangeEligible=1).",
-    );
+    expect(running.snapshot.warnings).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /유효 스캔 후보.*부족해.*\(1\/2; market=KR, requested=2, scanned=1, exchangeEligible=1\)\./,
+      ),
+    ]));
     await setup.service.cancel(started.runId, "owner");
   });
 
@@ -740,7 +914,7 @@ describe("AI trading simulation service", () => {
       (value) => (value as {
         snapshot?: { warnings?: string[] };
       } | undefined)?.snapshot?.warnings?.some((warning) => (
-        warning.includes("유효 스캔 후보가 부족해")
+        warning.includes("유효 스캔 후보") && warning.includes("부족해")
       )) === true,
       "pending workspace retry",
     );
@@ -946,20 +1120,38 @@ describe("AI trading simulation service", () => {
     );
 
     expect(setup.run()?.input).toMatchObject({
-      decision_interval_seconds: 10,
+      decision_cadence: "event_driven_finalized_one_minute_bar",
+      selection: {
+        mode: "auto",
+        criterion: "trading_amount",
+        symbolCount: 1,
+      },
+      risk_tolerance: 50,
       selection_maximum_attempts: 4,
       selection_retry_delay_ms: 1_234,
     });
     expect(diagnostics?.content).toMatchObject({
-      decision_interval_seconds: 10,
+      decision_trigger: "new_finalized_one_minute_bar",
+      decision_cadence: {
+        trigger: "finalized_one_minute_bar",
+        triggeredEvents: 0,
+      },
+      selection_mode: "auto",
+      risk_tolerance: 50,
       selection_maximum_attempts: 4,
       selection_retry_delay_ms: 1_234,
     });
     expect(setup.service.status()).toMatchObject({
       limits: {
-        decisionIntervalSeconds: 10,
         selectionMaximumAttempts: 4,
         selectionRetryDelayMs: 1_234,
+      },
+      capabilities: {
+        eventDrivenDecisions: true,
+        manualSymbolSelection: true,
+      },
+      policy: {
+        cadence: "event_driven_immediately_after_each_new_finalized_one_minute_bar",
       },
     });
     await setup.service.cancel(started.runId, "owner");
@@ -1055,16 +1247,16 @@ describe("AI trading simulation service", () => {
     };
     const trade = filled.snapshot.trades[0]!;
     expect(trade).toMatchObject({
-      quantity: 997,
-      grossAmount: 99_700,
+      quantity: 525,
+      grossAmount: 52_500,
       source: "kis_ws_trade",
     });
     expect(Number.isSafeInteger(trade.quantity)).toBe(true);
-    expect(trade.totalCosts).toBeCloseTo(299.1);
-    expect(filled.snapshot.totalCosts).toBeCloseTo(299.1);
-    expect(filled.snapshot.cash).toBeCloseTo(0.9);
+    expect(trade.totalCosts).toBeCloseTo(157.5);
+    expect(filled.snapshot.totalCosts).toBeCloseTo(157.5);
+    expect(filled.snapshot.cash).toBeCloseTo(47_342.5);
     expect(filled.snapshot.positions).toEqual([
-      expect.objectContaining({ symbol: "BBB", quantity: 997 }),
+      expect.objectContaining({ symbol: "BBB", quantity: 525 }),
     ]);
 
     await setup.service.cancel(started.runId, "owner");
@@ -1139,7 +1331,6 @@ describe("AI trading simulation service", () => {
       101,
       102,
     ));
-    setup.triggerDecision();
     await eventually(
       () => setup.service.get(started.runId, "owner"),
       (value) => (value as {
@@ -1152,7 +1343,7 @@ describe("AI trading simulation service", () => {
         mode: "isolated",
         positions: [expect.objectContaining({
           symbol: "BBB",
-          quantity: 997,
+          quantity: 525,
           asOf: "2026-07-24T00:05:05.000Z",
         })],
       },
@@ -1184,12 +1375,11 @@ describe("AI trading simulation service", () => {
     const refreshGate = deferred<ReturnType<typeof forecast>>();
     setup.market.forecast.mockReturnValueOnce(refreshGate.promise);
     setup.emit(finalBarEvent(
-      "2026-07-24T00:06:00.000Z",
+      TECHNICAL_AT,
       "2026-07-24T00:07:00.000Z",
-      0,
+      100,
       100,
     ));
-    setup.triggerDecision();
     await eventually(
       () => setup.market.forecast.mock.calls.length,
       (count) => count === 2,
@@ -1205,7 +1395,7 @@ describe("AI trading simulation service", () => {
     refreshGate.resolve(forecast(true));
     await eventually(
       () => setup.market.realtimeAnalysis.mock.calls.length,
-      (count) => count >= 3,
+      (count) => count >= 2,
       "ledger-aware refresh retry",
     );
     expect(setup.market.realtimeAnalysis).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -1213,7 +1403,7 @@ describe("AI trading simulation service", () => {
         mode: "isolated",
         positions: [expect.objectContaining({
           symbol: "BBB",
-          quantity: 997,
+          quantity: 525,
           asOf: "2026-07-24T00:07:03.000Z",
         })],
       },
@@ -1253,7 +1443,6 @@ describe("AI trading simulation service", () => {
       100,
       "AAA",
     ));
-    setup.triggerDecision();
     await eventually(
       () => setup.service.get(started.runId, "owner"),
       (value) => (value as {
@@ -1410,7 +1599,7 @@ describe("AI trading simulation service", () => {
     expect(closeSettled).toBe(true);
   });
 
-  it("does not install cadence timers when cancellation races initial checkpoint persistence", async () => {
+  it("does not install end or progress timers when cancellation races initial checkpoint persistence", async () => {
     const gate = deferred();
     const setup = harness({ artifactGate: gate.promise });
     const started = await setup.service.start(request(1), "owner");
@@ -1421,7 +1610,6 @@ describe("AI trading simulation service", () => {
         phase: string;
         endTimer?: NodeJS.Timeout;
         progressTimer?: NodeJS.Timeout;
-        decisionTimer?: NodeJS.Timeout;
       }>;
     }).active.get(started.runId)!;
 
@@ -1435,7 +1623,6 @@ describe("AI trading simulation service", () => {
     expect(cancelled.run.status).toBe("cancelled");
     expect(session.endTimer).toBeUndefined();
     expect(session.progressTimer).toBeUndefined();
-    expect(session.decisionTimer).toBeUndefined();
   });
 
   it("terminalizes an owned active database run even when no in-memory session exists", async () => {
@@ -1444,13 +1631,11 @@ describe("AI trading simulation service", () => {
     await waitForPhase(setup, started.runId, "running");
     const internals = setup.service as unknown as {
       active: Map<string, {
-        decisionTimer?: NodeJS.Timeout;
         decisionAbort: AbortController;
         release?: () => void;
       }>;
     };
     const detached = internals.active.get(started.runId)!;
-    if (detached.decisionTimer) clearTimeout(detached.decisionTimer);
     detached.decisionAbort.abort(new Error("synthetic restart"));
     detached.release?.();
     internals.active.delete(started.runId);

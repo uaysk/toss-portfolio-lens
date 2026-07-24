@@ -1,9 +1,131 @@
-export const AI_PAPER_POLICY_VERSION = "ai-paper-policy/v1" as const;
+import {
+  SimulationPresetSchema,
+  type SimulationPreset,
+} from "./contracts.js";
 
-export const AI_PAPER_ENTRY_UP_PROBABILITY = 0.55;
-export const AI_PAPER_EXIT_UP_PROBABILITY = 0.45;
-export const AI_PAPER_RISK_PENALTY = 0.25;
+export const AI_PAPER_POLICY_VERSION = "ai-paper-policy/v2" as const;
+
 export const AI_PAPER_FORECAST_HORIZON_MINUTES = 5 as const;
+
+export type PaperTechnicalConfirmation = "entry_candidate" | "non_exit";
+export type PaperPatternConfirmation = "bullish" | "non_bearish";
+export type PaperChartPatternBias = "bullish" | "bearish" | "neutral";
+
+export type ResolvedPaperPolicyProfile = {
+  policyVersion: typeof AI_PAPER_POLICY_VERSION;
+  preset: SimulationPreset;
+  riskTolerance: number;
+  entryUpProbability: number;
+  exitUpProbability: number;
+  riskPenalty: number;
+  technicalConfirmation: PaperTechnicalConfirmation;
+  patternConfirmation: PaperPatternConfirmation;
+  targetAllocationRate: number;
+  cashReserveRate: number;
+};
+
+type PresetProfileSeed = {
+  entryAdjustment: number;
+  exitAdjustment: number;
+  riskPenaltyAdjustment: number;
+  allocationAdjustment: number;
+  technicalConfirmationUntil: number;
+  bullishPatternUntil: number;
+};
+
+const PRESET_PROFILE_SEEDS: Readonly<Record<SimulationPreset, PresetProfileSeed>> = {
+  trend: {
+    entryAdjustment: 0,
+    exitAdjustment: 0,
+    riskPenaltyAdjustment: 0,
+    allocationAdjustment: 0,
+    technicalConfirmationUntil: 35,
+    bullishPatternUntil: 25,
+  },
+  breakout: {
+    entryAdjustment: -0.01,
+    exitAdjustment: -0.01,
+    riskPenaltyAdjustment: -0.03,
+    allocationAdjustment: 0.05,
+    technicalConfirmationUntil: 50,
+    bullishPatternUntil: 45,
+  },
+  mean_reversion: {
+    entryAdjustment: 0.01,
+    exitAdjustment: 0.01,
+    riskPenaltyAdjustment: 0.02,
+    allocationAdjustment: -0.05,
+    technicalConfirmationUntil: 55,
+    bullishPatternUntil: 50,
+  },
+  risk_management: {
+    entryAdjustment: 0.02,
+    exitAdjustment: 0.02,
+    riskPenaltyAdjustment: 0.05,
+    allocationAdjustment: -0.1,
+    technicalConfirmationUntil: 70,
+    bullishPatternUntil: 65,
+  },
+};
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function rounded(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function interpolate(defensive: number, aggressive: number, riskRatio: number): number {
+  return defensive + (aggressive - defensive) * riskRatio;
+}
+
+export function resolvePaperPolicyProfile(
+  presetInput: SimulationPreset,
+  riskTolerance: number,
+): ResolvedPaperPolicyProfile {
+  const preset = SimulationPresetSchema.parse(presetInput);
+  if (!Number.isSafeInteger(riskTolerance) || riskTolerance < 0 || riskTolerance > 100) {
+    throw new RangeError("riskTolerance must be an integer in 0..=100.");
+  }
+  const seed = PRESET_PROFILE_SEEDS[preset];
+  const riskRatio = riskTolerance / 100;
+  const entryUpProbability = clamp(
+    interpolate(0.66, 0.52, riskRatio) + seed.entryAdjustment,
+    0.5,
+    0.9,
+  );
+  const exitUpProbability = clamp(
+    interpolate(0.52, 0.4, riskRatio) + seed.exitAdjustment,
+    0.25,
+    entryUpProbability - 0.05,
+  );
+  const targetAllocationRate = clamp(
+    interpolate(0.35, 0.9, riskRatio) + seed.allocationAdjustment,
+    0.2,
+    0.95,
+  );
+  return {
+    policyVersion: AI_PAPER_POLICY_VERSION,
+    preset,
+    riskTolerance,
+    entryUpProbability: rounded(entryUpProbability),
+    exitUpProbability: rounded(exitUpProbability),
+    riskPenalty: rounded(clamp(
+      interpolate(0.45, 0.15, riskRatio) + seed.riskPenaltyAdjustment,
+      0.05,
+      0.75,
+    )),
+    technicalConfirmation: riskTolerance <= seed.technicalConfirmationUntil
+      ? "entry_candidate"
+      : "non_exit",
+    patternConfirmation: riskTolerance <= seed.bullishPatternUntil
+      ? "bullish"
+      : "non_bearish",
+    targetAllocationRate: rounded(targetAllocationRate),
+    cashReserveRate: rounded(1 - targetAllocationRate),
+  };
+}
 
 export type AiPaperModelProvenance = {
   modelId: string;
@@ -32,6 +154,7 @@ export type AiPaperForecastCandidate = {
   q90Return: number;
   upProbability: number;
   score: number;
+  riskPenalty: number;
   roundTripCostRate: number;
   model: AiPaperModelProvenance;
 };
@@ -68,6 +191,8 @@ export type PaperPolicyAction = {
   upProbability: number;
   technicalState: PaperTechnicalState | null;
   technicalObservedAt?: string;
+  chartPatternBias: PaperChartPatternBias | null;
+  chartPatterns: string[];
   reasons: string[];
   model: AiPaperModelProvenance;
 };
@@ -103,6 +228,7 @@ export type PaperExecution = {
 export type PaperFillConfig = {
   symbolCount: 1 | 2;
   costs: PaperTradingCosts;
+  targetAllocationRate: number;
   markPrices?: Readonly<Record<string, number>>;
   allocationEquity?: number;
 };
@@ -181,6 +307,13 @@ function validatedRoundTripCostRate(value: number): number {
   return value;
 }
 
+function validatedRiskPenalty(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new RangeError("riskPenalty must be a finite coefficient in [0, 1].");
+  }
+  return value;
+}
+
 function parseModel(value: unknown): AiPaperModelProvenance | undefined {
   const source = record(value);
   if (!source) return undefined;
@@ -248,6 +381,7 @@ function parseCandidate(
   generatedAt: string,
   model: AiPaperModelProvenance,
   roundTripCostRate: number,
+  riskPenalty: number,
   notBeforeMs: number,
 ): AiPaperForecastCandidate | undefined {
   const source = record(value);
@@ -268,7 +402,7 @@ function parseCandidate(
     || upProbability < 0
     || upProbability > 1) return undefined;
   const score = quantiles.median
-    - AI_PAPER_RISK_PENALTY * (quantiles.q90 - quantiles.q10)
+    - riskPenalty * (quantiles.q90 - quantiles.q10)
     - roundTripCostRate;
   if (!Number.isFinite(score)) return undefined;
   return {
@@ -282,6 +416,7 @@ function parseCandidate(
     q90Return: quantiles.q90,
     upProbability,
     score,
+    riskPenalty,
     roundTripCostRate,
     model,
   };
@@ -289,12 +424,18 @@ function parseCandidate(
 
 export function selectAiForecastSeries(
   input: unknown,
-  config: { symbolCount: 1 | 2; roundTripCostRate: number; notBeforeMs?: number },
+  config: {
+    symbolCount: 1 | 2;
+    roundTripCostRate: number;
+    riskPenalty: number;
+    notBeforeMs?: number;
+  },
 ): AiPaperSelection {
   if (config.symbolCount !== 1 && config.symbolCount !== 2) {
     throw new RangeError("symbolCount must be exactly 1 or 2.");
   }
   const roundTripCostRate = validatedRoundTripCostRate(config.roundTripCostRate);
+  const riskPenalty = validatedRiskPenalty(config.riskPenalty);
   if (config.notBeforeMs !== undefined && !Number.isFinite(config.notBeforeMs)) {
     throw new RangeError("notBeforeMs must be a finite epoch timestamp.");
   }
@@ -335,7 +476,14 @@ export function selectAiForecastSeries(
         && Date.parse(targetTimestamp) <= freshnessCutoff) {
         staleForecastCount += 1;
       }
-      return parseCandidate(series, generatedAt, model, roundTripCostRate, notBeforeMs);
+      return parseCandidate(
+        series,
+        generatedAt,
+        model,
+        roundTripCostRate,
+        riskPenalty,
+        notBeforeMs,
+      );
     })
     .filter((candidate): candidate is AiPaperForecastCandidate => candidate !== undefined);
   const duplicateSymbols = new Set<string>();
@@ -377,22 +525,42 @@ function maxTimestamp(left: string, right: string): string {
 function technicalObservation(value: unknown): {
   state: PaperTechnicalState | null;
   observedAt?: string;
+  chartPatternBias: PaperChartPatternBias | null;
+  chartPatterns: string[];
 } {
   const source = record(value);
-  const rawState = source?.status ?? value;
+  const rawState = source?.status
+    ?? source?.state
+    ?? source?.technicalState
+    ?? source?.technical_state
+    ?? value;
   const state = rawState === "watch" || rawState === "entry_candidate"
     || rawState === "hold" || rawState === "exit_candidate"
     ? rawState
     : null;
   const observedAt = isoTimestamp(source?.observedAt ?? source?.observed_at);
+  const rawBias = source?.chartPatternBias ?? source?.chart_pattern_bias;
+  const chartPatternBias = rawBias === "bullish" || rawBias === "bearish" || rawBias === "neutral"
+    ? rawBias
+    : null;
+  const rawPatterns = source?.chartPatterns ?? source?.chart_patterns;
+  const chartPatterns = Array.isArray(rawPatterns)
+    ? [...new Set(rawPatterns
+        .map((pattern) => nonemptyString(pattern, 128))
+        .filter((pattern): pattern is string => pattern !== undefined))]
+        .slice(0, 16)
+    : [];
   return {
     state,
     ...(observedAt ? { observedAt } : {}),
+    chartPatternBias,
+    chartPatterns,
   };
 }
 
 export function decidePaperActions(input: {
   selection: AiPaperSelection;
+  profile: ResolvedPaperPolicyProfile;
   technicalStates?: Readonly<Record<string, unknown>>;
   heldSymbols?: readonly string[];
 }): PaperPolicyAction[] {
@@ -402,26 +570,50 @@ export function decidePaperActions(input: {
     const observation = technicalObservation(input.technicalStates?.[candidate.symbol]);
     const state = observation.state;
     const isHeld = held.has(candidate.symbol);
+    const technicalEntryConfirmed = input.profile.technicalConfirmation === "entry_candidate"
+      ? state === "entry_candidate"
+      : state !== "exit_candidate";
+    const patternEntryConfirmed = input.profile.patternConfirmation === "bullish"
+      ? observation.chartPatternBias === "bullish"
+      : observation.chartPatternBias !== "bearish";
     const exitReasons = [
       ...(candidate.score < 0 ? ["negative_risk_adjusted_score"] : []),
-      ...(candidate.upProbability <= AI_PAPER_EXIT_UP_PROBABILITY ? ["low_up_probability"] : []),
+      ...(candidate.upProbability <= input.profile.exitUpProbability
+        ? ["low_up_probability"] : []),
       ...(state === "exit_candidate" ? ["technical_exit_candidate"] : []),
+      ...(observation.chartPatternBias === "bearish" ? ["bearish_chart_pattern"] : []),
     ];
     const canEnter = candidate.score > 0
-      && candidate.upProbability >= AI_PAPER_ENTRY_UP_PROBABILITY
-      && state !== "exit_candidate";
+      && candidate.upProbability >= input.profile.entryUpProbability
+      && technicalEntryConfirmed
+      && patternEntryConfirmed;
     const action: PaperPolicyActionKind = isHeld
       ? exitReasons.length ? "sell" : "hold"
       : canEnter ? "buy" : "watch";
     const reasons = action === "buy"
-      ? ["positive_risk_adjusted_score", "entry_probability_threshold", "technical_exit_absent"]
+      ? [
+          "positive_risk_adjusted_score",
+          "entry_probability_threshold",
+          input.profile.technicalConfirmation === "entry_candidate"
+            ? "technical_entry_confirmation"
+            : "technical_exit_absent",
+          input.profile.patternConfirmation === "bullish"
+            ? "bullish_chart_pattern"
+            : "bearish_chart_pattern_absent",
+        ]
       : action === "sell" ? exitReasons
         : action === "hold" ? ["exit_conditions_absent"]
           : [
               ...(candidate.score <= 0 ? ["entry_score_threshold_not_met"] : []),
-              ...(candidate.upProbability < AI_PAPER_ENTRY_UP_PROBABILITY
+              ...(candidate.upProbability < input.profile.entryUpProbability
                 ? ["entry_probability_threshold_not_met"] : []),
               ...(state === "exit_candidate" ? ["technical_exit_candidate"] : []),
+              ...(state !== "exit_candidate" && !technicalEntryConfirmed
+                ? ["technical_entry_confirmation_required"] : []),
+              ...(observation.chartPatternBias === "bearish"
+                ? ["bearish_chart_pattern"] : []),
+              ...(observation.chartPatternBias !== "bearish" && !patternEntryConfirmed
+                ? ["bullish_chart_pattern_required"] : []),
             ];
     const aiEligibleAfter = maxTimestamp(candidate.inputEndAt, candidate.generatedAt);
     const eligibleAfter = observation.observedAt
@@ -441,6 +633,8 @@ export function decidePaperActions(input: {
       upProbability: candidate.upProbability,
       technicalState: state,
       ...(observation.observedAt ? { technicalObservedAt: observation.observedAt } : {}),
+      chartPatternBias: observation.chartPatternBias,
+      chartPatterns: [...observation.chartPatterns],
       reasons,
       model: candidate.model,
     };
@@ -552,6 +746,11 @@ export function fillPaperAction(
   if (config.symbolCount !== 1 && config.symbolCount !== 2) {
     throw new RangeError("symbolCount must be exactly 1 or 2.");
   }
+  if (!Number.isFinite(config.targetAllocationRate)
+    || config.targetAllocationRate <= 0
+    || config.targetAllocationRate > 1) {
+    throw new RangeError("targetAllocationRate must be a finite decimal rate in (0, 1].");
+  }
   const rates = validateCosts(config.costs);
   const executedAt = isoTimestamp(execution.timestamp);
   const eligibleAfter = isoTimestamp(action.eligibleAfter);
@@ -606,7 +805,7 @@ export function fillPaperAction(
   if (equity === undefined) return rejected(ledger, "mark_price_unavailable");
   const current = ledger.positions[action.symbol];
   const currentGross = (current?.quantity ?? 0) * execution.price;
-  const targetGross = equity / config.symbolCount;
+  const targetGross = equity * config.targetAllocationRate / config.symbolCount;
   const desiredQuantity = Math.floor(Math.max(0, targetGross - currentGross) / execution.price);
   if (desiredQuantity <= 0) return skipped(ledger, "target_already_met");
   const unitDebit = execution.price * (

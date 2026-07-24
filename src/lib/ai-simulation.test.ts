@@ -16,10 +16,25 @@ describe("AI simulation request validation", () => {
         expect(validateAiSimulationRequest({
           ...DEFAULT_AI_SIMULATION_REQUEST,
           marketCountry,
-          symbolCount,
+          selection: {
+            mode: "auto",
+            criterion: "trading_amount",
+            symbolCount,
+          },
         })).toEqual([]);
       }
     }
+  });
+
+  it("accepts one or two normalized manual symbols and rejects duplicates", () => {
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      selection: { mode: "manual", symbols: ["005930", "000660"] },
+    })).toEqual([]);
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      selection: { mode: "manual", symbols: ["NVDA", "nvda"] },
+    })).toContain("직접 선택 종목은 중복될 수 없습니다.");
   });
 
   it("applies server-provided cash and duration limits without inventing values", () => {
@@ -47,9 +62,13 @@ describe("AI simulation request validation", () => {
     const invalid = {
       ...DEFAULT_AI_SIMULATION_REQUEST,
       marketCountry: "JP",
-      criterion: "market_cap",
       durationMinutes: 12.5,
-      symbolCount: 3,
+      riskTolerance: 101,
+      selection: {
+        mode: "auto",
+        criterion: "market_cap",
+        symbolCount: 3,
+      },
       preset: "guaranteed_profit",
       costs: { ...DEFAULT_AI_SIMULATION_REQUEST.costs, slippageBpsPerSide: -1 },
     } as unknown as AiSimulationRequest;
@@ -57,6 +76,7 @@ describe("AI simulation request validation", () => {
       "시장 선택이 올바르지 않습니다.",
       "종목 선정 기준이 올바르지 않습니다.",
       "AI 전략 프리셋이 올바르지 않습니다.",
+      "공격·방어 성향은 0부터 100 사이의 정수여야 합니다.",
       "테스트 기간은 1분 이상의 정수여야 합니다.",
       "AI 선정 종목 수는 1개 또는 2개여야 합니다.",
       "편도 슬리피지 bps는 0 이상의 숫자여야 합니다.",
@@ -74,12 +94,10 @@ describe("AI simulation response normalization", () => {
         durationMinutes: { minimum: 10, maximum: 390 },
       },
       capabilities: { realOrders: false, mcp: false, symbolCountMaximum: 2 },
-      policy: { decisionIntervalSeconds: 20 },
       limitations: ["실시간 데이터가 없으면 시작할 수 없습니다."],
     })).toEqual({
       enabled: false,
       message: "AI worker unavailable",
-      decisionIntervalSeconds: 20,
       limits: {
         minimumInitialCash: 100_000,
         maximumInitialCash: 50_000_000,
@@ -102,7 +120,20 @@ describe("AI simulation response normalization", () => {
       cash: 4_990,
       equity: 10_120,
       progress: 0.5,
-      decisionIntervalSeconds: 20,
+      selection: { mode: "manual", symbols: ["NVDA"] },
+      preset: "trend",
+      riskTolerance: 65,
+      policyProfile: {
+        entryUpProbability: 0.56,
+        targetAllocationRate: 0.75,
+        cashReserveRate: 0.25,
+        technicalConfirmation: "non_exit",
+        patternConfirmation: "non_bearish",
+      },
+      decisionCadence: {
+        trigger: "finalized_one_minute_bar",
+        triggeredEvents: 3,
+      },
       selected: [
         {
           symbol: "NVDA",
@@ -110,7 +141,7 @@ describe("AI simulation response normalization", () => {
           score: 0.82,
           upProbability: 0.61,
           predictedMedianReturn: 0.004,
-          model: { modelId: "chronos", modelRevision: "pinned" },
+          model: { modelId: "chronos", modelRevision: "pinned", device: "cuda" },
         },
         { score: 1 },
       ],
@@ -123,9 +154,38 @@ describe("AI simulation response normalization", () => {
         { symbol: "BAD", side: "sell" },
       ],
       decisions: [
-        { symbol: "NVDA", action: "buy", decidedAt: "2026-07-24T00:01:00.000Z", eligibleAfter: "2026-07-24T00:02:00.000Z", reason: "forecast_and_signal_aligned", model: "chronos" },
+        {
+          symbol: "NVDA",
+          action: "buy",
+          decidedAt: "2026-07-24T00:01:00.000Z",
+          eligibleAfter: "2026-07-24T00:02:00.000Z",
+          reason: "forecast_and_signal_aligned",
+          chartPatternBias: "bullish",
+          chartPatterns: ["bullish_engulfing"],
+          model: "chronos",
+        },
         { symbol: "BAD", action: "buy" },
       ],
+      charts: [{
+        symbol: "NVDA",
+        name: "NVIDIA",
+        currency: "USD",
+        bars: [{
+          timestamp: "2026-07-24T00:01:00.000Z",
+          open: 169,
+          high: 171,
+          low: 168,
+          close: 170,
+          status: "final",
+          indicatorValues: { "ema:value": 169.5 },
+        }],
+        indicators: [{ id: "ema", kind: "ema", status: "available", values: { value: 169.5 } }],
+        patterns: [{
+          name: "bullish_engulfing",
+          bias: "bullish",
+          detectedAt: "2026-07-24T00:01:00.000Z",
+        }],
+      }],
       warnings: ["호가 unavailable 구간은 다음 확정 분봉을 사용했습니다."],
       capabilities: { realOrders: false },
     });
@@ -134,11 +194,20 @@ describe("AI simulation response normalization", () => {
       phase: "monitoring",
       currency: "USD",
       progress: 0.5,
-      decisionIntervalSeconds: 20,
-      selected: [{ symbol: "NVDA", model: "chronos · pinned" }],
+      selection: { mode: "manual", symbols: ["NVDA"] },
+      preset: "trend",
+      riskTolerance: 65,
+      policyProfile: { targetAllocationRate: 0.75, cashReserveRate: 0.25 },
+      decisionCadence: { trigger: "finalized_one_minute_bar", triggeredEvents: 3 },
+      selected: [{ symbol: "NVDA", model: "chronos · pinned · CUDA" }],
       positions: [{ symbol: "NVDA", quantity: 3 }],
       trades: [{ symbol: "NVDA", source: "next_valid_quote" }],
-      decisions: [{ symbol: "NVDA", eligibleAfter: "2026-07-24T00:02:00.000Z" }],
+      decisions: [{
+        symbol: "NVDA",
+        eligibleAfter: "2026-07-24T00:02:00.000Z",
+        chartPatterns: ["bullish_engulfing"],
+      }],
+      charts: [{ symbol: "NVDA", bars: [{ close: 170 }] }],
       capabilities: { realOrders: false },
     });
     expect(snapshot.selected).toHaveLength(1);

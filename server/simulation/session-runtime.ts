@@ -4,9 +4,7 @@ export type SimulationRuntimeHandles = {
   selectionRetryResolve?: () => void;
   endTimer?: NodeJS.Timeout;
   progressTimer?: NodeJS.Timeout;
-  decisionTimer?: NodeJS.Timeout;
   decisionAbort: AbortController;
-  nextDecisionAtMs?: number;
   analysisQueued: boolean;
 };
 
@@ -60,11 +58,8 @@ export function cleanupSimulationRuntime(
   clearSelectionRetry(handles);
   if (handles.endTimer !== undefined) clearTimeout(handles.endTimer);
   if (handles.progressTimer !== undefined) clearInterval(handles.progressTimer);
-  if (handles.decisionTimer !== undefined) clearTimeout(handles.decisionTimer);
   handles.endTimer = undefined;
   handles.progressTimer = undefined;
-  handles.decisionTimer = undefined;
-  handles.nextDecisionAtMs = undefined;
   handles.analysisQueued = false;
   if (!handles.decisionAbort.signal.aborted) {
     handles.decisionAbort.abort(abortReason);

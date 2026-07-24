@@ -20,6 +20,7 @@ import {
   createPaperLedger,
   decidePaperActions,
   fillPaperAction,
+  resolvePaperPolicyProfile,
   selectAiForecastSeries,
   type AiPaperForecastCandidate,
   type AiPaperSelection,
@@ -28,8 +29,6 @@ import {
   type PaperTrade,
 } from "./policy.js";
 import {
-  calculateCadenceTick,
-  planDecisionTimer,
   reduceDecisionQueueTick,
   transitionSimulationPhase,
   type SimulationPhase,
@@ -40,6 +39,13 @@ import {
   combinedRelease,
   type SimulationRuntimeHandles,
 } from "./session-runtime.js";
+import {
+  latestSimulationPatternObservation,
+  mergeSimulationFinalBar,
+  mergeSimulationLatestTechnical,
+  simulationChartsFromWorkspace,
+  type SimulationChartView,
+} from "./chart-data.js";
 
 const MINUTE_MS = 60_000;
 const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
@@ -150,26 +156,85 @@ function latestTimestamp(values: readonly unknown[]): string | undefined {
   return timestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0];
 }
 
-function technicalStates(value: ScalpingRealtimeAnalysisResult): Record<string, unknown> {
+function technicalStates(
+  value: ScalpingRealtimeAnalysisResult,
+  charts: readonly SimulationChartView[],
+): Record<string, unknown> {
   const technical = value.technical;
-  if (!("instruments" in technical)) return {};
-  const output: Record<string, unknown> = {};
+  const output: Record<string, unknown> = Object.fromEntries(charts.map((chart) => {
+    const pattern = latestSimulationPatternObservation(chart);
+    return [chart.symbol, {
+      observedAt: latestTimestamp([value.generatedAt, pattern.patternObservedAt]),
+      ...pattern,
+    }];
+  }));
+  if (!("instruments" in technical)) return output;
   for (const instrument of technical.instruments) {
     const symbol = instrument.instrument_key.toUpperCase();
-    const latest = instrument.signals?.latest;
-    const state = latest?.status;
-    if (symbol && state) {
-      output[symbol] = {
-        status: state,
-        observedAt: latestTimestamp([
-          value.generatedAt,
-          latest.calculation_timestamp,
-          latest.signal_timestamp,
-        ]),
-      };
-    }
+    const latest = instrument.signals?.latest ?? instrument.signals?.points?.at(-1);
+    const pattern = latestSimulationPatternObservation(
+      charts.find((chart) => chart.symbol === symbol),
+    );
+    output[symbol] = {
+      ...(latest?.status ? { status: latest.status } : {}),
+      observedAt: latestTimestamp([
+        value.generatedAt,
+        latest?.calculation_timestamp,
+        latest?.signal_timestamp,
+        pattern.patternObservedAt,
+      ]),
+      ...pattern,
+    };
   }
   return output;
+}
+
+function workspaceTechnicalStates(
+  value: ScalpingWorkspaceResult,
+  charts: readonly SimulationChartView[],
+): Record<string, unknown> {
+  const output: Record<string, unknown> = Object.fromEntries(charts.map((chart) => {
+    const pattern = latestSimulationPatternObservation(chart);
+    return [chart.symbol, {
+      observedAt: latestTimestamp([value.workspace.generatedAt, pattern.patternObservedAt]),
+      ...pattern,
+    }];
+  }));
+  for (const item of value.workspace.instruments) {
+    if (!("instrument_key" in item.technical)) continue;
+    const latest = item.technical.signals?.latest ?? item.technical.signals?.points?.at(-1);
+    const symbol = item.symbol.toUpperCase();
+    const pattern = latestSimulationPatternObservation(
+      charts.find((chart) => chart.symbol === symbol),
+    );
+    output[symbol] = {
+      ...(latest?.status ? { status: latest.status } : {}),
+      observedAt: latestTimestamp([
+        value.workspace.generatedAt,
+        latest?.calculation_timestamp,
+        latest?.signal_timestamp,
+        pattern.patternObservedAt,
+      ]),
+      ...pattern,
+    };
+  }
+  return output;
+}
+
+function selectionSymbolCount(request: SimulationStartRequest): 1 | 2 {
+  return request.selection.mode === "manual"
+    ? request.selection.symbols.length as 1 | 2
+    : request.selection.symbolCount;
+}
+
+function selectionCriterion(request: SimulationStartRequest): ScannerCriterion {
+  return request.selection.mode === "auto"
+    ? request.selection.criterion
+    : "trading_amount";
+}
+
+function manuallySelectedSymbols(request: SimulationStartRequest): string[] {
+  return request.selection.mode === "manual" ? [...request.selection.symbols] : [];
 }
 
 type SimulationMarketSource = {
@@ -181,7 +246,8 @@ type SimulationMarketSource = {
     interval: "1m";
     layoutColumns: 1;
     preset: SimulationPreset;
-    scanOnly: true;
+    symbols?: string[];
+    scanOnly: boolean;
     includePortfolioContext: false;
   }): Promise<ScalpingWorkspaceResult>;
   forecast(input: {
@@ -226,7 +292,6 @@ type SimulationLiveSource = {
 
 export type AiTradingSimulationConfig = {
   maximumDurationMinutes: number;
-  decisionIntervalSeconds: number;
   maximumActiveSessions: number;
   candidatePoolSize: number;
   selectionMaximumAttempts: number;
@@ -251,6 +316,8 @@ type SimulationDecision = {
   q10Return: number;
   q90Return: number;
   technicalState: PaperPolicyAction["technicalState"];
+  chartPatternBias: PaperPolicyAction["chartPatternBias"];
+  chartPatterns: string[];
   model: AiPaperForecastCandidate["model"];
 };
 
@@ -292,13 +359,14 @@ type ActiveSession = SimulationRuntimeHandles & {
   decisions: SimulationDecision[];
   trades: SimulationTrade[];
   equity: EquityPoint[];
+  charts: SimulationChartView[];
   warnings: string[];
-  lastDecisionScheduledAt?: string;
+  lastDecisionTriggeredAt?: string;
   lastDecisionStartedAt?: string;
   lastDecisionFinishedAt?: string;
-  decisionScheduledTicks: number;
-  decisionCoalescedTicks: number;
-  decisionSkippedTicks: number;
+  decisionTriggeredEvents: number;
+  decisionCoalescedEvents: number;
+  decisionDuplicateEvents: number;
   lastArtifactPersistedAtMs?: number;
   analysisRunning: boolean;
   persistenceTail: Promise<void>;
@@ -439,9 +507,6 @@ export class AiTradingSimulationService {
     private readonly config: AiTradingSimulationConfig,
   ) {
     if (!Number.isInteger(config.maximumDurationMinutes) || config.maximumDurationMinutes < 1
-      || !Number.isInteger(config.decisionIntervalSeconds)
-      || config.decisionIntervalSeconds < 10
-      || config.decisionIntervalSeconds > 30
       || !Number.isInteger(config.maximumActiveSessions) || config.maximumActiveSessions < 1
       || !Number.isInteger(config.candidatePoolSize) || config.candidatePoolSize < 2) {
       throw new Error("AI simulation configuration is invalid.");
@@ -481,7 +546,6 @@ export class AiTradingSimulationService {
         selectedSymbolCount: [1, 2],
         candidatePoolSize: this.config.candidatePoolSize,
         maximumActiveSessions: this.config.maximumActiveSessions,
-        decisionIntervalSeconds: this.config.decisionIntervalSeconds,
         selectionMaximumAttempts: this.selectionMaximumAttempts,
         selectionRetryDelayMs: this.selectionRetryDelayMs,
       },
@@ -492,7 +556,11 @@ export class AiTradingSimulationService {
         mcp: false,
         autonomousPaperTrading: true,
         aiSelectsSymbols: true,
+        manualSymbolSelection: true,
         rustTechnicalIndicators: true,
+        deterministicChartPatterns: true,
+        eventDrivenDecisions: true,
+        gpuForecastWorker: "provenance_reported_per_run",
         nextObservedExecutionOnly: true,
         marketCountries: "KR,US",
       },
@@ -500,16 +568,16 @@ export class AiTradingSimulationService {
         version: AI_PAPER_POLICY_VERSION,
         side: "long_only",
         quantity: "whole_share",
-        decisionIntervalSeconds: this.config.decisionIntervalSeconds,
-        cadence: "wall_clock_timer_using_latest_final_bars_and_realtime_snapshot",
+        initialPortfolio: "cash_only_zero_holdings",
+        cadence: "event_driven_immediately_after_each_new_finalized_one_minute_bar",
         execution: "strictly_after_ai_generation_on_next_observed_trade_or_later_final_bar_open",
       },
       activeSessions: this.active.size,
       limitations: [
         "실제 주문 API를 호출하지 않는 가상 원장입니다.",
         "AI 전망은 투자 지시나 수익 보장이 아니며 모델이 unavailable이면 임의 신호를 만들지 않습니다.",
-        `AI 판단은 ${this.config.decisionIntervalSeconds}초 주기로 예약하지만 이전 추론이 끝나지 않으면 중첩하지 않고 한 번만 합쳐서 실행합니다.`,
-        "초 단위 판단도 진행 중인 봉을 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
+        "고정 초 단위 주기 없이 새 확정 1분봉이 들어오는 즉시 판단하며 이전 추론이 끝나지 않으면 최신 이벤트 한 번으로 합칩니다.",
+        "진행 중인 봉을 미래정보처럼 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
@@ -548,19 +616,24 @@ export class AiTradingSimulationService {
   private async startReserved(input: SimulationStartRequest, ownerSubject: string) {
     const createdAtMs = this.now();
     const createdAt = new Date(createdAtMs).toISOString();
+    const symbolCount = selectionSymbolCount(input);
+    const policyProfile = resolvePaperPolicyProfile(input.preset, input.riskTolerance);
     const config = {
       schema_version: AI_SIMULATION_CONTRACT_VERSION,
       policy_version: AI_PAPER_POLICY_VERSION,
       mode: "forward_paper_session",
       market_country: input.marketCountry,
-      scanner_criterion: input.criterion,
+      selection: input.selection,
+      scanner_criterion: selectionCriterion(input),
       initial_cash: input.initialCash,
       duration_minutes: input.durationMinutes,
-      selected_symbol_count: input.symbolCount,
+      selected_symbol_count: symbolCount,
       preset: input.preset,
+      risk_tolerance: input.riskTolerance,
+      resolved_policy_profile: policyProfile,
       costs: input.costs,
       candidate_pool_size: this.config.candidatePoolSize,
-      decision_interval_seconds: this.config.decisionIntervalSeconds,
+      decision_cadence: "event_driven_finalized_one_minute_bar",
       selection_maximum_attempts: this.selectionMaximumAttempts,
       selection_retry_delay_ms: this.selectionRetryDelayMs,
       session_nonce: createdAt,
@@ -573,7 +646,7 @@ export class AiTradingSimulationService {
       kind: "ai_trading_simulation",
       config,
       dataRevision,
-      totalCandidates: input.symbolCount,
+      totalCandidates: symbolCount,
     });
     try {
       if (!await this.repository.markRunning(run.id, createdAtMs)) {
@@ -581,7 +654,9 @@ export class AiTradingSimulationService {
       }
       await this.repository.addEvent(run.id, "simulation_selecting", {
         market_country: input.marketCountry,
-        requested_symbol_count: input.symbolCount,
+        selection_mode: input.selection.mode,
+        requested_symbol_count: symbolCount,
+        requested_symbols: manuallySelectedSymbols(input),
         real_order_api: false,
       }, createdAtMs);
     } catch (error) {
@@ -618,11 +693,12 @@ export class AiTradingSimulationService {
       decisions: [],
       trades: [],
       equity: [{ timestamp: createdAt, equity: input.initialCash, cash: input.initialCash, invested: 0 }],
+      charts: [],
       warnings: [],
       decisionAbort: new AbortController(),
-      decisionScheduledTicks: 0,
-      decisionCoalescedTicks: 0,
-      decisionSkippedTicks: 0,
+      decisionTriggeredEvents: 0,
+      decisionCoalescedEvents: 0,
+      decisionDuplicateEvents: 0,
       analysisRunning: false,
       analysisQueued: false,
       persistenceTail: Promise.resolve(),
@@ -745,6 +821,10 @@ export class AiTradingSimulationService {
   }
 
   private async initialize(session: ActiveSession): Promise<void> {
+    const symbolCount = selectionSymbolCount(session.request);
+    const criterion = selectionCriterion(session.request);
+    const manualSymbols = manuallySelectedSymbols(session.request);
+    const manualSymbolSet = new Set(manualSymbols);
     let candidates: CandidateMetadata[] = [];
     let scannedCandidateCount = 0;
     let exchangeEligibleCount = 0;
@@ -753,50 +833,60 @@ export class AiTradingSimulationService {
       scanAttempts = attempt;
       const workspaceResult = await this.market.workspace({
         marketCountry: session.request.marketCountry,
-        criterion: session.request.criterion,
+        criterion,
         topCount: this.config.candidatePoolSize,
         interval: "1m",
         layoutColumns: 1,
         preset: session.request.preset,
+        ...(manualSymbols.length ? { symbols: manualSymbols } : {}),
         scanOnly: true,
         includePortfolioContext: false,
       });
       if (session.phase !== "selecting") return;
       const scannedCandidates = workspaceCandidates(workspaceResult).slice(0, this.config.candidatePoolSize);
-      candidates = session.request.marketCountry === "US"
+      const eligibleCandidates = session.request.marketCountry === "US"
         ? scannedCandidates.filter(({ exchange }) => exchange !== undefined)
         : scannedCandidates;
+      candidates = manualSymbols.length
+        ? manualSymbols.flatMap((symbol) => {
+            const candidate = eligibleCandidates.find((item) => item.symbol === symbol);
+            return candidate ? [candidate] : [];
+          })
+        : eligibleCandidates;
       scannedCandidateCount = scannedCandidates.length;
-      exchangeEligibleCount = candidates.length;
-      if (candidates.length !== scannedCandidates.length) {
+      exchangeEligibleCount = eligibleCandidates.length;
+      if (eligibleCandidates.length !== scannedCandidates.length) {
         this.warn(session, "거래소 식별자가 없는 미국 후보를 AI 선정 대상에서 제외했습니다.");
       }
-      if (candidates.length >= session.request.symbolCount) break;
+      if (candidates.length >= symbolCount) break;
       if (attempt >= this.selectionMaximumAttempts) {
         throw new Error(
-          "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다: "
-          + `market=${session.request.marketCountry}, requested=${session.request.symbolCount}, `
+          `${manualSymbols.length ? "직접 선택한 종목을 검증하지 못했습니다" : "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다"}: `
+          + `market=${session.request.marketCountry}, requested=${symbolCount}, `
           + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
           + `attempts=${scanAttempts}`,
         );
       }
       this.warn(
         session,
-        "유효 스캔 후보가 부족해 공급자 데이터를 제한 재조회합니다 "
+        `${manualSymbols.length ? "직접 선택한 종목 검증" : "유효 스캔 후보"}이 부족해 공급자 데이터를 제한 재조회합니다 `
         + `(${attempt}/${this.selectionMaximumAttempts}; market=${session.request.marketCountry}, `
-        + `requested=${session.request.symbolCount}, scanned=${scannedCandidateCount}, `
+        + `requested=${symbolCount}, scanned=${scannedCandidateCount}, `
         + `exchangeEligible=${exchangeEligibleCount}).`,
       );
       await this.waitForSelectionRetry(session);
       if (session.phase !== "selecting") return;
     }
-    if (candidates.length < session.request.symbolCount) {
+    if (candidates.length < symbolCount) {
       throw new Error(
-        "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다: "
-        + `market=${session.request.marketCountry}, requested=${session.request.symbolCount}, `
+        `${manualSymbols.length ? "직접 선택한 종목을 검증하지 못했습니다" : "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다"}: `
+        + `market=${session.request.marketCountry}, requested=${symbolCount}, `
         + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
         + `attempts=${scanAttempts}`,
       );
+    }
+    if (manualSymbols.length && candidates.some(({ symbol }) => !manualSymbolSet.has(symbol))) {
+      throw new Error("직접 선택한 종목 집합 밖의 후보가 포함되었습니다.");
     }
     session.metadata = new Map(candidates.map((candidate) => [candidate.symbol, candidate]));
     const candidateSymbols = candidates.map(({ symbol }) => symbol);
@@ -826,8 +916,12 @@ export class AiTradingSimulationService {
       });
       if (session.phase !== "selecting") return;
       selection = selectAiForecastSeries(forecastResult.forecast, {
-        symbolCount: session.request.symbolCount,
+        symbolCount,
         roundTripCostRate: roundTripCostRate(session.request.costs),
+        riskPenalty: resolvePaperPolicyProfile(
+          session.request.preset,
+          session.request.riskTolerance,
+        ).riskPenalty,
         notBeforeMs: this.now(),
       });
       if (selection.status === "available") break;
@@ -852,6 +946,11 @@ export class AiTradingSimulationService {
     }
     if (!selection || selection.status !== "available") {
       throw new Error("AI 종목 선정 결과가 준비되지 않았습니다.");
+    }
+    if (manualSymbols.length
+      && (selection.selected.length !== manualSymbols.length
+        || selection.selected.some(({ symbol }) => !manualSymbolSet.has(symbol)))) {
+      throw new Error("AI 예측 결과가 직접 선택한 종목 집합을 완전히 포함하지 않았습니다.");
     }
     if (selection.selected.some(({ symbol }) => !session.metadata.has(symbol))) {
       throw new Error("AI 종목 선정 결과가 요청한 스캔 후보 집합을 벗어났습니다.");
@@ -888,26 +987,38 @@ export class AiTradingSimulationService {
       this.warn(session, `후보 실시간 구독 해제 실패: ${error instanceof Error ? error.message : "unknown"}`);
     }
     await this.live.waitForIdle();
-    const technical = await this.market.realtimeAnalysis({
+    const chartWorkspace = await this.market.workspace({
       marketCountry: session.request.marketCountry,
+      criterion,
+      topCount: this.config.candidatePoolSize,
       symbols,
       interval: "1m",
+      layoutColumns: 1,
       preset: session.request.preset,
-      positionContext: isolatedPositionContext(session),
-    }, {
-      signal: session.decisionAbort.signal,
-      skipAutomaticRefresh: true,
+      scanOnly: false,
+      includePortfolioContext: false,
     });
     if (session.phase !== "selecting") return;
+    session.charts = simulationChartsFromWorkspace(chartWorkspace, symbols);
+    const missingCharts = symbols.filter((symbol) => !session.charts.some((chart) => (
+      chart.symbol === symbol && chart.bars.length > 0
+    )));
+    if (missingCharts.length) {
+      this.warn(session, `차트 분봉 unavailable: ${missingCharts.join(", ")}`);
+    }
     const startedAtMs = this.now();
     session.startedAt = new Date(startedAtMs).toISOString();
     session.expiresAt = new Date(startedAtMs + session.request.durationMinutes * MINUTE_MS).toISOString();
     const runningTransition = transitionSimulationPhase(session.phase, "selection_ready");
     if (!runningTransition.accepted) return;
     session.phase = runningTransition.phase;
-    session.lastDecisionScheduledAt = session.startedAt;
+    session.lastDecisionTriggeredAt = session.startedAt;
     session.lastDecisionStartedAt = session.startedAt;
-    const decisionRecordedAt = this.recordActions(session, selection, technicalStates(technical));
+    const decisionRecordedAt = this.recordActions(
+      session,
+      selection,
+      workspaceTechnicalStates(chartWorkspace, session.charts),
+    );
     session.lastDecisionFinishedAt = decisionRecordedAt;
     this.recordEquity(session, decisionRecordedAt);
     await this.enqueuePersistence(session, async () => {
@@ -921,7 +1032,7 @@ export class AiTradingSimulationService {
       await this.repository.updateProgress(session.id, {
         progress: 0,
         completedCandidates: symbols.length,
-        totalCandidates: session.request.symbolCount,
+        totalCandidates: symbolCount,
         currentValidationWindow: session.startedAt,
       }, startedAtMs);
     });
@@ -939,10 +1050,6 @@ export class AiTradingSimulationService {
     session.endTimer.unref();
     session.progressTimer = setInterval(() => this.queueProgress(session), this.progressUpdateMs);
     session.progressTimer.unref();
-    this.scheduleNextDecision(
-      session,
-      startedAtMs + this.config.decisionIntervalSeconds * 1_000,
-    );
   }
 
   private recordActions(
@@ -956,6 +1063,10 @@ export class AiTradingSimulationService {
       selection,
       technicalStates: states,
       heldSymbols: Object.keys(session.ledger.positions),
+      profile: resolvePaperPolicyProfile(
+        session.request.preset,
+        session.request.riskTolerance,
+      ),
     });
     for (const action of actions) {
       const eligibleAfter = latestTimestamp([action.eligibleAfter, recordedAt]) ?? action.eligibleAfter;
@@ -979,6 +1090,8 @@ export class AiTradingSimulationService {
         q10Return: action.q10Return,
         q90Return: action.q90Return,
         technicalState: action.technicalState,
+        chartPatternBias: action.chartPatternBias,
+        chartPatterns: action.chartPatterns,
         model: action.model,
       };
       session.decisions.push(decision);
@@ -1048,6 +1161,8 @@ export class AiTradingSimulationService {
       } else if (event.type === "bar"
         && payload.intervalMinutes === 1
         && payload.state === "final") {
+        const chart = session.charts.find((item) => item.symbol === event.symbol);
+        const chartChanged = chart ? mergeSimulationFinalBar(chart, payload) : false;
         const closeTime = timestamp(payload.closeTime);
         const openTime = timestamp(payload.openTime);
         const open = finite(payload.open);
@@ -1062,42 +1177,23 @@ export class AiTradingSimulationService {
           && close !== undefined && close > 0) {
           updateMark(session, event.symbol, close, closeTime);
         }
+        if (chartChanged && session.phase === "running") {
+          this.queueAnalysis(session, this.now());
+        } else if (chart && !chartChanged) {
+          session.decisionDuplicateEvents += 1;
+        }
       }
     }
   }
 
-  private scheduleNextDecision(session: ActiveSession, scheduledAtMs: number): void {
-    if (session.phase !== "running") return;
-    const expiresAtMs = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN;
-    const timerPlan = planDecisionTimer(
-      scheduledAtMs,
-      this.now(),
-      Number.isFinite(expiresAtMs) ? expiresAtMs : undefined,
-    );
-    if (timerPlan.status !== "scheduled") return;
-    if (session.decisionTimer !== undefined) clearTimeout(session.decisionTimer);
-    session.nextDecisionAtMs = scheduledAtMs;
-    session.decisionTimer = setTimeout(() => {
-      session.decisionTimer = undefined;
-      if (session.phase !== "running") return;
-      const intervalMs = this.config.decisionIntervalSeconds * 1_000;
-      const tick = calculateCadenceTick(scheduledAtMs, this.now(), intervalMs);
-      session.decisionSkippedTicks += tick.missedTicks;
-      this.queueAnalysis(session, tick.effectiveScheduledAtMs);
-      this.scheduleNextDecision(session, tick.nextScheduledAtMs);
-    }, timerPlan.delayMs);
-    session.decisionTimer.unref();
-  }
-
-  private queueAnalysis(session: ActiveSession, scheduledAtMs: number): void {
+  private queueAnalysis(session: ActiveSession, triggeredAtMs: number): void {
     const tick = reduceDecisionQueueTick({
       analysisRunning: session.analysisRunning,
       analysisQueued: session.analysisQueued,
     });
-    session.decisionScheduledTicks += tick.scheduledTickDelta;
-    session.decisionCoalescedTicks += tick.coalescedTickDelta;
-    session.decisionSkippedTicks += tick.skippedTickDelta;
-    session.lastDecisionScheduledAt = new Date(scheduledAtMs).toISOString();
+    session.decisionTriggeredEvents += tick.scheduledTickDelta;
+    session.decisionCoalescedEvents += tick.coalescedTickDelta + tick.skippedTickDelta;
+    session.lastDecisionTriggeredAt = new Date(triggeredAtMs).toISOString();
     session.analysisQueued = tick.analysisQueued;
     session.analysisRunning = tick.analysisRunning;
     if (!tick.shouldStartRunner) return;
@@ -1159,9 +1255,17 @@ export class AiTradingSimulationService {
       session.analysisQueued = true;
       return;
     }
+    for (const chart of session.charts) {
+      mergeSimulationLatestTechnical(chart, technical);
+    }
+    const profile = resolvePaperPolicyProfile(
+      session.request.preset,
+      session.request.riskTolerance,
+    );
     const selection = selectAiForecastSeries(forecastResult.forecast, {
-      symbolCount: session.request.symbolCount,
+      symbolCount: selectionSymbolCount(session.request),
       roundTripCostRate: roundTripCostRate(session.request.costs),
+      riskPenalty: profile.riskPenalty,
       notBeforeMs: this.now(),
     });
     if (selection.status !== "available") {
@@ -1174,7 +1278,11 @@ export class AiTradingSimulationService {
       return;
     }
     session.selection = selection;
-    const decisionRecordedAt = this.recordActions(session, selection, technicalStates(technical));
+    const decisionRecordedAt = this.recordActions(
+      session,
+      selection,
+      technicalStates(technical, session.charts),
+    );
     this.recordEquity(session, decisionRecordedAt);
     const checkpoint = this.now() - (session.lastArtifactPersistedAtMs ?? Number.NEGATIVE_INFINITY)
       >= DECISION_ARTIFACT_CHECKPOINT_MS;
@@ -1207,12 +1315,17 @@ export class AiTradingSimulationService {
       return;
     }
     const valuation = markToMarket(session, executedAt);
+    const profile = resolvePaperPolicyProfile(
+      session.request.preset,
+      session.request.riskTolerance,
+    );
     const result = fillPaperAction(
       session.ledger,
       action,
       { timestamp: executedAt, price },
       {
-        symbolCount: session.request.symbolCount,
+        symbolCount: selectionSymbolCount(session.request),
+        targetAllocationRate: profile.targetAllocationRate,
         costs: {
           commissionBpsPerSide: session.request.costs.commissionBpsPerSide,
           exitTaxBps: session.request.costs.taxBpsOnExit,
@@ -1288,7 +1401,7 @@ export class AiTradingSimulationService {
     await this.enqueuePersistence(session, () => this.repository.updateProgress(session.id, {
       progress,
       completedCandidates: selectedSymbols(session).length,
-      totalCandidates: session.request.symbolCount,
+      totalCandidates: selectionSymbolCount(session.request),
       currentValidationWindow: new Date(this.now()).toISOString(),
       warnings: session.warnings,
     }));
@@ -1326,6 +1439,14 @@ export class AiTradingSimulationService {
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       marketCountry: session.request.marketCountry,
       currency: session.request.marketCountry === "US" ? "USD" : "KRW",
+      selection: session.request.selection,
+      criterion: selectionCriterion(session.request),
+      preset: session.request.preset,
+      riskTolerance: session.request.riskTolerance,
+      policyProfile: resolvePaperPolicyProfile(
+        session.request.preset,
+        session.request.riskTolerance,
+      ),
       initialCash: session.request.initialCash,
       cash: session.ledger.cash,
       equity: valuation.equity,
@@ -1333,18 +1454,15 @@ export class AiTradingSimulationService {
       realizedPnl: session.ledger.realizedPnl,
       totalCosts: session.ledger.totalCosts,
       progress,
-      decisionIntervalSeconds: this.config.decisionIntervalSeconds,
       decisionCadence: {
-        scheduledTicks: session.decisionScheduledTicks,
-        coalescedTicks: session.decisionCoalescedTicks,
-        skippedTicks: session.decisionSkippedTicks,
+        trigger: "finalized_one_minute_bar",
+        triggeredEvents: session.decisionTriggeredEvents,
+        coalescedEvents: session.decisionCoalescedEvents,
+        duplicateEvents: session.decisionDuplicateEvents,
         // Terminal snapshots describe the persisted run state. An aborted task
         // may still be unwinding locally, but it is no longer active work.
         inFlight: session.phase === "running" && session.analysisRunning,
-        ...(session.nextDecisionAtMs !== undefined && session.phase === "running"
-          ? { nextScheduledAt: new Date(session.nextDecisionAtMs).toISOString() }
-          : {}),
-        ...(session.lastDecisionScheduledAt ? { lastScheduledAt: session.lastDecisionScheduledAt } : {}),
+        ...(session.lastDecisionTriggeredAt ? { lastTriggeredAt: session.lastDecisionTriggeredAt } : {}),
         ...(session.lastDecisionStartedAt ? { lastStartedAt: session.lastDecisionStartedAt } : {}),
         ...(session.lastDecisionFinishedAt ? { lastFinishedAt: session.lastDecisionFinishedAt } : {}),
       },
@@ -1375,6 +1493,7 @@ export class AiTradingSimulationService {
       pendingActions: [...session.pending.values()].map(({ symbol, action, eligibleAfter }) => ({
         symbol, action, eligibleAfter,
       })),
+      charts: session.charts,
       trades: session.trades,
       decisions: session.decisions,
       warnings: uniqueWarnings([
@@ -1451,8 +1570,16 @@ export class AiTradingSimulationService {
           next_trade_preferred: true,
           later_final_bar_open_fallback: true,
           open_positions_are_not_force_filled_at_end: true,
-          selected_symbol_limit: session.request.symbolCount,
-          decision_interval_seconds: this.config.decisionIntervalSeconds,
+          initial_portfolio: "cash_only_zero_holdings",
+          selected_symbol_limit: selectionSymbolCount(session.request),
+          selection_mode: session.request.selection.mode,
+          preset: session.request.preset,
+          risk_tolerance: session.request.riskTolerance,
+          resolved_policy_profile: resolvePaperPolicyProfile(
+            session.request.preset,
+            session.request.riskTolerance,
+          ),
+          decision_trigger: "new_finalized_one_minute_bar",
           decision_cadence: snapshot.decisionCadence,
           decision_artifact_checkpoint_seconds: DECISION_ARTIFACT_CHECKPOINT_MS / 1_000,
           selection_maximum_attempts: this.selectionMaximumAttempts,
@@ -1532,6 +1659,9 @@ export class AiTradingSimulationService {
           summary: {
             phase,
             market_country: session.request.marketCountry,
+            selection_mode: session.request.selection.mode,
+            preset: session.request.preset,
+            risk_tolerance: session.request.riskTolerance,
             initial_cash: session.request.initialCash,
             final_equity: snapshot.equity,
             net_profit_loss: snapshot.equity - session.request.initialCash,
