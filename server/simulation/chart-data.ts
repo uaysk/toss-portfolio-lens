@@ -312,13 +312,36 @@ export function simulationChartsFromWorkspace(
 export function mergeSimulationFinalBar(
   chart: SimulationChartView,
   payload: unknown,
+  observedAt?: string,
 ): boolean {
   const bar = normalizeBar(payload);
   const source = record(payload);
   if (!bar || bar.status !== "final" || source.intervalMinutes !== 1) return false;
+  return upsertSimulationChartBar(chart, bar, observedAt, true);
+}
+
+export function mergeSimulationFormingBar(
+  chart: SimulationChartView,
+  payload: unknown,
+  observedAt?: string,
+): boolean {
+  const bar = normalizeBar(payload);
+  const source = record(payload);
+  if (!bar || bar.status !== "forming" || source.intervalMinutes !== 1) return false;
+  return upsertSimulationChartBar(chart, bar, observedAt, false);
+}
+
+function upsertSimulationChartBar(
+  chart: SimulationChartView,
+  bar: SimulationChartBar,
+  observedAt: string | undefined,
+  refreshPatterns: boolean,
+): boolean {
   const existingIndex = chart.bars.findIndex((candidate) => candidate.timestamp === bar.timestamp);
   if (existingIndex >= 0) {
     const existing = chart.bars[existingIndex]!;
+    // A late forming update must never downgrade an already finalized candle.
+    if (existing.status === "final" && bar.status === "forming") return false;
     const unchanged = existing.open === bar.open
       && existing.high === bar.high
       && existing.low === bar.low
@@ -334,8 +357,8 @@ export function mergeSimulationFinalBar(
       chart.bars.splice(0, chart.bars.length - MAX_CHART_BARS);
     }
   }
-  chart.updatedAt = bar.timestamp;
-  chart.patterns = detectSimulationChartPatterns(chart.bars);
+  chart.updatedAt = normalizedTimestamp(observedAt) ?? bar.timestamp;
+  if (refreshPatterns) chart.patterns = detectSimulationChartPatterns(chart.bars);
   return true;
 }
 

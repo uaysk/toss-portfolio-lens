@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
+import { AiSimulationHistory } from "@/components/ai-simulation-history";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -290,6 +291,13 @@ function SelectedSymbols({ snapshot }: { snapshot: AiSimulationSnapshot }) {
                 <div><p className="text-[9px] font-black text-muted-foreground">상승 확률</p><p className="mt-1 font-black">{formatRatio(item.upProbability)}</p></div>
                 <div><p className="text-[9px] font-black text-muted-foreground">중앙 수익률</p><p className="mt-1 font-black">{formatRatio(item.predictedMedianReturn, true)}</p></div>
               </div>
+              {item.currentPrice !== undefined ? (
+                <div className="mt-3 rounded-xl bg-card p-3" data-simulation-selected-live-price={item.symbol}>
+                  <p className="text-[9px] font-black text-muted-foreground">최근 시장가</p>
+                  <p className="mt-1 text-xs font-black">{formatMoney(item.currentPrice, snapshot.currency)}</p>
+                  <p className="mt-1 text-[8px] text-muted-foreground">갱신 {formatTimestamp(item.priceObservedAt)}</p>
+                </div>
+              ) : null}
               <p className="mt-3 truncate text-[9px] text-muted-foreground" title={item.model}>{item.model ?? "모델 provenance unavailable"}</p>
             </article>
           ))}
@@ -525,6 +533,7 @@ function RunPanel({
               bars={chart.bars}
               indicators={chart.indicators}
               patterns={chart.patterns}
+              updatedAt={chart.updatedAt}
               trades={snapshot.trades.flatMap((trade) => {
                 if (trade.symbol !== chart.symbol) return [];
                 const side = trade.side.toLowerCase();
@@ -691,14 +700,14 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError("");
         setRun({ ...next, runId: next.runId ?? runId });
-        if (ACTIVE_RUN_STATUSES.has(next.status)) timer = window.setTimeout(() => void poll(), 1_000);
+        if (ACTIVE_RUN_STATUSES.has(next.status)) timer = window.setTimeout(() => void poll(), 500);
       } catch (caught) {
         if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError(caught instanceof Error ? caught.message : "시뮬레이션 상태를 불러오지 못했습니다.");
-        timer = window.setTimeout(() => void poll(), 2_500);
+        timer = window.setTimeout(() => void poll(), 1_500);
       }
     };
-    timer = window.setTimeout(() => void poll(), 800);
+    timer = window.setTimeout(() => void poll(), 300);
     return () => {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
@@ -1155,6 +1164,10 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           </div>
         </Card>
       )}
+      <AiSimulationHistory
+        onUnauthorized={onUnauthorized}
+        refreshKey={run ? `${run.runId ?? "unknown"}:${run.status}` : "initial"}
+      />
     </section>
   );
 }

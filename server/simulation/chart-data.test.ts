@@ -3,6 +3,7 @@ import {
   detectSimulationChartPatterns,
   latestSimulationPatternObservation,
   mergeSimulationFinalBar,
+  mergeSimulationFormingBar,
   simulationChartsFromWorkspace,
   type SimulationChartBar,
   type SimulationChartView,
@@ -93,6 +94,57 @@ describe("simulation chart patterns", () => {
       close: 102,
       indicatorValues: { "trend-ema:value": 100.5 },
     });
+  });
+
+  it("updates a forming one-minute candle immediately without pattern refresh or final downgrade", () => {
+    const finalized = bar("2026-07-24T00:01:00.000Z", 100, 102, 99, 101);
+    const chart: SimulationChartView = {
+      symbol: "AAPL",
+      currency: "USD",
+      bars: [finalized],
+      indicators: [],
+      patterns: detectSimulationChartPatterns([finalized]),
+    };
+    expect(mergeSimulationFormingBar(chart, {
+      intervalMinutes: 1,
+      closeTime: "2026-07-24T00:02:00.000Z",
+      state: "forming",
+      open: 101,
+      high: 103,
+      low: 100.5,
+      close: 102.5,
+      volume: 10,
+    }, "2026-07-24T00:01:12.345Z")).toBe(true);
+    expect(chart.bars.at(-1)).toMatchObject({
+      timestamp: "2026-07-24T00:02:00.000Z",
+      status: "forming",
+      close: 102.5,
+    });
+    expect(chart.updatedAt).toBe("2026-07-24T00:01:12.345Z");
+    const patternsBeforeLateUpdate = [...chart.patterns];
+    expect(mergeSimulationFinalBar(chart, {
+      intervalMinutes: 1,
+      closeTime: "2026-07-24T00:02:00.000Z",
+      state: "final",
+      open: 101,
+      high: 103,
+      low: 100.5,
+      close: 102,
+      volume: 20,
+    })).toBe(true);
+    expect(chart.bars.at(-1)?.status).toBe("final");
+    expect(mergeSimulationFormingBar(chart, {
+      intervalMinutes: 1,
+      closeTime: "2026-07-24T00:02:00.000Z",
+      state: "forming",
+      open: 101,
+      high: 104,
+      low: 100,
+      close: 103,
+      volume: 30,
+    })).toBe(false);
+    expect(chart.bars.at(-1)).toMatchObject({ status: "final", close: 102 });
+    expect(patternsBeforeLateUpdate).toEqual([]);
   });
 
   it("keeps a selected-symbol chart slot ready when initial bars are unavailable", () => {

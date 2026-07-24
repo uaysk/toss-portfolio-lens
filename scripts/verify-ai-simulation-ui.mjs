@@ -57,6 +57,8 @@ function snapshot({
     score: 0.81 - index * 0.08,
     upProbability: 0.64 - index * 0.03,
     predictedMedianReturn: 0.006 - index * 0.001,
+    currentPrice: 50_600 + index * 100,
+    priceObservedAt: "2026-07-24T00:23:12.345Z",
     model: {
       modelId: "amazon/chronos-bolt-small",
       modelRevision: "ui-fixture",
@@ -234,12 +236,40 @@ function snapshot({
 }
 
 export async function routeSimulationUiApi(page) {
+  const archivedRequest = {
+    marketCountry: "KR",
+    initialCash: 2_500_000,
+    durationMinutes: 45,
+    preset: "breakout",
+    riskTolerance: 91,
+    selection: {
+      mode: "auto",
+      criterion: "volatility",
+      symbolCount: 2,
+    },
+    costs: {
+      commissionBpsPerSide: 1.5,
+      taxBpsOnExit: 18,
+      spreadBpsRoundTrip: 5,
+      slippageBpsPerSide: 2,
+    },
+  };
+  const archivedRuns = Array.from({ length: 22 }, (_, index) => ({
+    runId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    body: archivedRequest,
+    status: "completed",
+    startedAt: new Date(Date.parse("2026-07-23T20:00:00.000Z") - index * 60_000).toISOString(),
+    finishedAt: new Date(Date.parse("2026-07-23T20:45:00.000Z") - index * 60_000).toISOString(),
+  }));
   const state = {
     starts: [],
     polls: 0,
     cancels: [],
     searches: [],
     active: new Map(),
+    historyRequests: 0,
+    reportRequests: 0,
+    archivedRunId: archivedRuns[0].runId,
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -309,6 +339,72 @@ export async function routeSimulationUiApi(page) {
         body: JSON.stringify({ run: null, snapshot: null }),
       });
     }
+    if (url.pathname === "/api/portfolio/simulation/runs" && request.method() === "GET") {
+      state.historyRequests += 1;
+      const activeItems = [...state.active.entries()].map(([runId, active], index) => {
+        const current = snapshot({
+          phase: active.cancelled ? "cancelled" : "monitoring",
+          request: active.body,
+          cancelled: active.cancelled,
+        });
+        return {
+          runId,
+          status: active.cancelled ? "cancelled" : "running",
+          startedAt: new Date(Date.parse("2026-07-24T00:20:00.000Z") + index * 1_000).toISOString(),
+          marketCountry: active.body.marketCountry,
+          preset: active.body.preset,
+          riskTolerance: active.body.riskTolerance,
+          selection: active.body.selection,
+          selected: current.selected,
+          currency: current.currency,
+          initialCash: current.initialCash,
+          finalEquity: current.equity,
+          cash: current.cash,
+          netProfitLoss: current.equity - current.initialCash,
+          returnRatio: (current.equity - current.initialCash) / current.initialCash,
+          tradeCount: current.trades.length,
+          decisionCount: current.decisions.length,
+          model: current.selected[0]?.model,
+          warnings: current.warnings,
+        };
+      });
+      const archivedItems = archivedRuns.map((item, index) => {
+        const current = snapshot({ phase: "completed", request: item.body });
+        return {
+          runId: item.runId,
+          status: item.status,
+          startedAt: item.startedAt,
+          finishedAt: item.finishedAt,
+          marketCountry: item.body.marketCountry,
+          preset: item.body.preset,
+          riskTolerance: item.body.riskTolerance,
+          selection: item.body.selection,
+          selected: current.selected,
+          currency: current.currency,
+          initialCash: current.initialCash,
+          finalEquity: current.equity + index * 100,
+          cash: current.cash,
+          netProfitLoss: current.equity + index * 100 - current.initialCash,
+          returnRatio: (current.equity + index * 100 - current.initialCash) / current.initialCash,
+          realizedPnl: 18_000,
+          unrealizedPnl: 18_000,
+          totalCosts: 56_000,
+          tradeCount: current.trades.length,
+          decisionCount: current.decisions.length,
+          model: current.selected[0]?.model,
+          warnings: current.warnings,
+        };
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schemaVersion: "ai-trading-simulation-v3",
+          items: [...activeItems, ...archivedItems],
+          page: { limit: 20, returned: activeItems.length + archivedItems.length },
+        }),
+      });
+    }
     if (url.pathname === "/api/portfolio/simulation/runs" && request.method() === "POST") {
       const body = request.postDataJSON();
       const runId = `00000000-0000-4000-8000-${String(state.starts.length + 1).padStart(12, "0")}`;
@@ -320,6 +416,96 @@ export async function routeSimulationUiApi(page) {
         body: JSON.stringify({
           runId,
           status: "running",
+        }),
+      });
+    }
+    const reportMatch = url.pathname.match(/^\/api\/portfolio\/simulation\/runs\/([^/]+)\/report$/);
+    if (reportMatch && request.method() === "GET") {
+      state.reportRequests += 1;
+      const runId = decodeURIComponent(reportMatch[1]);
+      const archived = archivedRuns.find((item) => item.runId === runId);
+      const active = state.active.get(runId);
+      const body = active?.body ?? archived?.body;
+      if (!body) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { message: "fixture report not found" } }),
+        });
+      }
+      const status = active ? (active.cancelled ? "cancelled" : "running") : "completed";
+      const current = snapshot({
+        phase: status,
+        request: body,
+        cancelled: status === "cancelled",
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schemaVersion: "ai-trading-simulation-v3",
+          generatedAt: "2026-07-24T00:46:00.000Z",
+          run: {
+            runId,
+            status,
+            startedAt: archived?.startedAt ?? current.startedAt,
+            finishedAt: archived?.finishedAt,
+          },
+          report: {
+            configuration: {
+              ...body,
+              decisionCadence: current.decisionCadence,
+            },
+            selection: body.selection,
+            selectionResult: { selected: current.selected },
+            selected: current.selected,
+            performance: {
+              currency: current.currency,
+              initialCash: current.initialCash,
+              finalEquity: current.equity,
+              cash: current.cash,
+              netProfitLoss: current.equity - current.initialCash,
+              returnRatio: (current.equity - current.initialCash) / current.initialCash,
+              realizedPnl: 18_000,
+              unrealizedPnl: current.positions.reduce((total, item) => total + item.unrealizedPnl, 0),
+              totalCosts: current.trades.reduce((total, item) => total + item.cost, 0),
+              tradeCount: current.trades.length,
+              decisionCount: current.decisions.length,
+              positionCount: current.positions.length,
+            },
+            cadence: current.decisionCadence,
+            decisions: current.decisions,
+            trades: current.trades,
+            positions: current.positions,
+            equity: [{
+              timestamp: "2026-07-24T00:20:00.000Z",
+              equity: current.initialCash,
+              cash: current.initialCash,
+            }, {
+              timestamp: "2026-07-24T00:45:00.000Z",
+              equity: current.equity,
+              cash: current.cash,
+            }],
+            charts: current.charts,
+            modelProvenance: current.selected.map((item) => ({ ...item.model, symbols: [item.symbol] })),
+            evidence: {
+              selection: { criterion: body.selection.criterion, selected: current.selected },
+              chartPatternCount: current.charts.reduce((total, chart) => total + chart.patterns.length, 0),
+              artifacts: [
+                { type: "simulation-decisions", rowCount: current.decisions.length },
+                { type: "simulation-trades", rowCount: current.trades.length },
+              ],
+            },
+            warnings: current.warnings,
+            limits: {
+              decisions: { total: current.decisions.length, returned: current.decisions.length, maximum: 500, truncated: false },
+              trades: { total: current.trades.length, returned: current.trades.length, maximum: 500, truncated: false },
+              equity: { total: 2, returned: 2, maximum: 1_000, truncated: false },
+              charts: { maximum: 2, barsPerChart: 180, patternsPerChart: 120, indicatorsPerChart: 64 },
+              modelProvenance: { maximum: 16, returned: current.selected.length },
+            },
+          },
+          snapshot: current,
         }),
       });
     }
@@ -410,6 +596,25 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("heading", { name: "시뮬레이션", exact: true }).waitFor();
     await page.locator("[data-ai-simulation]").waitFor();
     await page.getByText("실주문 없음, 투자 지시 아님, 다음 유효 체결만.", { exact: true }).waitFor();
+    const historyPanel = page.locator("[data-simulation-history]");
+    await historyPanel.waitFor();
+    await historyPanel.locator(`[data-simulation-history-item="${state.archivedRunId}"]`).waitFor();
+    await historyPanel.locator(`[data-simulation-report="${state.archivedRunId}"]`).waitFor({ timeout: 10_000 });
+    await historyPanel.getByText("실행 설정", { exact: true }).waitFor();
+    await historyPanel.getByText("캔들·지표·패턴 근거", { exact: true }).waitFor();
+    const historyScroll = historyPanel.locator("[data-simulation-history-scroll]");
+    const historyScrollMetrics = await historyScroll.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      tabIndex: element.tabIndex,
+    }));
+    check(
+      historyScrollMetrics.scrollHeight > historyScrollMetrics.clientHeight,
+      `시뮬레이션 기록 목록이 내부 스크롤 영역을 만들지 않았습니다: ${JSON.stringify(historyScrollMetrics)}`,
+    );
+    check(historyScrollMetrics.tabIndex === 0, "시뮬레이션 기록 스크롤 영역을 키보드로 탐색할 수 없습니다.");
+    check(state.historyRequests >= 1, "시뮬레이션 기록 API가 호출되지 않았습니다.");
+    check(state.reportRequests >= 1, "시뮬레이션 결과 보고서 API가 호출되지 않았습니다.");
     const actualTheme = await page.evaluate(() => (
       document.documentElement.classList.contains("dark") ? "dark" : "light"
     ));
@@ -466,7 +671,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       check(state.searches.length >= 1, "직접 종목 선택 검색 API가 호출되지 않았습니다.");
     }
     await startButton.click();
-    await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
     const stopButton = page.getByRole("button", { name: "테스트 중단", exact: true });
     await stopButton.waitFor();
     check(state.starts.length === 1, "시작 버튼 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
@@ -490,7 +695,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(!("criterion" in firstRequest), "legacy top-level criterion이 요청 body에 남아 있습니다.");
 
     await stopButton.click();
-    await page.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
     check(state.cancels.length === 1, "준비 단계 테스트 중단이 정확히 한 번 호출되지 않았습니다.");
 
     await startButton.waitFor();
@@ -500,16 +705,17 @@ async function verify(browser, baseUrl, viewport, theme) {
       return button instanceof HTMLButtonElement && !button.disabled;
     });
     await startButton.click();
-    await page.getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
     check(state.starts.length === 2, "준비 단계 중단 후 새 테스트를 다시 시작하지 못했습니다.");
     check(
       JSON.stringify(state.starts[1]) === JSON.stringify(firstRequest),
       "중단 후 재시작하면서 v3 설정 요청이 달라졌습니다.",
     );
 
-    await page.getByText("시뮬레이션 진행", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").getByText("시뮬레이션 진행", { exact: true }).waitFor({ timeout: 10_000 });
     await page.getByText("새 확정 1분봉 즉시", { exact: false }).waitFor({ timeout: 10_000 });
     await page.locator("[data-simulation-selected] article").first().waitFor();
+    await page.locator("[data-simulation-selected-live-price]").first().waitFor();
     const selectedCount = await page.locator("[data-simulation-selected] article").count();
     check(
       selectedCount === requestedSymbolCount,
@@ -524,9 +730,10 @@ async function verify(browser, baseUrl, viewport, theme) {
     } else {
       await page.getByRole("heading", { name: "AI 선정 종목", exact: true }).waitFor();
     }
-    await page.getByText("SIM1 · 가상 매수", { exact: true }).first().waitFor();
-    await page.getByText("positive_risk_adjusted_score · entry_probability_threshold", { exact: true }).waitFor();
-    await page.getByText(/next_valid_quote/).first().waitFor();
+    const currentRunPanel = page.locator("[data-simulation-run]");
+    await currentRunPanel.getByText("SIM1 · 가상 매수", { exact: true }).first().waitFor();
+    await currentRunPanel.getByText("positive_risk_adjusted_score · entry_probability_threshold", { exact: true }).waitFor();
+    await currentRunPanel.getByText(/next_valid_quote/).first().waitFor();
     check(state.polls >= 1, "시작 후 run snapshot을 polling하지 않았습니다.");
 
     const chartGrid = page.locator("[data-simulation-charts]");
@@ -593,7 +800,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(overflow === 0, `${viewport.width}px에서 가로 overflow ${overflow}px`);
 
     await page.getByRole("button", { name: "테스트 중단", exact: true }).click();
-    await page.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
     check(state.cancels.length === 2, "각 테스트 중단이 정확히 한 번씩 cancel API를 호출하지 않았습니다.");
     check(
       Object.values(errors).every((items) => items.length === 0),
@@ -617,6 +824,9 @@ async function verify(browser, baseUrl, viewport, theme) {
       requestedRiskTolerance,
       selectedCount,
       chartCount,
+      historyScrollMetrics,
+      historyRequests: state.historyRequests,
+      reportRequests: state.reportRequests,
       scrollMetrics,
       polls: state.polls,
       cancels: state.cancels.length,

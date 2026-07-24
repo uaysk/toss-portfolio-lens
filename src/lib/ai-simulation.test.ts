@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_AI_SIMULATION_REQUEST,
   aiSimulationErrorMessage,
+  normalizeAiSimulationHistory,
+  normalizeAiSimulationReport,
   normalizeAiSimulationRun,
   normalizeAiSimulationSnapshot,
   normalizeAiSimulationStatus,
@@ -141,6 +143,8 @@ describe("AI simulation response normalization", () => {
           score: 0.82,
           upProbability: 0.61,
           predictedMedianReturn: 0.004,
+          currentPrice: 171.25,
+          priceObservedAt: "2026-07-24T00:01:12.345Z",
           model: { modelId: "chronos", modelRevision: "pinned", device: "cuda" },
         },
         { score: 1 },
@@ -199,7 +203,12 @@ describe("AI simulation response normalization", () => {
       riskTolerance: 65,
       policyProfile: { targetAllocationRate: 0.75, cashReserveRate: 0.25 },
       decisionCadence: { trigger: "finalized_one_minute_bar", triggeredEvents: 3 },
-      selected: [{ symbol: "NVDA", model: "chronos · pinned · CUDA" }],
+      selected: [{
+        symbol: "NVDA",
+        currentPrice: 171.25,
+        priceObservedAt: "2026-07-24T00:01:12.345Z",
+        model: "chronos · pinned · CUDA",
+      }],
       positions: [{ symbol: "NVDA", quantity: 3 }],
       trades: [{ symbol: "NVDA", source: "next_valid_quote" }],
       decisions: [{
@@ -234,5 +243,196 @@ describe("AI simulation response normalization", () => {
     });
     expect(aiSimulationErrorMessage({ error: { message: "기간이 올바르지 않습니다." } }, "fallback"))
       .toBe("기간이 올바르지 않습니다.");
+  });
+
+  it("normalizes durable run history summaries without requiring the live snapshot shape", () => {
+    const history = normalizeAiSimulationHistory({
+      schemaVersion: "ai-simulation-history-v1",
+      items: [{
+        run: {
+          id: "history-1",
+          status: "completed",
+          startedAt: "2026-07-24T01:00:00.000Z",
+          completedAt: "2026-07-24T01:30:00.000Z",
+        },
+        configuration: {
+          marketCountry: "US",
+          preset: "breakout",
+          riskTolerance: 92,
+          initialCash: 10_000,
+          selection: {
+            mode: "auto",
+            criterion: "volatility",
+            symbolCount: 2,
+          },
+        },
+        selected: [{
+          symbol: "NVDA",
+          name: "NVIDIA",
+          model: { modelId: "chronos", device: "cuda" },
+        }],
+        performance: {
+          currency: "USD",
+          finalEquity: 10_125,
+          returnRatio: 0.0125,
+          realizedPnl: 125,
+          totalCosts: 2.1,
+          tradeCount: 4,
+          decisionCount: 18,
+        },
+        warnings: ["프리마켓 호가를 사용했습니다."],
+      }],
+      nextCursor: "cursor-2",
+    });
+
+    expect(history).toEqual({
+      items: [expect.objectContaining({
+        runId: "history-1",
+        status: "completed",
+        marketCountry: "US",
+        currency: "USD",
+        preset: "breakout",
+        riskTolerance: 92,
+        selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
+        selected: [{ symbol: "NVDA", name: "NVIDIA", model: "chronos · CUDA" }],
+        finalEquity: 10_125,
+        returnRatio: 0.0125,
+        tradeCount: 4,
+        decisionCount: 18,
+      })],
+      nextCursor: "cursor-2",
+    });
+  });
+
+  it("normalizes a run report with configuration, ledger, cadence, model, and chart evidence", () => {
+    const report = normalizeAiSimulationReport({
+      schemaVersion: "ai-simulation-report-v1",
+      run: {
+        id: "report-1",
+        status: "completed",
+        startedAt: "2026-07-24T02:00:00.000Z",
+        completedAt: "2026-07-24T02:05:00.000Z",
+      },
+      report: {
+        configuration: {
+          marketCountry: "US",
+          initialCash: 20_000,
+          durationMinutes: 5,
+          preset: "trend",
+          riskTolerance: 70,
+          selection: { mode: "manual", symbols: ["NVDA"] },
+          costs: {
+            commissionBpsPerSide: 1,
+            taxBpsOnExit: 0,
+            spreadBpsRoundTrip: 2,
+            slippageBpsPerSide: 1,
+          },
+        },
+        selection: {
+          selected: [{
+            symbol: "NVDA",
+            name: "NVIDIA",
+            upProbability: 0.67,
+            predictedMedianReturn: 0.006,
+          }],
+        },
+        performance: {
+          currency: "USD",
+          initialCash: 20_000,
+          finalEquity: 20_100,
+          cash: 20_100,
+          realizedPnl: 104,
+          totalCosts: 4,
+          returnRatio: 0.005,
+          tradeCount: 2,
+          decisionCount: 3,
+        },
+        cadence: {
+          trigger: "finalized_one_minute_bar",
+          triggeredEvents: 3,
+          lastFinishedAt: "2026-07-24T02:04:01.000Z",
+        },
+        decisions: [{
+          symbol: "NVDA",
+          action: "buy",
+          decidedAt: "2026-07-24T02:01:00.000Z",
+          reason: "forecast_and_signal_aligned",
+          chartPatterns: ["bullish_engulfing"],
+          model: { modelId: "chronos", revision: "pinned", device: "cuda" },
+        }],
+        trades: [{
+          symbol: "NVDA",
+          side: "buy",
+          executedAt: "2026-07-24T02:02:00.000Z",
+          price: 170,
+          quantity: 2,
+          amount: 340,
+          cost: 1,
+        }],
+        positions: [],
+        equity: [{
+          timestamp: "2026-07-24T02:05:00.000Z",
+          equity: 20_100,
+          cash: 20_100,
+        }],
+        charts: [{
+          symbol: "NVDA",
+          currency: "USD",
+          bars: [{
+            timestamp: "2026-07-24T02:01:00.000Z",
+            open: 169,
+            high: 171,
+            low: 168,
+            close: 170,
+            status: "final",
+            indicatorValues: {},
+          }],
+          indicators: [],
+          patterns: [],
+        }],
+        modelProvenance: [{
+          modelId: "chronos",
+          revision: "pinned",
+          device: "cuda",
+        }],
+        evidence: [{ label: "chart_pattern", value: "bullish_engulfing" }],
+        warnings: ["가상 체결만 생성합니다."],
+        limits: ["실주문 없음"],
+      },
+    });
+
+    expect(report).toMatchObject({
+      runId: "report-1",
+      status: "completed",
+      configuration: {
+        marketCountry: "US",
+        durationMinutes: 5,
+        preset: "trend",
+        riskTolerance: 70,
+        selection: { mode: "manual", symbols: ["NVDA"] },
+      },
+      selected: [{ symbol: "NVDA", name: "NVIDIA" }],
+      performance: {
+        currency: "USD",
+        initialCash: 20_000,
+        finalEquity: 20_100,
+        pnl: 100,
+        returnRatio: 0.005,
+        tradeCount: 2,
+        decisionCount: 3,
+      },
+      decisionCadence: {
+        trigger: "finalized_one_minute_bar",
+        triggeredEvents: 3,
+      },
+      equity: [{ equity: 20_100, cash: 20_100 }],
+      charts: [{ symbol: "NVDA" }],
+      modelProvenance: ["chronos · pinned · CUDA"],
+      evidence: [{ label: "chart_pattern", value: "bullish_engulfing" }],
+      warnings: ["가상 체결만 생성합니다."],
+      limits: ["실주문 없음"],
+    });
+    expect(report?.decisions).toHaveLength(1);
+    expect(report?.trades).toHaveLength(1);
   });
 });

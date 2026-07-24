@@ -65,6 +65,7 @@ export type AiSimulationChartProps = {
   indicators: readonly AiSimulationChartIndicator[];
   trades: readonly AiSimulationChartTrade[];
   patterns: readonly AiSimulationChartPattern[];
+  updatedAt?: string;
   className?: string;
 };
 
@@ -397,6 +398,7 @@ export function AiSimulationChart({
   indicators,
   trades,
   patterns,
+  updatedAt,
   className,
 }: AiSimulationChartProps) {
   const rows = useMemo(() => chartRows(bars), [bars]);
@@ -429,7 +431,9 @@ export function AiSimulationChart({
         {latestBar ? (
           <dl className="flex shrink-0 flex-wrap justify-end gap-x-3 gap-y-1 text-[9px]">
             <div>
-              <dt className="inline text-muted-foreground">종가 </dt>
+              <dt className="inline text-muted-foreground">
+                {latestBar.status === "forming" ? "현재가 " : "종가 "}
+              </dt>
               <dd className="inline font-black">{formatMoney(latestBar.close, currency)}</dd>
             </div>
             {finite(latestBar.volume) ? (
@@ -438,6 +442,24 @@ export function AiSimulationChart({
                 <dd className="inline font-black">{formatQuantity(latestBar.volume)}</dd>
               </div>
             ) : null}
+            <div className="basis-full text-right">
+              <dt
+                className={cn(
+                  "inline font-black",
+                  latestBar.status === "forming"
+                    ? "text-amber-700 dark:text-amber-300"
+                    : "text-muted-foreground",
+                )}
+                data-ai-simulation-latest-bar-status={latestBar.status}
+              >
+                {latestBar.status === "forming" ? "실시간 진행봉" : "확정봉"}
+              </dt>
+              {updatedAt ? (
+                <dd className="ml-1 inline text-muted-foreground">
+                  · 갱신 {formatTimestamp(updatedAt)}
+                </dd>
+              ) : null}
+            </div>
           </dl>
         ) : null}
       </div>

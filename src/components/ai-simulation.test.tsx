@@ -35,6 +35,8 @@ describe("AiSimulation", () => {
     expect(markup).toContain("AI 시뮬레이션 시작");
     expect(markup).toContain("시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.");
     expect(markup).toContain('data-simulation-empty="true"');
+    expect(markup).toContain("시뮬레이션 기록·결과 보고서");
+    expect(markup).toContain('data-simulation-history="true"');
   });
 
   it("keeps the complete decision history inside a bounded scroll region", () => {

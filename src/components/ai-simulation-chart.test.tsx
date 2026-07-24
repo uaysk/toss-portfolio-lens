@@ -100,4 +100,23 @@ describe("AiSimulationChart", () => {
       }),
     ]);
   });
+
+  it("labels the latest forming candle as a live price with its observed time", () => {
+    const markup = renderToStaticMarkup(
+      <AiSimulationChart
+        symbol="SOXL"
+        currency="USD"
+        bars={bars}
+        trades={[]}
+        indicators={[]}
+        patterns={[]}
+        updatedAt="2026-07-24T00:02:12.345Z"
+      />,
+    );
+
+    expect(markup).toContain("현재가");
+    expect(markup).toContain("실시간 진행봉");
+    expect(markup).toContain('data-ai-simulation-latest-bar-status="forming"');
+    expect(markup).toContain("갱신");
+  });
 });

@@ -21,7 +21,8 @@ function routeHandler(
 ) {
   const layer = router.stack.find((candidate: {
     route?: { path?: string; stack?: Array<{ method?: string; handle: (...args: never[]) => unknown }> };
-  }) => candidate.route?.path === path);
+  }) => candidate.route?.path === path
+    && candidate.route.stack?.some((entry) => entry.method === method));
   const route = layer?.route?.stack?.find((candidate) => candidate.method === method);
   if (!route) throw new Error(`Missing ${method.toUpperCase()} ${path}`);
   return route.handle as unknown as (
@@ -35,7 +36,9 @@ function service(overrides: Partial<SimulationRouterService> = {}): SimulationRo
     status: vi.fn().mockResolvedValue({ enabled: true, capabilities: { realOrder: false, mcp: false } }),
     start: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "running" } }),
     current: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "running" } }),
+    list: vi.fn().mockResolvedValue({ items: [{ runId: RUN_ID, status: "running" }] }),
     get: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "running" } }),
+    report: vi.fn().mockResolvedValue({ run: { runId: RUN_ID }, report: { tradeCount: 0 } }),
     cancel: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "cancel_requested" } }),
     ...overrides,
   };
@@ -73,7 +76,15 @@ describe("AI paper simulation session-only router", () => {
     const paths = created.value.stack
       .map((layer: { route?: { path?: string } }) => layer.route?.path)
       .filter(Boolean);
-    expect(paths).toEqual(["/status", "/runs", "/runs/current", "/runs/:runId", "/runs/:runId/cancel"]);
+    expect(paths).toEqual([
+      "/status",
+      "/runs",
+      "/runs",
+      "/runs/current",
+      "/runs/:runId/report",
+      "/runs/:runId",
+      "/runs/:runId/cancel",
+    ]);
     expect(paths.some((path) => /order|mcp/i.test(String(path)))).toBe(false);
   });
 
@@ -181,9 +192,54 @@ describe("AI paper simulation session-only router", () => {
     expect(absentResponse.json).toHaveBeenCalledWith({ run: null, snapshot: null });
   });
 
+  it("lists only the configured owner's history with bounded status filters", async () => {
+    const api = service();
+    const created = router({ service: api, ownerSubject: "dashboard-owner" });
+    const response = mockResponse();
+    await routeHandler(created.value, "/runs", "get")({
+      query: {
+        limit: "12",
+        cursor: "opaque-cursor",
+        status: ["completed", "failed", "completed"],
+      },
+    }, response);
+
+    expect(api.list).toHaveBeenCalledWith({
+      limit: 12,
+      cursor: "opaque-cursor",
+      statuses: ["completed", "failed"],
+    }, "dashboard-owner");
+    expect(response.json).toHaveBeenCalledWith({
+      items: [{ runId: RUN_ID, status: "running" }],
+    });
+    expect(response.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store, max-age=0");
+  });
+
+  it("returns an owned run report and rejects invalid history filters", async () => {
+    const api = service();
+    const created = router({ service: api, ownerSubject: "dashboard-owner" });
+    const reportResponse = mockResponse();
+    await routeHandler(created.value, "/runs/:runId/report", "get")({
+      params: { runId: RUN_ID },
+    }, reportResponse);
+    expect(api.report).toHaveBeenCalledWith(RUN_ID, "dashboard-owner");
+    expect(reportResponse.json).toHaveBeenCalledWith({
+      run: { runId: RUN_ID },
+      report: { tradeCount: 0 },
+    });
+
+    const invalidResponse = mockResponse();
+    await routeHandler(created.value, "/runs", "get")({
+      query: { limit: "51", status: "completed,unknown" },
+    }, invalidResponse);
+    expect(invalidResponse.status).toHaveBeenCalledWith(400);
+    expect(api.list).toHaveBeenCalledTimes(0);
+  });
+
   it("returns 404 for an absent run and 400 for an invalid run id", async () => {
     const api = service({
       get: vi.fn().mockResolvedValue(undefined),
+      report: vi.fn().mockResolvedValue(undefined),
       cancel: vi.fn().mockResolvedValue(false),
     });
     const created = router({ service: api });
@@ -199,6 +255,12 @@ describe("AI paper simulation session-only router", () => {
       params: { runId: RUN_ID },
     }, cancelledResponse);
     expect(cancelledResponse.status).toHaveBeenCalledWith(404);
+
+    const missingReportResponse = mockResponse();
+    await routeHandler(created.value, "/runs/:runId/report", "get")({
+      params: { runId: RUN_ID },
+    }, missingReportResponse);
+    expect(missingReportResponse.status).toHaveBeenCalledWith(404);
 
     const invalidResponse = mockResponse();
     await routeHandler(created.value, "/runs/:runId", "get")({

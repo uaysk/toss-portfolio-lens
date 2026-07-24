@@ -269,6 +269,29 @@ function finalBarEvent(
   };
 }
 
+function formingBarEvent(
+  openTime: string,
+  closeTime: string,
+  open = 100,
+  close = 100,
+  symbol = "BBB",
+): ScalpingLiveEvent {
+  return {
+    ...finalBarEvent(openTime, closeTime, open, close, symbol),
+    emittedAt: new Date(Date.parse(openTime) + 12_345).toISOString(),
+    payload: {
+      intervalMinutes: 1,
+      state: "forming",
+      openTime,
+      closeTime,
+      open,
+      high: Math.max(open, close),
+      low: Math.min(open, close),
+      close,
+    },
+  };
+}
+
 async function eventually<T>(
   read: () => T | Promise<T>,
   predicate: (value: T) => boolean,
@@ -524,10 +547,186 @@ describe("AI trading simulation service", () => {
     expect(status.limitations.join(" ")).toContain("실제 주문 API를 호출하지 않는");
 
     const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(setup.service));
-    expect(methods).toEqual(expect.arrayContaining(["status", "start", "get", "cancel", "close"]));
+    expect(methods).toEqual(expect.arrayContaining([
+      "status",
+      "start",
+      "get",
+      "list",
+      "report",
+      "cancel",
+      "close",
+    ]));
     expect(methods.filter((name) => /order/i.test(name))).toEqual([]);
     await setup.service.close("test_complete");
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists bounded owner history and builds a capped reusable run report from persisted artifacts", async () => {
+    const setup = harness();
+    const started = await setup.service.start(request(2), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    await setup.service.cancel(started.runId, "owner");
+
+    const decisions = Array.from({ length: 520 }, (_, index) => ({
+      symbol: index % 2 ? "AAA" : "BBB",
+      action: "watch",
+      decidedAt: new Date(Date.parse(CREATED_AT) + index * 1_000).toISOString(),
+      reason: "test",
+      model: model(),
+    }));
+    const trades = Array.from({ length: 510 }, (_, index) => ({
+      symbol: "BBB",
+      side: index % 2 ? "sell" : "buy",
+      executedAt: new Date(Date.parse(CREATED_AT) + index * 1_000).toISOString(),
+      price: 100,
+      quantity: 1,
+      amount: 100,
+      cost: 0,
+    }));
+    const equity = Array.from({ length: 1_010 }, (_, index) => ({
+      timestamp: new Date(Date.parse(CREATED_AT) + index * 1_000).toISOString(),
+      equity: 100_000 + index,
+      cash: 100_000 + index,
+      invested: 0,
+    }));
+    setup.artifacts.push(
+      {
+        runId: RUN_ID,
+        type: "simulation-decisions",
+        content: decisions,
+        rowCount: decisions.length,
+        dataRevision: setup.run()!.dataRevision,
+      },
+      {
+        runId: RUN_ID,
+        type: "simulation-trades",
+        content: trades,
+        rowCount: trades.length,
+        dataRevision: setup.run()!.dataRevision,
+      },
+      {
+        runId: RUN_ID,
+        type: "simulation-equity",
+        content: equity,
+        rowCount: equity.length,
+        dataRevision: setup.run()!.dataRevision,
+      },
+    );
+
+    const history = await setup.service.list({
+      limit: 999,
+      statuses: ["completed", "cancelled"],
+      cursor: "opaque",
+    }, "owner") as unknown as {
+      items: Array<{
+        runId: string;
+        marketCountry: string;
+        selected: unknown[];
+        tradeCount: number;
+        decisionCount: number;
+        model: { device: string };
+      }>;
+      page: { limit: number };
+    };
+    expect(setup.repository.list).toHaveBeenLastCalledWith({
+      ownerSubject: "owner",
+      kinds: ["ai_trading_simulation"],
+      archived: "all",
+      statuses: ["completed", "cancelled"],
+      limit: 50,
+      cursor: "opaque",
+    });
+    expect(history.page.limit).toBe(50);
+    expect(history.items[0]).toMatchObject({
+      runId: RUN_ID,
+      marketCountry: "KR",
+      tradeCount: 0,
+      decisionCount: 2,
+      model: { device: "cuda" },
+    });
+    expect(history.items[0]!.selected).toHaveLength(2);
+
+    setup.repository.list.mockResolvedValueOnce({
+      items: [
+        { ...setup.run()!, ownerSubject: "another-owner" },
+        { ...setup.run()!, kind: "backtest" },
+      ],
+    });
+    const isolatedHistory = await setup.service.list({}, "owner") as { items: unknown[] };
+    expect(isolatedHistory.items).toEqual([]);
+
+    const response = await setup.service.report(RUN_ID, "owner") as unknown as {
+      run: { runId: string; status: string };
+      report: {
+        configuration: {
+          marketCountry: string;
+          initialCash: number;
+          selection: unknown;
+          preset: string;
+          riskTolerance: number;
+        };
+        selected: unknown[];
+        performance: { tradeCount: number; decisionCount: number };
+        cadence: { trigger: string };
+        decisions: unknown[];
+        trades: unknown[];
+        equity: unknown[];
+        charts: Array<{ bars: unknown[]; patterns: unknown[] }>;
+        modelProvenance: Array<{ device: string; symbols: string[] }>;
+        evidence: { artifacts: unknown[]; chartPatternCount: number };
+        limits: {
+          decisions: { total: number; returned: number; truncated: boolean };
+          trades: { total: number; returned: number; truncated: boolean };
+          equity: { total: number; returned: number; truncated: boolean };
+        };
+      };
+      snapshot: {
+        decisions: unknown[];
+        trades: unknown[];
+        charts: unknown[];
+      };
+    };
+    expect(response.run).toMatchObject({ runId: RUN_ID, status: "cancelled" });
+    expect(response.report.configuration).toMatchObject({
+      marketCountry: "KR",
+      initialCash: 100_000,
+      selection: { mode: "auto", criterion: "trading_amount", symbolCount: 2 },
+      preset: "risk_management",
+      riskTolerance: 50,
+    });
+    expect(response.report.performance).toMatchObject({
+      tradeCount: 510,
+      decisionCount: 520,
+    });
+    expect(response.report.cadence).toMatchObject({
+      trigger: "finalized_one_minute_bar",
+    });
+    expect(response.report.decisions).toHaveLength(500);
+    expect(response.report.trades).toHaveLength(500);
+    expect(response.report.equity).toHaveLength(1_000);
+    expect(response.report.charts[0]!.bars.length).toBeLessThanOrEqual(180);
+    expect(response.report.charts[0]!.patterns.length).toBeLessThanOrEqual(120);
+    expect(response.report.modelProvenance).toEqual([
+      expect.objectContaining({
+        device: "cuda",
+        symbols: expect.arrayContaining(["AAA", "BBB"]),
+      }),
+    ]);
+    expect(response.report.limits).toMatchObject({
+      decisions: { total: 520, returned: 500, truncated: true },
+      trades: { total: 510, returned: 500, truncated: true },
+      equity: { total: 1_010, returned: 1_000, truncated: true },
+    });
+    expect(response.snapshot.decisions).toHaveLength(500);
+    expect(response.snapshot.trades).toHaveLength(500);
+
+    const artifactReads = setup.artifactService.get.mock.calls.length;
+    expect(await setup.service.report(RUN_ID, "another-owner")).toBeUndefined();
+    expect(setup.artifactService.get).toHaveBeenCalledTimes(artifactReads);
+    setup.run()!.kind = "backtest";
+    expect(await setup.service.report(RUN_ID, "owner")).toBeUndefined();
+    expect(setup.artifactService.get).toHaveBeenCalledTimes(artifactReads);
+    await setup.service.close("test_complete");
   });
 
   it("runs immediately on a new finalized bar, ignores its duplicate, and aborts on cancellation", async () => {
@@ -603,6 +802,74 @@ describe("AI trading simulation service", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(setup.market.forecast).toHaveBeenCalledTimes(2);
     expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+  });
+
+  it("publishes live forming prices without triggering AI before the candle is final", async () => {
+    let now = Date.parse(CREATED_AT);
+    const setup = harness({ now: () => now });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+
+    now = Date.parse("2026-07-24T00:06:12.345Z");
+    setup.emit(formingBarEvent(
+      "2026-07-24T00:06:00.000Z",
+      "2026-07-24T00:07:00.000Z",
+      100,
+      101.5,
+    ));
+    const live = await setup.service.get(started.runId, "owner") as {
+      snapshot: {
+        selected: Array<{
+          symbol: string;
+          currentPrice?: number;
+          priceObservedAt?: string;
+        }>;
+        charts: Array<{
+          symbol: string;
+          updatedAt?: string;
+          bars: Array<{ timestamp: string; status: string; close: number }>;
+        }>;
+        decisionCadence: { triggeredEvents: number };
+      };
+    };
+    expect(live.snapshot.selected.find(({ symbol }) => symbol === "BBB")).toMatchObject({
+      currentPrice: 101.5,
+      priceObservedAt: "2026-07-24T00:06:12.345Z",
+    });
+    expect(live.snapshot.charts.find(({ symbol }) => symbol === "BBB")).toMatchObject({
+      updatedAt: "2026-07-24T00:06:12.345Z",
+      bars: expect.arrayContaining([
+        expect.objectContaining({
+          timestamp: "2026-07-24T00:07:00.000Z",
+          status: "forming",
+          close: 101.5,
+        }),
+      ]),
+    });
+    expect(live.snapshot.decisionCadence.triggeredEvents).toBe(0);
+    expect(setup.market.forecast).toHaveBeenCalledTimes(1);
+
+    now = Date.parse("2026-07-24T00:07:02.000Z");
+    setup.emit(finalBarEvent(
+      "2026-07-24T00:06:00.000Z",
+      "2026-07-24T00:07:00.000Z",
+      100,
+      101.25,
+    ));
+    await eventually(
+      () => setup.market.forecast.mock.calls.length,
+      (count) => count === 2,
+      "finalized candle analysis after live forming display",
+    );
+    const finalized = await setup.service.get(started.runId, "owner") as {
+      snapshot: {
+        charts: Array<{ symbol: string; bars: Array<{ status: string; close: number }> }>;
+      };
+    };
+    expect(finalized.snapshot.charts.find(({ symbol }) => symbol === "BBB")?.bars.at(-1))
+      .toMatchObject({ status: "final", close: 101.25 });
+    await setup.service.cancel(started.runId, "owner");
   });
 
   it("coalesces finalized bars arriving during slow inference without overlapping AI requests", async () => {

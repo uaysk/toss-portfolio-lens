@@ -1,6 +1,14 @@
 import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
-import type { RunRepository, PortfolioRunRecord } from "../repositories/run-repository.js";
+import type {
+  PortfolioRunRecord,
+  PortfolioRunStatus,
+  RunRepository,
+} from "../repositories/run-repository.js";
+import type {
+  ArtifactDescriptor,
+  ArtifactType,
+} from "../repositories/artifact-repository.js";
 import type { ScalpingLiveEvent } from "../scalping/live-runtime.js";
 import type { MarketCountry, ScannerCriterion, UsExchange } from "../scalping/contracts.js";
 import type {
@@ -42,6 +50,7 @@ import {
 import {
   latestSimulationPatternObservation,
   mergeSimulationFinalBar,
+  mergeSimulationFormingBar,
   mergeSimulationLatestTechnical,
   simulationChartsFromWorkspace,
   type SimulationChartView,
@@ -52,6 +61,30 @@ const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
 const MAX_DECISIONS = 5_000;
 const MAX_EQUITY_POINTS = 5_000;
 const MAX_MARK_HISTORY_PER_SYMBOL = 4_096;
+const MAX_HISTORY_PAGE_SIZE = 50;
+const DEFAULT_HISTORY_PAGE_SIZE = 20;
+const MAX_REPORT_DECISIONS = 500;
+const MAX_REPORT_TRADES = 500;
+const MAX_REPORT_EQUITY_POINTS = 1_000;
+const MAX_REPORT_CHARTS = 2;
+const MAX_REPORT_CHART_BARS = 180;
+const MAX_REPORT_CHART_PATTERNS = 120;
+const MAX_REPORT_CHART_INDICATORS = 50;
+const MAX_REPORT_MODEL_PROVENANCE = 16;
+
+const SIMULATION_ARTIFACT_TYPES = [
+  "simulation-selection",
+  "simulation-decisions",
+  "simulation-equity",
+  "simulation-trades",
+  "simulation-diagnostics",
+] as const satisfies readonly ArtifactType[];
+
+export type SimulationHistoryListInput = {
+  limit?: number;
+  cursor?: string;
+  statuses?: PortfolioRunStatus[];
+};
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -484,6 +517,340 @@ function runView(run: PortfolioRunRecord) {
   };
 }
 
+function values(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function firstDefined(source: UnknownRecord | undefined, ...keys: string[]): unknown {
+  if (!source) return undefined;
+  for (const key of keys) {
+    if (source[key] !== undefined && source[key] !== null) return source[key];
+  }
+  return undefined;
+}
+
+function stringValues(value: unknown): string[] {
+  return values(value).flatMap((item) => {
+    const text = nonempty(item, 1_000);
+    return text ? [text] : [];
+  });
+}
+
+function runSnapshot(run: PortfolioRunRecord): UnknownRecord | undefined {
+  return record(record(run.result)?.snapshot) ?? record(record(run.summary)?.snapshot);
+}
+
+function simulationConfiguration(
+  run: PortfolioRunRecord,
+  snapshot: UnknownRecord | undefined,
+) {
+  const input = record(run.input);
+  const schemaVersion = nonempty(
+    firstDefined(input, "schemaVersion", "schema_version")
+      ?? firstDefined(snapshot, "schemaVersion", "schema_version"),
+    128,
+  );
+  const policyVersion = nonempty(
+    firstDefined(input, "policyVersion", "policy_version")
+      ?? firstDefined(snapshot, "policyVersion", "policy_version"),
+    128,
+  );
+  const marketCountry = nonempty(
+    firstDefined(snapshot, "marketCountry", "market_country")
+      ?? firstDefined(input, "marketCountry", "market_country"),
+    8,
+  );
+  const initialCash = finite(
+    firstDefined(snapshot, "initialCash", "initial_cash")
+      ?? firstDefined(input, "initialCash", "initial_cash"),
+  );
+  const durationMinutes = finite(firstDefined(input, "durationMinutes", "duration_minutes"));
+  const preset = nonempty(
+    firstDefined(snapshot, "preset") ?? firstDefined(input, "preset"),
+    64,
+  );
+  const riskTolerance = finite(
+    firstDefined(snapshot, "riskTolerance", "risk_tolerance")
+      ?? firstDefined(input, "riskTolerance", "risk_tolerance"),
+  );
+  const selection = firstDefined(snapshot, "selection") ?? firstDefined(input, "selection");
+  const costs = firstDefined(input, "costs");
+  const policyProfile = firstDefined(snapshot, "policyProfile", "policy_profile")
+    ?? firstDefined(input, "resolvedPolicyProfile", "resolved_policy_profile");
+  const decisionCadence = firstDefined(input, "decisionCadence", "decision_cadence");
+  return {
+    ...(schemaVersion ? { schemaVersion } : {}),
+    ...(policyVersion ? { policyVersion } : {}),
+    ...(marketCountry ? { marketCountry } : {}),
+    ...(initialCash !== undefined ? { initialCash } : {}),
+    ...(durationMinutes !== undefined ? { durationMinutes } : {}),
+    ...(selection !== undefined ? { selection } : {}),
+    ...(preset ? { preset } : {}),
+    ...(riskTolerance !== undefined ? { riskTolerance } : {}),
+    ...(costs !== undefined ? { costs } : {}),
+    ...(policyProfile !== undefined ? { policyProfile } : {}),
+    ...(decisionCadence !== undefined ? { decisionCadence } : {}),
+  };
+}
+
+function modelView(value: unknown): UnknownRecord | undefined {
+  const source = record(value);
+  const direct = nonempty(value, 256);
+  if (!source && !direct) return undefined;
+  const modelId = direct ?? nonempty(firstDefined(source, "modelId", "model_id", "id", "name"), 256);
+  const modelRevision = nonempty(
+    firstDefined(source, "modelRevision", "model_revision", "revision"),
+    256,
+  );
+  const tokenizerId = nonempty(firstDefined(source, "tokenizerId", "tokenizer_id"), 256);
+  const tokenizerRevision = nonempty(
+    firstDefined(source, "tokenizerRevision", "tokenizer_revision"),
+    256,
+  );
+  const sourceRevision = nonempty(
+    firstDefined(source, "sourceRevision", "source_revision"),
+    256,
+  );
+  const loaderVersion = nonempty(
+    firstDefined(source, "loaderVersion", "loader_version"),
+    256,
+  );
+  const license = nonempty(firstDefined(source, "license"), 128);
+  const device = nonempty(firstDefined(source, "device"), 64);
+  const dtype = nonempty(firstDefined(source, "dtype"), 64);
+  const attentionBackend = nonempty(
+    firstDefined(source, "attentionBackend", "attention_backend"),
+    64,
+  );
+  const loaded = firstDefined(source, "loaded");
+  if (!modelId && !modelRevision && !device && typeof loaded !== "boolean") return undefined;
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(modelRevision ? { modelRevision } : {}),
+    ...(tokenizerId ? { tokenizerId } : {}),
+    ...(tokenizerRevision ? { tokenizerRevision } : {}),
+    ...(sourceRevision ? { sourceRevision } : {}),
+    ...(loaderVersion ? { loaderVersion } : {}),
+    ...(license ? { license } : {}),
+    ...(device ? { device } : {}),
+    ...(dtype ? { dtype } : {}),
+    ...(attentionBackend ? { attentionBackend } : {}),
+    ...(typeof loaded === "boolean" ? { loaded } : {}),
+  };
+}
+
+function modelProvenance(
+  selected: readonly unknown[],
+  decisions: readonly unknown[],
+): UnknownRecord[] {
+  const models = new Map<string, UnknownRecord & { symbols: string[] }>();
+  for (const entry of [...selected, ...decisions]) {
+    const item = record(entry);
+    const model = modelView(item?.model);
+    if (!model) continue;
+    const key = JSON.stringify(model);
+    const symbol = nonempty(item?.symbol, 32);
+    const previous = models.get(key);
+    if (previous) {
+      if (symbol && !previous.symbols.includes(symbol)) previous.symbols.push(symbol);
+      continue;
+    }
+    models.set(key, {
+      ...model,
+      symbols: symbol ? [symbol] : [],
+    });
+    if (models.size >= MAX_REPORT_MODEL_PROVENANCE) break;
+  }
+  return [...models.values()];
+}
+
+function boundedChart(value: unknown): UnknownRecord | undefined {
+  const source = record(value);
+  const symbol = nonempty(source?.symbol, 32);
+  if (!source || !symbol) return undefined;
+  return {
+    symbol,
+    ...(nonempty(source.name, 256) ? { name: nonempty(source.name, 256) } : {}),
+    ...(nonempty(source.currency, 8) ? { currency: nonempty(source.currency, 8) } : {}),
+    bars: values(source.bars).slice(-MAX_REPORT_CHART_BARS),
+    indicators: values(source.indicators).slice(-MAX_REPORT_CHART_INDICATORS),
+    patterns: values(source.patterns).slice(-MAX_REPORT_CHART_PATTERNS),
+    ...(timestamp(source.updatedAt) ? { updatedAt: timestamp(source.updatedAt) } : {}),
+  };
+}
+
+function boundedCharts(value: unknown): UnknownRecord[] {
+  return values(value)
+    .slice(0, MAX_REPORT_CHARTS)
+    .map(boundedChart)
+    .filter((item): item is UnknownRecord => item !== undefined);
+}
+
+function boundedSnapshot(input: {
+  source: UnknownRecord;
+  selected: unknown[];
+  positions: unknown[];
+  charts: UnknownRecord[];
+  trades: unknown[];
+  decisions: unknown[];
+  warnings: string[];
+}) {
+  const source = input.source;
+  return {
+    ...(firstDefined(source, "schemaVersion", "schema_version") !== undefined
+      ? { schemaVersion: firstDefined(source, "schemaVersion", "schema_version") } : {}),
+    ...(firstDefined(source, "policyVersion", "policy_version") !== undefined
+      ? { policyVersion: firstDefined(source, "policyVersion", "policy_version") } : {}),
+    ...(source.phase !== undefined ? { phase: source.phase } : {}),
+    ...(source.createdAt !== undefined ? { createdAt: source.createdAt } : {}),
+    ...(source.startedAt !== undefined ? { startedAt: source.startedAt } : {}),
+    ...(source.expiresAt !== undefined ? { expiresAt: source.expiresAt } : {}),
+    ...(source.marketCountry !== undefined ? { marketCountry: source.marketCountry } : {}),
+    ...(source.currency !== undefined ? { currency: source.currency } : {}),
+    ...(source.selection !== undefined ? { selection: source.selection } : {}),
+    ...(source.criterion !== undefined ? { criterion: source.criterion } : {}),
+    ...(source.preset !== undefined ? { preset: source.preset } : {}),
+    ...(source.riskTolerance !== undefined ? { riskTolerance: source.riskTolerance } : {}),
+    ...(source.policyProfile !== undefined ? { policyProfile: source.policyProfile } : {}),
+    ...(source.initialCash !== undefined ? { initialCash: source.initialCash } : {}),
+    ...(source.cash !== undefined ? { cash: source.cash } : {}),
+    ...(source.equity !== undefined ? { equity: source.equity } : {}),
+    ...(source.invested !== undefined ? { invested: source.invested } : {}),
+    ...(source.realizedPnl !== undefined ? { realizedPnl: source.realizedPnl } : {}),
+    ...(source.totalCosts !== undefined ? { totalCosts: source.totalCosts } : {}),
+    ...(source.progress !== undefined ? { progress: source.progress } : {}),
+    ...(source.decisionCadence !== undefined ? { decisionCadence: source.decisionCadence } : {}),
+    selected: input.selected,
+    positions: input.positions,
+    pendingActions: values(source.pendingActions).slice(-10),
+    charts: input.charts,
+    trades: input.trades,
+    decisions: input.decisions,
+    warnings: input.warnings,
+    ...(source.capabilities !== undefined ? { capabilities: source.capabilities } : {}),
+  };
+}
+
+function countFromArtifact(
+  artifacts: ReadonlyMap<ArtifactType, ArtifactDescriptor>,
+  type: ArtifactType,
+  fallback: number,
+): number {
+  const value = artifacts.get(type)?.rowCount;
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Math.max(Number(value), fallback)
+    : fallback;
+}
+
+function reportLimit(total: number, returned: number, maximum: number) {
+  return {
+    total,
+    returned,
+    maximum,
+    truncated: total > returned,
+    window: "latest" as const,
+  };
+}
+
+function performanceView(input: {
+  run: PortfolioRunRecord;
+  snapshot: UnknownRecord;
+  positions: readonly unknown[];
+  tradeCount: number;
+  decisionCount: number;
+}) {
+  const summary = record(input.run.summary);
+  const configuration = simulationConfiguration(input.run, input.snapshot);
+  const initialCash = finite(
+    firstDefined(input.snapshot, "initialCash", "initial_cash")
+      ?? firstDefined(summary, "initialCash", "initial_cash")
+      ?? configuration.initialCash,
+  );
+  const finalEquity = finite(
+    firstDefined(input.snapshot, "equity", "finalEquity", "final_equity")
+      ?? firstDefined(summary, "finalEquity", "final_equity"),
+  );
+  const cash = finite(firstDefined(input.snapshot, "cash"));
+  const realizedPnl = finite(
+    firstDefined(input.snapshot, "realizedPnl", "realized_pnl"),
+  ) ?? 0;
+  const unrealizedPnl = input.positions.reduce<number>((total, value) => (
+    total + (finite(firstDefined(record(value), "unrealizedPnl", "unrealized_pnl")) ?? 0)
+  ), 0);
+  const totalCosts = finite(
+    firstDefined(input.snapshot, "totalCosts", "total_costs")
+      ?? firstDefined(summary, "totalCosts", "total_costs"),
+  ) ?? 0;
+  const returnRatio = finite(
+    firstDefined(summary, "returnRatio", "return_ratio"),
+  ) ?? (
+    initialCash !== undefined && initialCash > 0 && finalEquity !== undefined
+      ? finalEquity / initialCash - 1
+      : undefined
+  );
+  const netProfitLoss = finite(
+    firstDefined(summary, "netProfitLoss", "net_profit_loss"),
+  ) ?? (
+    initialCash !== undefined && finalEquity !== undefined
+      ? finalEquity - initialCash
+      : undefined
+  );
+  return {
+    ...(initialCash !== undefined ? { initialCash } : {}),
+    ...(finalEquity !== undefined ? { finalEquity } : {}),
+    ...(cash !== undefined ? { cash } : {}),
+    ...(netProfitLoss !== undefined ? { netProfitLoss } : {}),
+    ...(returnRatio !== undefined ? { returnRatio } : {}),
+    realizedPnl,
+    unrealizedPnl,
+    totalCosts,
+    tradeCount: input.tradeCount,
+    decisionCount: input.decisionCount,
+    positionCount: input.positions.length,
+  };
+}
+
+function historyItem(run: PortfolioRunRecord) {
+  const snapshot = runSnapshot(run) ?? {};
+  const summary = record(run.summary);
+  const configuration = simulationConfiguration(run, snapshot);
+  const selected = values(snapshot.selected).slice(0, 2);
+  const positions = values(snapshot.positions).slice(0, 2);
+  const trades = values(snapshot.trades);
+  const decisions = values(snapshot.decisions);
+  const tradeCount = finite(firstDefined(summary, "tradeCount", "trade_count")) ?? trades.length;
+  const decisionCount = finite(firstDefined(summary, "decisionCount", "decision_count"))
+    ?? decisions.length;
+  const performance = performanceView({
+    run,
+    snapshot,
+    positions,
+    tradeCount,
+    decisionCount,
+  });
+  const firstModel = modelView(record(selected[0])?.model);
+  return {
+    runId: run.id,
+    status: run.status,
+    progress: run.progress,
+    createdAt: new Date(run.createdAt).toISOString(),
+    ...(run.startedAt !== undefined ? { startedAt: new Date(run.startedAt).toISOString() } : {}),
+    ...(run.finishedAt !== undefined ? { finishedAt: new Date(run.finishedAt).toISOString() } : {}),
+    ...(configuration.marketCountry ? { marketCountry: configuration.marketCountry } : {}),
+    ...(configuration.preset ? { preset: configuration.preset } : {}),
+    ...(configuration.riskTolerance !== undefined
+      ? { riskTolerance: configuration.riskTolerance } : {}),
+    ...(configuration.selection !== undefined ? { selection: configuration.selection } : {}),
+    selected,
+    ...(nonempty(snapshot.currency, 8) ? { currency: nonempty(snapshot.currency, 8) } : {}),
+    ...performance,
+    ...(firstModel ? { model: firstModel } : {}),
+    decisionCadence: firstDefined(snapshot, "decisionCadence", "decision_cadence") ?? null,
+    warnings: uniqueWarnings([...run.warnings, ...stringValues(snapshot.warnings)]).slice(-20),
+    ...(run.error !== undefined ? { error: run.error } : {}),
+  };
+}
+
 export class AiTradingSimulationService {
   private readonly active = new Map<string, ActiveSession>();
   private readonly startingOwners = new Set<string>();
@@ -778,6 +1145,173 @@ export class AiTradingSimulationService {
     return {
       run: runView(run),
       snapshot: result?.snapshot ?? summary?.snapshot ?? checkpoint,
+    };
+  }
+
+  async list(input: SimulationHistoryListInput, ownerSubject: string) {
+    const requestedLimit = Number.isSafeInteger(input.limit)
+      ? Number(input.limit)
+      : DEFAULT_HISTORY_PAGE_SIZE;
+    const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE_SIZE, requestedLimit));
+    const listed = await this.repository.list({
+      ownerSubject,
+      kinds: ["ai_trading_simulation"],
+      archived: "all",
+      ...(input.statuses?.length ? { statuses: input.statuses } : {}),
+      limit,
+      ...(input.cursor ? { cursor: input.cursor } : {}),
+    });
+    const statuses = new Set(input.statuses ?? []);
+    const items = listed.items
+      .filter((run) => (
+        run.ownerSubject === ownerSubject
+        && run.kind === "ai_trading_simulation"
+        && (!statuses.size || statuses.has(run.status))
+      ))
+      .map(historyItem);
+    return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      items,
+      ...(listed.nextCursor ? { nextCursor: listed.nextCursor } : {}),
+      page: {
+        limit,
+        returned: items.length,
+      },
+    };
+  }
+
+  async report(runId: string, ownerSubject: string) {
+    const run = await this.repository.get(runId, ownerSubject);
+    if (!run
+      || run.ownerSubject !== ownerSubject
+      || run.kind !== "ai_trading_simulation") return undefined;
+
+    const artifactFailures: string[] = [];
+    const artifactEntries = await Promise.all(SIMULATION_ARTIFACT_TYPES.map(async (type) => {
+      try {
+        return [type, await this.artifacts.get(run.id, type)] as const;
+      } catch {
+        artifactFailures.push(`${type} artifact를 읽지 못했습니다.`);
+        return [type, undefined] as const;
+      }
+    }));
+    const artifactContent = new Map<ArtifactType, unknown>();
+    const artifactDescriptors = new Map<ArtifactType, ArtifactDescriptor>();
+    for (const [type, artifact] of artifactEntries) {
+      if (!artifact) continue;
+      artifactContent.set(type, artifact.content);
+      artifactDescriptors.set(type, artifact.descriptor);
+    }
+
+    const diagnostic = record(artifactContent.get("simulation-diagnostics"));
+    const active = this.active.get(run.id);
+    const sourceSnapshot = active
+      ? record(this.snapshot(active)) ?? {}
+      : runSnapshot(run) ?? record(diagnostic?.snapshot) ?? {};
+    const selectionEvidence = record(artifactContent.get("simulation-selection"));
+    const selectionResult = record(selectionEvidence?.selection);
+    const selected = values(sourceSnapshot.selected).length
+      ? values(sourceSnapshot.selected).slice(0, 2)
+      : values(selectionResult?.selected).slice(0, 2);
+    const positions = values(sourceSnapshot.positions).slice(0, 2);
+    const allDecisions = Array.isArray(artifactContent.get("simulation-decisions"))
+      ? values(artifactContent.get("simulation-decisions"))
+      : values(sourceSnapshot.decisions);
+    const allTrades = Array.isArray(artifactContent.get("simulation-trades"))
+      ? values(artifactContent.get("simulation-trades"))
+      : values(sourceSnapshot.trades);
+    const allEquity = Array.isArray(artifactContent.get("simulation-equity"))
+      ? values(artifactContent.get("simulation-equity"))
+      : [];
+    const decisions = allDecisions.slice(-MAX_REPORT_DECISIONS);
+    const trades = allTrades.slice(-MAX_REPORT_TRADES);
+    const equity = allEquity.slice(-MAX_REPORT_EQUITY_POINTS);
+    const charts = boundedCharts(sourceSnapshot.charts);
+    const warnings = uniqueWarnings([
+      ...run.warnings,
+      ...stringValues(sourceSnapshot.warnings),
+      ...artifactFailures,
+    ]);
+    const decisionCount = countFromArtifact(
+      artifactDescriptors,
+      "simulation-decisions",
+      allDecisions.length,
+    );
+    const tradeCount = countFromArtifact(
+      artifactDescriptors,
+      "simulation-trades",
+      allTrades.length,
+    );
+    const equityPointCount = countFromArtifact(
+      artifactDescriptors,
+      "simulation-equity",
+      allEquity.length,
+    );
+    const configuration = simulationConfiguration(run, sourceSnapshot);
+    const cadence = firstDefined(sourceSnapshot, "decisionCadence", "decision_cadence")
+      ?? firstDefined(diagnostic, "decisionCadence", "decision_cadence")
+      ?? null;
+    const provenance = modelProvenance(selected, allDecisions);
+    const performance = performanceView({
+      run,
+      snapshot: sourceSnapshot,
+      positions,
+      tradeCount,
+      decisionCount,
+    });
+    const snapshot = boundedSnapshot({
+      source: sourceSnapshot,
+      selected,
+      positions,
+      charts,
+      trades,
+      decisions,
+      warnings,
+    });
+    const patternCount = charts.reduce(
+      (total, chart) => total + values(chart.patterns).length,
+      0,
+    );
+    return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      generatedAt: new Date(this.now()).toISOString(),
+      run: runView(run),
+      report: {
+        configuration,
+        selection: configuration.selection ?? null,
+        selectionResult: selectionResult ?? null,
+        selected,
+        performance,
+        cadence,
+        decisions,
+        trades,
+        positions,
+        equity,
+        charts,
+        modelProvenance: provenance,
+        evidence: {
+          selection: selectionEvidence ?? null,
+          chartPatternCount: patternCount,
+          artifacts: [...artifactDescriptors.values()],
+        },
+        warnings,
+        limits: {
+          decisions: reportLimit(decisionCount, decisions.length, MAX_REPORT_DECISIONS),
+          trades: reportLimit(tradeCount, trades.length, MAX_REPORT_TRADES),
+          equity: reportLimit(equityPointCount, equity.length, MAX_REPORT_EQUITY_POINTS),
+          charts: {
+            maximum: MAX_REPORT_CHARTS,
+            barsPerChart: MAX_REPORT_CHART_BARS,
+            patternsPerChart: MAX_REPORT_CHART_PATTERNS,
+            indicatorsPerChart: MAX_REPORT_CHART_INDICATORS,
+          },
+          modelProvenance: {
+            maximum: MAX_REPORT_MODEL_PROVENANCE,
+            returned: provenance.length,
+          },
+        },
+      },
+      snapshot,
     };
   }
 
@@ -1160,9 +1694,16 @@ export class AiTradingSimulationService {
         }
       } else if (event.type === "bar"
         && payload.intervalMinutes === 1
+        && payload.state === "forming") {
+        const chart = session.charts.find((item) => item.symbol === event.symbol);
+        if (chart) mergeSimulationFormingBar(chart, payload, event.emittedAt);
+      } else if (event.type === "bar"
+        && payload.intervalMinutes === 1
         && payload.state === "final") {
         const chart = session.charts.find((item) => item.symbol === event.symbol);
-        const chartChanged = chart ? mergeSimulationFinalBar(chart, payload) : false;
+        const chartChanged = chart
+          ? mergeSimulationFinalBar(chart, payload, event.emittedAt)
+          : false;
         const closeTime = timestamp(payload.closeTime);
         const openTime = timestamp(payload.openTime);
         const open = finite(payload.open);
@@ -1466,17 +2007,27 @@ export class AiTradingSimulationService {
         ...(session.lastDecisionStartedAt ? { lastStartedAt: session.lastDecisionStartedAt } : {}),
         ...(session.lastDecisionFinishedAt ? { lastFinishedAt: session.lastDecisionFinishedAt } : {}),
       },
-      selected: (session.selection?.selected ?? []).map((candidate) => ({
-        symbol: candidate.symbol,
-        name: session.metadata.get(candidate.symbol)?.name,
-        exchange: session.metadata.get(candidate.symbol)?.exchange,
-        score: candidate.score,
-        upProbability: candidate.upProbability,
-        predictedMedianReturn: candidate.medianReturn,
-        inputEndAt: candidate.inputEndAt,
-        generatedAt: candidate.generatedAt,
-        model: candidate.model,
-      })),
+      selected: (session.selection?.selected ?? []).map((candidate) => {
+        const chart = session.charts.find(({ symbol }) => symbol === candidate.symbol);
+        const latestBar = chart?.bars.at(-1);
+        const currentPrice = session.marks[candidate.symbol] ?? latestBar?.close;
+        const priceObservedAt = session.markTimes[candidate.symbol] ?? chart?.updatedAt;
+        return {
+          symbol: candidate.symbol,
+          name: session.metadata.get(candidate.symbol)?.name,
+          exchange: session.metadata.get(candidate.symbol)?.exchange,
+          ...(currentPrice !== undefined ? {
+            currentPrice,
+            ...(priceObservedAt ? { priceObservedAt } : {}),
+          } : {}),
+          score: candidate.score,
+          upProbability: candidate.upProbability,
+          predictedMedianReturn: candidate.medianReturn,
+          inputEndAt: candidate.inputEndAt,
+          generatedAt: candidate.generatedAt,
+          model: candidate.model,
+        };
+      }),
       positions: Object.values(session.ledger.positions).map((position) => {
         const marketPrice = session.marks[position.symbol];
         return {

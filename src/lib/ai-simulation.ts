@@ -57,6 +57,8 @@ export type AiSimulationSelection = {
   score?: number;
   upProbability?: number;
   predictedMedianReturn?: number;
+  currentPrice?: number;
+  priceObservedAt?: string;
   model?: string;
 };
 
@@ -178,6 +180,88 @@ export type AiSimulationRunResponse = {
   error?: string;
 };
 
+export type AiSimulationHistoryItem = {
+  runId: string;
+  status: string;
+  startedAt?: string;
+  finishedAt?: string;
+  marketCountry?: AiSimulationMarketCountry;
+  currency: "KRW" | "USD";
+  preset?: AiSimulationPreset;
+  riskTolerance?: number;
+  selection?: AiSimulationSelectionRequest;
+  selected: AiSimulationSelection[];
+  initialCash?: number;
+  finalEquity?: number;
+  returnRatio?: number;
+  realizedPnl?: number;
+  totalCosts?: number;
+  tradeCount?: number;
+  decisionCount?: number;
+  model?: string;
+  warnings: string[];
+};
+
+export type AiSimulationHistoryPage = {
+  items: AiSimulationHistoryItem[];
+  nextCursor?: string;
+};
+
+export type AiSimulationReportConfiguration = {
+  marketCountry?: AiSimulationMarketCountry;
+  initialCash?: number;
+  durationMinutes?: number;
+  preset?: AiSimulationPreset;
+  riskTolerance?: number;
+  selection?: AiSimulationSelectionRequest;
+  costs?: Partial<AiSimulationCosts>;
+};
+
+export type AiSimulationReportPerformance = {
+  currency: "KRW" | "USD";
+  initialCash?: number;
+  finalEquity?: number;
+  cash?: number;
+  pnl?: number;
+  returnRatio?: number;
+  realizedPnl?: number;
+  unrealizedPnl?: number;
+  totalCosts?: number;
+  tradeCount?: number;
+  decisionCount?: number;
+};
+
+export type AiSimulationEquityPoint = {
+  timestamp: string;
+  equity: number;
+  cash?: number;
+};
+
+export type AiSimulationReportEvidence = {
+  label: string;
+  value?: string;
+};
+
+export type AiSimulationRunReport = {
+  runId: string;
+  status: string;
+  startedAt?: string;
+  finishedAt?: string;
+  configuration: AiSimulationReportConfiguration;
+  selected: AiSimulationSelection[];
+  performance: AiSimulationReportPerformance;
+  decisionCadence?: AiSimulationSnapshot["decisionCadence"];
+  decisions: AiSimulationDecision[];
+  trades: AiSimulationTrade[];
+  positions: AiSimulationPosition[];
+  equity: AiSimulationEquityPoint[];
+  charts: AiSimulationChartView[];
+  modelProvenance: string[];
+  evidence: AiSimulationReportEvidence[];
+  warnings: string[];
+  limits: string[];
+};
+
 export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
   marketCountry: "KR",
   initialCash: 10_000_000,
@@ -245,6 +329,22 @@ function finiteNumberRecord(value: unknown): Record<string, number> {
       return number === undefined ? [] : [[key, number]];
     }),
   );
+}
+
+function finiteCosts(value: unknown): Partial<AiSimulationCosts> | undefined {
+  const source = asRecord(value);
+  const result: Partial<AiSimulationCosts> = {};
+  const fields: Array<[keyof AiSimulationCosts, string[]]> = [
+    ["commissionBpsPerSide", ["commissionBpsPerSide", "commission_bps_per_side"]],
+    ["taxBpsOnExit", ["taxBpsOnExit", "tax_bps_on_exit"]],
+    ["spreadBpsRoundTrip", ["spreadBpsRoundTrip", "spread_bps_round_trip"]],
+    ["slippageBpsPerSide", ["slippageBpsPerSide", "slippage_bps_per_side"]],
+  ];
+  for (const [key, aliases] of fields) {
+    const number = finiteNumber(first(source, ...aliases));
+    if (number !== undefined) result[key] = number;
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 function normalizeSelectionRequest(value: unknown): AiSimulationSelectionRequest | undefined {
@@ -357,6 +457,23 @@ function normalizeSelection(value: unknown): AiSimulationSelection | undefined {
       "predicted_median_return",
       "medianReturn",
       "median_return",
+    )),
+    currentPrice: finiteNumber(first(
+      item,
+      "currentPrice",
+      "current_price",
+      "marketPrice",
+      "market_price",
+      "price",
+    )),
+    priceObservedAt: textValue(first(
+      item,
+      "priceObservedAt",
+      "price_observed_at",
+      "observedAt",
+      "observed_at",
+      "updatedAt",
+      "updated_at",
     )),
     model: modelLabel(item.model),
   };
@@ -512,6 +629,23 @@ function mapValid<T>(value: unknown, normalizer: (item: unknown) => T | undefine
   return values.map(normalizer).filter((item): item is T => item !== undefined);
 }
 
+function normalizedCadence(value: unknown): AiSimulationSnapshot["decisionCadence"] | undefined {
+  const cadence = asRecord(value);
+  if (!Object.keys(cadence).length) return undefined;
+  return {
+    trigger: textValue(cadence.trigger),
+    triggeredEvents: finiteNumber(first(cadence, "triggeredEvents", "triggered_events")),
+    coalescedEvents: finiteNumber(first(cadence, "coalescedEvents", "coalesced_events")),
+    duplicateEvents: finiteNumber(first(cadence, "duplicateEvents", "duplicate_events")),
+    inFlight: typeof first(cadence, "inFlight", "in_flight") === "boolean"
+      ? first(cadence, "inFlight", "in_flight") as boolean
+      : undefined,
+    lastTriggeredAt: textValue(first(cadence, "lastTriggeredAt", "last_triggered_at")),
+    lastStartedAt: textValue(first(cadence, "lastStartedAt", "last_started_at")),
+    lastFinishedAt: textValue(first(cadence, "lastFinishedAt", "last_finished_at")),
+  };
+}
+
 export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSnapshot {
   const outer = asRecord(payload);
   const source = Object.keys(asRecord(outer.snapshot)).length ? asRecord(outer.snapshot) : outer;
@@ -559,18 +693,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
         "pattern_confirmation",
       )),
     } : undefined,
-    decisionCadence: Object.keys(cadence).length ? {
-      trigger: textValue(cadence.trigger),
-      triggeredEvents: finiteNumber(first(cadence, "triggeredEvents", "triggered_events")),
-      coalescedEvents: finiteNumber(first(cadence, "coalescedEvents", "coalesced_events")),
-      duplicateEvents: finiteNumber(first(cadence, "duplicateEvents", "duplicate_events")),
-      inFlight: typeof first(cadence, "inFlight", "in_flight") === "boolean"
-        ? first(cadence, "inFlight", "in_flight") as boolean
-        : undefined,
-      lastTriggeredAt: textValue(first(cadence, "lastTriggeredAt", "last_triggered_at")),
-      lastStartedAt: textValue(first(cadence, "lastStartedAt", "last_started_at")),
-      lastFinishedAt: textValue(first(cadence, "lastFinishedAt", "last_finished_at")),
-    } : undefined,
+    decisionCadence: normalizedCadence(cadence),
     selected: mapValid(source.selected, normalizeSelection),
     positions: mapValid(source.positions, normalizePosition),
     charts: mapValid(source.charts, normalizeChartView),
@@ -598,6 +721,413 @@ export function normalizeAiSimulationRun(payload: unknown): AiSimulationRunRespo
       ?? textValue(root.error)
       ?? textValue(run.error)
       ?? textValue(first(root, "errorMessage", "error_message")),
+  };
+}
+
+function runIdentity(value: unknown): {
+  runId?: string;
+  status?: string;
+  startedAt?: string;
+  finishedAt?: string;
+} {
+  const run = asRecord(value);
+  return {
+    runId: textValue(first(run, "id", "runId", "run_id")),
+    status: textValue(first(run, "status", "phase")),
+    startedAt: textValue(first(
+      run,
+      "startedAt",
+      "started_at",
+      "createdAt",
+      "created_at",
+    )),
+    finishedAt: textValue(first(
+      run,
+      "finishedAt",
+      "finished_at",
+      "completedAt",
+      "completed_at",
+      "endedAt",
+      "ended_at",
+      "updatedAt",
+      "updated_at",
+    )),
+  };
+}
+
+function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefined {
+  const item = asRecord(value);
+  const run = runIdentity(item.run);
+  const configuration = asRecord(first(item, "configuration", "config", "request"));
+  const selectionBlock = asRecord(item.selection);
+  const performance = asRecord(first(item, "performance", "result", "summary"));
+  const market = textValue(first(
+    configuration,
+    "marketCountry",
+    "market_country",
+  )) ?? textValue(first(item, "marketCountry", "market_country"));
+  const preset = textValue(configuration.preset) ?? textValue(item.preset);
+  const selection = normalizeSelectionRequest(configuration.selection)
+    ?? normalizeSelectionRequest(first(selectionBlock, "request", "configuration"))
+    ?? normalizeSelectionRequest(item.selection);
+  const selected = mapValid(
+    first(item, "selected", "symbols")
+      ?? first(selectionBlock, "selected", "symbols", "instruments"),
+    normalizeSelection,
+  );
+  const runId = run.runId
+    ?? textValue(first(item, "runId", "run_id", "id"));
+  if (!runId) return undefined;
+  const initialCash = finiteNumber(first(
+    performance,
+    "initialCash",
+    "initial_cash",
+  )) ?? finiteNumber(first(configuration, "initialCash", "initial_cash"))
+    ?? finiteNumber(first(item, "initialCash", "initial_cash"));
+  const finalEquity = finiteNumber(first(
+    performance,
+    "finalEquity",
+    "final_equity",
+    "equity",
+  )) ?? finiteNumber(first(item, "finalEquity", "final_equity", "equity"));
+  const pnl = finiteNumber(first(performance, "pnl", "totalPnl", "total_pnl"))
+    ?? finiteNumber(first(item, "netProfitLoss", "net_profit_loss", "pnl"))
+    ?? (initialCash !== undefined && finalEquity !== undefined
+      ? finalEquity - initialCash
+      : undefined);
+  const explicitReturn = finiteNumber(first(
+    performance,
+    "returnRatio",
+    "return_ratio",
+    "returnRate",
+    "return_rate",
+  )) ?? finiteNumber(first(item, "returnRatio", "return_ratio", "returnRate", "return_rate"));
+  const model = modelLabel(first(item, "model", "modelProvenance", "model_provenance"))
+    ?? selected.map((entry) => entry.model).find((entry): entry is string => Boolean(entry));
+
+  return {
+    runId,
+    status: run.status ?? textValue(first(item, "status", "phase")) ?? "unknown",
+    startedAt: run.startedAt ?? textValue(first(
+      item,
+      "startedAt",
+      "started_at",
+      "createdAt",
+      "created_at",
+    )),
+    finishedAt: run.finishedAt ?? textValue(first(
+      item,
+      "finishedAt",
+      "finished_at",
+      "completedAt",
+      "completed_at",
+      "endedAt",
+      "ended_at",
+    )),
+    marketCountry: market === "KR" || market === "US" ? market : undefined,
+    currency: first(performance, "currency") === "USD"
+      || configuration.currency === "USD"
+      || item.currency === "USD"
+      || market === "US"
+      ? "USD"
+      : "KRW",
+    preset: AI_SIMULATION_PRESETS.includes(preset as AiSimulationPreset)
+      ? preset as AiSimulationPreset
+      : undefined,
+    riskTolerance: finiteNumber(first(configuration, "riskTolerance", "risk_tolerance"))
+      ?? finiteNumber(first(item, "riskTolerance", "risk_tolerance")),
+    selection,
+    selected,
+    initialCash,
+    finalEquity,
+    returnRatio: explicitReturn
+      ?? (initialCash !== undefined && initialCash > 0 && pnl !== undefined
+        ? pnl / initialCash
+        : undefined),
+    realizedPnl: finiteNumber(first(performance, "realizedPnl", "realized_pnl"))
+      ?? finiteNumber(first(item, "realizedPnl", "realized_pnl")),
+    totalCosts: finiteNumber(first(performance, "totalCosts", "total_costs", "costs"))
+      ?? finiteNumber(first(item, "totalCosts", "total_costs")),
+    tradeCount: finiteNumber(first(performance, "tradeCount", "trade_count"))
+      ?? finiteNumber(first(item, "tradeCount", "trade_count")),
+    decisionCount: finiteNumber(first(performance, "decisionCount", "decision_count"))
+      ?? finiteNumber(first(item, "decisionCount", "decision_count")),
+    model,
+    warnings: stringList(first(item, "warnings", "limitations")),
+  };
+}
+
+export function normalizeAiSimulationHistory(payload: unknown): AiSimulationHistoryPage {
+  const root = asRecord(payload);
+  const nested = asRecord(first(root, "data", "history"));
+  const source = Object.keys(nested).length ? nested : root;
+  return {
+    items: mapValid(first(source, "items", "runs", "results"), normalizeHistoryItem),
+    nextCursor: textValue(first(source, "nextCursor", "next_cursor", "cursor")),
+  };
+}
+
+function normalizeEquityPoint(value: unknown): AiSimulationEquityPoint | undefined {
+  const item = asRecord(value);
+  const timestamp = textValue(first(item, "timestamp", "at", "recordedAt", "recorded_at"));
+  const equity = finiteNumber(first(item, "equity", "value"));
+  if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || equity === undefined) return undefined;
+  return {
+    timestamp,
+    equity,
+    cash: finiteNumber(item.cash),
+  };
+}
+
+function normalizeEvidence(value: unknown): AiSimulationReportEvidence | undefined {
+  const direct = textValue(value);
+  if (direct) return { label: direct };
+  const item = asRecord(value);
+  const label = textValue(first(item, "label", "title", "name", "type", "kind", "key"));
+  if (!label) return undefined;
+  const directValue = first(item, "value", "detail", "summary", "reason", "description");
+  return {
+    label,
+    value: textValue(directValue)
+      ?? (finiteNumber(directValue) !== undefined ? String(finiteNumber(directValue)) : undefined),
+  };
+}
+
+function normalizeModelProvenance(value: unknown): string[] {
+  const direct = modelLabel(value);
+  if (direct && (typeof value === "string" || !Array.isArray(value))) return [direct];
+  const values = Array.isArray(value) ? value : Object.values(asRecord(value));
+  return values
+    .map(modelLabel)
+    .filter((item): item is string => Boolean(item))
+    .filter((item, index, all) => all.indexOf(item) === index);
+}
+
+function normalizeLimit(value: unknown): string | undefined {
+  const direct = textValue(value);
+  if (direct) return direct;
+  const item = asRecord(value);
+  const label = textValue(first(item, "label", "name", "key", "type"));
+  const detail = textValue(first(item, "value", "detail", "description", "reason"));
+  if (label && detail) return `${label} · ${detail}`;
+  return label ?? detail;
+}
+
+function normalizeReportEvidence(value: unknown): AiSimulationReportEvidence[] {
+  if (Array.isArray(value)) return mapValid(value, normalizeEvidence);
+  const source = asRecord(value);
+  if (!Object.keys(source).length) {
+    const direct = normalizeEvidence(value);
+    return direct ? [direct] : [];
+  }
+  const evidence: AiSimulationReportEvidence[] = [];
+  const patternCount = finiteNumber(first(source, "chartPatternCount", "chart_pattern_count"));
+  if (patternCount !== undefined) {
+    evidence.push({ label: "감지 차트 패턴", value: `${patternCount}건` });
+  }
+  const selection = asRecord(source.selection);
+  if (Object.keys(selection).length) {
+    const candidates = Array.isArray(selection.candidates)
+      ? selection.candidates.length
+      : Array.isArray(selection.selected)
+        ? selection.selected.length
+        : undefined;
+    evidence.push({
+      label: "종목 선정 근거",
+      value: candidates === undefined ? "저장됨" : `${candidates}개 후보·선정 기록`,
+    });
+  }
+  const artifacts = Array.isArray(source.artifacts) ? source.artifacts : [];
+  for (const value of artifacts) {
+    const artifact = asRecord(value);
+    const type = textValue(first(artifact, "type", "artifactType", "artifact_type"));
+    if (!type) continue;
+    const rows = finiteNumber(first(artifact, "rowCount", "row_count"));
+    evidence.push({
+      label: `저장 근거 · ${type}`,
+      value: rows === undefined ? "artifact 저장됨" : `${rows}행`,
+    });
+  }
+  return evidence;
+}
+
+function normalizeReportLimits(value: unknown): string[] {
+  if (Array.isArray(value)) return mapValid(value, normalizeLimit);
+  const source = asRecord(value);
+  const labels: Record<string, string> = {
+    decisions: "판단 기록",
+    trades: "가상 체결",
+    equity: "자산 추이",
+    charts: "차트",
+    modelProvenance: "모델 provenance",
+    model_provenance: "모델 provenance",
+  };
+  return Object.entries(source).flatMap(([key, raw]) => {
+    const item = asRecord(raw);
+    if (!Object.keys(item).length) {
+      const detail = normalizeLimit(raw);
+      return detail ? [`${labels[key] ?? key} · ${detail}`] : [];
+    }
+    const total = finiteNumber(item.total);
+    const returned = finiteNumber(item.returned);
+    const maximum = finiteNumber(item.maximum);
+    const truncated = item.truncated === true;
+    if (total !== undefined || returned !== undefined || maximum !== undefined) {
+      const count = total !== undefined && returned !== undefined
+        ? `${returned}/${total}건 표시`
+        : returned !== undefined
+          ? `${returned}건 표시`
+          : `최대 ${maximum}건`;
+      return [`${labels[key] ?? key} · ${count}${truncated ? " · 최근 기록만 포함" : ""}`];
+    }
+    const chartParts = [
+      finiteNumber(first(item, "barsPerChart", "bars_per_chart")) !== undefined
+        ? `종목당 봉 ${finiteNumber(first(item, "barsPerChart", "bars_per_chart"))}개`
+        : undefined,
+      finiteNumber(first(item, "patternsPerChart", "patterns_per_chart")) !== undefined
+        ? `패턴 ${finiteNumber(first(item, "patternsPerChart", "patterns_per_chart"))}개`
+        : undefined,
+      finiteNumber(first(item, "indicatorsPerChart", "indicators_per_chart")) !== undefined
+        ? `지표 ${finiteNumber(first(item, "indicatorsPerChart", "indicators_per_chart"))}개`
+        : undefined,
+    ].filter((part): part is string => Boolean(part));
+    return chartParts.length ? [`${labels[key] ?? key} · ${chartParts.join(" · ")}`] : [];
+  });
+}
+
+export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunReport | undefined {
+  const root = asRecord(payload);
+  const report = Object.keys(asRecord(root.report)).length ? asRecord(root.report) : root;
+  const run = runIdentity(root.run);
+  const reportRun = runIdentity(report.run);
+  const snapshotSource = first(report, "snapshot", "latestSnapshot", "latest_snapshot")
+    ?? root.snapshot;
+  const snapshot = Object.keys(asRecord(snapshotSource)).length
+    ? normalizeAiSimulationSnapshot(snapshotSource)
+    : undefined;
+  const configuration = asRecord(first(report, "configuration", "config", "request"));
+  const selectionBlock = asRecord(report.selection);
+  const performance = asRecord(first(report, "performance", "result", "summary"));
+  const runId = reportRun.runId
+    ?? run.runId
+    ?? textValue(first(report, "runId", "run_id"))
+    ?? textValue(first(root, "runId", "run_id"));
+  if (!runId) return undefined;
+  const market = textValue(first(configuration, "marketCountry", "market_country"))
+    ?? snapshot?.marketCountry;
+  const preset = textValue(configuration.preset) ?? snapshot?.preset;
+  const selected = mapValid(
+    first(report, "selected", "symbols")
+      ?? first(selectionBlock, "selected", "symbols", "instruments")
+      ?? snapshot?.selected,
+    normalizeSelection,
+  );
+  const decisions = mapValid(report.decisions ?? snapshot?.decisions, normalizeDecision);
+  const trades = mapValid(report.trades ?? snapshot?.trades, normalizeTrade);
+  const positions = mapValid(report.positions ?? snapshot?.positions, normalizePosition);
+  const charts = mapValid(report.charts ?? snapshot?.charts, normalizeChartView);
+  const initialCash = finiteNumber(first(performance, "initialCash", "initial_cash"))
+    ?? finiteNumber(first(configuration, "initialCash", "initial_cash"))
+    ?? snapshot?.initialCash;
+  const finalEquity = finiteNumber(first(
+    performance,
+    "finalEquity",
+    "final_equity",
+    "equity",
+  )) ?? snapshot?.equity;
+  const pnl = finiteNumber(first(performance, "pnl", "totalPnl", "total_pnl"))
+    ?? (initialCash !== undefined && finalEquity !== undefined
+      ? finalEquity - initialCash
+      : undefined);
+  const explicitReturn = finiteNumber(first(
+    performance,
+    "returnRatio",
+    "return_ratio",
+    "returnRate",
+    "return_rate",
+  ));
+  const currency = first(performance, "currency") === "USD"
+    || configuration.currency === "USD"
+    || snapshot?.currency === "USD"
+    || market === "US"
+    ? "USD"
+    : "KRW";
+  const reportModels = normalizeModelProvenance(first(
+    report,
+    "modelProvenance",
+    "model_provenance",
+    "models",
+    "model",
+  ));
+  const inferredModels = [
+    ...selected.map((item) => item.model),
+    ...decisions.map((item) => item.model),
+  ].filter((item): item is string => Boolean(item));
+
+  return {
+    runId,
+    status: reportRun.status
+      ?? run.status
+      ?? textValue(first(report, "status", "phase"))
+      ?? snapshot?.phase
+      ?? "unknown",
+    startedAt: reportRun.startedAt
+      ?? run.startedAt
+      ?? snapshot?.startedAt
+      ?? textValue(first(report, "startedAt", "started_at")),
+    finishedAt: reportRun.finishedAt
+      ?? run.finishedAt
+      ?? textValue(first(report, "finishedAt", "finished_at", "completedAt", "completed_at"))
+      ?? snapshot?.expiresAt,
+    configuration: {
+      marketCountry: market === "KR" || market === "US" ? market : undefined,
+      initialCash,
+      durationMinutes: finiteNumber(first(configuration, "durationMinutes", "duration_minutes")),
+      preset: AI_SIMULATION_PRESETS.includes(preset as AiSimulationPreset)
+        ? preset as AiSimulationPreset
+        : undefined,
+      riskTolerance: finiteNumber(first(configuration, "riskTolerance", "risk_tolerance"))
+        ?? snapshot?.riskTolerance,
+      selection: normalizeSelectionRequest(configuration.selection)
+        ?? normalizeSelectionRequest(first(selectionBlock, "request", "configuration"))
+        ?? snapshot?.selection,
+      costs: finiteCosts(configuration.costs),
+    },
+    selected,
+    performance: {
+      currency,
+      initialCash,
+      finalEquity,
+      cash: finiteNumber(performance.cash) ?? snapshot?.cash,
+      pnl,
+      returnRatio: explicitReturn
+        ?? (initialCash !== undefined && initialCash > 0 && pnl !== undefined
+          ? pnl / initialCash
+          : undefined),
+      realizedPnl: finiteNumber(first(performance, "realizedPnl", "realized_pnl")),
+      unrealizedPnl: finiteNumber(first(performance, "unrealizedPnl", "unrealized_pnl")),
+      totalCosts: finiteNumber(first(performance, "totalCosts", "total_costs", "costs"))
+        ?? trades.reduce((total, trade) => total + trade.cost, 0),
+      tradeCount: finiteNumber(first(performance, "tradeCount", "trade_count"))
+        ?? trades.length,
+      decisionCount: finiteNumber(first(performance, "decisionCount", "decision_count"))
+        ?? decisions.length,
+    },
+    decisionCadence: normalizedCadence(
+      first(report, "cadence", "decisionCadence", "decision_cadence")
+        ?? snapshot?.decisionCadence,
+    ),
+    decisions,
+    trades,
+    positions,
+    equity: mapValid(first(report, "equity", "equityCurve", "equity_curve"), normalizeEquityPoint),
+    charts,
+    modelProvenance: [...new Set([...reportModels, ...inferredModels])],
+    evidence: normalizeReportEvidence(report.evidence),
+    warnings: stringList(first(report, "warnings", "limitations"))
+      .concat(snapshot?.warnings ?? [])
+      .filter((item, index, all) => all.indexOf(item) === index),
+    limits: normalizeReportLimits(first(report, "limits", "limitations")),
   };
 }
 

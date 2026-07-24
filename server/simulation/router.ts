@@ -9,12 +9,16 @@ import {
   createSimulationStartRequestSchema,
   type SimulationStartRequest,
 } from "./contracts.js";
+import type { PortfolioRunStatus } from "../repositories/run-repository.js";
+import type { SimulationHistoryListInput } from "./simulation-service.js";
 
 export type SimulationRouterService = {
   status(enabled?: boolean): unknown | Promise<unknown>;
   start(input: SimulationStartRequest, ownerSubject: string): Promise<unknown>;
   current(ownerSubject: string): Promise<unknown | undefined>;
+  list(input: SimulationHistoryListInput, ownerSubject: string): Promise<unknown>;
   get(runId: string, ownerSubject: string): Promise<unknown | undefined>;
+  report(runId: string, ownerSubject: string): Promise<unknown | undefined>;
   cancel(runId: string, ownerSubject: string): Promise<unknown | undefined>;
 };
 
@@ -29,6 +33,33 @@ export type SimulationRouterDependencies = {
 };
 
 const RunIdSchema = z.string().uuid();
+const RunStatusSchema = z.enum([
+  "queued",
+  "running",
+  "cancel_requested",
+  "cancelled",
+  "completed",
+  "failed",
+]);
+const HistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+  cursor: z.string().trim().min(1).max(2_048).optional(),
+  status: z.preprocess((value) => {
+    if (value === undefined) return undefined;
+    const raw = Array.isArray(value) ? value : [value];
+    return raw.flatMap((item) => (
+      typeof item === "string"
+        ? item.split(",").map((entry) => entry.trim()).filter(Boolean)
+        : [item]
+    ));
+  }, z.array(RunStatusSchema).min(1).max(6).optional()),
+}).strict().transform((input): SimulationHistoryListInput => ({
+  limit: input.limit,
+  ...(input.cursor ? { cursor: input.cursor } : {}),
+  ...(input.status?.length
+    ? { statuses: Array.from(new Set(input.status)) as PortfolioRunStatus[] }
+    : {}),
+}));
 
 function disabled(response: Response): void {
   setNoStore(response);
@@ -112,12 +143,40 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
     }
   });
 
+  router.get("/runs", async (request, response) => {
+    setNoStore(response);
+    if (!dependencies.config.enabled || !dependencies.service) return disabled(response);
+    try {
+      response.json(await dependencies.service.list(
+        HistoryQuerySchema.parse(request.query),
+        ownerSubject,
+      ));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
   router.get("/runs/current", async (_request, response) => {
     setNoStore(response);
     if (!dependencies.config.enabled || !dependencies.service) return disabled(response);
     try {
       const result = await dependencies.service.current(ownerSubject);
       response.json(result ?? { run: null, snapshot: null });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  router.get("/runs/:runId/report", async (request, response) => {
+    setNoStore(response);
+    if (!dependencies.config.enabled || !dependencies.service) return disabled(response);
+    try {
+      const result = await dependencies.service.report(
+        RunIdSchema.parse(request.params.runId),
+        ownerSubject,
+      );
+      if (notFound(result)) return missing(response);
+      response.json(result);
     } catch (error) {
       sendError(response, error);
     }
