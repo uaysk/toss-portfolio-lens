@@ -17,6 +17,15 @@ import {
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
+import {
+  AiSimulationAssetClassControl,
+  AiSimulationCryptoSetup,
+  type AiSimulationAssetClass,
+} from "@/components/ai-simulation-crypto";
+import {
+  AiSimulationFuturesLedger,
+  AiSimulationModelComparisonPanel,
+} from "@/components/ai-simulation-futures";
 import { AiSimulationHistory } from "@/components/ai-simulation-history";
 import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
 import { Button } from "@/components/ui/button";
@@ -25,16 +34,21 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   DEFAULT_AI_SIMULATION_REQUEST,
+  DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   aiSimulationErrorMessage,
   aiSimulationPairCatalog,
   aiSimulationPairStrategyEnabled,
   defaultAiSimulationCosts,
   normalizeAiSimulationRun,
+  normalizeAiSimulationCandidates,
   normalizeAiSimulationStatus,
   usesDefaultAiSimulationCosts,
+  validateAiSimulationCryptoRequest,
   validateAiSimulationRequest,
   type AiSimulationCosts,
+  type AiSimulationCandidateSnapshot,
   type AiSimulationCriterion,
+  type AiSimulationCryptoRequest,
   type AiSimulationMarketCountry,
   type AiSimulationPairCatalogItem,
   type AiSimulationPairId,
@@ -439,6 +453,7 @@ function SelectedSymbols({ snapshot }: { snapshot: AiSimulationSnapshot }) {
 }
 
 function Positions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
+  const quantityUnit = snapshot.currency === "USDT" ? "계약" : "주";
   return (
     <Card className="bg-card p-5 sm:p-6" data-simulation-positions>
       <div>
@@ -452,7 +467,7 @@ function Positions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
               <div>
                 <p className="font-black">{position.symbol}</p>
                 <p className="mt-1 text-[10px] text-muted-foreground">
-                  {formatQuantity(position.quantity)}주 · 평균 {formatMoney(position.averagePrice, snapshot.currency)}
+                  {formatQuantity(position.quantity)}{quantityUnit} · 평균 {formatMoney(position.averagePrice, snapshot.currency)}
                 </p>
               </div>
               <div className="sm:text-right">
@@ -474,6 +489,7 @@ function Positions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
 export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapshot }) {
   const trades = [...snapshot.trades].reverse();
   const decisions = [...snapshot.decisions].reverse();
+  const quantityUnit = snapshot.currency === "USDT" ? "계약" : "주";
   return (
     <div className="grid gap-3 xl:grid-cols-2">
       <Card className="min-w-0 bg-card p-5 sm:p-6" data-simulation-trades>
@@ -496,7 +512,7 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
                   <p className="text-[9px] text-muted-foreground">{formatTimestamp(trade.executedAt)}</p>
                 </div>
                 <p className="mt-2 text-xs">
-                  {formatQuantity(trade.quantity)}주 × {formatMoney(trade.price, snapshot.currency)} · {formatMoney(trade.amount, snapshot.currency)}
+                  {formatQuantity(trade.quantity)}{quantityUnit} × {formatMoney(trade.price, snapshot.currency)} · {formatMoney(trade.amount, snapshot.currency)}
                 </p>
                 <p className="mt-1 text-[9px] text-muted-foreground">
                   비용 {formatMoney(trade.cost, snapshot.currency)} · {trade.source ?? "체결 source unavailable"}
@@ -621,6 +637,7 @@ function RunPanel({
   }
   const pnl = snapshot.equity - snapshot.initialCash;
   const returnRatio = snapshot.initialCash > 0 ? pnl / snapshot.initialCash : undefined;
+  const cryptoFutures = snapshot.market?.kind === "crypto_futures";
 
   return (
     <div className="space-y-3" data-simulation-run={run.runId ?? "unknown"}>
@@ -637,7 +654,9 @@ function RunPanel({
               </span>
               <span className="text-[10px] text-primary-foreground/60">run {run.runId ?? "ID unavailable"}</span>
             </div>
-            <p className="mt-5 text-[10px] font-black tracking-[0.12em] text-primary-foreground/60">VIRTUAL EQUITY</p>
+            <p className="mt-5 text-[10px] font-black tracking-[0.12em] text-primary-foreground/60">
+              {cryptoFutures ? "FUTURES PAPER EQUITY" : "VIRTUAL EQUITY"}
+            </p>
             <p className="mt-1 text-[clamp(2rem,5vw,4.5rem)] font-black tracking-[-0.07em]">{formatMoney(snapshot.equity, snapshot.currency)}</p>
             <p className="mt-2 text-sm font-black">
               {pnl >= 0 ? "+" : ""}{formatMoney(pnl, snapshot.currency)} · {formatRatio(returnRatio, true)}
@@ -662,7 +681,9 @@ function RunPanel({
           <div className="h-full rounded-full bg-primary-foreground transition-[width]" style={{ width: `${snapshot.progress * 100}%` }} />
         </div>
         <div className="mt-4 flex flex-wrap gap-2 text-[9px] font-black text-primary-foreground/70">
-          <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">보유 0주 · 현금 100% 시작</span>
+          <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
+            {cryptoFutures ? "isolated · 단방향 · paper only" : "보유 0주 · 현금 100% 시작"}
+          </span>
           {snapshot.preset ? <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">{PRESET_DETAILS[snapshot.preset].label}</span> : null}
           {snapshot.riskTolerance !== undefined ? (
             <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
@@ -684,10 +705,21 @@ function RunPanel({
         />
       ) : null}
 
-      <div className="grid gap-3 xl:grid-cols-2">
-        <SelectedSymbols snapshot={snapshot} />
-        <Positions snapshot={snapshot} />
-      </div>
+      {cryptoFutures ? (
+        <>
+          <AiSimulationModelComparisonPanel comparison={snapshot.modelComparison} />
+          <AiSimulationFuturesLedger
+            positions={snapshot.futuresPositions ?? []}
+            risk={snapshot.futuresRisk}
+          />
+          <SelectedSymbols snapshot={snapshot} />
+        </>
+      ) : (
+        <div className="grid gap-3 xl:grid-cols-2">
+          <SelectedSymbols snapshot={snapshot} />
+          <Positions snapshot={snapshot} />
+        </div>
+      )}
       {snapshot.charts.length ? (
         <div className="grid gap-3 xl:grid-cols-2" data-simulation-charts>
           {snapshot.charts.map((chart) => (
@@ -709,6 +741,7 @@ function RunPanel({
                   price: trade.price,
                   side,
                   quantity: trade.quantity,
+                  positionSide: trade.positionSide,
                 }];
               })}
             />
@@ -734,7 +767,11 @@ function RunPanel({
 }
 
 export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
+  const [assetClass, setAssetClass] = useState<AiSimulationAssetClass>("stock");
   const [request, setRequest] = useState<AiSimulationRequest>(DEFAULT_AI_SIMULATION_REQUEST);
+  const [cryptoRequest, setCryptoRequest] = useState<AiSimulationCryptoRequest>(
+    DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+  );
   const [status, setStatus] = useState<AiSimulationStatus>();
   const [statusLoading, setStatusLoading] = useState(true);
   const [starting, setStarting] = useState(false);
@@ -746,16 +783,54 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const [instrumentResults, setInstrumentResults] = useState<TechnicalInstrumentChoice[]>([]);
   const [instrumentSearching, setInstrumentSearching] = useState(false);
   const [instrumentError, setInstrumentError] = useState("");
+  const [candidateSnapshot, setCandidateSnapshot] = useState<AiSimulationCandidateSnapshot>();
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateError, setCandidateError] = useState("");
   const cancellingRef = useRef(false);
   const pollingGeneration = useRef(0);
 
   const issues = useMemo(
-    () => validateAiSimulationRequest(request, status?.limits),
-    [request, status?.limits],
+    () => assetClass === "crypto_futures"
+      ? validateAiSimulationCryptoRequest(cryptoRequest)
+      : validateAiSimulationRequest(request, status?.limits),
+    [assetClass, cryptoRequest, request, status?.limits],
   );
   const runActive = Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
   const pairEnabled = aiSimulationPairStrategyEnabled(status);
   const pairCatalog = useMemo(() => aiSimulationPairCatalog(status), [status]);
+  const loadCryptoCandidates = useCallback(async (signal?: AbortSignal) => {
+    setCandidateLoading(true);
+    setCandidateError("");
+    try {
+      const criterion = cryptoRequest.selection.criterion;
+      const response = await fetch(
+        `/api/portfolio/simulation/candidates?criterion=${encodeURIComponent(criterion)}`,
+        { headers: { Accept: "application/json" }, signal },
+      );
+      const payload = await readJson(response);
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(aiSimulationErrorMessage(payload, "암호화폐 선물 후보를 스캔하지 못했습니다."));
+      }
+      if (!signal?.aborted) setCandidateSnapshot(normalizeAiSimulationCandidates(payload, criterion));
+    } catch (caught) {
+      if (signal?.aborted) return;
+      setCandidateError(caught instanceof Error ? caught.message : "암호화폐 선물 후보를 스캔하지 못했습니다.");
+      setCandidateSnapshot(undefined);
+    } finally {
+      if (!signal?.aborted) setCandidateLoading(false);
+    }
+  }, [cryptoRequest.selection.criterion, onUnauthorized]);
+
+  useEffect(() => {
+    if (assetClass !== "crypto_futures" || runActive) return;
+    const controller = new AbortController();
+    void loadCryptoCandidates(controller.signal);
+    return () => controller.abort();
+  }, [assetClass, loadCryptoCandidates, runActive]);
 
   useEffect(() => {
     const query = instrumentQuery.trim();
@@ -836,7 +911,11 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             && typeof currentPayload === "object"
             && (currentPayload as { run?: unknown }).run
             && !controller.signal.aborted) {
-            setRun(normalizeAiSimulationRun(currentPayload));
+            const restored = normalizeAiSimulationRun(currentPayload);
+            setRun(restored);
+            if (restored.snapshot?.market?.kind === "crypto_futures") {
+              setAssetClass("crypto_futures");
+            }
           } else if (!currentResponse.ok) {
             throw new Error(aiSimulationErrorMessage(currentPayload, "최근 시뮬레이션을 복원하지 못했습니다."));
           }
@@ -889,7 +968,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   }, [run?.runId, runActive, cancelling, onUnauthorized]);
 
   const startSimulation = useCallback(async () => {
-    const validation = validateAiSimulationRequest(request, status?.limits);
+    const validation = assetClass === "crypto_futures"
+      ? validateAiSimulationCryptoRequest(cryptoRequest)
+      : validateAiSimulationRequest(request, status?.limits);
     if (validation.length) {
       setError(validation[0]);
       return;
@@ -900,7 +981,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       const response = await fetch("/api/portfolio/simulation/runs", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(request),
+        body: JSON.stringify(assetClass === "crypto_futures" ? cryptoRequest : request),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -916,7 +997,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     } finally {
       setStarting(false);
     }
-  }, [onUnauthorized, request, status?.limits]);
+  }, [assetClass, cryptoRequest, onUnauthorized, request, status?.limits]);
 
   const cancelSimulation = useCallback(async () => {
     if (!run?.runId || cancellingRef.current) return;
@@ -1026,6 +1107,13 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     });
   };
 
+  const changeAssetClass = (next: AiSimulationAssetClass) => {
+    if (runActive || next === assetClass) return;
+    setAssetClass(next);
+    setError("");
+    setRun(undefined);
+  };
+
   const currency = request.marketCountry === "US" ? "USD" : "KRW";
   const costProfile = status?.costProfiles?.[request.marketCountry];
   const selectedPairId = request.strategy.mode === "pair" ? request.strategy.pairId : undefined;
@@ -1035,6 +1123,11 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
   return (
     <section className="space-y-3" data-ai-simulation>
+      <AiSimulationAssetClassControl
+        value={assetClass}
+        disabled={runActive}
+        onChange={changeAssetClass}
+      />
       <Card className="overflow-hidden bg-primary p-6 text-primary-foreground sm:p-8">
         <div className="grid gap-7 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
           <div>
@@ -1043,25 +1136,60 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               PAPER TRADING ONLY
             </div>
             <h2 className="mt-6 max-w-3xl text-[clamp(2rem,5vw,4.7rem)] font-black leading-[0.95] tracking-[-0.07em]">
-              AI가 고르고,<br />가상 원장으로 검증합니다.
+              {assetClass === "crypto_futures"
+                ? <>선물 방향을 읽고,<br />격리 원장으로 검증합니다.</>
+                : <>AI가 고르고,<br />가상 원장으로 검증합니다.</>}
             </h2>
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
-              보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 Kronos-base 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다.
+              {assetClass === "crypto_futures"
+                ? "Binance USDⓈ-M USDT 무기한 계약 중 유동성 조건을 통과한 한 종목을 고르고, 확정봉과 다음 유효 체결만으로 롱·숏 paper 결과를 검증합니다. 읽기 전용 키와 공개 시세 외에는 외부로 주문을 전송하지 않습니다."
+                : "보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 Kronos-base 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다."}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">AI 또는 직접 선택</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "유동성 통과 1종목" : "AI 또는 직접 선택"}</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">현금 100% · 0주</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">Kronos-base · Rust · 패턴</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "USDT · isolated" : "현금 100% · 0주"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "Kronos · FinCast" : "Kronos-base · Rust · 패턴"}</p></div>
           </div>
         </div>
       </Card>
 
-      <SimulationDisclosure />
+      {assetClass === "stock" ? (
+        <SimulationDisclosure />
+      ) : (
+        <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" data-crypto-simulation-disclosure>
+          <p className="font-black text-foreground">선물 paper 전용 · 실주문 capability false</p>
+          <p className="mt-1">
+            거래당 위험 0.5%, UTC 일손실 3% 중단, paper gross exposure 150%·증거금 20% 상한을 적용합니다.
+            추정 청산가가 보호 손절 거리의 두 배 이상 떨어져 있지 않으면 수량을 줄이거나 진입하지 않습니다.
+          </p>
+        </Card>
+      )}
       <RuntimeStatus status={status} loading={statusLoading} />
 
-      <Card className="bg-card p-5 sm:p-7">
+      {assetClass === "crypto_futures" ? (
+        <AiSimulationCryptoSetup
+          request={cryptoRequest}
+          status={status?.cryptoFutures}
+          candidateSnapshot={candidateSnapshot}
+          candidateLoading={candidateLoading}
+          candidateError={candidateError}
+          issues={issues}
+          error={error}
+          disabled={runActive || statusLoading || !status?.enabled}
+          starting={starting}
+          active={runActive}
+          cancelling={cancelling}
+          cancelRequested={run?.status === "cancel_requested"}
+          onRequestChange={setCryptoRequest}
+          onRefreshCandidates={() => void loadCryptoCandidates()}
+          onStart={() => void startSimulation()}
+          onCancel={() => void cancelSimulation()}
+        />
+      ) : null}
+
+      <Card className={cn("bg-card p-5 sm:p-7", assetClass !== "stock" && "hidden")} aria-hidden={assetClass !== "stock"}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">SIMULATION SETUP</p>

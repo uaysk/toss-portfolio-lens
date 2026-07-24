@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { Card } from "@/components/ui/card";
 import { formatMoney, formatQuantity } from "@/lib/format";
+import type { AiSimulationCurrency } from "@/lib/ai-simulation";
 import {
   scalpingTradeMarkerPoints,
   type ScalpingTradeMarker,
@@ -48,6 +49,7 @@ export type AiSimulationChartTrade = {
   price: number;
   side: "buy" | "sell";
   quantity: number;
+  positionSide?: "long" | "short";
 };
 
 export type AiSimulationChartPattern = {
@@ -60,7 +62,7 @@ export type AiSimulationChartPattern = {
 export type AiSimulationChartProps = {
   symbol: string;
   name?: string;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   bars: readonly AiSimulationChartBar[];
   indicators: readonly AiSimulationChartIndicator[];
   trades: readonly AiSimulationChartTrade[];
@@ -367,12 +369,23 @@ function TradeMarkerShape({
 }) {
   const buy = point.trade.side === "buy";
   const markerY = cy + (buy ? 8 : -8);
-  const color = buy ? "#2563eb" : "#e11d48";
-  const label = `${buy ? "매수" : "매도"} ${formatQuantity(point.trade.quantity)}주 · ${formatMoney(point.price, currency)}`;
+  const color = point.trade.positionSide === "long"
+    ? "#22d3ee"
+    : point.trade.positionSide === "short"
+      ? "#f59e0b"
+      : buy
+        ? "#2563eb"
+        : "#e11d48";
+  const direction = point.trade.positionSide
+    ? point.trade.positionSide.toUpperCase()
+    : buy ? "매수" : "매도";
+  const unit = currency === "USDT" ? "계약" : "주";
+  const label = `${direction} ${formatQuantity(point.trade.quantity)}${unit} · ${formatMoney(point.price, currency)}`;
   return (
     <g
       aria-label={label}
       data-ai-simulation-trade-marker={point.trade.side}
+      data-ai-simulation-position-side={point.trade.positionSide}
       data-ai-simulation-trade-at={point.trade.executedAt}
     >
       <title>{label}</title>

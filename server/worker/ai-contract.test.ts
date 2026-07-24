@@ -136,6 +136,41 @@ function kronosForecastResponse(): unknown {
   };
 }
 
+function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed_float16"): unknown {
+  const response = structuredClone(kronosForecastResponse()) as {
+    model: Record<string, unknown>;
+    model_runs: Array<{
+      role: string;
+      expected_model_id: string;
+      model: Record<string, unknown>;
+    }>;
+  };
+  const model = {
+    ...response.model,
+    model_id: "Vincent05R/FinCast",
+    model_revision: "2d7d90b159db8961d27c2cf165d51195902ef92b",
+    tokenizer_id: null,
+    tokenizer_revision: null,
+    source_revision: "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
+    loader_version: "fincast-source-488b19d",
+    license: "Apache-2.0",
+    dtype: precision,
+    precision_validation: precision === "mixed_float16" ? "passed" : "fallback_fp32",
+    peak_vram_bytes: 4_294_967_296,
+    peak_vram_measurement: "cuda_allocated_or_reserved",
+    memory_status: "ok",
+    quantile_tail_policy: "tail_clamped_q10_q90",
+    precision_failure_reasons: precision === "mixed_float16"
+      ? []
+      : ["q50_p95_error_above_15pct"],
+  };
+  response.model = model;
+  response.model_runs[0]!.role = "fincast";
+  response.model_runs[0]!.expected_model_id = "Vincent05R/FinCast";
+  response.model_runs[0]!.model = structuredClone(model);
+  return response;
+}
+
 describe("AI worker response contract", () => {
   it("Python walk-forward target/stop first-hit metrics와 동일한 필드를 검증한다", () => {
     const response = AiResponseSchema.parse(evaluatedResponse);
@@ -328,15 +363,73 @@ describe("AI worker response contract", () => {
   it("Kronos-base run의 degraded·fallback 및 다른 모델 ID를 거부한다", () => {
     const response = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
     response.model_runs![0]!.degraded = true;
-    expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain degraded or fallback/);
+    expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain degraded or model fallback/);
 
     const fallback = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
     fallback.model_runs![0]!.fallback_used = true;
     fallback.model_runs![0]!.fallback_reason = "unexpected fallback";
-    expect(() => AiResponseSchema.parse(fallback)).toThrow(/cannot contain degraded or fallback/);
+    expect(() => AiResponseSchema.parse(fallback)).toThrow(/cannot contain degraded or model fallback/);
 
     const otherModel = structuredClone(evaluatedResponse);
     otherModel.model.model_id = "amazon/chronos-2";
-    expect(() => AiResponseSchema.parse(otherModel)).toThrow(/pinned to NeoQuasar\/Kronos-base/);
+    expect(() => AiResponseSchema.parse(otherModel)).toThrow(/supported pinned Kronos-base or FinCast/);
+  });
+
+  it("FinCast의 검증된 mixed FP16과 손실 없는 FP32 precision fallback을 각각 수용한다", () => {
+    const fp16 = AiResponseSchema.parse(fincastForecastResponse());
+    expect(fp16.model_runs?.[0]).toMatchObject({
+      role: "fincast",
+      expected_model_id: "Vincent05R/FinCast",
+      model: {
+        dtype: "mixed_float16",
+        precision_validation: "passed",
+        memory_status: "ok",
+        quantile_tail_policy: "tail_clamped_q10_q90",
+      },
+    });
+
+    const fp32 = AiResponseSchema.parse(fincastForecastResponse("float32"));
+    expect(fp32.model_runs?.[0]?.model).toMatchObject({
+      model_id: "Vincent05R/FinCast",
+      dtype: "float32",
+      precision_validation: "fallback_fp32",
+      precision_failure_reasons: ["q50_p95_error_above_15pct"],
+    });
+  });
+
+  it("lane/model identity 불일치와 모델 대체 fallback을 FinCast에서도 거부한다", () => {
+    const identityDrift = structuredClone(fincastForecastResponse()) as {
+      model_runs: Array<{ expected_model_id: string }>;
+    };
+    identityDrift.model_runs[0]!.expected_model_id = "NeoQuasar/Kronos-base";
+    expect(() => AiResponseSchema.parse(identityDrift)).toThrow(/role and expected model identity/);
+
+    const modelFallback = structuredClone(fincastForecastResponse()) as {
+      model: { fallback_from?: string };
+      model_runs: Array<{ model: { fallback_from?: string } }>;
+    };
+    modelFallback.model.fallback_from = "NeoQuasar/Kronos-base";
+    modelFallback.model_runs[0]!.model.fallback_from = "NeoQuasar/Kronos-base";
+    expect(() => AiResponseSchema.parse(modelFallback)).toThrow(/cannot contain model fallback provenance/);
+  });
+
+  it("mixed FP16 검증 누락과 Kronos precision 위장을 거부한다", () => {
+    const unvalidated = structuredClone(fincastForecastResponse()) as {
+      model: { precision_validation: string };
+      model_runs: Array<{ model: { precision_validation: string } }>;
+    };
+    unvalidated.model.precision_validation = "fallback_fp32";
+    unvalidated.model_runs[0]!.model.precision_validation = "fallback_fp32";
+    expect(() => AiResponseSchema.parse(unvalidated)).toThrow(/requires passed precision validation/);
+
+    const disguisedKronos = structuredClone(kronosForecastResponse()) as {
+      model: { dtype: string; precision_validation?: string };
+      model_runs: Array<{ model: { dtype: string; precision_validation?: string } }>;
+    };
+    disguisedKronos.model.dtype = "mixed_float16";
+    disguisedKronos.model.precision_validation = "passed";
+    disguisedKronos.model_runs[0]!.model.dtype = "mixed_float16";
+    disguisedKronos.model_runs[0]!.model.precision_validation = "passed";
+    expect(() => AiResponseSchema.parse(disguisedKronos)).toThrow(/native float32 provenance/);
   });
 });

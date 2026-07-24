@@ -5,6 +5,7 @@ import { canonicalJson } from "../worker/contracts.js";
 import type {
   MarketCountry,
   MarketProvider,
+  MarketStorageKey,
   MarketVenue,
   OrderbookLevel,
   UsExchange,
@@ -23,7 +24,13 @@ const RAW_MARKET_DATA_INPUT_LIMIT = 100_000;
 const RECORDING_EVENT_DETAILS_MAX_BYTES = 64 * 1_024;
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
 export type IntradayBarState = "forming" | "final";
-export type IntradayBarSource = "kis_ws" | "kis_rest" | "toss_rest" | "recovered";
+export type IntradayBarSource =
+  | "kis_ws"
+  | "kis_rest"
+  | "toss_rest"
+  | "binance_ws"
+  | "binance_rest"
+  | "recovered";
 export type IntradayQuality = "complete" | "partial" | "recovered" | "stale";
 export type ScalpingSessionFeed = "standard" | "day";
 export type ScalpingTradeSide = "buy" | "sell" | "unknown";
@@ -59,9 +66,12 @@ export type IntradayBarRecord = {
   quality: IntradayQuality;
   updatedAt: number;
 };
+export type StoredIntradayBarRecord = Omit<IntradayBarRecord, "marketCountry"> & {
+  marketCountry?: MarketStorageKey;
+};
 
 export type ScalpingTradeRecord = {
-  marketCountry?: MarketCountry;
+  marketCountry?: MarketStorageKey;
   symbol: string;
   eventId: string;
   provider: MarketProvider;
@@ -86,7 +96,7 @@ export type ScalpingTradeRecord = {
 
 export type ScalpingOrderbookRecord = {
   snapshotId: string;
-  marketCountry?: MarketCountry;
+  marketCountry?: MarketStorageKey;
   symbol: string;
   provider: MarketProvider;
   venue: MarketVenue;
@@ -109,7 +119,7 @@ export type ScalpingOrderbookRecord = {
 
 export type ScalpingRecordingEventRecord = {
   eventId: string;
-  marketCountry: MarketCountry;
+  marketCountry: MarketStorageKey;
   symbol?: string;
   eventType: ScalpingRecordingEventType;
   occurredAt: string;
@@ -129,7 +139,7 @@ export type ScalpingPredictionQuality =
 
 export type ScalpingPredictionRecord = {
   id: string;
-  marketCountry?: MarketCountry;
+  marketCountry?: MarketStorageKey;
   symbol: string;
   modelName: string;
   modelVersion: string;
@@ -143,7 +153,7 @@ export type ScalpingPredictionRecord = {
 };
 
 type IntradayBarRow = {
-  market_country: MarketCountry;
+  market_country: MarketStorageKey;
   symbol: string;
   interval_minutes: number | string;
   open_time: string;
@@ -165,7 +175,7 @@ type IntradayBarRow = {
 
 type PredictionRow = {
   prediction_id: string;
-  market_country: MarketCountry;
+  market_country: MarketStorageKey;
   symbol: string;
   model_name: string;
   model_version: string;
@@ -179,7 +189,7 @@ type PredictionRow = {
 };
 
 type ScalpingTradeRow = {
-  market_country: MarketCountry;
+  market_country: MarketStorageKey;
   symbol: string;
   event_id: string;
   provider: MarketProvider;
@@ -204,7 +214,7 @@ type ScalpingTradeRow = {
 
 type ScalpingOrderbookRow = {
   snapshot_id: string;
-  market_country: MarketCountry;
+  market_country: MarketStorageKey;
   symbol: string;
   provider: MarketProvider;
   venue: MarketVenue;
@@ -227,7 +237,7 @@ type ScalpingOrderbookRow = {
 
 type ScalpingRecordingEventRow = {
   event_id: string;
-  market_country: MarketCountry;
+  market_country: MarketStorageKey;
   symbol: string | null;
   event_type: ScalpingRecordingEventType;
   occurred_at: string;
@@ -247,9 +257,11 @@ function symbol(value: string): string {
   return normalized;
 }
 
-function marketCountry(value: MarketCountry | undefined): MarketCountry {
+function marketCountry(value: MarketStorageKey | undefined): MarketStorageKey {
   const normalized = value ?? "KR";
-  if (normalized !== "KR" && normalized !== "US") throw new Error("단타 시장은 KR 또는 US여야 합니다.");
+  if (normalized !== "KR" && normalized !== "US" && normalized !== "BINANCE_USDM") {
+    throw new Error("단타 시장은 KR, US 또는 BINANCE_USDM이어야 합니다.");
+  }
   return normalized;
 }
 
@@ -309,18 +321,57 @@ function snapshotId(value: string): string {
 
 function provider(value: MarketProvider): MarketProvider {
   const normalized = identifier(value, "provider", 32).toLowerCase();
-  if (normalized !== "toss" && normalized !== "kis" && normalized !== "derived") {
+  if (normalized !== "toss" && normalized !== "kis"
+    && normalized !== "derived" && normalized !== "binance") {
     throw new Error("provider 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function barSource(value: IntradayBarSource, market: MarketStorageKey): IntradayBarSource {
+  const normalized = identifier(value, "source", 32).toLowerCase() as IntradayBarSource;
+  const supported: readonly IntradayBarSource[] = [
+    "kis_ws",
+    "kis_rest",
+    "toss_rest",
+    "binance_ws",
+    "binance_rest",
+    "recovered",
+  ];
+  if (!supported.includes(normalized)) throw new Error("source 식별자가 올바르지 않습니다.");
+  const binance = normalized === "binance_ws" || normalized === "binance_rest";
+  if ((market === "BINANCE_USDM") !== binance && normalized !== "recovered") {
+    throw new Error("Binance bar source와 marketCountry가 같은 시장을 가리켜야 합니다.");
   }
   return normalized;
 }
 
 function venue(value: MarketVenue): MarketVenue {
   const normalized = identifier(value, "venue", 32).toUpperCase();
-  if (normalized !== "KRX" && normalized !== "NXT" && normalized !== "INTEGRATED" && normalized !== "US") {
+  if (normalized !== "KRX" && normalized !== "NXT" && normalized !== "INTEGRATED"
+    && normalized !== "US" && normalized !== "BINANCE_USDM") {
     throw new Error("venue 식별자가 올바르지 않습니다.");
   }
   return normalized;
+}
+
+function validateMarketSource(
+  market: MarketStorageKey,
+  normalizedProvider: MarketProvider,
+  normalizedVenue: MarketVenue,
+): void {
+  if (market === "BINANCE_USDM") {
+    if (normalizedProvider !== "binance" || normalizedVenue !== "BINANCE_USDM") {
+      throw new Error("BINANCE_USDM 시장은 binance provider와 BINANCE_USDM venue가 필요합니다.");
+    }
+    return;
+  }
+  if (normalizedProvider === "binance" || normalizedVenue === "BINANCE_USDM") {
+    throw new Error("Binance provider와 venue는 BINANCE_USDM 시장에서만 사용할 수 있습니다.");
+  }
+  if ((market === "US") !== (normalizedVenue === "US")) {
+    throw new Error("marketCountry와 venue가 같은 시장을 가리켜야 합니다.");
+  }
 }
 
 function exchange(value: UsExchange | undefined): UsExchange | undefined {
@@ -482,7 +533,7 @@ async function insertAppendOnlyRows(
   await database.transaction(write);
 }
 
-function barFromRow(row: IntradayBarRow): IntradayBarRecord {
+function barFromRow(row: IntradayBarRow): StoredIntradayBarRecord {
   return {
     marketCountry: marketCountry(row.market_country),
     symbol: row.symbol,
@@ -600,7 +651,7 @@ export class ScalpingRepository {
     return applyPortfolioMigrations(this.database);
   }
 
-  async putBars(input: readonly IntradayBarRecord[]): Promise<void> {
+  async putBars(input: readonly StoredIntradayBarRecord[]): Promise<void> {
     if (input.length > 100_000) throw new Error("한 번에 저장할 분봉은 100,000개 이하여야 합니다.");
     if (!input.length) return;
     const mysqlPreferred = `(
@@ -612,8 +663,12 @@ export class ScalpingRepository {
         WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND CASE VALUES(source_kind)
-        WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
-        > CASE source_kind WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
+        WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
+        WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
+        WHEN 'recovered' THEN 2 ELSE 1 END
+        > CASE source_kind WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
+          WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
+          WHEN 'recovered' THEN 2 ELSE 1 END)
       OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
         WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
@@ -631,9 +686,13 @@ export class ScalpingRepository {
         = CASE portfolio_intraday_bars.quality_status
           WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
         AND CASE EXCLUDED.source_kind
-        WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END
+        WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
+        WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
+        WHEN 'recovered' THEN 2 ELSE 1 END
         > CASE portfolio_intraday_bars.source_kind
-          WHEN 'kis_ws' THEN 4 WHEN 'kis_rest' THEN 3 WHEN 'recovered' THEN 2 ELSE 1 END)
+          WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
+          WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
+          WHEN 'recovered' THEN 2 ELSE 1 END)
       OR (EXCLUDED.bar_state = portfolio_intraday_bars.bar_state
         AND CASE EXCLUDED.quality_status
           WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
@@ -645,6 +704,7 @@ export class ScalpingRepository {
     const normalized = input.map((item) => {
       const normalizedMarketCountry = marketCountry(item.marketCountry);
       const normalizedSymbol = symbol(item.symbol);
+      const normalizedSource = barSource(item.source, normalizedMarketCountry);
       if (!(SCALPING_INTERVALS as readonly number[]).includes(item.intervalMinutes)) {
         throw new Error("지원하지 않는 분봉 간격입니다.");
       }
@@ -665,7 +725,8 @@ export class ScalpingRepository {
       }
       if (!Number.isSafeInteger(item.updatedAt) || item.updatedAt < 0) throw new Error("updatedAt 값이 올바르지 않습니다.");
       return [
-        normalizedMarketCountry, normalizedSymbol, item.intervalMinutes, openTime, closeTime, date(item.sessionDate), item.source, item.state,
+        normalizedMarketCountry, normalizedSymbol, item.intervalMinutes, openTime, closeTime,
+        date(item.sessionDate), normalizedSource, item.state,
         open, high, low, close, item.volume ?? 0,
         this.database.dialect === "postgres" ? item.volume !== undefined : item.volume === undefined ? 0 : 1,
         item.turnover, item.tradeCount, item.quality, item.updatedAt,
@@ -763,7 +824,25 @@ export class ScalpingRepository {
     to?: string;
     includeForming?: boolean;
     limit?: number;
-  }): Promise<IntradayBarRecord[]> {
+  }): Promise<IntradayBarRecord[]>;
+  async listBars(input: {
+    marketCountry: "BINANCE_USDM";
+    symbol: string;
+    intervalMinutes: ScalpingInterval;
+    from?: string;
+    to?: string;
+    includeForming?: boolean;
+    limit?: number;
+  }): Promise<StoredIntradayBarRecord[]>;
+  async listBars(input: {
+    marketCountry?: MarketStorageKey;
+    symbol: string;
+    intervalMinutes: ScalpingInterval;
+    from?: string;
+    to?: string;
+    includeForming?: boolean;
+    limit?: number;
+  }): Promise<StoredIntradayBarRecord[]> {
     const conditions = ["market_country = ?", "symbol = ?", "interval_minutes = ?"];
     const parameters: unknown[] = [marketCountry(input.marketCountry), symbol(input.symbol), input.intervalMinutes];
     if (input.from) {
@@ -793,11 +872,10 @@ export class ScalpingRepository {
     const rows = input.map((item) => {
       const normalizedMarketCountry = marketCountry(item.marketCountry);
       const normalizedVenue = venue(item.venue);
+      const normalizedProvider = provider(item.provider);
       const normalizedExchange = exchange(item.exchange);
       const normalizedSessionFeed = sessionFeed(item.sessionFeed);
-      if ((normalizedMarketCountry === "US") !== (normalizedVenue === "US")) {
-        throw new Error("marketCountry와 venue가 같은 시장을 가리켜야 합니다.");
-      }
+      validateMarketSource(normalizedMarketCountry, normalizedProvider, normalizedVenue);
       if (normalizedMarketCountry !== "US" && (normalizedExchange || normalizedSessionFeed)) {
         throw new Error("exchange와 sessionFeed는 미국 시장 체결에만 사용할 수 있습니다.");
       }
@@ -825,7 +903,7 @@ export class ScalpingRepository {
         normalizedMarketCountry,
         symbol(item.symbol),
         eventId(item.eventId),
-        provider(item.provider),
+        normalizedProvider,
         normalizedVenue,
         normalizedExchange ?? null,
         normalizedSessionFeed ?? null,
@@ -860,7 +938,7 @@ export class ScalpingRepository {
   }
 
   async listTrades(input: {
-    marketCountry?: MarketCountry;
+    marketCountry?: MarketStorageKey;
     symbol: string;
     sessionDate?: string;
     from?: string;
@@ -902,11 +980,10 @@ export class ScalpingRepository {
     const rows = input.map((item) => {
       const normalizedMarketCountry = marketCountry(item.marketCountry);
       const normalizedVenue = venue(item.venue);
+      const normalizedProvider = provider(item.provider);
       const normalizedExchange = exchange(item.exchange);
       const normalizedSessionFeed = sessionFeed(item.sessionFeed);
-      if ((normalizedMarketCountry === "US") !== (normalizedVenue === "US")) {
-        throw new Error("marketCountry와 venue가 같은 시장을 가리켜야 합니다.");
-      }
+      validateMarketSource(normalizedMarketCountry, normalizedProvider, normalizedVenue);
       if (normalizedMarketCountry !== "US" && (normalizedExchange || normalizedSessionFeed)) {
         throw new Error("exchange와 sessionFeed는 미국 시장 호가에만 사용할 수 있습니다.");
       }
@@ -933,7 +1010,7 @@ export class ScalpingRepository {
         snapshotId(item.snapshotId),
         normalizedMarketCountry,
         symbol(item.symbol),
-        provider(item.provider),
+        normalizedProvider,
         normalizedVenue,
         normalizedExchange ?? null,
         normalizedSessionFeed ?? null,
@@ -967,7 +1044,7 @@ export class ScalpingRepository {
   }
 
   async listOrderbooks(input: {
-    marketCountry?: MarketCountry;
+    marketCountry?: MarketStorageKey;
     symbol: string;
     sessionDate?: string;
     from?: string;
@@ -1029,7 +1106,7 @@ export class ScalpingRepository {
   }
 
   async listRecordingEvents(input: {
-    marketCountry?: MarketCountry;
+    marketCountry?: MarketStorageKey;
     symbol?: string | null;
     eventTypes?: readonly ScalpingRecordingEventType[];
     from?: string;
@@ -1120,7 +1197,7 @@ export class ScalpingRepository {
   async latestPredictions(
     symbols: readonly string[],
     retrospective = false,
-    requestedMarketCountry: MarketCountry = "KR",
+    requestedMarketCountry: MarketStorageKey = "KR",
   ): Promise<ScalpingPredictionRecord[]> {
     const normalized = Array.from(new Set(symbols.map(symbol)));
     const normalizedMarketCountry = marketCountry(requestedMarketCountry);

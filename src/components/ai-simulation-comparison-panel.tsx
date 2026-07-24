@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, GitCompareArrows } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import type {
+  AiSimulationCurrency,
   AiSimulationStrategyComparison,
   AiSimulationStrategyComparisonLane,
 } from "@/lib/ai-simulation";
@@ -56,7 +57,7 @@ function LaneCard({
   compact,
 }: {
   lane: AiSimulationStrategyComparisonLane;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   compact: boolean;
 }) {
   return (
@@ -158,7 +159,7 @@ export function AiSimulationComparisonPanel({
   compact = false,
 }: {
   comparison: AiSimulationStrategyComparison;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   compact?: boolean;
 }) {
   const conditions = comparisonConditions(comparison);

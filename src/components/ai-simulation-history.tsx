@@ -17,15 +17,21 @@ import {
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
+import {
+  AiSimulationFuturesLedger,
+  AiSimulationModelComparisonPanel,
+} from "@/components/ai-simulation-futures";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   aiSimulationErrorMessage,
   normalizeAiSimulationHistory,
   normalizeAiSimulationReport,
+  type AiSimulationCurrency,
   type AiSimulationDecision,
   type AiSimulationHistoryItem,
   type AiSimulationMarketCountry,
+  type AiSimulationMarket,
   type AiSimulationPreset,
   type AiSimulationRunReport,
   type AiSimulationSelectionRequest,
@@ -92,11 +98,13 @@ function ratio(value?: number, signed = false): string {
   return `${signed && percent > 0 ? "+" : ""}${percent.toFixed(2)}%`;
 }
 
-function money(value: number | undefined, currency: "KRW" | "USD"): string {
+function money(value: number | undefined, currency: AiSimulationCurrency): string {
   return Number.isFinite(value) ? formatMoney(value as number, currency) : "unavailable";
 }
 
-function marketLabel(value?: AiSimulationMarketCountry): string {
+function marketLabel(value?: AiSimulationMarketCountry, market?: AiSimulationMarket): string {
+  if (market?.kind === "crypto_futures") return "Binance USDT 무기한";
+  if (market?.kind === "stock") return market.country === "US" ? "미국" : "국내";
   return value === "US" ? "미국" : value === "KR" ? "국내" : "시장 unavailable";
 }
 
@@ -188,7 +196,7 @@ export function SimulationRunHistoryList({
                 : "border-transparent bg-secondary hover:border-border hover:bg-secondary/70",
             )}
             aria-pressed={selected}
-            aria-label={`${timestamp(item.startedAt)} ${marketLabel(item.marketCountry)} 시뮬레이션 결과 보고서 열기`}
+            aria-label={`${timestamp(item.startedAt)} ${marketLabel(item.marketCountry, item.market)} 시뮬레이션 결과 보고서 열기`}
             data-simulation-history-item={item.runId}
             onClick={() => onSelect(item.runId)}
           >
@@ -196,7 +204,7 @@ export function SimulationRunHistoryList({
               <div className="min-w-0">
                 <p className="text-xs font-black">{timestamp(item.startedAt)}</p>
                 <p className="mt-1 truncate text-[9px] text-muted-foreground">
-                  {marketLabel(item.marketCountry)} · {presetLabel(item.preset)} · {selectionLabel(item.selection)}
+                  {marketLabel(item.marketCountry, item.market)} · {presetLabel(item.preset)} · {selectionLabel(item.selection)}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -317,15 +325,20 @@ function TradeList({
   currency,
 }: {
   trades: AiSimulationTrade[];
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
 }) {
+  const quantityUnit = currency === "USDT" ? "계약" : "주";
   return (
     <section className="min-w-0 rounded-2xl bg-secondary p-4" data-simulation-report-trades>
       <div className="flex items-center justify-between gap-2">
         <h4 className="flex items-center gap-2 text-xs font-black"><ReceiptText className="size-3.5" />가상 체결</h4>
         <span className="text-[9px] font-black text-muted-foreground">{trades.length}건</span>
       </div>
-      <div className="mt-3 max-h-72 min-h-0 space-y-2 overflow-y-auto overscroll-contain pr-1" tabIndex={0}>
+      <div
+        className="mt-3 max-h-72 min-h-0 space-y-2 overflow-y-auto overscroll-contain pr-1"
+        tabIndex={0}
+        aria-label="가상 체결 스크롤 목록"
+      >
         {trades.length ? [...trades].reverse().map((trade, index) => (
           <article key={`${trade.symbol}:${trade.executedAt}:${index}`} className="rounded-xl bg-card p-3">
             <div className="flex flex-wrap justify-between gap-2">
@@ -335,7 +348,7 @@ function TradeList({
               <time className="text-[8px] text-muted-foreground">{timestamp(trade.executedAt)}</time>
             </div>
             <p className="mt-2 text-[9px]">
-              {formatQuantity(trade.quantity)}주 × {formatMoney(trade.price, currency)}
+              {formatQuantity(trade.quantity)}{quantityUnit} × {formatMoney(trade.price, currency)}
             </p>
             <p className="mt-1 text-[8px] text-muted-foreground">
               체결액 {formatMoney(trade.amount, currency)} · 비용 {formatMoney(trade.cost, currency)}
@@ -353,6 +366,7 @@ export function SimulationRunReportView({
   report: AiSimulationRunReport;
 }) {
   const { performance, configuration } = report;
+  const quantityUnit = performance.currency === "USDT" ? "계약" : "주";
   const selectedSymbols = report.selected.map(({ name, symbol }) => name ? `${name} · ${symbol}` : symbol);
   const costs = configuration.costs
     ? Object.entries(configuration.costs).map(([key, value]) => `${key} ${value}bps`)
@@ -396,6 +410,15 @@ export function SimulationRunReportView({
           currency={performance.currency}
         />
       ) : null}
+      {report.modelComparison ? (
+        <AiSimulationModelComparisonPanel comparison={report.modelComparison} />
+      ) : null}
+      {configuration.market?.kind === "crypto_futures" ? (
+        <AiSimulationFuturesLedger
+          positions={report.futuresPositions ?? []}
+          risk={report.futuresRisk}
+        />
+      ) : null}
 
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <ReportMetric label="실현 손익" value={money(performance.realizedPnl, performance.currency)} />
@@ -413,7 +436,7 @@ export function SimulationRunReportView({
           <h3 id={`configuration-${report.runId}`} className="text-sm font-black">실행 설정</h3>
         </div>
         <dl className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2 xl:grid-cols-3">
-          <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">시장</dt><dd className="mt-1 font-black">{marketLabel(configuration.marketCountry)}</dd></div>
+          <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">시장</dt><dd className="mt-1 font-black">{marketLabel(configuration.marketCountry, configuration.market)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">프리셋</dt><dd className="mt-1 font-black">{presetLabel(configuration.preset)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">공격·방어</dt><dd className="mt-1 font-black">{riskDispositionLabel(configuration.riskTolerance)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">종목 선정</dt><dd className="mt-1 font-black">{selectionLabel(configuration.selection)}</dd></div>
@@ -603,6 +626,7 @@ export function SimulationRunReportView({
                     price: trade.price,
                     quantity: trade.quantity,
                     side,
+                    positionSide: trade.positionSide,
                   }];
                 })}
               />
@@ -628,7 +652,7 @@ export function SimulationRunReportView({
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             {report.positions.map((position) => (
               <article key={position.symbol} className="rounded-xl bg-card p-3 text-[9px]">
-                <p className="font-black">{position.symbol} · {formatQuantity(position.quantity)}주</p>
+                <p className="font-black">{position.symbol} · {formatQuantity(position.quantity)}{quantityUnit}</p>
                 <p className="mt-1 text-muted-foreground">
                   평균 {formatMoney(position.averagePrice, performance.currency)} · 평가손익 {money(position.unrealizedPnl, performance.currency)}
                 </p>

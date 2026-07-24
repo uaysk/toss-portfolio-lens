@@ -24,6 +24,11 @@ export function registerApiAndSpaFallbacks(
     production: boolean;
   },
 ): void {
+  const comparisonReportPath = path.resolve(
+    input.clientDirectory,
+    "reports",
+    "crypto-scalping-model-comparison.html",
+  );
   app.use("/api", (_request, response) => {
     response.status(404).json({
       error: {
@@ -38,6 +43,13 @@ export function registerApiAndSpaFallbacks(
       index: false,
       maxAge: input.production ? "1y" : 0,
       immutable: input.production,
+      setHeaders: (response, filePath) => {
+        if (path.resolve(filePath) === comparisonReportPath) {
+          // Override the production immutable static policy for the evolving
+          // single-file comparison artifact.
+          response.setHeader("Cache-Control", "no-store, max-age=0");
+        }
+      },
     }),
   );
 

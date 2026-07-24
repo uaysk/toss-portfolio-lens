@@ -66,11 +66,87 @@ describe("scalping AI WebSocket transport contract", () => {
       request_id: "status-1",
       status: {
         status: "available",
-        model: { loaded: true, device: "cuda", model_id: "kronos-base", model_revision: "pinned" },
+        model: {
+          loaded: true,
+          device: "cuda",
+          model_id: "NeoQuasar/Kronos-base",
+          model_revision: "pinned",
+        },
         active_requests: 1,
         queued_requests: 0,
         generated_at: "2026-07-21T00:00:01.000Z",
       },
     })).toMatchObject({ type: "status_response", status: { model: { device: "cuda" } } });
+  });
+
+  it("FinCast precision 상태와 memory-pressure fail-closed 상태를 검증한다", () => {
+    const fincast = {
+      transport_version: SCALPING_AI_TRANSPORT_VERSION,
+      type: "status_response",
+      request_id: "status-fincast",
+      status: {
+        status: "available",
+        model: {
+          loaded: true,
+          device: "cuda",
+          model_id: "Vincent05R/FinCast",
+          model_revision: "pinned",
+          precision: "mixed_float16",
+          precision_validation: "passed",
+          memory_status: "ok",
+          quantile_tail_policy: "tail_clamped_q10_q90",
+        },
+        active_requests: 0,
+        queued_requests: 0,
+        generated_at: "2026-07-21T00:00:01.000Z",
+      },
+    };
+    expect(AiServerTransportEnvelopeSchema.parse(fincast)).toMatchObject({
+      status: { model: { model_id: "Vincent05R/FinCast", precision: "mixed_float16" } },
+    });
+
+    const pressure = structuredClone(fincast);
+    pressure.status.status = "unavailable";
+    pressure.status.model.loaded = false;
+    pressure.status.model.device = "unavailable";
+    pressure.status.model.precision = "float32";
+    pressure.status.model.precision_validation = "unavailable";
+    pressure.status.model.memory_status = "memory_pressure";
+    pressure.status.model.quantile_tail_policy = "unavailable";
+    expect(AiServerTransportEnvelopeSchema.parse(pressure)).toMatchObject({
+      status: { status: "unavailable", model: { memory_status: "memory_pressure" } },
+    });
+
+    pressure.status.status = "degraded";
+    expect(() => AiServerTransportEnvelopeSchema.parse(pressure)).toThrow(/must fail closed/);
+  });
+
+  it("검증되지 않은 mixed FP16 worker 상태와 알 수 없는 모델을 거부한다", () => {
+    const status = {
+      transport_version: SCALPING_AI_TRANSPORT_VERSION,
+      type: "status_response",
+      request_id: "status-invalid",
+      status: {
+        status: "available",
+        model: {
+          loaded: true,
+          device: "cuda",
+          model_id: "Vincent05R/FinCast",
+          model_revision: "pinned",
+          precision: "mixed_float16",
+          precision_validation: "fallback_fp32",
+          memory_status: "ok",
+          quantile_tail_policy: "tail_clamped_q10_q90",
+        },
+        active_requests: 0,
+        queued_requests: 0,
+        generated_at: "2026-07-21T00:00:01.000Z",
+      },
+    };
+    expect(() => AiServerTransportEnvelopeSchema.parse(status)).toThrow(/requires passed precision validation/);
+
+    status.status.model.precision = "float32";
+    status.status.model.model_id = "unknown/model";
+    expect(() => AiServerTransportEnvelopeSchema.parse(status)).toThrow();
   });
 });

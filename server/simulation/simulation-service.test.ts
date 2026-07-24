@@ -7,7 +7,10 @@ import type {
 import type { ScalpingLiveEvent } from "../scalping/live-runtime.js";
 import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
-import type { SimulationStartRequest } from "./contracts.js";
+import {
+  createSimulationStartRequestSchema,
+  type SimulationStartRequest,
+} from "./contracts.js";
 import { AiTradingSimulationService } from "./simulation-service.js";
 
 const RUN_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -106,6 +109,7 @@ function staleForecast() {
 
 function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
   return {
+    market: { kind: "stock", country: "KR" },
     marketCountry: "KR",
     initialCash: 100_000,
     durationMinutes: 60,
@@ -122,6 +126,8 @@ function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
       spreadBpsRoundTrip: 20,
       slippageBpsPerSide: 10,
     },
+    modelLanes: ["kronos_base"],
+    execution: { mode: "paper" },
   };
 }
 
@@ -597,6 +603,118 @@ describe("AI trading simulation service", () => {
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes a legacy stock request across v7 storage, live reads, history, reports, and artifacts", async () => {
+    const setup = harness();
+    const legacyInput = Object.fromEntries(
+      Object.entries(request(1)).filter(([key]) => key !== "market"),
+    );
+    const parsed = createSimulationStartRequestSchema({
+      maxDurationMinutes: 390,
+    }).parse(legacyInput);
+    expect(parsed).toMatchObject({
+      market: { kind: "stock", country: "KR" },
+      marketCountry: "KR",
+    });
+
+    const started = await setup.service.start(parsed, "owner");
+    expect(started).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      snapshot: {
+        schemaVersion: "ai-paper-simulation/v7",
+        market: { kind: "stock", country: "KR" },
+        marketCountry: "KR",
+      },
+    });
+    expect(setup.runService.create).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        schema_version: "ai-paper-simulation/v7",
+        market: { kind: "stock", country: "KR" },
+        market_country: "KR",
+      }),
+    }));
+
+    await waitForPhase(setup, started.runId, "running");
+    expect(await setup.service.get(started.runId, "owner")).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      run: {
+        schemaVersion: "ai-paper-simulation/v7",
+        market: { kind: "stock", country: "KR" },
+      },
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+    expect(await setup.service.current("owner")).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+
+    await setup.service.cancel(started.runId, "owner");
+    expect(setup.run()?.summary).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      market_country: "KR",
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+    expect(setup.latestArtifact("simulation-selection")?.content).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+    });
+    expect(setup.latestArtifact("simulation-diagnostics")?.content).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+
+    expect(await setup.service.list({}, "owner")).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      items: [{
+        schemaVersion: "ai-paper-simulation/v7",
+        market: { kind: "stock", country: "KR" },
+        marketCountry: "KR",
+      }],
+    });
+    expect(await setup.service.report(started.runId, "owner")).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      run: { market: { kind: "stock", country: "KR" } },
+      report: {
+        configuration: {
+          market: { kind: "stock", country: "KR" },
+          marketCountry: "KR",
+        },
+        evidence: {
+          selection: { market: { kind: "stock", country: "KR" } },
+        },
+      },
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+    await setup.service.close("test_complete");
+  });
+
+  it("persists the normalized stock market at the v7 result root on completion", async () => {
+    let now = Date.parse(CREATED_AT);
+    const artifactGate = deferred();
+    const setup = harness({ artifactGate: artifactGate.promise, now: () => now });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    now += 60 * 60_000 + 1;
+    artifactGate.resolve();
+
+    await eventually(
+      setup.run,
+      (run) => run?.status === "completed",
+      "v7 stock result completion",
+    );
+    expect(setup.run()?.result).toMatchObject({
+      schemaVersion: "ai-paper-simulation/v7",
+      market: { kind: "stock", country: "KR" },
+      snapshot: { market: { kind: "stock", country: "KR" } },
+    });
+    await setup.service.close("test_complete");
+  });
+
   it("lists bounded owner history and builds a capped reusable run report from persisted artifacts", async () => {
     const setup = harness();
     const started = await setup.service.start(request(2), "owner");
@@ -797,7 +915,7 @@ describe("AI trading simulation service", () => {
         snapshot?: { decisionCadence?: { inFlight?: boolean } };
       } | undefined)?.snapshot?.decisionCadence?.inFlight === false,
       "completed finalized-bar analysis",
-    ) as {
+    ) as unknown as {
       snapshot: {
         decisionCadence: {
           trigger: string;
@@ -854,7 +972,7 @@ describe("AI trading simulation service", () => {
       100,
       101.5,
     ));
-    const live = await setup.service.get(started.runId, "owner") as {
+    const live = await setup.service.get(started.runId, "owner") as unknown as {
       snapshot: {
         selected: Array<{
           symbol: string;
@@ -898,7 +1016,7 @@ describe("AI trading simulation service", () => {
       (count) => count === 2,
       "finalized candle analysis after live forming display",
     );
-    const finalized = await setup.service.get(started.runId, "owner") as {
+    const finalized = await setup.service.get(started.runId, "owner") as unknown as {
       snapshot: {
         charts: Array<{ symbol: string; bars: Array<{ status: string; close: number }> }>;
       };
@@ -958,7 +1076,7 @@ describe("AI trading simulation service", () => {
         snapshot?: { decisionCadence?: { inFlight?: boolean } };
       } | undefined)?.snapshot?.decisionCadence?.inFlight === false,
       "coalesced analysis completion",
-    ) as {
+    ) as unknown as {
       snapshot: {
         decisionCadence: {
           triggeredEvents: number;
@@ -981,7 +1099,7 @@ describe("AI trading simulation service", () => {
   ])("scans then selects exactly $symbolCount symbol(s) and invokes one Rust batch", async ({ symbolCount, selected }) => {
     const setup = harness();
     const started = await setup.service.start(request(symbolCount), "owner");
-    const running = await waitForPhase(setup, started.runId, "running") as {
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: {
         selected: Array<{ symbol: string }>;
         charts: Array<{ symbol: string; bars: unknown[]; patterns: Array<{ bias: string }> }>;
@@ -1040,7 +1158,7 @@ describe("AI trading simulation service", () => {
     };
 
     const started = await setup.service.start(input, "owner");
-    const running = await waitForPhase(setup, started.runId, "running") as {
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: {
         selection: SimulationStartRequest["selection"];
         riskTolerance: number;
@@ -1091,7 +1209,7 @@ describe("AI trading simulation service", () => {
     ) as never);
 
     const started = await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
-    const running = await waitForPhase(setup, started.runId, "running") as {
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: { selected: Array<{ symbol: string }> };
     };
 
@@ -1142,7 +1260,7 @@ describe("AI trading simulation service", () => {
       } as never);
 
     const started = await setup.service.start(request(2), "owner");
-    const running = await waitForPhase(setup, started.runId, "running") as {
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: { selected: Array<{ symbol: string }>; warnings: string[] };
     };
 
@@ -1229,7 +1347,7 @@ describe("AI trading simulation service", () => {
     }).active.get(started.runId);
     expect(session?.selectionRetryTimer).toBeDefined();
 
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string };
       snapshot: { phase: string };
     };
@@ -1256,7 +1374,7 @@ describe("AI trading simulation service", () => {
       .mockResolvedValueOnce(forecast() as never);
 
     const started = await setup.service.start(request(1), "owner");
-    const running = await waitForPhase(setup, started.runId, "running") as {
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: { selected: Array<{ symbol: string }>; warnings: string[] };
     };
 
@@ -1296,7 +1414,7 @@ describe("AI trading simulation service", () => {
     expect(session?.selectionRetryTimer).toBeDefined();
     expect(session?.selectionRetryResolve).toBeTypeOf("function");
 
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string };
       snapshot: { phase: string };
     };
@@ -1328,7 +1446,7 @@ describe("AI trading simulation service", () => {
       (count) => count === 1,
       "in-flight selection forecast",
     );
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string };
       snapshot: { phase: string };
     };
@@ -1524,7 +1642,7 @@ describe("AI trading simulation service", () => {
 
     setup.emit(tradeEvent(TECHNICAL_AT));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    const unchanged = await setup.service.get(started.runId, "owner") as {
+    const unchanged = await setup.service.get(started.runId, "owner") as unknown as {
       snapshot: { cash: number; positions: unknown[]; trades: unknown[] };
     };
     expect(unchanged.snapshot).toMatchObject({
@@ -1540,7 +1658,7 @@ describe("AI trading simulation service", () => {
         ((value as { snapshot?: { trades?: unknown[] } } | undefined)?.snapshot?.trades?.length ?? 0) === 1
       ),
       "later causal fill",
-    ) as {
+    ) as unknown as {
       snapshot: {
         cash: number;
         totalCosts: number;
@@ -1578,7 +1696,7 @@ describe("AI trading simulation service", () => {
     );
     setup.emit(tradeEvent("2026-07-24T00:05:30.000Z", 100, "AAA"));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    const guarded = await setup.service.get(started.runId, "owner") as {
+    const guarded = await setup.service.get(started.runId, "owner") as unknown as {
       snapshot: {
         trades: Array<{ symbol: string; executedAt: string }>;
         pendingActions: Array<{ symbol: string }>;
@@ -1598,7 +1716,7 @@ describe("AI trading simulation service", () => {
       () => setup.service.get(started.runId, "owner"),
       (value) => ((value as { snapshot?: { trades?: unknown[] } })?.snapshot?.trades?.length ?? 0) === 2,
       "later monotonic fill",
-    ) as {
+    ) as unknown as {
       snapshot: { trades: Array<{ symbol: string; executedAt: string }> };
     };
     expect(filled.snapshot.trades.map(({ executedAt }) => executedAt)).toEqual([
@@ -1656,7 +1774,7 @@ describe("AI trading simulation service", () => {
       () => setup.service.get(started.runId, "owner"),
       (value) => ((value as { snapshot?: { trades?: unknown[] } })?.snapshot?.trades?.length ?? 0) === 2,
       "later autonomous sell fill",
-    ) as {
+    ) as unknown as {
       snapshot: {
         positions: unknown[];
         trades: Array<{ side: string; executedAt: string }>;
@@ -1760,7 +1878,7 @@ describe("AI trading simulation service", () => {
       () => setup.service.get(started.runId, "owner"),
       (value) => ((value as { snapshot?: { trades?: unknown[] } })?.snapshot?.trades?.length ?? 0) === 3,
       "as-of exit fill",
-    ) as {
+    ) as unknown as {
       snapshot: { positions: Array<{ symbol: string; quantity: number }> };
     };
     const held = sold.snapshot.positions.find(({ symbol }) => symbol === "BBB");
@@ -1791,7 +1909,7 @@ describe("AI trading simulation service", () => {
       "filled trade before cancellation",
     );
 
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string };
       snapshot: { phase: string; trades: unknown[]; capabilities: Record<string, unknown> };
     };
@@ -1860,7 +1978,7 @@ describe("AI trading simulation service", () => {
     expect(setup.repository.cancel).not.toHaveBeenCalled();
 
     fillGate.resolve();
-    const [cancelled] = await Promise.all([cancelling, closing]) as [{
+    const [cancelled] = await Promise.all([cancelling, closing]) as unknown as [{
       run: { status: string };
       snapshot: { trades: unknown[] };
     }, void];
@@ -1943,7 +2061,7 @@ describe("AI trading simulation service", () => {
     detached.release?.();
     internals.active.delete(started.runId);
 
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string };
       snapshot?: { phase?: string };
     };
@@ -1962,7 +2080,7 @@ describe("AI trading simulation service", () => {
     const started = await setup.service.start(request(1), "owner");
     await waitForPhase(setup, started.runId, "running");
 
-    const cancelled = await setup.service.cancel(started.runId, "owner") as {
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
       run: { status: string; warnings: string[] };
       snapshot: { phase: string };
     };
@@ -2093,7 +2211,7 @@ describe("AI trading simulation service", () => {
       () => setup.service.get(started.runId, "owner"),
       (value) => ((value as { snapshot?: { trades?: unknown[] } })?.snapshot?.trades?.length ?? 0) === 1,
       "position before expiry",
-    ) as {
+    ) as unknown as {
       snapshot: {
         cash: number;
         equity: number;
@@ -2103,7 +2221,7 @@ describe("AI trading simulation service", () => {
     };
     setup.emit(tradeEvent("2026-07-24T01:00:00.001Z"));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    const result = await setup.service.get(started.runId, "owner") as {
+    const result = await setup.service.get(started.runId, "owner") as unknown as {
       snapshot: {
         trades: unknown[];
         cash: number;
@@ -2145,7 +2263,7 @@ describe("AI trading simulation service", () => {
     const setup = harness();
     const started = await setup.service.start(request(1), "owner");
     await waitForPhase(setup, started.runId, "running");
-    const current = await setup.service.current("owner") as {
+    const current = await setup.service.current("owner") as unknown as {
       run: { runId: string; status: string };
       snapshot: { phase: string };
     };
@@ -2177,7 +2295,7 @@ describe("AI trading simulation service", () => {
     stored.error = { code: "STALE_RUN_RECOVERED", message: "서버 재시작으로 실행이 중단되었습니다." };
     stored.warnings = ["중단 전 저장된 artifact는 보존되었습니다."];
 
-    const recovered = await setup.service.current("owner") as {
+    const recovered = await setup.service.current("owner") as unknown as {
       run: { status: string };
       snapshot: {
         phase: string;

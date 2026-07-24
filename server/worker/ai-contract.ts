@@ -4,6 +4,7 @@ export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1" as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
 export const KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
+export const FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
 
 const finite = z.number().finite();
 const positive = finite.positive();
@@ -223,9 +224,15 @@ const ModelProvenanceSchema = z.object({
   device: z.enum(["cuda", "cpu", "unavailable"]),
   device_name: z.string().min(1).max(256).nullable().optional(),
   cuda_capability: z.string().regex(/^\d+\.\d+$/).max(16).nullable().optional(),
-  dtype: z.literal("float32"),
+  dtype: z.enum(["float32", "mixed_float16"]),
   attention_backend: z.enum(["math", "unavailable"]),
   loaded: z.boolean(),
+  precision_validation: z.enum(["not_required", "passed", "fallback_fp32", "unavailable"]).optional(),
+  peak_vram_bytes: z.number().int().nonnegative().nullable().optional(),
+  peak_vram_measurement: z.literal("cuda_allocated_or_reserved").nullable().optional(),
+  memory_status: z.enum(["ok", "memory_pressure", "unavailable"]).optional(),
+  quantile_tail_policy: z.enum(["native", "tail_clamped_q10_q90", "unavailable"]).optional(),
+  precision_failure_reasons: z.array(z.string().min(1).max(300)).optional(),
   fallback_from: z.string().min(1).max(256).nullable().optional(),
   fallback_reason: z.string().min(1).max(500).nullable().optional(),
 }).strict().superRefine((model, context) => {
@@ -246,6 +253,76 @@ const ModelProvenanceSchema = z.object({
       path: ["cuda_capability"],
       message: "CUDA device name and capability must be recorded together",
     });
+  }
+  if (model.dtype === "mixed_float16" && model.precision_validation !== "passed") {
+    context.addIssue({
+      code: "custom",
+      path: ["precision_validation"],
+      message: "mixed_float16 provenance requires passed precision validation",
+    });
+  }
+  const peakVramBytes = model.peak_vram_bytes ?? null;
+  const peakVramMeasurement = model.peak_vram_measurement ?? null;
+  if (peakVramBytes !== null && !model.loaded) {
+    context.addIssue({
+      code: "custom",
+      path: ["peak_vram_bytes"],
+      message: "peak VRAM is valid only for a loaded model",
+    });
+  }
+  if ((peakVramBytes === null) !== (peakVramMeasurement === null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["peak_vram_measurement"],
+      message: "peak VRAM value and measurement basis must be recorded together",
+    });
+  }
+  if (model.model_id === KRONOS_BASE_MODEL_ID) {
+    const invalidKronosPrecision = model.dtype !== "float32"
+      || (model.precision_validation !== undefined
+        && model.precision_validation !== (model.loaded ? "not_required" : "unavailable"))
+      || (model.memory_status !== undefined
+        && model.memory_status !== (model.loaded ? "ok" : "unavailable"))
+      || (model.quantile_tail_policy !== undefined
+        && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable"))
+      || (model.precision_failure_reasons?.length ?? 0) > 0;
+    if (invalidKronosPrecision) {
+      context.addIssue({
+        code: "custom",
+        message: "Kronos-base requires native float32 provenance",
+      });
+    }
+  }
+  if (model.model_id === FINCAST_MODEL_ID) {
+    if (model.loaded) {
+      const validPrecision = (
+        model.dtype === "mixed_float16"
+        && model.precision_validation === "passed"
+        && (model.precision_failure_reasons?.length ?? 0) === 0
+      ) || (
+        model.dtype === "float32"
+        && model.precision_validation === "fallback_fp32"
+        && (model.precision_failure_reasons?.length ?? 0) > 0
+      );
+      if (!validPrecision
+        || peakVramBytes === null
+        || peakVramBytes <= 0
+        || model.memory_status !== "ok"
+        || model.quantile_tail_policy !== "tail_clamped_q10_q90") {
+        context.addIssue({
+          code: "custom",
+          message: "loaded FinCast requires complete validated precision and VRAM provenance",
+        });
+      }
+    } else if (model.dtype !== "float32"
+      || model.precision_validation !== "unavailable"
+      || (model.memory_status !== "unavailable" && model.memory_status !== "memory_pressure")
+      || model.quantile_tail_policy !== "unavailable") {
+      context.addIssue({
+        code: "custom",
+        message: "unavailable FinCast requires fail-closed runtime provenance",
+      });
+    }
   }
 });
 
@@ -329,8 +406,8 @@ const ModelRunInputOriginSchema = z.object({
 });
 
 const ModelRunSchema = z.object({
-  role: z.literal("kronos_base"),
-  expected_model_id: z.literal(KRONOS_BASE_MODEL_ID),
+  role: z.enum(["kronos_base", "fincast"]),
+  expected_model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID]),
   status: z.enum(["available", "partial", "unavailable"]),
   model: ModelProvenanceSchema,
   generated_at: timestamp,
@@ -342,8 +419,15 @@ const ModelRunSchema = z.object({
   input_end_aligned: z.literal(true),
   raw_series: z.array(SeriesForecastResultSchema).min(1).max(10_000),
 }).strict().superRefine((run, context) => {
-  if (run.model.model_id !== run.expected_model_id
-    || run.degraded
+  const expectedModelId = run.role === "kronos_base" ? KRONOS_BASE_MODEL_ID : FINCAST_MODEL_ID;
+  if (run.expected_model_id !== expectedModelId || run.model.model_id !== expectedModelId) {
+    context.addIssue({
+      code: "custom",
+      path: ["expected_model_id"],
+      message: "model run role and expected model identity must match",
+    });
+  }
+  if (run.degraded
     || run.fallback_used
     || (run.fallback_reason ?? null) !== null
     || (run.model.fallback_from ?? null) !== null
@@ -351,7 +435,7 @@ const ModelRunSchema = z.object({
     context.addIssue({
       code: "custom",
       path: ["model"],
-      message: "Kronos-base run cannot contain degraded or fallback provenance",
+      message: "independent model run cannot contain degraded or model fallback provenance",
     });
   }
   if (run.input_origins.length !== run.raw_series.length) {
@@ -404,6 +488,8 @@ const HorizonEvaluationSchema = z.object({
   horizon_minutes: z.number().int().positive(),
   overall: MetricGroupSchema,
   quantile_coverage: z.array(QuantileValueSchema),
+  mean_pinball_loss: nonnegative.nullable().optional(),
+  quantile_pinball_loss: z.array(QuantileValueSchema).optional(),
   up_probability_brier: nonnegative.nullable().optional(),
   target_stop_first_count: z.number().int().nonnegative(),
   target_stop_first_accuracy: finite.min(0).max(1).nullable(),
@@ -554,11 +640,18 @@ export const AiResponseSchema = z.object({
   evaluation: EvaluationResultSchema.nullable().optional(),
   error: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((response, context) => {
-  if (response.model.model_id !== KRONOS_BASE_MODEL_ID) {
+  if (response.model.model_id !== KRONOS_BASE_MODEL_ID && response.model.model_id !== FINCAST_MODEL_ID) {
     context.addIssue({
       code: "custom",
       path: ["model", "model_id"],
-      message: "AI backend is pinned to NeoQuasar/Kronos-base",
+      message: "AI backend must use a supported pinned Kronos-base or FinCast model",
+    });
+  }
+  if ((response.model.fallback_from ?? null) !== null || (response.model.fallback_reason ?? null) !== null) {
+    context.addIssue({
+      code: "custom",
+      path: ["model"],
+      message: "independent AI responses cannot contain model fallback provenance",
     });
   }
   if (response.mode === "evaluate" && response.status !== "unavailable" && !response.evaluation) {
@@ -597,7 +690,7 @@ export const AiResponseSchema = z.object({
     context.addIssue({
       code: "custom",
       path: ["model_runs"],
-      message: "successful forecast requires the Kronos-base model run",
+      message: "successful forecast requires exactly one independent model run",
     });
   }
   if (response.model_runs) {
@@ -605,22 +698,24 @@ export const AiResponseSchema = z.object({
       context.addIssue({ code: "custom", path: ["model_runs"], message: "model runs require a successful forecast" });
       return;
     }
-    if (response.model_runs[0]?.role !== "kronos_base") {
+    const independentRun = response.model_runs[0]!;
+    const expectedModelId = independentRun.role === "kronos_base"
+      ? KRONOS_BASE_MODEL_ID
+      : FINCAST_MODEL_ID;
+    if (response.model.model_id !== expectedModelId) {
       context.addIssue({
         code: "custom",
-        path: ["model_runs"],
-        message: "model runs must contain only Kronos-base",
+        path: ["model", "model_id"],
+        message: "top-level model identity must match the independent model lane",
       });
-      return;
     }
-    const kronos = response.model_runs[0]!;
-    if (JSON.stringify(response.model) !== JSON.stringify(kronos.model)
-      || JSON.stringify(response.series) !== JSON.stringify(kronos.raw_series)
-      || response.status !== kronos.status) {
+    if (JSON.stringify(response.model) !== JSON.stringify(independentRun.model)
+      || JSON.stringify(response.series) !== JSON.stringify(independentRun.raw_series)
+      || response.status !== independentRun.status) {
       context.addIssue({
         code: "custom",
         path: ["model_runs", 0],
-        message: "top-level response fields must mirror the Kronos-base run",
+        message: "top-level response fields must mirror the independent model run",
       });
     }
     if (response.model_runs.some((run) => timestampMillis(run.generated_at) > timestampMillis(response.generated_at))) {

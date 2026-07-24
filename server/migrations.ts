@@ -161,14 +161,14 @@ export async function ensureScalpingMarketCountry(database: RelationalDatabase):
   await addMissingColumns(database, "portfolio_intraday_bars", {
     market_country: {
       sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
       postgres: "TEXT NOT NULL DEFAULT 'KR'",
     },
   });
   await addMissingColumns(database, "portfolio_scalping_predictions", {
     market_country: {
       sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
       postgres: "TEXT NOT NULL DEFAULT 'KR'",
     },
   });
@@ -267,7 +267,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   if (database.dialect === "mysql") {
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
-        market_country VARCHAR(2) NOT NULL DEFAULT 'KR',
+        market_country VARCHAR(32) NOT NULL DEFAULT 'KR',
         symbol VARCHAR(32) NOT NULL,
         interval_minutes INT NOT NULL,
         open_time VARCHAR(40) NOT NULL,
@@ -292,7 +292,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
         prediction_id VARCHAR(64) PRIMARY KEY,
-        market_country VARCHAR(2) NOT NULL DEFAULT 'KR',
+        market_country VARCHAR(32) NOT NULL DEFAULT 'KR',
         symbol VARCHAR(32) NOT NULL,
         model_name VARCHAR(128) NOT NULL,
         model_version VARCHAR(128) NOT NULL,
@@ -336,7 +336,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   await addMissingColumns(database, "portfolio_intraday_bars", {
     market_country: {
       sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
       postgres: "TEXT NOT NULL DEFAULT 'KR'",
     },
   });
@@ -367,7 +367,7 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   await addMissingColumns(database, "portfolio_scalping_predictions", {
     market_country: {
       sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(2) NOT NULL DEFAULT 'KR'",
+      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
       postgres: "TEXT NOT NULL DEFAULT 'KR'",
     },
   });
@@ -381,7 +381,7 @@ export async function createScalpingRawMarketDataTables(database: RelationalData
   if (database.dialect === "mysql") {
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
-        market_country VARCHAR(2) NOT NULL,
+        market_country VARCHAR(32) NOT NULL,
         symbol VARCHAR(32) NOT NULL,
         event_id VARCHAR(240) NOT NULL,
         provider VARCHAR(32) NOT NULL,
@@ -408,7 +408,7 @@ export async function createScalpingRawMarketDataTables(database: RelationalData
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
         snapshot_id VARCHAR(36) PRIMARY KEY,
-        market_country VARCHAR(2) NOT NULL,
+        market_country VARCHAR(32) NOT NULL,
         symbol VARCHAR(32) NOT NULL,
         provider VARCHAR(32) NOT NULL,
         venue VARCHAR(32) NOT NULL,
@@ -432,7 +432,7 @@ export async function createScalpingRawMarketDataTables(database: RelationalData
     await database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
         event_id VARCHAR(36) PRIMARY KEY,
-        market_country VARCHAR(2) NOT NULL,
+        market_country VARCHAR(32) NOT NULL,
         symbol VARCHAR(32) NULL,
         event_type VARCHAR(64) NOT NULL,
         occurred_at VARCHAR(40) NOT NULL,
@@ -530,6 +530,40 @@ export async function createScalpingRawMarketDataTables(database: RelationalData
     "idx_portfolio_scalping_recording_time_type",
     "portfolio_scalping_recording_events",
     "market_country, occurred_at, event_type, recorded_at, event_id",
+  );
+}
+
+export async function widenScalpingMarketCountryForCrypto(
+  database: RelationalDatabase,
+): Promise<void> {
+  const definitions = [
+    ["portfolio_intraday_bars", "VARCHAR(32) NOT NULL DEFAULT 'KR'"],
+    ["portfolio_scalping_predictions", "VARCHAR(32) NOT NULL DEFAULT 'KR'"],
+    ["portfolio_scalping_trades", "VARCHAR(32) NOT NULL"],
+    ["portfolio_scalping_orderbooks", "VARCHAR(32) NOT NULL"],
+    ["portfolio_scalping_recording_events", "VARCHAR(32) NOT NULL"],
+  ] as const;
+  if (database.dialect === "mysql") {
+    for (const [table, definition] of definitions) {
+      if (await hasTable(database, table)) {
+        // MODIFY preserves the existing composite primary keys and row values.
+        await database.run(
+          `ALTER TABLE ${table} MODIFY COLUMN market_country ${definition}`,
+        );
+      }
+    }
+  }
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_trade_provider_venue",
+    "portfolio_scalping_trades",
+    "market_country, provider, venue, symbol, executed_at",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_orderbook_provider_venue",
+    "portfolio_scalping_orderbooks",
+    "market_country, provider, venue, symbol, observed_at",
   );
 }
 
@@ -830,6 +864,11 @@ const migrations: readonly Migration[] = [
     id: "20260724_009_scalping_raw_market_data",
     signature: "portfolio_scalping_trades-v1;portfolio_scalping_orderbooks-v1;portfolio_scalping_recording_events-v1;raw-us-market-data-session-ordering-v2",
     up: createScalpingRawMarketDataTables,
+  },
+  {
+    id: "20260725_010_binance_usdm_market",
+    signature: "market-country:varchar32;value:BINANCE_USDM;provider:binance;venue:BINANCE_USDM;preserve-existing-primary-keys",
+    up: widenScalpingMarketCountryForCrypto,
   },
 ];
 

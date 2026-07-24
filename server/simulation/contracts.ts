@@ -5,7 +5,50 @@ import {
 } from "../scalping/contracts.js";
 import { defaultSimulationCostsForMarket } from "./cost-profile.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v6" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v7" as const;
+
+export const StockSimulationMarketSchema = z.object({
+  kind: z.literal("stock"),
+  country: MarketCountrySchema,
+}).strict();
+export type StockSimulationMarket = z.infer<typeof StockSimulationMarketSchema>;
+
+export const CryptoFuturesSimulationMarketSchema = z.object({
+  kind: z.literal("crypto_futures"),
+  venue: z.literal("BINANCE_USDM"),
+  quoteAsset: z.literal("USDT"),
+  contractType: z.literal("PERPETUAL"),
+}).strict();
+export type CryptoFuturesSimulationMarket = z.infer<
+  typeof CryptoFuturesSimulationMarketSchema
+>;
+
+export const SimulationMarketSchema = z.discriminatedUnion("kind", [
+  StockSimulationMarketSchema,
+  CryptoFuturesSimulationMarketSchema,
+]);
+export type SimulationMarket = z.infer<typeof SimulationMarketSchema>;
+
+export const DEFAULT_CRYPTO_FUTURES_MARKET: CryptoFuturesSimulationMarket = Object.freeze({
+  kind: "crypto_futures",
+  venue: "BINANCE_USDM",
+  quoteAsset: "USDT",
+  contractType: "PERPETUAL",
+});
+
+export const SimulationModelLaneSchema = z.enum(["kronos_base", "fincast"]);
+export type SimulationModelLane = z.infer<typeof SimulationModelLaneSchema>;
+export const SimulationModelLanesSchema = z.union([
+  z.tuple([z.literal("kronos_base")]),
+  z.tuple([z.literal("fincast")]),
+  z.tuple([z.literal("kronos_base"), z.literal("fincast")]),
+]).default(["kronos_base"]);
+
+export const SimulationExecutionSchema = z.object({
+  mode: z.literal("paper").default("paper"),
+}).strict().default({ mode: "paper" });
+export type SimulationExecution = z.infer<typeof SimulationExecutionSchema>;
+export type SimulationModelLanes = z.infer<typeof SimulationModelLanesSchema>;
 
 export const SimulationPresetSchema = z.enum([
   "trend",
@@ -16,6 +59,12 @@ export const SimulationPresetSchema = z.enum([
 export type SimulationPreset = z.infer<typeof SimulationPresetSchema>;
 
 export const DEFAULT_SIMULATION_COSTS = Object.freeze(defaultSimulationCostsForMarket("KR"));
+export const DEFAULT_CRYPTO_FUTURES_COSTS = Object.freeze({
+  commissionBpsPerSide: 4,
+  taxBpsOnExit: 0,
+  spreadBpsRoundTrip: 2,
+  slippageBpsPerSide: 1,
+});
 
 export const SimulationCostsSchema = z.object({
   commissionBpsPerSide: z.number().finite().min(0).max(1_000)
@@ -100,13 +149,34 @@ export const SimulationStrategySchema = z.discriminatedUnion("mode", [
 ]);
 export type SimulationStrategy = z.infer<typeof SimulationStrategySchema>;
 
+export type SimulationStartRequest = {
+  market: SimulationMarket;
+  /**
+   * Internal stock-v6 coordinator compatibility. This property is
+   * non-enumerable for crypto requests, so wire responses and artifacts only
+   * serialize the normalized `market` discriminated union.
+   */
+  marketCountry: z.infer<typeof MarketCountrySchema>;
+  initialCash: number;
+  durationMinutes: number;
+  selection: SimulationSelection;
+  strategy?: SimulationStrategy;
+  preset: SimulationPreset;
+  riskTolerance: number;
+  costs: SimulationCosts;
+  modelLanes: SimulationModelLanes;
+  execution: SimulationExecution;
+};
+
 export function createSimulationStartRequestSchema(limits: SimulationRequestLimits) {
   if (!Number.isSafeInteger(limits.maxDurationMinutes) || limits.maxDurationMinutes < 1) {
     throw new Error("Simulation maximum duration must be a positive safe integer.");
   }
   return z.object({
-    marketCountry: MarketCountrySchema.default("KR"),
-    initialCash: z.number().finite().min(100_000).max(10_000_000_000_000),
+    market: SimulationMarketSchema.optional(),
+    // v6 compatibility input. Every v7 request is normalized to `market`.
+    marketCountry: MarketCountrySchema.optional(),
+    initialCash: z.number().finite().min(100).max(10_000_000_000_000),
     durationMinutes: z.number().int().min(1).max(limits.maxDurationMinutes),
     selection: SimulationSelectionSchema,
     // Optional on the wire so existing auto/manual requests remain valid.
@@ -115,21 +185,86 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     preset: SimulationPresetSchema.default("risk_management"),
     riskTolerance: z.number().int().min(0).max(100).default(50),
     costs: SimulationCostOverridesSchema.optional(),
+    modelLanes: SimulationModelLanesSchema,
+    execution: SimulationExecutionSchema,
   }).strict().superRefine((input, context) => {
-    if (input.strategy?.mode === "pair" && input.marketCountry !== "US") {
+    const market = input.market
+      ?? { kind: "stock" as const, country: input.marketCountry ?? "KR" };
+    if (input.market && input.marketCountry !== undefined) {
+      if (input.market.kind !== "stock" || input.market.country !== input.marketCountry) {
+        context.addIssue({
+          code: "custom",
+          path: ["marketCountry"],
+          message: "marketCountry와 market이 서로 일치해야 합니다.",
+        });
+      }
+    }
+    if (input.strategy?.mode === "pair"
+      && (market.kind !== "stock" || market.country !== "US")) {
       context.addIssue({
         code: "custom",
-        path: ["marketCountry"],
+        path: ["market"],
         message: "페어 전략은 미국 시장에서만 사용할 수 있습니다.",
       });
     }
-  }).transform((input) => ({
-    ...input,
-    costs: {
-      ...defaultSimulationCostsForMarket(input.marketCountry),
-      ...input.costs,
-    },
-  }));
+    if (market.kind === "crypto_futures") {
+      if (input.initialCash > 100_000_000) {
+        context.addIssue({
+          code: "custom",
+          path: ["initialCash"],
+          message: "암호화폐 선물 초기 자산은 100,000,000 USDT 이하여야 합니다.",
+        });
+      }
+      if (input.strategy?.mode === "pair") {
+        context.addIssue({
+          code: "custom",
+          path: ["strategy"],
+          message: "암호화폐 선물은 단일 종목 전략만 지원합니다.",
+        });
+      }
+      if (input.selection.mode === "auto" && input.selection.symbolCount !== 1) {
+        context.addIssue({
+          code: "custom",
+          path: ["selection", "symbolCount"],
+          message: "암호화폐 선물 자동 선택은 한 종목만 지원합니다.",
+        });
+      }
+      if (input.selection.mode === "manual" && input.selection.symbols.length !== 1) {
+        context.addIssue({
+          code: "custom",
+          path: ["selection", "symbols"],
+          message: "암호화폐 선물 수동 선택은 한 종목만 지원합니다.",
+        });
+      }
+    } else if (input.initialCash < 100_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["initialCash"],
+        message: "주식 초기 자산은 100,000 이상이어야 합니다.",
+      });
+    }
+  }).transform((input): SimulationStartRequest => {
+    const market = input.market
+      ?? { kind: "stock" as const, country: input.marketCountry ?? "KR" };
+    const normalized = {
+      ...input,
+      market,
+      costs: {
+        ...(market.kind === "stock"
+          ? defaultSimulationCostsForMarket(market.country)
+          : DEFAULT_CRYPTO_FUTURES_COSTS),
+        ...input.costs,
+      },
+    } as Omit<SimulationStartRequest, "marketCountry">;
+    if (market.kind === "stock") {
+      return { ...normalized, marketCountry: market.country };
+    }
+    Object.defineProperty(normalized, "marketCountry", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: "US",
+    });
+    return normalized as SimulationStartRequest;
+  });
 }
-
-export type SimulationStartRequest = z.infer<ReturnType<typeof createSimulationStartRequestSchema>>;

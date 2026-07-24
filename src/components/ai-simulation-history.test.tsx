@@ -203,5 +203,16 @@ describe("AI simulation history", () => {
     expect(markup).toContain("costs_passed");
     expect(markup).not.toContain("Chronos");
     expect(markup).not.toContain("Kronos-small");
+
+    const cryptoMarkup = renderToStaticMarkup(
+      <SimulationRunReportView
+        report={{
+          ...report,
+          performance: { ...report.performance, currency: "USDT" },
+        }}
+      />,
+    );
+    expect(cryptoMarkup).toContain("2계약");
+    expect(cryptoMarkup).not.toContain("2주");
   });
 });

@@ -1,4 +1,11 @@
 export function formatMoney(value: number, currency = "KRW", compact = false): string {
+  if (currency === "USDT") {
+    return `${new Intl.NumberFormat("ko-KR", {
+      minimumFractionDigits: compact ? 0 : 2,
+      maximumFractionDigits: compact ? 2 : 4,
+      ...(compact ? { notation: "compact", compactDisplay: "short" } : {}),
+    }).format(Number.isFinite(value) ? value : 0)} USDT`;
+  }
   const safeCurrency = currency === "USD" ? "USD" : "KRW";
   return new Intl.NumberFormat("ko-KR", {
     style: "currency",

@@ -10,10 +10,19 @@ import {
   type SimulationStartRequest,
 } from "./contracts.js";
 import type { PortfolioRunStatus } from "../repositories/run-repository.js";
+import { ScannerCriterionSchema, type ScannerCriterion } from "../scalping/contracts.js";
 import type { SimulationHistoryListInput } from "./simulation-service.js";
+
+export type SimulationCandidatesInput = {
+  criterion: ScannerCriterion;
+};
 
 export type SimulationRouterService = {
   status(enabled?: boolean): unknown | Promise<unknown>;
+  candidates?(
+    input: SimulationCandidatesInput,
+    ownerSubject: string,
+  ): Promise<unknown>;
   start(input: SimulationStartRequest, ownerSubject: string): Promise<unknown>;
   current(ownerSubject: string): Promise<unknown | undefined>;
   list(input: SimulationHistoryListInput, ownerSubject: string): Promise<unknown>;
@@ -60,6 +69,9 @@ const HistoryQuerySchema = z.object({
     ? { statuses: Array.from(new Set(input.status)) as PortfolioRunStatus[] }
     : {}),
 }));
+const CandidatesQuerySchema = z.object({
+  criterion: ScannerCriterionSchema.default("volatility"),
+}).strict();
 
 function disabled(response: Response): void {
   setNoStore(response);
@@ -127,11 +139,47 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
           autonomousPaperTrading: false,
           orderApiDependency: false,
         },
+        credentials: {
+          configured: false,
+          signedReadSucceeded: false,
+        },
+        executionGates: {
+          paper: false,
+          testnet: false,
+          live: false,
+          realOrder: false,
+        },
+        workers: {
+          kronos_base: { status: "unavailable", precision: "unknown" },
+          fincast: { status: "unavailable", precision: "unknown" },
+        },
       });
       return;
     }
     try {
       response.json(await dependencies.service.status(true));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  router.get("/candidates", async (request, response) => {
+    setNoStore(response);
+    if (!dependencies.config.enabled || !dependencies.service) return disabled(response);
+    if (!dependencies.service.candidates) {
+      response.status(503).json({
+        error: {
+          code: "crypto-scanner-unavailable",
+          message: "암호화폐 선물 스캐너가 설정되지 않았습니다.",
+        },
+      });
+      return;
+    }
+    try {
+      response.json(await dependencies.service.candidates(
+        CandidatesQuerySchema.parse(request.query),
+        ownerSubject,
+      ));
     } catch (error) {
       sendError(response, error);
     }

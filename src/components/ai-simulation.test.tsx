@@ -84,6 +84,37 @@ describe("AiSimulation", () => {
     expect(markup).toContain("decision-25");
   });
 
+  it("labels crypto futures fills in contracts instead of shares", () => {
+    const snapshot: AiSimulationSnapshot = {
+      phase: "running",
+      currency: "USDT",
+      initialCash: 10_000,
+      cash: 9_900,
+      equity: 10_010,
+      progress: 0.5,
+      selected: [],
+      positions: [],
+      charts: [],
+      trades: [{
+        symbol: "BTCUSDT",
+        side: "buy",
+        quantity: 0.01,
+        price: 67_100,
+        amount: 671,
+        cost: 0.27,
+        executedAt: "2026-07-25T00:01:00.000Z",
+      }],
+      decisions: [],
+      kronosForecasts: [],
+      warnings: [],
+      capabilities: {},
+    };
+
+    const markup = renderToStaticMarkup(<TradesAndDecisions snapshot={snapshot} />);
+    expect(markup).toContain("0.01계약");
+    expect(markup).not.toContain("0.01주");
+  });
+
   it("renders the US pair catalog with a fixed fail-closed policy", () => {
     const markup = renderToStaticMarkup(
       <AiSimulationStrategySettings

@@ -22,10 +22,12 @@ import type {
 } from "../scalping/api-contracts.js";
 import type { ScalpingService } from "../scalping/scalping-service.js";
 import type {
+  SimulationMarket,
   SimulationCosts,
   SimulationPreset,
   SimulationStartRequest,
   SimulationStrategy,
+  StockSimulationMarket,
 } from "./contracts.js";
 import { AI_SIMULATION_CONTRACT_VERSION } from "./contracts.js";
 import {
@@ -1245,9 +1247,12 @@ function markToMarket(session: ActiveSession, asOf?: string): {
 }
 
 function runView(run: PortfolioRunRecord) {
+  const market = runStockMarket(run, runSnapshot(run));
   return {
+    schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
     runId: run.id,
     kind: run.kind,
+    market,
     status: run.status,
     progress: run.progress,
     ...(run.error !== undefined ? { error: run.error } : {}),
@@ -1277,6 +1282,80 @@ function stringValues(value: unknown): string[] {
   });
 }
 
+function simulationMarket(value: unknown): SimulationMarket | undefined {
+  const source = record(value);
+  const kind = nonempty(source?.kind, 32);
+  if (kind === "stock") {
+    const country = nonempty(source?.country, 8);
+    if (country === "KR" || country === "US") {
+      return { kind, country };
+    }
+    return undefined;
+  }
+  if (kind === "crypto_futures"
+    && source?.venue === "BINANCE_USDM"
+    && source.quoteAsset === "USDT"
+    && source.contractType === "PERPETUAL") {
+    return {
+      kind,
+      venue: "BINANCE_USDM",
+      quoteAsset: "USDT",
+      contractType: "PERPETUAL",
+    };
+  }
+  return undefined;
+}
+
+function legacyStockCountry(value: unknown): MarketCountry | undefined {
+  const source = record(value);
+  const country = nonempty(firstDefined(source, "marketCountry", "market_country"), 8);
+  return country === "KR" || country === "US" ? country : undefined;
+}
+
+function normalizedStockMarket(
+  ...sources: readonly unknown[]
+): StockSimulationMarket {
+  for (const value of sources) {
+    const direct = simulationMarket(firstDefined(record(value), "market"));
+    if (direct?.kind === "stock") return direct;
+  }
+  for (const value of sources) {
+    const country = legacyStockCountry(value);
+    if (country) return { kind: "stock", country };
+  }
+  // This service owns the legacy stock lane. Runs predating market_country
+  // used KR as the repository and policy default, so normalize those records
+  // deterministically instead of emitting an incomplete v7 shape.
+  return { kind: "stock", country: "KR" };
+}
+
+function requestStockMarket(request: SimulationStartRequest): StockSimulationMarket {
+  // `marketCountry` remains the internal compatibility field used throughout
+  // the stock runtime. The v7 parser guarantees it agrees with `market`; using
+  // it here also keeps direct, pre-v7 service callers normalized.
+  return { kind: "stock", country: request.marketCountry };
+}
+
+function runStockMarket(
+  run: PortfolioRunRecord,
+  snapshot?: UnknownRecord,
+): StockSimulationMarket {
+  return normalizedStockMarket(
+    snapshot,
+    record(run.result),
+    record(run.summary),
+    record(run.input),
+  );
+}
+
+function normalizeStockSnapshot(
+  value: unknown,
+  market: StockSimulationMarket,
+): UnknownRecord | undefined {
+  const source = record(value);
+  return source ? { ...source, market } : undefined;
+}
+
 function runSnapshot(run: PortfolioRunRecord): UnknownRecord | undefined {
   return record(record(run.result)?.snapshot) ?? record(record(run.summary)?.snapshot);
 }
@@ -1286,6 +1365,7 @@ function simulationConfiguration(
   snapshot: UnknownRecord | undefined,
 ) {
   const input = record(run.input);
+  const market = runStockMarket(run, snapshot);
   const schemaVersion = nonempty(
     firstDefined(input, "schemaVersion", "schema_version")
       ?? firstDefined(snapshot, "schemaVersion", "schema_version"),
@@ -1296,11 +1376,7 @@ function simulationConfiguration(
       ?? firstDefined(snapshot, "policyVersion", "policy_version"),
     128,
   );
-  const marketCountry = nonempty(
-    firstDefined(snapshot, "marketCountry", "market_country")
-      ?? firstDefined(input, "marketCountry", "market_country"),
-    8,
-  );
+  const marketCountry = market.country;
   const initialCash = finite(
     firstDefined(snapshot, "initialCash", "initial_cash")
       ?? firstDefined(input, "initialCash", "initial_cash"),
@@ -1323,7 +1399,8 @@ function simulationConfiguration(
   return {
     ...(schemaVersion ? { schemaVersion } : {}),
     ...(policyVersion ? { policyVersion } : {}),
-    ...(marketCountry ? { marketCountry } : {}),
+    market,
+    marketCountry,
     ...(initialCash !== undefined ? { initialCash } : {}),
     ...(durationMinutes !== undefined ? { durationMinutes } : {}),
     ...(selection !== undefined ? { selection } : {}),
@@ -1448,6 +1525,7 @@ function boundedSnapshot(input: {
     ...(source.createdAt !== undefined ? { createdAt: source.createdAt } : {}),
     ...(source.startedAt !== undefined ? { startedAt: source.startedAt } : {}),
     ...(source.expiresAt !== undefined ? { expiresAt: source.expiresAt } : {}),
+    ...(source.market !== undefined ? { market: source.market } : {}),
     ...(source.marketCountry !== undefined ? { marketCountry: source.marketCountry } : {}),
     ...(source.currency !== undefined ? { currency: source.currency } : {}),
     ...(source.selection !== undefined ? { selection: source.selection } : {}),
@@ -1578,13 +1656,15 @@ function historyItem(run: PortfolioRunRecord) {
   });
   const firstModel = modelView(record(selected[0])?.model);
   return {
+    schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
     runId: run.id,
     status: run.status,
     progress: run.progress,
     createdAt: new Date(run.createdAt).toISOString(),
     ...(run.startedAt !== undefined ? { startedAt: new Date(run.startedAt).toISOString() } : {}),
     ...(run.finishedAt !== undefined ? { finishedAt: new Date(run.finishedAt).toISOString() } : {}),
-    ...(configuration.marketCountry ? { marketCountry: configuration.marketCountry } : {}),
+    market: configuration.market,
+    marketCountry: configuration.marketCountry,
     ...(configuration.preset ? { preset: configuration.preset } : {}),
     ...(configuration.riskTolerance !== undefined
       ? { riskTolerance: configuration.riskTolerance } : {}),
@@ -1765,6 +1845,7 @@ export class AiTradingSimulationService {
   private async startReserved(input: SimulationStartRequest, ownerSubject: string) {
     const createdAtMs = this.now();
     const createdAt = new Date(createdAtMs).toISOString();
+    const market = requestStockMarket(input);
     const strategy = simulationStrategy(input);
     const pairCatalog = strategy.mode === "pair"
       ? getPairCatalogEntry(strategy.pairId)
@@ -1788,6 +1869,7 @@ export class AiTradingSimulationService {
         ? PAIR_ENSEMBLE_POLICY_VERSION
         : AI_PAPER_POLICY_VERSION,
       mode: "forward_paper_session",
+      market,
       market_country: input.marketCountry,
       selection: input.selection,
       strategy,
@@ -1824,6 +1906,8 @@ export class AiTradingSimulationService {
         throw new Error("AI 시뮬레이션 run을 시작하지 못했습니다.");
       }
       await this.repository.addEvent(run.id, "simulation_selecting", {
+        schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+        market,
         market_country: input.marketCountry,
         selection_mode: input.selection.mode,
         requested_symbol_count: symbolCount,
@@ -1897,6 +1981,8 @@ export class AiTradingSimulationService {
     this.active.set(run.id, session);
     void this.initialize(session).catch((error) => this.fail(session, error));
     return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      market,
       runId: run.id,
       status: "running",
       snapshot: this.snapshot(session),
@@ -1939,11 +2025,20 @@ export class AiTradingSimulationService {
       ? undefined
       : await this.checkpointSnapshot(run);
     const activeSnapshot = active ? this.snapshot(active) : undefined;
-    return {
-      run: runView(run),
-      snapshot: run.status === "cancel_requested" && activeSnapshot
+    const market = active
+      ? requestStockMarket(active.request)
+      : runStockMarket(run, record(result?.snapshot) ?? record(summary?.snapshot) ?? record(checkpoint));
+    const snapshot = normalizeStockSnapshot(
+      run.status === "cancel_requested" && activeSnapshot
         ? { ...activeSnapshot, phase: "finalizing" }
         : activeSnapshot ?? result?.snapshot ?? summary?.snapshot ?? checkpoint,
+      market,
+    );
+    return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      market,
+      run: runView(run),
+      snapshot,
     };
   }
 
@@ -1966,9 +2061,18 @@ export class AiTradingSimulationService {
     const checkpoint = result?.snapshot || summary?.snapshot
       ? undefined
       : await this.checkpointSnapshot(run);
+    const market = runStockMarket(
+      run,
+      record(result?.snapshot) ?? record(summary?.snapshot) ?? record(checkpoint),
+    );
     return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      market,
       run: runView(run),
-      snapshot: result?.snapshot ?? summary?.snapshot ?? checkpoint,
+      snapshot: normalizeStockSnapshot(
+        result?.snapshot ?? summary?.snapshot ?? checkpoint,
+        market,
+      ),
     };
   }
 
@@ -2031,10 +2135,21 @@ export class AiTradingSimulationService {
     const comparisonArtifact = record(artifactContent.get("simulation-comparison"));
     const provenanceArtifact = artifactContent.get("simulation-provenance");
     const active = this.active.get(run.id);
-    const sourceSnapshot = active
+    const rawSourceSnapshot = active
       ? record(this.snapshot(active)) ?? {}
       : runSnapshot(run) ?? record(diagnostic?.snapshot) ?? {};
-    const selectionEvidence = record(artifactContent.get("simulation-selection"));
+    const market = active
+      ? requestStockMarket(active.request)
+      : runStockMarket(run, rawSourceSnapshot);
+    const sourceSnapshot = normalizeStockSnapshot(rawSourceSnapshot, market) ?? { market };
+    const storedSelectionEvidence = record(artifactContent.get("simulation-selection"));
+    const selectionEvidence: UnknownRecord | undefined = storedSelectionEvidence
+      ? {
+          ...storedSelectionEvidence,
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          market,
+        }
+      : undefined;
     const selectionResult = record(selectionEvidence?.selection);
     const selected = values(sourceSnapshot.selected).length
       ? values(sourceSnapshot.selected).slice(0, 2)
@@ -2110,6 +2225,7 @@ export class AiTradingSimulationService {
     );
     return {
       schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      market,
       generatedAt: new Date(this.now()).toISOString(),
       run: runView(run),
       report: {
@@ -2166,8 +2282,12 @@ export class AiTradingSimulationService {
     if (session) {
       await this.finish(session, "cancelled", reason);
     } else if (["queued", "running", "cancel_requested"].includes(run.status)) {
+      const market = runStockMarket(run, runSnapshot(run));
       await this.repository.cancel(runId, {
+        schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         phase: "cancelled",
+        market,
+        market_country: market.country,
         cancelled: true,
         real_order_api_used: false,
       }, [reason], this.now());
@@ -3956,6 +4076,7 @@ export class AiTradingSimulationService {
       : started !== undefined && expires !== undefined && expires > started
         ? Math.max(0, Math.min(0.99, (this.now() - started) / (expires - started)))
         : 0;
+    const market = requestStockMarket(session.request);
     return {
       schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
       policyVersion: session.pair
@@ -3965,6 +4086,7 @@ export class AiTradingSimulationService {
       createdAt: session.createdAt,
       ...(session.startedAt ? { startedAt: session.startedAt } : {}),
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+      market,
       marketCountry: session.request.marketCountry,
       currency: session.request.marketCountry === "US" ? "USD" : "KRW",
       costs: session.request.costs,
@@ -4106,6 +4228,8 @@ export class AiTradingSimulationService {
         runId: session.id,
         type: "simulation-selection",
         content: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          market: requestStockMarket(session.request),
           policy_version: session.pair
             ? PAIR_ENSEMBLE_POLICY_VERSION
             : AI_PAPER_POLICY_VERSION,
@@ -4158,6 +4282,8 @@ export class AiTradingSimulationService {
         runId: session.id,
         type: "simulation-diagnostics",
         content: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          market: requestStockMarket(session.request),
           phase: session.phase,
           policy_version: session.pair
             ? PAIR_ENSEMBLE_POLICY_VERSION
@@ -4287,10 +4413,13 @@ export class AiTradingSimulationService {
           this.warn(session, `최종 artifact 저장 실패: ${error instanceof Error ? error.message : "unknown"}`);
         }
         const snapshot = this.snapshot(session);
+        const market = requestStockMarket(session.request);
         return {
           snapshot,
           summary: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
             phase,
+            market,
             market_country: session.request.marketCountry,
             selection_mode: session.request.selection.mode,
             preset: session.request.preset,
@@ -4315,7 +4444,11 @@ export class AiTradingSimulationService {
         const completed = await this.repository.complete(
           session.id,
           payload.summary,
-          { snapshot: payload.snapshot },
+          {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            market: requestStockMarket(session.request),
+            snapshot: payload.snapshot,
+          },
           session.warnings,
           this.now(),
         );

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +19,11 @@ async function fixture(mcpEnabled = false) {
   writeFileSync(
     path.join(clientDirectory, "index.html"),
     "<!doctype html><html><body>portfolio-spa-fixture</body></html>",
+  );
+  mkdirSync(path.join(clientDirectory, "reports"));
+  writeFileSync(
+    path.join(clientDirectory, "reports", "crypto-scalping-model-comparison.html"),
+    "<!doctype html><html><body>comparison-report-fixture</body></html>",
   );
   const app = createApp({ trustProxy: [] });
   if (mcpEnabled) {
@@ -127,6 +132,23 @@ describe("application route ordering", () => {
     const session = await fetch(`${baseUrl}/api/auth/session`);
     expect(session.status).toBe(200);
     expect(await session.json()).toEqual({ authenticated: false });
+  });
+
+  it("scopes inline report JS and no-store to the exact comparison report path", async () => {
+    const baseUrl = await fixture();
+    const report = await fetch(`${baseUrl}/reports/crypto-scalping-model-comparison.html`);
+    expect(report.headers.get("content-security-policy")).toContain(
+      "script-src 'self' 'unsafe-inline'",
+    );
+    expect(report.headers.get("cache-control")).toBe("no-store, max-age=0");
+    expect(report.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
+
+    const ordinary = await fetch(`${baseUrl}/ordinary`);
+    expect(ordinary.headers.get("content-security-policy")).toContain("script-src 'self';");
+    expect(ordinary.headers.get("content-security-policy")).not.toContain(
+      "script-src 'self' 'unsafe-inline'",
+    );
+    expect(ordinary.headers.get("cache-control")).not.toBe("no-store, max-age=0");
   });
 
   it("keeps disabled and unknown MCP paths out of the HTML fallback", async () => {

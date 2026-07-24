@@ -17,14 +17,14 @@ import {
   selectExactKronosForecastActualMark,
   type AiSimulationKronosForecast,
 } from "@/lib/ai-simulation-forecast";
-import type { AiSimulationChartView } from "@/lib/ai-simulation";
+import type { AiSimulationChartView, AiSimulationCurrency } from "@/lib/ai-simulation";
 import { formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type AiSimulationKronosForecastSectionProps = {
   forecasts: readonly AiSimulationKronosForecast[];
   charts: readonly AiSimulationChartView[];
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   className?: string;
 };
 
@@ -63,7 +63,7 @@ function ForecastCard({
 }: {
   forecast: AiSimulationKronosForecast;
   charts: readonly AiSimulationChartView[];
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
 }) {
   const actualMark = useMemo(
     () => selectExactKronosForecastActualMark(forecast, charts),

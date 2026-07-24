@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { isAbsolute } from "node:path";
 import type { MySqlConnectionConfig, PostgresConnectionConfig } from "./database.js";
 import type { KisExchangeRateConfig } from "./kis-exchange-rate.js";
 import type { IntradayBarAggregatorConfig } from "./scalping/intraday-bar-aggregator.js";
@@ -122,6 +123,29 @@ export type ScalpingAiConfig = {
   tlsCa?: string;
 };
 
+export type CryptoAiLaneConfig = {
+  url: string;
+  authTokenFile: string;
+  timeoutMs: number;
+  connectTimeoutMs: number;
+  reconnectBaseMs: number;
+  reconnectMaxMs: number;
+  maximumInFlight: 1;
+  maximumRequestBytes: number;
+  maximumResponseBytes: number;
+  tlsCa?: string;
+};
+
+export type CryptoAiConfig = {
+  kronos: CryptoAiLaneConfig;
+  fincast?: CryptoAiLaneConfig;
+  sequentialDeadlineMs: number;
+  circuitBreaker: {
+    failureThreshold: number;
+    cooldownMs: number;
+  };
+};
+
 export type AiTradingSimulationConfig = {
   maximumDurationMinutes: number;
   maximumActiveSessions: number;
@@ -198,6 +222,7 @@ export type AppConfig = TossApiAuthConfig & {
   mcp: McpConfig;
   kisExchangeRate?: KisExchangeRateConfig;
   scalping: ScalpingConfig;
+  cryptoAi: CryptoAiConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -472,31 +497,65 @@ function isPrivateIpLiteral(host: string): boolean {
   return isIP(normalized) === 6 && (normalized.startsWith("fc") || normalized.startsWith("fd"));
 }
 
-function readAiComputeUrl(allowInsecurePrivate: boolean): string {
-  const value = optional("AI_COMPUTE_URL") || "ws://ai-worker:8765/ws/scalping-ai/v1";
+function readAiComputeUrl(
+  value: string,
+  name: string,
+  allowInsecurePrivate: boolean,
+): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error("AI_COMPUTE_URL은 유효한 WebSocket URL이어야 합니다.");
+    throw new Error(`${name}은 유효한 WebSocket URL이어야 합니다.`);
   }
   if (!["ws:", "wss:"].includes(parsed.protocol)
     || parsed.pathname !== "/ws/scalping-ai/v1"
     || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("AI_COMPUTE_URL은 /ws/scalping-ai/v1 경로의 ws:// 또는 wss:// URL이어야 합니다.");
+    throw new Error(`${name}은 /ws/scalping-ai/v1 경로의 ws:// 또는 wss:// URL이어야 합니다.`);
   }
   if (parsed.protocol === "ws:") {
-    const localCompose = parsed.hostname.toLowerCase() === "ai-worker";
+    const localCompose = ["ai-worker", "fincast-worker"].includes(parsed.hostname.toLowerCase());
     const local = localCompose || isLoopbackHost(parsed.hostname);
     const explicitlyAllowedPrivate = allowInsecurePrivate && isPrivateIpLiteral(parsed.hostname);
     if (!local && !explicitlyAllowedPrivate) {
       throw new Error(
-        "원격 AI_COMPUTE_URL은 wss://를 사용해야 하며, private IP의 ws://는 "
+        `원격 ${name}은 wss://를 사용해야 하며, private IP의 ws://는 `
         + "AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS=true일 때만 허용됩니다.",
       );
     }
   }
   return parsed.toString();
+}
+
+type SelectedEnvironmentValue = {
+  name: string;
+  value: string;
+};
+
+function selectEnvironmentValue(
+  primaryName: string,
+  fallbackName: string,
+  defaultValue: string,
+): SelectedEnvironmentValue {
+  const primary = optional(primaryName);
+  if (primary) return { name: primaryName, value: primary };
+  const fallback = optional(fallbackName);
+  if (fallback) return { name: fallbackName, value: fallback };
+  return { name: primaryName, value: defaultValue };
+}
+
+function readAbsolutePath(selection: SelectedEnvironmentValue): string {
+  if (!isAbsolute(selection.value)) {
+    throw new Error(`${selection.name}은 절대 경로여야 합니다.`);
+  }
+  return selection.value;
+}
+
+function readSerializedLaneLimit(selection: SelectedEnvironmentValue): 1 {
+  if (selection.value !== "1") {
+    throw new Error(`${selection.name}은 GPU lane 직렬화를 위해 1이어야 합니다.`);
+  }
+  return 1;
 }
 
 function readSecretFile(name: string, fallbackPath: string): string {
@@ -523,6 +582,125 @@ function readAiTlsCa(): string | undefined {
   if (!value.trim()) throw new Error("AI_COMPUTE_TLS_CA_FILE이 비어 있습니다.");
   if (Buffer.byteLength(value, "utf8") > 1024 * 1024) throw new Error("AI_COMPUTE_TLS_CA_FILE은 1MiB 이하여야 합니다.");
   return value;
+}
+
+function readCryptoAiConfig(): CryptoAiConfig {
+  const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
+  const tlsCa = readAiTlsCa();
+  const timeoutMs = readBoundedInteger("AI_COMPUTE_TIMEOUT_MS", 120_000, 1_000, 3_600_000);
+  const connectTimeoutMs = readBoundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000);
+  const reconnectBaseMs = readBoundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 250, 1, 60_000);
+  const reconnectMaxMs = readBoundedInteger(
+    "AI_COMPUTE_RECONNECT_MAX_MS",
+    10_000,
+    reconnectBaseMs,
+    600_000,
+  );
+  const maximumRequestBytes = readBoundedInteger(
+    "AI_MAX_REQUEST_BYTES",
+    64 * 1024 * 1024,
+    1_024,
+    512 * 1024 * 1024,
+  );
+  const maximumResponseBytes = readBoundedInteger(
+    "AI_MAX_RESPONSE_BYTES",
+    128 * 1024 * 1024,
+    1_024,
+    512 * 1024 * 1024,
+  );
+  const common = {
+    timeoutMs,
+    connectTimeoutMs,
+    reconnectBaseMs,
+    reconnectMaxMs,
+    maximumRequestBytes,
+    maximumResponseBytes,
+    ...(tlsCa ? { tlsCa } : {}),
+  };
+
+  const readLane = ({
+    url,
+    token,
+    maximumInFlight,
+  }: {
+    url: SelectedEnvironmentValue;
+    token: SelectedEnvironmentValue;
+    maximumInFlight: SelectedEnvironmentValue;
+  }): CryptoAiLaneConfig => {
+    const normalizedUrl = readAiComputeUrl(url.value, url.name, allowInsecurePrivateWs);
+    if (tlsCa && new URL(normalizedUrl).protocol !== "wss:") {
+      throw new Error(`AI_COMPUTE_TLS_CA_FILE은 wss:// ${url.name}에서만 사용할 수 있습니다.`);
+    }
+    return {
+      url: normalizedUrl,
+      authTokenFile: readAbsolutePath(token),
+      maximumInFlight: readSerializedLaneLimit(maximumInFlight),
+      ...common,
+    };
+  };
+
+  const kronos = readLane({
+    url: selectEnvironmentValue(
+      "AI_KRONOS_COMPUTE_URL",
+      "AI_COMPUTE_URL",
+      "ws://ai-worker:8765/ws/scalping-ai/v1",
+    ),
+    token: selectEnvironmentValue(
+      "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE",
+      "AI_COMPUTE_AUTH_TOKEN_FILE",
+      "/run/ai-auth/token",
+    ),
+    maximumInFlight: selectEnvironmentValue(
+      "AI_KRONOS_COMPUTE_MAX_IN_FLIGHT",
+      "AI_COMPUTE_MAX_IN_FLIGHT",
+      "1",
+    ),
+  });
+
+  const fincastUrl = optional("AI_FINCAST_COMPUTE_URL");
+  const fincast = fincastUrl
+    ? readLane({
+      url: { name: "AI_FINCAST_COMPUTE_URL", value: fincastUrl },
+      token: {
+        name: "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE",
+        value: optional("AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE") || "/run/fincast-auth/token",
+      },
+      maximumInFlight: {
+        name: "AI_FINCAST_COMPUTE_MAX_IN_FLIGHT",
+        value: optional("AI_FINCAST_COMPUTE_MAX_IN_FLIGHT") || "1",
+      },
+    })
+    : undefined;
+  if (fincast && fincast.authTokenFile === kronos.authTokenFile) {
+    throw new Error(
+      "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE은 Kronos와 분리된 token 절대 경로여야 합니다.",
+    );
+  }
+
+  return {
+    kronos,
+    ...(fincast ? { fincast } : {}),
+    sequentialDeadlineMs: readBoundedInteger(
+      "AI_CRYPTO_SEQUENTIAL_DEADLINE_MS",
+      240_000,
+      1_000,
+      7_200_000,
+    ),
+    circuitBreaker: {
+      failureThreshold: readBoundedInteger(
+        "AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+        3,
+        1,
+        100,
+      ),
+      cooldownMs: readBoundedInteger(
+        "AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS",
+        60_000,
+        1_000,
+        3_600_000,
+      ),
+    },
+  };
 }
 
 function readMcpConfig({
@@ -736,7 +914,11 @@ function readScalpingConfig(): ScalpingConfig {
   const minimumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MIN", 5, 1, 50);
   let maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
   const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
-  const aiUrl = readAiComputeUrl(allowInsecurePrivateWs);
+  const aiUrl = readAiComputeUrl(
+    optional("AI_COMPUTE_URL") || "ws://ai-worker:8765/ws/scalping-ai/v1",
+    "AI_COMPUTE_URL",
+    allowInsecurePrivateWs,
+  );
   const authTokenFile = optional("AI_COMPUTE_AUTH_TOKEN_FILE") || "/run/ai-auth/token";
   if (!authTokenFile.startsWith("/")) throw new Error("AI_COMPUTE_AUTH_TOKEN_FILE은 절대 경로여야 합니다.");
   const reconnectBaseMs = readBoundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 250, 1, 60_000);
@@ -1231,5 +1413,6 @@ export function loadConfig(): AppConfig {
     mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
     kisExchangeRate: readKisExchangeRateConfig(),
     scalping: readScalpingConfig(),
+    cryptoAi: readCryptoAiConfig(),
   };
 }

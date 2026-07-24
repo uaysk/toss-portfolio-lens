@@ -54,6 +54,24 @@ import { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
 import { AiTradingSimulationService } from "./simulation/simulation-service.js";
 import { createSimulationRouter } from "./simulation/router.js";
+import {
+  normalizeBinanceUniverse,
+  OfficialBinanceUsdmPublicStreams,
+  OfficialBinanceUsdmRestMarketData,
+} from "./crypto/binance-market-data.js";
+import { BinanceUsdmScanner } from "./crypto/binance-scanner.js";
+import {
+  BinanceSignedReadProbe,
+  loadBinanceServerCredentials,
+} from "./crypto/binance-credentials.js";
+import { BinanceMaintenanceMarginProvider } from "./crypto/binance-maintenance-margin.js";
+import {
+  CryptoSimulationCoordinator,
+  SimulationServiceMultiplexer,
+} from "./crypto/crypto-simulation-service.js";
+import { CryptoPaperRuntime } from "./crypto/crypto-paper-runtime.js";
+import { createConfiguredFuturesExecution } from "./crypto/execution.js";
+import { cryptoWorkerPublicState } from "./crypto/worker-public-state.js";
 import { krIntegratedSessionWindows } from "./scalping/market-session.js";
 import { buildInfo } from "./build-info.js";
 import { GracefulLifecycle, ShutdownGate, SseConnectionTracker } from "./lifecycle.js";
@@ -216,6 +234,94 @@ const technicalStrategyService = new TechnicalStrategyService(
   rustCompute,
 );
 const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
+const binanceCredentialLoad = loadBinanceServerCredentials({
+  BINANCE_API_KEY: process.env.BINANCE_API_KEY,
+  BINANCE_SECRET_KEY: process.env.BINANCE_SECRET_KEY,
+  BINANCE_API_KEY_FILE: process.env.BINANCE_API_KEY_FILE,
+  BINANCE_SECRET_KEY_FILE: process.env.BINANCE_SECRET_KEY_FILE,
+});
+const binanceSignedRead = await new BinanceSignedReadProbe({
+  credentials: binanceCredentialLoad.credentials,
+  environment: "live",
+}).probe();
+const binanceMaintenanceMargin = new BinanceMaintenanceMarginProvider({
+  credentials: binanceCredentialLoad.credentials,
+  environment: "live",
+});
+const binanceMarketData = new OfficialBinanceUsdmRestMarketData();
+const cryptoKronosClient = new AiComputeClient(config.cryptoAi.kronos);
+const cryptoFincastClient = config.cryptoAi.fincast
+  ? new AiComputeClient(config.cryptoAi.fincast)
+  : undefined;
+cryptoKronosClient.start();
+cryptoFincastClient?.start();
+const cryptoRuntimeSnapshots = new Map<string, unknown>();
+let binanceRulesCache:
+  | { loadedAt: number; rules: ReturnType<typeof normalizeBinanceUniverse> }
+  | undefined;
+const resolveBinanceRules = async (
+  symbol: string,
+  requiredMaximumNotional: number,
+  forceRefresh = false,
+) => {
+  const now = Date.now();
+  if (!binanceRulesCache || now - binanceRulesCache.loadedAt > 60 * 60_000) {
+    binanceRulesCache = {
+      loadedAt: now,
+      rules: normalizeBinanceUniverse(await binanceMarketData.exchangeInformation(), now),
+    };
+  }
+  const publicRules = binanceRulesCache.rules.find(
+    (candidate) => candidate.symbol === symbol,
+  );
+  if (!publicRules) throw new Error("Selected Binance instrument rules are unavailable.");
+  // Every run obtains fresh account-applicable brackets before it may open a
+  // position. The provider retains only a strict credential-free projection.
+  return (await binanceMaintenanceMargin.resolveInstrumentRules(
+    publicRules,
+    requiredMaximumNotional,
+    { forceRefresh },
+  )).rules;
+};
+const cryptoPaperRuntime = new CryptoPaperRuntime({
+  rest: binanceMarketData,
+  streams: new OfficialBinanceUsdmPublicStreams(),
+  laneClients: {
+    kronos_base: cryptoKronosClient,
+    ...(cryptoFincastClient ? { fincast: cryptoFincastClient } : {}),
+  },
+  instrumentRules: resolveBinanceRules,
+  contextBars: 512,
+  inferenceDeadlineMs: config.cryptoAi.sequentialDeadlineMs,
+  circuitBreaker: config.cryptoAi.circuitBreaker,
+  onSnapshot: (runId, snapshot) => {
+    cryptoRuntimeSnapshots.set(runId, snapshot);
+  },
+});
+const cryptoSimulationService = new CryptoSimulationCoordinator({
+  scanner: new BinanceUsdmScanner({
+    rest: binanceMarketData,
+  }),
+  execution: createConfiguredFuturesExecution(),
+  runService,
+  repository: runRepository,
+  artifacts: artifactService,
+  runtime: cryptoPaperRuntime,
+  runtimeSnapshots: cryptoRuntimeSnapshots,
+  maximumActiveSessions: config.scalping.simulation.maximumActiveSessions,
+  credentials: {
+    configured: binanceSignedRead.configured,
+    signedReadSucceeded: binanceSignedRead.signedReadSucceeded,
+  },
+  maintenanceMarginState: () => binanceMaintenanceMargin.status(),
+  prepareRiskData: async (symbol, requiredMaximumNotional) => {
+    await resolveBinanceRules(symbol, requiredMaximumNotional, true);
+  },
+  workerState: () => ({
+    kronos_base: cryptoWorkerPublicState(cryptoKronosClient.snapshot()),
+    fincast: cryptoWorkerPublicState(cryptoFincastClient?.snapshot()),
+  }),
+});
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
 let scalpingService: ScalpingService | undefined;
 let marketDataRecorder: MarketDataRecorder | undefined;
@@ -403,9 +509,11 @@ const scalpingRouter = createScalpingRouter({
 });
 const simulationRouter = createSimulationRouter({
   authenticate: requireSession,
-  service: simulationService,
+  service: new SimulationServiceMultiplexer(cryptoSimulationService, simulationService),
   config: {
-    enabled: Boolean(simulationService),
+    // Public Binance scanning is independent of the stock scalping/KIS stack.
+    // The deployed execution adapter remains paper-only and never sends orders.
+    enabled: true,
     maxDurationMinutes: config.scalping.simulation.maximumDurationMinutes,
     ownerSubject: "owner",
   },
@@ -422,7 +530,7 @@ const healthRouter = createHealthRouter({
   executionMode: config.compute.executionMode,
   rustSocketPath: config.compute.rustSocketPath,
   eventLoopLagSnapshot: () => eventLoopLag.snapshot(),
-  simulationEnabled: Boolean(simulationService),
+  simulationEnabled: true,
 });
 const portfolioRouter = createPortfolioRouter({
   authenticate: requireSession,
@@ -559,12 +667,17 @@ const lifecycle = new GracefulLifecycle({
     return Promise.all([
       shutdownStep("run service", () => runService.close(signal)),
       shutdownStep("simulation", () => simulationService?.close(signal)),
+      shutdownStep("crypto simulation", () => cryptoSimulationService.close(signal)),
       shutdownStep("scalping runtime", async () => {
         await marketDataRecorder?.close();
         scalpingLiveRuntime?.close();
         await scalpingLiveRuntime?.waitForIdle();
       }),
       shutdownStep("AI client", () => aiComputeClient?.close()),
+      shutdownStep("crypto AI clients", () => {
+        cryptoKronosClient.close();
+        cryptoFincastClient?.close();
+      }),
       shutdownStep("Rust client", () => rustCompute?.close()),
       shutdownStep("MCP transport", () => mcpHttpRuntime?.close()),
       shutdownStep("MCP OAuth cleanup tail", async () => {

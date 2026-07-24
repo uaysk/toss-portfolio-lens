@@ -6,6 +6,7 @@ const mysqlCaPath = "/tmp/toss-portfolio-lens-env-test-ca.pem";
 const postgresCaPath = "/tmp/toss-portfolio-lens-env-test-postgres-ca.pem";
 const mcpClientSecretPath = "/tmp/toss-portfolio-lens-env-test-mcp-client";
 const mcpSigningKeyPath = "/tmp/toss-portfolio-lens-env-test-mcp-key";
+const aiCaPath = "/tmp/toss-portfolio-lens-env-test-ai-ca.pem";
 
 describe("database environment configuration", () => {
   const originalEnvironment = { ...process.env };
@@ -24,6 +25,7 @@ describe("database environment configuration", () => {
     rmSync(postgresCaPath, { force: true });
     rmSync(mcpClientSecretPath, { force: true });
     rmSync(mcpSigningKeyPath, { force: true });
+    rmSync(aiCaPath, { force: true });
     process.env = { ...originalEnvironment };
     vi.restoreAllMocks();
   });
@@ -72,6 +74,24 @@ describe("database environment configuration", () => {
         selectionRetryDelayMs: 15_000,
       },
       recorder: { enabled: false },
+    });
+    expect(config.cryptoAi).toEqual({
+      kronos: {
+        url: "ws://ai-worker:8765/ws/scalping-ai/v1",
+        authTokenFile: "/run/ai-auth/token",
+        timeoutMs: 120_000,
+        connectTimeoutMs: 10_000,
+        reconnectBaseMs: 250,
+        reconnectMaxMs: 10_000,
+        maximumInFlight: 1,
+        maximumRequestBytes: 64 * 1024 * 1024,
+        maximumResponseBytes: 128 * 1024 * 1024,
+      },
+      sequentialDeadlineMs: 240_000,
+      circuitBreaker: {
+        failureThreshold: 3,
+        cooldownMs: 60_000,
+      },
     });
   });
 
@@ -297,6 +317,135 @@ describe("database environment configuration", () => {
     process.env.AI_COMPUTE_URL = "wss://gpu.example.test:8765/ws/scalping-ai/v1";
     process.env.AI_COMPUTE_AUTH_TOKEN_FILE = "relative/token";
     expect(() => loadConfig()).toThrow("절대 경로");
+  });
+
+  it("암호화폐 AI lane은 Kronos legacy fallback과 독립 FinCast 설정을 검증한다", () => {
+    Object.assign(process.env, {
+      AI_COMPUTE_URL: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
+      AI_COMPUTE_AUTH_TOKEN_FILE: "/run/legacy-ai/token",
+      AI_COMPUTE_MAX_IN_FLIGHT: "1",
+      AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: "/run/fincast-ai/token",
+      AI_FINCAST_COMPUTE_MAX_IN_FLIGHT: "1",
+      AI_COMPUTE_TIMEOUT_MS: "90000",
+      AI_COMPUTE_CONNECT_TIMEOUT_MS: "9000",
+      AI_COMPUTE_RECONNECT_BASE_MS: "500",
+      AI_COMPUTE_RECONNECT_MAX_MS: "15000",
+      AI_MAX_REQUEST_BYTES: "33554432",
+      AI_MAX_RESPONSE_BYTES: "67108864",
+      AI_CRYPTO_SEQUENTIAL_DEADLINE_MS: "190000",
+      AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5",
+      AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS: "45000",
+    });
+
+    const cryptoAi = loadConfig().cryptoAi;
+    expect(cryptoAi).toEqual({
+      kronos: {
+        url: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
+        authTokenFile: "/run/legacy-ai/token",
+        timeoutMs: 90_000,
+        connectTimeoutMs: 9_000,
+        reconnectBaseMs: 500,
+        reconnectMaxMs: 15_000,
+        maximumInFlight: 1,
+        maximumRequestBytes: 33_554_432,
+        maximumResponseBytes: 67_108_864,
+      },
+      fincast: {
+        url: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
+        authTokenFile: "/run/fincast-ai/token",
+        timeoutMs: 90_000,
+        connectTimeoutMs: 9_000,
+        reconnectBaseMs: 500,
+        reconnectMaxMs: 15_000,
+        maximumInFlight: 1,
+        maximumRequestBytes: 33_554_432,
+        maximumResponseBytes: 67_108_864,
+      },
+      sequentialDeadlineMs: 190_000,
+      circuitBreaker: {
+        failureThreshold: 5,
+        cooldownMs: 45_000,
+      },
+    });
+
+    process.env.AI_KRONOS_COMPUTE_URL = "wss://kronos.example.test:18765/ws/scalping-ai/v1";
+    process.env.AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE = "/run/kronos-ai/token";
+    expect(loadConfig().cryptoAi.kronos).toMatchObject({
+      url: "wss://kronos.example.test:18765/ws/scalping-ai/v1",
+      authTokenFile: "/run/kronos-ai/token",
+    });
+
+    process.env.AI_FINCAST_COMPUTE_URL = "ws://fincast-worker:8766/ws/scalping-ai/v1";
+    expect(loadConfig().cryptoAi.fincast?.url).toBe(
+      "ws://fincast-worker:8766/ws/scalping-ai/v1",
+    );
+  });
+
+  it("암호화폐 AI lane은 URL, token, 직렬화 상한 오류를 해당 변수 이름으로 보고한다", () => {
+    process.env.AI_KRONOS_COMPUTE_URL = "http://kronos.example.test/ws/scalping-ai/v1";
+    expect(() => loadConfig()).toThrow("AI_KRONOS_COMPUTE_URL은 /ws/scalping-ai/v1");
+
+    process.env.AI_KRONOS_COMPUTE_URL = "ws://10.20.30.40:18765/ws/scalping-ai/v1";
+    expect(() => loadConfig()).toThrow("원격 AI_KRONOS_COMPUTE_URL은 wss://");
+    process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";
+    expect(loadConfig().cryptoAi.kronos.url).toBe(
+      "ws://10.20.30.40:18765/ws/scalping-ai/v1",
+    );
+
+    process.env.AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE = "relative/kronos-token";
+    expect(() => loadConfig()).toThrow("AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE은 절대 경로");
+    process.env.AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE = "/run/kronos/token";
+    process.env.AI_KRONOS_COMPUTE_MAX_IN_FLIGHT = "2";
+    expect(() => loadConfig()).toThrow("AI_KRONOS_COMPUTE_MAX_IN_FLIGHT은 GPU lane 직렬화를 위해 1");
+
+    delete process.env.AI_KRONOS_COMPUTE_MAX_IN_FLIGHT;
+    process.env.AI_COMPUTE_MAX_IN_FLIGHT = "4";
+    expect(() => loadConfig()).toThrow("AI_COMPUTE_MAX_IN_FLIGHT은 GPU lane 직렬화를 위해 1");
+    process.env.AI_COMPUTE_MAX_IN_FLIGHT = "1";
+
+    process.env.AI_FINCAST_COMPUTE_URL = "ws://10.20.30.41:18766/not-the-contract";
+    expect(() => loadConfig()).toThrow("AI_FINCAST_COMPUTE_URL은 /ws/scalping-ai/v1");
+    process.env.AI_FINCAST_COMPUTE_URL = "ws://10.20.30.41:18766/ws/scalping-ai/v1";
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "relative/fincast-token";
+    expect(() => loadConfig()).toThrow("AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE은 절대 경로");
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "/run/fincast/token";
+    process.env.AI_FINCAST_COMPUTE_MAX_IN_FLIGHT = "3";
+    expect(() => loadConfig()).toThrow("AI_FINCAST_COMPUTE_MAX_IN_FLIGHT은 GPU lane 직렬화를 위해 1");
+  });
+
+  it("암호화폐 AI lane은 공통 TLS CA와 독립 token 및 제어 한도를 강제한다", () => {
+    writeFileSync(aiCaPath, "test-ca\n", "utf8");
+    Object.assign(process.env, {
+      AI_KRONOS_COMPUTE_URL: "wss://kronos.example.test:18765/ws/scalping-ai/v1",
+      AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE: "/run/kronos/token",
+      AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:18766/ws/scalping-ai/v1",
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: "/run/fincast/token",
+      AI_COMPUTE_TLS_CA_FILE: aiCaPath,
+    });
+    expect(loadConfig().cryptoAi).toMatchObject({
+      kronos: { tlsCa: "test-ca\n" },
+      fincast: { tlsCa: "test-ca\n" },
+    });
+
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "/run/kronos/token";
+    expect(() => loadConfig()).toThrow("Kronos와 분리된 token 절대 경로");
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "/run/fincast/token";
+    process.env.AI_FINCAST_COMPUTE_URL = "ws://10.20.30.41:18766/ws/scalping-ai/v1";
+    process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";
+    expect(() => loadConfig()).toThrow(
+      "AI_COMPUTE_TLS_CA_FILE은 wss:// AI_FINCAST_COMPUTE_URL에서만",
+    );
+
+    process.env.AI_FINCAST_COMPUTE_URL = "wss://fincast.example.test:18766/ws/scalping-ai/v1";
+    process.env.AI_CRYPTO_SEQUENTIAL_DEADLINE_MS = "999";
+    expect(() => loadConfig()).toThrow("AI_CRYPTO_SEQUENTIAL_DEADLINE_MS");
+    process.env.AI_CRYPTO_SEQUENTIAL_DEADLINE_MS = "240000";
+    process.env.AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD = "0";
+    expect(() => loadConfig()).toThrow("AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD");
+    process.env.AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD = "3";
+    process.env.AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS = "999";
+    expect(() => loadConfig()).toThrow("AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS");
   });
 
   it("한국투자증권 환율 폴백 설정을 검증한다", () => {

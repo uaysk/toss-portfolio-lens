@@ -83,11 +83,153 @@ function kronosBaseForecastOutput(symbol, origin, basePrice) {
   };
 }
 
+function cryptoSnapshot({ phase, request, cancelled = false }) {
+  const active = phase !== "selecting" && !cancelled;
+  const bars = Array.from({ length: 24 }, (_, index) => {
+    const open = 67_000 + index * 18;
+    const close = open + (index % 3 === 0 ? -32 : 44);
+    return {
+      timestamp: new Date(Date.parse("2026-07-24T00:00:00.000Z") + index * 60_000).toISOString(),
+      open,
+      high: Math.max(open, close) + 25,
+      low: Math.min(open, close) - 25,
+      close,
+      volume: 180 + index * 2,
+      status: "final",
+      indicatorValues: {},
+    };
+  });
+  return {
+    phase,
+    startedAt: "2026-07-24T00:20:00.000Z",
+    expiresAt: "2026-07-24T02:20:00.000Z",
+    market: request.market,
+    currency: "USDT",
+    initialCash: request.initialCash,
+    cash: active ? request.initialCash - 670 : request.initialCash,
+    equity: cancelled ? request.initialCash + 12 : request.initialCash + 31.5,
+    progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
+    selection: request.selection,
+    criterion: request.selection.criterion,
+    preset: request.preset,
+    riskTolerance: request.riskTolerance,
+    selected: active ? [{
+      symbol: "BTCUSDT",
+      name: "Bitcoin perpetual",
+      score: 0.91,
+      upProbability: 0.68,
+      predictedMedianReturn: 0.004,
+      currentPrice: 67_418,
+      priceObservedAt: "2026-07-24T00:23:12.345Z",
+      model: { modelId: "NeoQuasar/Kronos-base", modelRevision: "ui-fixture", device: "cuda:0" },
+    }] : [],
+    positions: [],
+    futuresPositions: active ? [{
+      symbol: "BTCUSDT",
+      side: "long",
+      marginMode: "isolated",
+      quantity: 0.015,
+      leverage: 5,
+      entryPrice: 67_100,
+      markPrice: 67_418,
+      notional: 1_011.27,
+      initialMargin: 202.25,
+      maintenanceMargin: 5.1,
+      liquidationPrice: 54_190,
+      liquidationBufferRatio: 0.196,
+      protectiveStopPrice: 66_510,
+      realizedPnl: 0,
+      unrealizedPnl: 4.77,
+      funding: -0.12,
+      fees: 0.81,
+      slippage: 0.2,
+    }] : [],
+    futuresRisk: {
+      dailyLossRatio: -0.0012,
+      dailyLossLimitRatio: 0.03,
+      newEntriesBlocked: false,
+      grossExposureRatio: 0.101,
+      marginUsageRatio: 0.0202,
+      riskPerTradeRatio: 0.005,
+    },
+    charts: active ? [{
+      symbol: "BTCUSDT",
+      name: "Bitcoin perpetual",
+      currency: "USDT",
+      bars,
+      indicators: [],
+      patterns: [],
+      updatedAt: bars.at(-1).timestamp,
+    }] : [],
+    trades: active ? [{
+      symbol: "BTCUSDT",
+      side: "buy",
+      positionSide: "long",
+      reduceOnly: false,
+      executedAt: "2026-07-24T00:10:15.000Z",
+      signalEligibleAfter: "2026-07-24T00:10:00.000Z",
+      price: 67_100,
+      quantity: 0.015,
+      amount: 1_006.5,
+      cost: 0.6,
+      totalCosts: 0.6,
+      source: "next_valid_agg_trade",
+    }] : [],
+    decisions: active ? [{
+      symbol: "BTCUSDT",
+      action: "buy",
+      direction: "long",
+      decidedAt: "2026-07-24T00:10:00.000Z",
+      eligibleAfter: "2026-07-24T00:10:00.001Z",
+      reason: "quantile_cost_threshold · protected_liquidation_buffer",
+      score: 0.91,
+      upProbability: 0.68,
+      chartPatterns: [],
+      model: "NeoQuasar/Kronos-base · ui-fixture",
+    }] : [],
+    warnings: ["UI fixture · realOrder false"],
+    capabilities: { realOrder: false, nextValidFillOnly: true },
+    modelLanes: request.modelLanes,
+    executionMode: "paper",
+    modelComparison: {
+      comparisonId: "ui-crypto-comparison",
+      outcome: "inconclusive",
+      sameOrigin: true,
+      sameContext: true,
+      sameCosts: true,
+      sameFillBarrier: true,
+      symbol: "BTCUSDT",
+      lanes: request.modelLanes.map((id) => ({
+        id,
+        status: "completed",
+        precision: id === "fincast" ? "fp16" : "fp32",
+        metrics: {
+          pinballLoss: id === "fincast" ? 0.008 : 0.009,
+          medianReturnMae: 0.004,
+          directionAccuracy: 0.61,
+          quantileCoverage: 0.89,
+          netPnl: id === "fincast" ? 29.8 : 31.5,
+          profitFactor: 1.18,
+          winRate: 0.54,
+          maxDrawdown: 0.012,
+          turnover: 2.4,
+          latencyMs: id === "fincast" ? 112 : 86,
+          availabilityRatio: 1,
+          peakVramMb: id === "fincast" ? 4_920 : 3_860,
+        },
+      })),
+    },
+  };
+}
+
 function snapshot({
   phase,
   request,
   cancelled = false,
 }) {
+  if (request.market?.kind === "crypto_futures") {
+    return cryptoSnapshot({ phase, request, cancelled });
+  }
   const symbols = request.selection.mode === "manual"
     ? request.selection.symbols
     : Array.from(
@@ -320,6 +462,7 @@ export async function routeSimulationUiApi(page) {
     historyRequests: 0,
     reportRequests: 0,
     archivedRunId: archivedRuns[0].runId,
+    failNextCryptoStart: false,
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -360,6 +503,30 @@ export async function routeSimulationUiApi(page) {
             eventDrivenDecisions: true,
             pairStrategy: true,
             kronosRustEnsemble: true,
+            cryptoFutures: true,
+          },
+          cryptoFutures: {
+            credentialsConfigured: true,
+            signedReadSucceeded: true,
+            executionGates: { paper: true, testnet: false, live: false },
+            workers: {
+              kronos_base: {
+                lane: "kronos_base",
+                status: "ready",
+                available: true,
+                modelId: "NeoQuasar/Kronos-base",
+                precision: "fp32",
+                latencyMs: 86,
+              },
+              fincast: {
+                lane: "fincast",
+                status: "ready",
+                available: true,
+                modelId: "Vincent05R/FinCast",
+                precision: "fp16",
+                latencyMs: 112,
+              },
+            },
           },
           pairStrategy: {
             enabled: true,
@@ -425,6 +592,57 @@ export async function routeSimulationUiApi(page) {
             cadence: "event_driven_immediately_after_each_new_finalized_one_minute_bar",
           },
           limitations: ["가상 체결만 생성합니다."],
+        }),
+      });
+    }
+    if (url.pathname === "/api/portfolio/simulation/candidates" && request.method() === "GET") {
+      const criterion = url.searchParams.get("criterion") ?? "volatility";
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schemaVersion: "ai-paper-simulation/v7",
+          snapshotId: "crypto-ui-snapshot-001",
+          scannerSnapshotId: "crypto-ui-snapshot-001",
+          generatedAt: "2026-07-24T00:24:00.000Z",
+          expiresAt: "2026-07-24T00:25:00.000Z",
+          criterion,
+          evidence: [{ summary: "UI fixture · 공개 시장 데이터 schema" }],
+          candidates: [{
+            symbol: "BTCUSDT",
+            rank: 1,
+            price: 67_418,
+            volume: 24_120,
+            quoteVolume: 1_626_000_000,
+            relativeVolume: 1.42,
+            spreadBps: 0.8,
+            realizedVolatility60m: 0.018,
+            priceChangePercent24h: 0.034,
+            atrPercent14: 0.012,
+            volatilityScore: 0.91,
+            score: 0.91,
+            scoreComponents: { realizedVolatility60m: 0.5, priceChangePercent24h: 0.3, atrPercent14: 0.2 },
+            eligible: true,
+            dataQuality: {
+              status: "complete",
+              finalBars: 1024,
+              missingFields: [],
+              observedAt: "2026-07-24T00:24:00.000Z",
+            },
+          }, {
+            symbol: "ETHUSDT",
+            rank: 2,
+            price: 3_470,
+            quoteVolume: 812_000_000,
+            spreadBps: 1.1,
+            realizedVolatility60m: 0.016,
+            priceChangePercent24h: 0.029,
+            atrPercent14: 0.011,
+            score: 0.84,
+            scoreComponents: {},
+            eligible: true,
+            dataQuality: { status: "complete", finalBars: 1024, missingFields: [] },
+          }],
         }),
       });
     }
@@ -519,6 +737,19 @@ export async function routeSimulationUiApi(page) {
     }
     if (url.pathname === "/api/portfolio/simulation/runs" && request.method() === "POST") {
       const body = request.postDataJSON();
+      if (state.failNextCryptoStart && body.market?.kind === "crypto_futures") {
+        state.failNextCryptoStart = false;
+        return route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: {
+              code: "fixture-risk-bracket-unavailable",
+              message: "fixture risk bracket unavailable",
+            },
+          }),
+        });
+      }
       const runId = `00000000-0000-4000-8000-${String(state.starts.length + 1).padStart(12, "0")}`;
       state.starts.push(body);
       state.active.set(runId, { body, cancelled: false });
@@ -1086,6 +1317,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   });
   const results = [
     await verify(browser, baseUrl, { width: 1440, height: 1000 }, "dark"),
+    await verify(browser, baseUrl, { width: 1920, height: 1080 }, "dark"),
     await verify(browser, baseUrl, { width: 390, height: 844 }, "light"),
   ];
   console.info(JSON.stringify({ ok: true, results }, null, 2));

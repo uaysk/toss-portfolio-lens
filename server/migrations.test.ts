@@ -6,6 +6,7 @@ import {
   ensureMarketCandleVolumeColumn,
   ensureScalpingMarketCountry,
   listAppliedMigrations,
+  widenScalpingMarketCountryForCrypto,
 } from "./migrations.js";
 import { RunRepository } from "./repositories/run-repository.js";
 
@@ -38,6 +39,36 @@ describe("versioned portfolio migrations", () => {
 
     expect(run).toHaveBeenCalledWith(
       `ALTER TABLE portfolio_market_candles ADD COLUMN volume ${columnType}`,
+    );
+  });
+
+  it("widens MySQL market_country in place and adds provider/venue indexes", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 0, insertId: 0 });
+    const query = vi.fn(async (sql: string, parameters: unknown[] = []) => {
+      if (sql.includes("information_schema.tables")) {
+        return [{ table_name: parameters[0] }];
+      }
+      if (sql.includes("information_schema.statistics")) return [];
+      return [];
+    });
+    const mysql = {
+      dialect: "mysql" as const,
+      query,
+      run,
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    await widenScalpingMarketCountryForCrypto(mysql);
+    const statements = run.mock.calls.map(([sql]) => String(sql));
+    expect(statements).toContain(
+      "ALTER TABLE portfolio_intraday_bars MODIFY COLUMN market_country VARCHAR(32) NOT NULL DEFAULT 'KR'",
+    );
+    expect(statements).toContain(
+      "ALTER TABLE portfolio_scalping_trades MODIFY COLUMN market_country VARCHAR(32) NOT NULL",
+    );
+    expect(statements).not.toContain(expect.stringMatching(/DROP PRIMARY KEY/));
+    expect(statements).toContain(
+      "CREATE INDEX idx_portfolio_scalping_trade_provider_venue ON portfolio_scalping_trades(market_country, provider, venue, symbol, executed_at)",
     );
   });
 
@@ -318,8 +349,9 @@ describe("versioned portfolio migrations", () => {
       "20260721_007_scalping_volume_availability",
       "20260721_008_scalping_market_country",
       "20260724_009_scalping_raw_market_data",
+      "20260725_010_binance_usdm_market",
     ]);
-    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(9);
+    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(10);
     const marketCandleColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_market_candles)");
     expect(marketCandleColumns.map((column) => column.name)).toContain("volume");
     const scalpingTables = await database.query<{ name: string }>(`
@@ -410,9 +442,11 @@ describe("versioned portfolio migrations", () => {
       ORDER BY name ASC
     `);
     expect(rawIndexes.map((index) => index.name)).toEqual([
+      "idx_portfolio_scalping_orderbook_provider_venue",
       "idx_portfolio_scalping_orderbook_session",
       "idx_portfolio_scalping_recording_symbol_time",
       "idx_portfolio_scalping_recording_time_type",
+      "idx_portfolio_scalping_trade_provider_venue",
       "idx_portfolio_scalping_trade_session",
     ]);
 

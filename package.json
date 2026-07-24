@@ -42,6 +42,7 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1088.0",
     "@aws-sdk/client-s3": "^3.1087.0",
+    "@binance/derivatives-trading-usds-futures": "36.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@radix-ui/react-select": "2.2.5",
     "@radix-ui/react-slot": "1.2.3",

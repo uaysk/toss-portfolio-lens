@@ -197,6 +197,17 @@ export class AiComputeClient {
     };
   }
 
+  start(): void {
+    if (this.closed) {
+      throw new AiComputeTransportError(
+        "AI compute client가 종료되었습니다.",
+        "CLIENT_CLOSED",
+        false,
+      );
+    }
+    this.ensureConnection();
+  }
+
   request(input: AiRequest, signal?: AbortSignal): Promise<AiResponse> {
     const request = AiRequestSchema.parse(input);
     const source = Buffer.from(JSON.stringify(request), "utf8");

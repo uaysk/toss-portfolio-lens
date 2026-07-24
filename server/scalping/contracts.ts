@@ -2,13 +2,16 @@ import { z } from "zod";
 
 export const SCALPING_CONTRACT_VERSION = "scalping-market/v1" as const;
 
-export const MarketProviderSchema = z.enum(["toss", "kis", "derived"]);
+export const MarketProviderSchema = z.enum(["toss", "kis", "derived", "binance"]);
 export type MarketProvider = z.infer<typeof MarketProviderSchema>;
 
 export const MarketCountrySchema = z.enum(["KR", "US"]);
 export type MarketCountry = z.infer<typeof MarketCountrySchema>;
 
-export const MarketVenueSchema = z.enum(["KRX", "NXT", "INTEGRATED", "US"]);
+export const MarketStorageKeySchema = z.enum(["KR", "US", "BINANCE_USDM"]);
+export type MarketStorageKey = z.infer<typeof MarketStorageKeySchema>;
+
+export const MarketVenueSchema = z.enum(["KRX", "NXT", "INTEGRATED", "US", "BINANCE_USDM"]);
 export type MarketVenue = z.infer<typeof MarketVenueSchema>;
 
 export const UsExchangeSchema = z.enum(["NAS", "NYS", "AMS"]);

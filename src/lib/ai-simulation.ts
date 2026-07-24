@@ -3,6 +3,51 @@ import {
   selectLatestKronosForecasts,
   type AiSimulationKronosForecast,
 } from "./ai-simulation-forecast";
+import {
+  AI_SIMULATION_MODEL_LANES,
+  normalizeAiSimulationCryptoStatus,
+  normalizeAiSimulationFuturesPositions,
+  normalizeAiSimulationFuturesRisk,
+  normalizeAiSimulationMarket,
+  normalizeAiSimulationModelComparison,
+  type AiSimulationCryptoStatus,
+  type AiSimulationExecutionMode,
+  type AiSimulationFuturesPosition,
+  type AiSimulationFuturesRisk,
+  type AiSimulationMarket,
+  type AiSimulationModelComparison,
+  type AiSimulationModelLane,
+} from "./ai-simulation-crypto";
+
+export {
+  AI_SIMULATION_CRYPTO_FUTURES_MARKET,
+  AI_SIMULATION_EXECUTION_MODES,
+  AI_SIMULATION_MODEL_LANES,
+  DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+  normalizeAiSimulationCandidates,
+  normalizeAiSimulationCryptoStatus,
+  normalizeAiSimulationFuturesPositions,
+  normalizeAiSimulationFuturesRisk,
+  normalizeAiSimulationMarket,
+  normalizeAiSimulationModelComparison,
+  validateAiSimulationCryptoRequest,
+} from "./ai-simulation-crypto";
+export type {
+  AiSimulationCandidateQuality,
+  AiSimulationCandidateSnapshot,
+  AiSimulationCryptoCandidate,
+  AiSimulationCryptoRequest,
+  AiSimulationCryptoStatus,
+  AiSimulationExecutionMode,
+  AiSimulationFuturesPosition,
+  AiSimulationFuturesRisk,
+  AiSimulationMarket,
+  AiSimulationModelComparison,
+  AiSimulationModelComparisonLane,
+  AiSimulationModelLane,
+  AiSimulationModelMetrics,
+  AiSimulationWorkerStatus,
+} from "./ai-simulation-crypto";
 
 export const AI_SIMULATION_MARKETS = ["KR", "US"] as const;
 export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
@@ -24,6 +69,7 @@ export type AiSimulationPreset = (typeof AI_SIMULATION_PRESETS)[number];
 export type AiSimulationSelectionMode = (typeof AI_SIMULATION_SELECTION_MODES)[number];
 export type AiSimulationPairId = (typeof AI_SIMULATION_PAIR_IDS)[number];
 export type AiSimulationComparisonLaneId = (typeof AI_SIMULATION_COMPARISON_LANES)[number];
+export type AiSimulationCurrency = "KRW" | "USD" | "USDT";
 
 export type AiSimulationPairCatalogItem = {
   id: AiSimulationPairId;
@@ -163,6 +209,7 @@ export type AiSimulationStatus = {
     catalog: AiSimulationPairCatalogItem[];
   };
   costProfiles?: Partial<Record<AiSimulationMarketCountry, AiSimulationCostProfile>>;
+  cryptoFutures?: AiSimulationCryptoStatus;
 };
 
 export type AiSimulationSelection = {
@@ -193,6 +240,10 @@ export type AiSimulationTrade = {
   amount: number;
   cost: number;
   source?: string;
+  positionSide?: "long" | "short";
+  reduceOnly?: boolean;
+  funding?: number;
+  realizedPnl?: number;
 };
 
 export type AiSimulationDecision = {
@@ -294,7 +345,7 @@ export type AiSimulationChartPattern = {
 export type AiSimulationChartView = {
   symbol: string;
   name?: string;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   bars: AiSimulationChartBar[];
   indicators: AiSimulationChartIndicator[];
   patterns: AiSimulationChartPattern[];
@@ -315,8 +366,9 @@ export type AiSimulationSnapshot = {
   phase: string;
   startedAt?: string;
   expiresAt?: string;
+  market?: AiSimulationMarket;
   marketCountry?: AiSimulationMarketCountry;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   initialCash: number;
   cash: number;
   equity: number;
@@ -346,6 +398,11 @@ export type AiSimulationSnapshot = {
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
   strategyComparison?: AiSimulationStrategyComparison;
+  futuresPositions?: AiSimulationFuturesPosition[];
+  futuresRisk?: AiSimulationFuturesRisk;
+  modelLanes?: AiSimulationModelLane[];
+  executionMode?: AiSimulationExecutionMode;
+  modelComparison?: AiSimulationModelComparison;
 };
 
 export type AiSimulationRunResponse = {
@@ -360,8 +417,9 @@ export type AiSimulationHistoryItem = {
   status: string;
   startedAt?: string;
   finishedAt?: string;
+  market?: AiSimulationMarket;
   marketCountry?: AiSimulationMarketCountry;
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   preset?: AiSimulationPreset;
   riskTolerance?: number;
   selection?: AiSimulationSelectionRequest;
@@ -377,6 +435,7 @@ export type AiSimulationHistoryItem = {
   model?: string;
   warnings: string[];
   strategyComparison?: AiSimulationStrategyComparison;
+  modelComparison?: AiSimulationModelComparison;
 };
 
 export type AiSimulationHistoryPage = {
@@ -385,6 +444,7 @@ export type AiSimulationHistoryPage = {
 };
 
 export type AiSimulationReportConfiguration = {
+  market?: AiSimulationMarket;
   marketCountry?: AiSimulationMarketCountry;
   initialCash?: number;
   durationMinutes?: number;
@@ -393,10 +453,12 @@ export type AiSimulationReportConfiguration = {
   selection?: AiSimulationSelectionRequest;
   strategy?: AiSimulationStrategyRequest;
   costs?: Partial<AiSimulationCosts>;
+  modelLanes?: AiSimulationModelLane[];
+  executionMode?: AiSimulationExecutionMode;
 };
 
 export type AiSimulationReportPerformance = {
-  currency: "KRW" | "USD";
+  currency: AiSimulationCurrency;
   initialCash?: number;
   finalEquity?: number;
   cash?: number;
@@ -466,6 +528,9 @@ export type AiSimulationRunReport = {
   warnings: string[];
   limits: string[];
   strategyComparison?: AiSimulationStrategyComparison;
+  futuresPositions?: AiSimulationFuturesPosition[];
+  futuresRisk?: AiSimulationFuturesRisk;
+  modelComparison?: AiSimulationModelComparison;
 };
 
 export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
@@ -805,6 +870,25 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
     );
     return profile ? [[market, profile] as const] : [];
   })) as Partial<Record<AiSimulationMarketCountry, AiSimulationCostProfile>>;
+  const cryptoStatusValue = first(
+    source,
+    "cryptoFutures",
+    "crypto_futures",
+    "binance",
+    "crypto",
+  );
+  const hasCryptoStatus = cryptoStatusValue !== undefined
+    || [
+      "credentialsConfigured",
+      "credentials_configured",
+      "signedReadSucceeded",
+      "signed_read_succeeded",
+      "workers",
+      "modelWorkers",
+      "model_workers",
+    ].some((key) => source[key] !== undefined)
+    || capabilities.cryptoFutures === true
+    || capabilities.crypto_futures === true;
 
   return {
     enabled,
@@ -842,6 +926,9 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
     capabilities,
     limitations: stringList(first(source, "limitations", "warnings")),
     ...(Object.keys(costProfiles).length ? { costProfiles } : {}),
+    ...(hasCryptoStatus
+      ? { cryptoFutures: normalizeAiSimulationCryptoStatus(source) }
+      : {}),
     ...(hasPairStrategy ? {
       pairStrategy: {
         enabled: pairEnabled ?? false,
@@ -946,6 +1033,12 @@ function normalizeTrade(value: unknown): AiSimulationTrade | undefined {
     amount,
     cost,
     source: textValue(item.source),
+    positionSide: (
+      ["long", "short"] as const
+    ).find((candidate) => candidate === textValue(first(item, "positionSide", "position_side", "direction"))?.toLowerCase()),
+    reduceOnly: booleanValue(first(item, "reduceOnly", "reduce_only")),
+    funding: finiteNumber(first(item, "funding", "fundingCost", "funding_cost")),
+    realizedPnl: finiteNumber(first(item, "realizedPnl", "realized_pnl")),
   };
 }
 
@@ -1088,7 +1181,7 @@ function normalizeChartView(value: unknown): AiSimulationChartView | undefined {
   return {
     symbol,
     name: textValue(item.name),
-    currency: item.currency === "USD" ? "USD" : "KRW",
+    currency: item.currency === "USDT" ? "USDT" : item.currency === "USD" ? "USD" : "KRW",
     bars: mapValid(item.bars, normalizeChartBar),
     indicators: mapValid(item.indicators, normalizeChartIndicator),
     patterns: mapValid(item.patterns, normalizeChartPattern),
@@ -1322,7 +1415,8 @@ function normalizedCadence(value: unknown): AiSimulationSnapshot["decisionCadenc
 export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSnapshot {
   const outer = asRecord(payload);
   const source = Object.keys(asRecord(outer.snapshot)).length ? asRecord(outer.snapshot) : outer;
-  const market = textValue(first(source, "marketCountry", "market_country"));
+  const legacyMarket = textValue(first(source, "marketCountry", "market_country"));
+  const market = normalizeAiSimulationMarket(source.market, legacyMarket);
   const currency = textValue(source.currency);
   const rawProgress = finiteNumber(source.progress) ?? 0;
   const rawPreset = textValue(source.preset);
@@ -1336,13 +1430,51 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
   ) ?? first(outer, "strategyComparison", "strategy_comparison"));
   const cadence = asRecord(first(source, "decisionCadence", "decision_cadence"));
   const profile = asRecord(first(source, "policyProfile", "policy_profile"));
+  const modelLanes = stringList(first(source, "modelLanes", "model_lanes"))
+    .map((lane) => lane.toLowerCase().replaceAll("-", "_"))
+    .filter((lane): lane is AiSimulationModelLane => (
+      AI_SIMULATION_MODEL_LANES.includes(lane as AiSimulationModelLane)
+    ))
+    .filter((lane, index, all) => all.indexOf(lane) === index);
+  const execution = asRecord(source.execution);
+  const executionModeValue = textValue(first(
+    execution,
+    "mode",
+    "executionMode",
+    "execution_mode",
+  )) ?? textValue(first(source, "executionMode", "execution_mode"));
+  const executionMode = (
+    ["paper", "testnet", "live"] as const
+  ).find((candidate) => candidate === executionModeValue);
+  const futuresPositions = market?.kind === "crypto_futures"
+    ? normalizeAiSimulationFuturesPositions(
+        first(source, "futuresPositions", "futures_positions") ?? source.positions,
+      )
+    : [];
+  const futuresRisk = normalizeAiSimulationFuturesRisk(first(
+    source,
+    "futuresRisk",
+    "futures_risk",
+    "riskState",
+    "risk_state",
+  ));
+  const modelComparison = normalizeAiSimulationModelComparison(first(
+    source,
+    "modelComparison",
+    "model_comparison",
+  ) ?? first(outer, "modelComparison", "model_comparison"));
 
   return {
     phase: textValue(source.phase) ?? "queued",
     startedAt: textValue(first(source, "startedAt", "started_at")),
     expiresAt: textValue(first(source, "expiresAt", "expires_at")),
-    marketCountry: market === "KR" || market === "US" ? market : undefined,
-    currency: currency === "USD" ? "USD" : "KRW",
+    market,
+    marketCountry: market?.kind === "stock" ? market.country : undefined,
+    currency: market?.kind === "crypto_futures" || currency === "USDT"
+      ? "USDT"
+      : currency === "USD"
+        ? "USD"
+        : "KRW",
     initialCash: finiteNumber(first(source, "initialCash", "initial_cash")) ?? 0,
     cash: finiteNumber(source.cash) ?? 0,
     equity: finiteNumber(source.equity) ?? 0,
@@ -1383,6 +1515,11 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     warnings: stringList(source.warnings),
     capabilities: capabilityRecord(source.capabilities),
     ...(strategyComparison ? { strategyComparison } : {}),
+    futuresPositions,
+    ...(futuresRisk ? { futuresRisk } : {}),
+    modelLanes,
+    ...(executionMode ? { executionMode } : {}),
+    ...(modelComparison ? { modelComparison } : {}),
   };
 }
 
@@ -1448,6 +1585,10 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     "marketCountry",
     "market_country",
   )) ?? textValue(first(item, "marketCountry", "market_country"));
+  const normalizedMarket = normalizeAiSimulationMarket(
+    first(configuration, "market") ?? item.market,
+    market,
+  );
   const preset = textValue(configuration.preset) ?? textValue(item.preset);
   const selection = normalizeSelectionRequest(configuration.selection)
     ?? normalizeSelectionRequest(first(selectionBlock, "request", "configuration"))
@@ -1459,6 +1600,11 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     "strategyComparison",
     "strategy_comparison",
   ) ?? first(performance, "strategyComparison", "strategy_comparison"));
+  const modelComparison = normalizeAiSimulationModelComparison(first(
+    item,
+    "modelComparison",
+    "model_comparison",
+  ) ?? first(performance, "modelComparison", "model_comparison"));
   const selected = mapValid(
     first(item, "selected", "symbols")
       ?? first(selectionBlock, "selected", "symbols", "instruments"),
@@ -1513,8 +1659,14 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
       "endedAt",
       "ended_at",
     )),
-    marketCountry: market === "KR" || market === "US" ? market : undefined,
-    currency: first(performance, "currency") === "USD"
+    market: normalizedMarket,
+    marketCountry: normalizedMarket?.kind === "stock" ? normalizedMarket.country : undefined,
+    currency: first(performance, "currency") === "USDT"
+      || configuration.currency === "USDT"
+      || item.currency === "USDT"
+      || normalizedMarket?.kind === "crypto_futures"
+      ? "USDT"
+      : first(performance, "currency") === "USD"
       || configuration.currency === "USD"
       || item.currency === "USD"
       || market === "US"
@@ -1545,6 +1697,7 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     model,
     warnings: stringList(first(item, "warnings", "limitations")),
     ...(strategyComparison ? { strategyComparison } : {}),
+    ...(modelComparison ? { modelComparison } : {}),
   };
 }
 
@@ -1852,6 +2005,10 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
   if (!runId) return undefined;
   const market = textValue(first(configuration, "marketCountry", "market_country"))
     ?? snapshot?.marketCountry;
+  const normalizedMarket = normalizeAiSimulationMarket(
+    configuration.market ?? snapshot?.market,
+    market,
+  );
   const preset = textValue(configuration.preset) ?? snapshot?.preset;
   const selected = mapValid(
     first(report, "selected", "symbols")
@@ -1883,7 +2040,12 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     "returnRate",
     "return_rate",
   ));
-  const currency = first(performance, "currency") === "USD"
+  const currency = first(performance, "currency") === "USDT"
+    || configuration.currency === "USDT"
+    || snapshot?.currency === "USDT"
+    || normalizedMarket?.kind === "crypto_futures"
+    ? "USDT"
+    : first(performance, "currency") === "USD"
     || configuration.currency === "USD"
     || snapshot?.currency === "USD"
     || market === "US"
@@ -1921,6 +2083,40 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       ?? first(performance, "strategyComparison", "strategy_comparison")
       ?? first(root, "strategyComparison", "strategy_comparison"),
   ) ?? snapshot?.strategyComparison;
+  const modelComparison = normalizeAiSimulationModelComparison(
+    first(report, "modelComparison", "model_comparison")
+      ?? first(performance, "modelComparison", "model_comparison")
+      ?? first(root, "modelComparison", "model_comparison"),
+  ) ?? snapshot?.modelComparison;
+  const rawModelLanes = stringList(first(configuration, "modelLanes", "model_lanes"))
+    .map((lane) => lane.toLowerCase().replaceAll("-", "_"))
+    .filter((lane): lane is AiSimulationModelLane => (
+      AI_SIMULATION_MODEL_LANES.includes(lane as AiSimulationModelLane)
+    ));
+  const executionConfiguration = asRecord(configuration.execution);
+  const rawExecutionMode = textValue(first(
+    executionConfiguration,
+    "mode",
+    "executionMode",
+    "execution_mode",
+  )) ?? textValue(first(configuration, "executionMode", "execution_mode"));
+  const executionMode = (
+    ["paper", "testnet", "live"] as const
+  ).find((candidate) => candidate === rawExecutionMode) ?? snapshot?.executionMode;
+  const futuresPositions = normalizedMarket?.kind === "crypto_futures"
+    ? normalizeAiSimulationFuturesPositions(
+        first(report, "futuresPositions", "futures_positions")
+          ?? report.positions
+          ?? snapshot?.futuresPositions,
+      )
+    : [];
+  const futuresRisk = normalizeAiSimulationFuturesRisk(first(
+    report,
+    "futuresRisk",
+    "futures_risk",
+    "riskState",
+    "risk_state",
+  )) ?? snapshot?.futuresRisk;
 
   return {
     runId,
@@ -1938,7 +2134,8 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       ?? textValue(first(report, "finishedAt", "finished_at", "completedAt", "completed_at"))
       ?? snapshot?.expiresAt,
     configuration: {
-      marketCountry: market === "KR" || market === "US" ? market : undefined,
+      market: normalizedMarket,
+      marketCountry: normalizedMarket?.kind === "stock" ? normalizedMarket.country : undefined,
       initialCash,
       durationMinutes: finiteNumber(first(configuration, "durationMinutes", "duration_minutes")),
       preset: AI_SIMULATION_PRESETS.includes(preset as AiSimulationPreset)
@@ -1951,6 +2148,8 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
         ?? snapshot?.selection,
       ...(strategy ? { strategy } : {}),
       costs: finiteCosts(configuration.costs),
+      modelLanes: rawModelLanes.length ? rawModelLanes : snapshot?.modelLanes,
+      ...(executionMode ? { executionMode } : {}),
     },
     selected,
     performance: {
@@ -1990,6 +2189,9 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       .filter((item, index, all) => all.indexOf(item) === index),
     limits: normalizeReportLimits(first(report, "limits", "limitations")),
     ...(strategyComparison ? { strategyComparison } : {}),
+    futuresPositions,
+    ...(futuresRisk ? { futuresRisk } : {}),
+    ...(modelComparison ? { modelComparison } : {}),
   };
 }
 

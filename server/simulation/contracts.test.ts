@@ -8,8 +8,8 @@ import {
 describe("AI paper simulation contracts", () => {
   const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
 
-  it("publishes the Kronos-base, Rust, pair, and Toss cost contract as v6", () => {
-    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v6");
+  it("publishes the normalized stock and crypto contract as v7", () => {
+    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v7");
   });
 
   it("applies market, strategy, risk, scanner, and cost defaults", () => {
@@ -19,6 +19,7 @@ describe("AI paper simulation contracts", () => {
       selection: { mode: "auto", symbolCount: 1 },
     })).toEqual({
       marketCountry: "KR",
+      market: { kind: "stock", country: "KR" },
       initialCash: 1_000_000,
       durationMinutes: 60,
       selection: {
@@ -29,7 +30,56 @@ describe("AI paper simulation contracts", () => {
       preset: "risk_management",
       riskTolerance: 50,
       costs: DEFAULT_SIMULATION_COSTS,
+      modelLanes: ["kronos_base"],
+      execution: { mode: "paper" },
     });
+  });
+
+  it("normalizes Binance USDT perpetual requests and keeps legacy stock state off the wire", () => {
+    const parsed = schema.parse({
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
+      modelLanes: ["kronos_base", "fincast"],
+      execution: { mode: "paper" },
+    });
+    expect(parsed.market.kind).toBe("crypto_futures");
+    expect(parsed.costs).toEqual({
+      commissionBpsPerSide: 4,
+      taxBpsOnExit: 0,
+      spreadBpsRoundTrip: 2,
+      slippageBpsPerSide: 1,
+    });
+    expect(JSON.parse(JSON.stringify(parsed))).not.toHaveProperty("marketCountry");
+    expect(() => schema.parse({
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
+    })).toThrow();
+    expect(() => schema.parse({
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
+      execution: { mode: "live" },
+    })).toThrow();
   });
 
   it("accepts both markets, every scanner criterion, one or two auto symbols, and risk endpoints", () => {

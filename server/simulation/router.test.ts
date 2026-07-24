@@ -34,6 +34,11 @@ function routeHandler(
 function service(overrides: Partial<SimulationRouterService> = {}): SimulationRouterService {
   return {
     status: vi.fn().mockResolvedValue({ enabled: true, capabilities: { realOrder: false, mcp: false } }),
+    candidates: vi.fn().mockResolvedValue({
+      scannerSnapshotId: "a".repeat(64),
+      generatedAt: "2026-07-25T00:00:00.000Z",
+      candidates: [],
+    }),
     start: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "running" } }),
     current: vi.fn().mockResolvedValue({ run: { id: RUN_ID, status: "running" } }),
     list: vi.fn().mockResolvedValue({ items: [{ runId: RUN_ID, status: "running" }] }),
@@ -78,6 +83,7 @@ describe("AI paper simulation session-only router", () => {
       .filter(Boolean);
     expect(paths).toEqual([
       "/status",
+      "/candidates",
       "/runs",
       "/runs",
       "/runs/current",
@@ -124,6 +130,7 @@ describe("AI paper simulation session-only router", () => {
 
     expect(api.start).toHaveBeenCalledWith({
       marketCountry: "KR",
+      market: { kind: "stock", country: "KR" },
       initialCash: 1_000_000,
       durationMinutes: 30,
       selection: {
@@ -139,8 +146,24 @@ describe("AI paper simulation session-only router", () => {
         spreadBpsRoundTrip: 5,
         slippageBpsPerSide: 2,
       },
+      modelLanes: ["kronos_base"],
+      execution: { mode: "paper" },
     }, "owner");
     expect(response.status).toHaveBeenCalledWith(202);
+  });
+
+  it("returns a bounded crypto candidate snapshot using the requested criterion", async () => {
+    const api = service();
+    const created = router({ service: api });
+    const response = mockResponse();
+    await routeHandler(created.value, "/candidates", "get")({
+      query: { criterion: "volatility" },
+    }, response);
+    expect(api.candidates).toHaveBeenCalledWith({ criterion: "volatility" }, "owner");
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      scannerSnapshotId: "a".repeat(64),
+      candidates: [],
+    }));
   });
 
   it("returns 400 without starting when the strict request is invalid", async () => {

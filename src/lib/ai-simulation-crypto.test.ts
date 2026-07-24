@@ -1,0 +1,137 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+  normalizeAiSimulationCandidates,
+  normalizeAiSimulationCryptoStatus,
+  normalizeAiSimulationFuturesPositions,
+  normalizeAiSimulationMarket,
+  normalizeAiSimulationModelComparison,
+  validateAiSimulationCryptoRequest,
+} from "@/lib/ai-simulation";
+
+describe("ai simulation v7 crypto contract", () => {
+  it("normalizes legacy stocks and the Binance USD-M discriminated market", () => {
+    expect(normalizeAiSimulationMarket(undefined, "KR")).toEqual({ kind: "stock", country: "KR" });
+    expect(normalizeAiSimulationMarket({
+      kind: "crypto_futures",
+      venue: "BINANCE_USDM",
+      quoteAsset: "USDT",
+      contractType: "PERPETUAL",
+    })).toEqual({
+      kind: "crypto_futures",
+      venue: "BINANCE_USDM",
+      quoteAsset: "USDT",
+      contractType: "PERPETUAL",
+    });
+  });
+
+  it("accepts the exact Binance scanner contract without percent inflation", () => {
+    const result = normalizeAiSimulationCandidates({
+      snapshotId: "scanner-1",
+      criterion: "volatility",
+      evidence: [{ summary: "finalized bars only" }],
+      candidates: [{
+        symbol: "BTCUSDT",
+        price: 67_418,
+        quoteVolume: 1_626_000_000,
+        spreadBps: 0.8,
+        realizedVolatility60m: 0.018,
+        priceChangePercent24h: 5,
+        atrPercent14: 0.012,
+        volatilityScore: 0.91,
+        scoreComponents: { realizedVolatility60m: 0.5 },
+        eligible: true,
+        dataQuality: {
+          status: "complete",
+          finalBars: 1024,
+          missingFields: ["markPrice"],
+          observedAt: "2026-07-24T00:24:00.000Z",
+        },
+      }],
+    });
+    expect(result.snapshotId).toBe("scanner-1");
+    expect(result.warnings).toContain("finalized bars only");
+    expect(result.candidates[0]).toMatchObject({
+      symbol: "BTCUSDT",
+      currentPrice: 67_418,
+      tradingAmount: 1_626_000_000,
+      volatility24h: 0.05,
+      atrPercent: 0.012,
+      quality: {
+        status: "complete",
+        finalBars: 1024,
+        missing: ["markPrice"],
+      },
+    });
+  });
+
+  it("exposes only boolean/enum worker status and keeps live closed", () => {
+    expect(normalizeAiSimulationCryptoStatus({
+      cryptoFutures: {
+        credentials: { configured: true, signedReadSucceeded: true, secretKey: "must-not-pass" },
+        executionGates: { paper: true, testnet: false, live: false },
+        workers: {
+          kronos_base: { status: "ready", available: true, precision: "float32" },
+          fincast: { status: "memory_pressure", available: false, precision: "half" },
+        },
+      },
+    })).toEqual({
+      credentialsConfigured: true,
+      signedReadSucceeded: true,
+      executionGates: { paper: true, testnet: false, live: false },
+      workers: {
+        kronos_base: {
+          lane: "kronos_base",
+          status: "ready",
+          available: true,
+          precision: "fp32",
+        },
+        fincast: {
+          lane: "fincast",
+          status: "memory_pressure",
+          available: false,
+          precision: "fp16",
+        },
+      },
+    });
+  });
+
+  it("normalizes long/short futures ledger and independent model lanes", () => {
+    expect(normalizeAiSimulationFuturesPositions([{
+      symbol: "ethusdt",
+      positionSide: "SHORT",
+      positionAmount: "0.5",
+      averagePrice: "3470",
+      leverage: "4",
+      liquidationPrice: "4220",
+    }])[0]).toMatchObject({
+      symbol: "ETHUSDT",
+      side: "short",
+      marginMode: "isolated",
+      quantity: 0.5,
+      leverage: 4,
+    });
+    expect(normalizeAiSimulationModelComparison({
+      outcome: "inconclusive",
+      same_origin: true,
+      same_context: true,
+      same_costs: true,
+      same_fill_barrier: true,
+      models: {
+        kronos: { status: "complete", dtype: "float32", pinball_loss: 0.01 },
+        fincast: { status: "complete", dtype: "float16", pinball_loss: 0.009 },
+      },
+    })?.lanes.map(({ id, precision }) => [id, precision])).toEqual([
+      ["kronos_base", "fp32"],
+      ["fincast", "fp16"],
+    ]);
+  });
+
+  it("allows paper only and requires at least one unique model lane", () => {
+    expect(validateAiSimulationCryptoRequest(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST)).toEqual([]);
+    expect(validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      execution: { mode: "live" as "paper" },
+    })).toContain("현재 운영에서는 paper 실행만 허용됩니다.");
+  });
+});

@@ -352,6 +352,7 @@ function workspace(scenario: Scenario, symbols: readonly string[]) {
 
 function pairRequest(): SimulationStartRequest {
   return {
+    market: { kind: "stock", country: "US" },
     marketCountry: "US",
     initialCash: 100_000,
     durationMinutes: 60,
@@ -373,6 +374,8 @@ function pairRequest(): SimulationStartRequest {
       spreadBpsRoundTrip: 5,
       slippageBpsPerSide: 2,
     },
+    modelLanes: ["kronos_base"],
+    execution: { mode: "paper" },
   };
 }
 

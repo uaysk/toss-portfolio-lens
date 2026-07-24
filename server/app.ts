@@ -88,6 +88,8 @@ export function createApp(options: CreateAppOptions): Express {
   if (options.trustProxy.length) app.set("trust proxy", [...options.trustProxy]);
 
   app.use((request, response, next) => {
+    const comparisonReport = request.path
+      === "/reports/crypto-scalping-model-comparison.html";
     const formAction = request.path === "/oauth/authorize" && options.oauthCallbackOrigin
       ? `'self' ${options.oauthCallbackOrigin}`
       : "'self'";
@@ -97,8 +99,14 @@ export function createApp(options: CreateAppOptions): Express {
     response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
     response.setHeader(
       "Content-Security-Policy",
-      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action ${formAction}`,
+      `default-src 'self'; script-src 'self'${comparisonReport ? " 'unsafe-inline'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action ${formAction}`,
     );
+    if (comparisonReport) {
+      // The comparison report is a deliberately self-contained audited
+      // artifact. Scope inline script permission and non-cacheability to this
+      // exact path; every other page keeps the stricter application CSP.
+      response.setHeader("Cache-Control", "no-store, max-age=0");
+    }
     if (request.path.startsWith("/reports/") || request.path.startsWith("/api/reports/")) {
       response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
     }

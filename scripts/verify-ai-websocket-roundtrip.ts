@@ -46,12 +46,16 @@ function validateTestUrl(value: string): string {
   return url.toString();
 }
 
-function buildRequest(seriesCount: number, timezone: "Asia/Seoul" | "America/New_York"): AiForecastRequest {
+function buildRequest(
+  seriesCount: number,
+  contextBars: number,
+  timezone: "Asia/Seoul" | "America/New_York",
+): AiForecastRequest {
   const end = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
-  const first = end - 79 * 60_000;
+  const first = end - (contextBars - 1) * 60_000;
   const series = Array.from({ length: seriesCount }, (_, seriesIndex) => {
     let previousClose = 100 + seriesIndex * 7;
-    const bars = Array.from({ length: 80 }, (_unused, index) => {
+    const bars = Array.from({ length: contextBars }, (_unused, index) => {
       const open = previousClose;
       const move = 0.00035 + Math.sin((index + seriesIndex) / 7) * 0.0012;
       const close = open * (1 + move);
@@ -87,6 +91,7 @@ function buildRequest(seriesCount: number, timezone: "Asia/Seoul" | "America/New
 
 async function main(): Promise<void> {
   const seriesCount = boundedInteger("AI_VERIFY_SERIES_COUNT", 2, 1, 50);
+  const contextBars = boundedInteger("AI_VERIFY_CONTEXT_BARS", 512, 64, 512);
   const timezoneValue = process.env.AI_VERIFY_TIMEZONE?.trim() || "Asia/Seoul";
   if (timezoneValue !== "Asia/Seoul" && timezoneValue !== "America/New_York") {
     throw new Error("AI_VERIFY_TIMEZONE must be Asia/Seoul or America/New_York.");
@@ -99,18 +104,22 @@ async function main(): Promise<void> {
     || (hostSecretSource?.startsWith("/") ? `${hostSecretSource.replace(/\/+$/, "")}/token` : undefined)
     || "/tmp/toss-portfolio-lens-ai-auth-token";
   const client = new AiComputeClient({
-    url: validateTestUrl(process.env.AI_COMPUTE_URL ?? "ws://127.0.0.1:18766/ws/scalping-ai/v1"),
+    url: validateTestUrl(
+      process.env.AI_VERIFY_COMPUTE_URL
+      ?? process.env.AI_COMPUTE_URL
+      ?? "ws://127.0.0.1:18765/ws/scalping-ai/v1",
+    ),
     authTokenFile,
     timeoutMs: boundedInteger("AI_COMPUTE_TIMEOUT_MS", 180_000, 1_000, 3_600_000),
     connectTimeoutMs: boundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000),
     reconnectBaseMs,
     reconnectMaxMs: boundedInteger("AI_COMPUTE_RECONNECT_MAX_MS", 10_000, reconnectBaseMs, 600_000),
-    maximumInFlight: boundedInteger("AI_COMPUTE_MAX_IN_FLIGHT", 4, 1, 1_000),
+    maximumInFlight: boundedInteger("AI_COMPUTE_MAX_IN_FLIGHT", 1, 1, 1_000),
     maximumRequestBytes: boundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     maximumResponseBytes: boundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     ...(caPath ? { tlsCa: readFileSync(caPath, "utf8") } : {}),
   });
-  const request = buildRequest(seriesCount, timezoneValue);
+  const request = buildRequest(seriesCount, contextBars, timezoneValue);
   const started = performance.now();
   try {
     const response = await client.request(request);
@@ -124,12 +133,20 @@ async function main(): Promise<void> {
     if (booleanSetting("AI_VERIFY_REQUIRE_CUDA") && response.model.device !== "cuda") {
       throw new Error(`AI_VERIFY_REQUIRE_CUDA was set, but the worker reported ${response.model.device}.`);
     }
+    const expectedRole = process.env.AI_VERIFY_EXPECTED_ROLE?.trim();
+    if (expectedRole && (
+      response.model_runs?.length !== 1
+      || response.model_runs[0]?.role !== expectedRole
+    )) {
+      throw new Error(`Worker did not report the expected independent ${expectedRole} lane.`);
+    }
     process.stdout.write(`${JSON.stringify({
       schema_version: "scalping-ai-websocket-verification/v1",
       elapsed_ms: elapsedMs,
       request_id: response.request_id,
       response_status: response.status,
       series_count: response.series.length,
+      context_bars: contextBars,
       timezone: timezoneValue,
       available_series: response.series.filter((item) => item.status === "available").length,
       horizons_per_available_series: response.series

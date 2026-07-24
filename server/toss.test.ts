@@ -77,6 +77,24 @@ function staticBearerConfig(): AppConfig {
       },
       recorder: { enabled: false },
     },
+    cryptoAi: {
+      kronos: {
+        url: "ws://127.0.0.1:18765/ws/scalping-ai/v1",
+        authTokenFile: "/tmp/toss-portfolio-lens-kronos-token",
+        timeoutMs: 120_000,
+        connectTimeoutMs: 10_000,
+        reconnectBaseMs: 250,
+        reconnectMaxMs: 10_000,
+        maximumInFlight: 1,
+        maximumRequestBytes: 64 * 1024 * 1024,
+        maximumResponseBytes: 128 * 1024 * 1024,
+      },
+      sequentialDeadlineMs: 240_000,
+      circuitBreaker: {
+        failureThreshold: 3,
+        cooldownMs: 60_000,
+      },
+    },
   };
 }
 
