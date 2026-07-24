@@ -14,6 +14,9 @@ export type MarketVenue = z.infer<typeof MarketVenueSchema>;
 export const UsExchangeSchema = z.enum(["NAS", "NYS", "AMS"]);
 export type UsExchange = z.infer<typeof UsExchangeSchema>;
 
+export const UsSessionFeedSchema = z.enum(["standard", "day"]);
+export type UsSessionFeed = z.infer<typeof UsSessionFeedSchema>;
+
 export function normalizeUsExchange(value: unknown): UsExchange | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim().toUpperCase().replace(/[\s_-]+/g, "");
@@ -121,15 +124,23 @@ export const NormalizedTradeSchema = z.object({
   provider: z.enum(["toss", "kis"]),
   symbol: marketSymbolSchema,
   market: MarketVenueSchema.optional(),
+  exchange: UsExchangeSchema.optional(),
+  sessionFeed: UsSessionFeedSchema.optional(),
+  sessionDate: sessionDateSchema.optional(),
   eventId: z.string().trim().min(1).max(240),
   eventIdSource: z.enum(["provider", "composite"]),
   executedAt: isoTimestampSchema,
+  receivedAt: isoTimestampSchema.optional(),
   price: positiveNumberSchema,
   quantity: positiveNumberSchema,
   tradingAmount: positiveNumberSchema.optional(),
   side: z.enum(["buy", "sell", "unknown"]),
   cumulativeVolume: nonNegativeNumberSchema.optional(),
+  cumulativeTradingAmount: nonNegativeNumberSchema.optional(),
   executionStrength: nonNegativeNumberSchema.optional(),
+  executionClassCode: z.string().trim().min(1).max(64).optional(),
+  bestBidPrice: nonNegativeNumberSchema.optional(),
+  bestAskPrice: nonNegativeNumberSchema.optional(),
 }).strict();
 export type NormalizedTrade = z.infer<typeof NormalizedTradeSchema>;
 
@@ -143,7 +154,11 @@ export const NormalizedOrderbookSchema = z.object({
   provider: z.enum(["toss", "kis"]),
   symbol: marketSymbolSchema,
   market: MarketVenueSchema.optional(),
+  exchange: UsExchangeSchema.optional(),
+  sessionFeed: UsSessionFeedSchema.optional(),
+  sessionDate: sessionDateSchema.optional(),
   observedAt: isoTimestampSchema,
+  receivedAt: isoTimestampSchema.optional(),
   depth: z.enum(["top_of_book", "ten_level"]).optional(),
   asks: z.array(OrderbookLevelSchema).min(1),
   bids: z.array(OrderbookLevelSchema).min(1),

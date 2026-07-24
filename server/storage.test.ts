@@ -72,6 +72,7 @@ function config(overrides: StorageConfigOverrides = {}): AppConfig {
         selectionMaximumAttempts: 3,
         selectionRetryDelayMs: 15_000,
       },
+      recorder: { enabled: false },
     },
     ...overrides,
   };

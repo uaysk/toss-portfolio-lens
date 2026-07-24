@@ -38,6 +38,7 @@ services:
     ports:
       - "0.0.0.0:3200:3200"
     restart: unless-stopped
+    stop_grace_period: 35s
     init: true
     volumes:
       - portfolio_data:/app/data

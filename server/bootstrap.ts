@@ -49,6 +49,7 @@ import { KisWebSocketClient } from "./scalping/kis-websocket-client.js";
 import { IntradayBarAggregator } from "./scalping/intraday-bar-aggregator.js";
 import { ScalpingScanner } from "./scalping/scanner-service.js";
 import { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
+import { MarketDataRecorder } from "./scalping/market-data-recorder.js";
 import { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
 import { AiTradingSimulationService } from "./simulation/simulation-service.js";
@@ -217,6 +218,7 @@ const technicalStrategyService = new TechnicalStrategyService(
 const technicalTradeMarkerService = new TechnicalTradeMarkerService(historyStore, portfolioAnalysis);
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
 let scalpingService: ScalpingService | undefined;
+let marketDataRecorder: MarketDataRecorder | undefined;
 let simulationService: AiTradingSimulationService | undefined;
 let aiComputeClient: AiComputeClient | undefined;
 if (config.scalping.enabled && scalpingRepository) {
@@ -275,6 +277,16 @@ if (config.scalping.enabled && scalpingRepository) {
     technicalTradeMarkerService,
     config.scalping.service,
   );
+  if (config.scalping.recorder.enabled) {
+    marketDataRecorder = new MarketDataRecorder(
+      scalpingLiveRuntime,
+      scalpingRepository,
+      {
+        ...config.scalping.recorder,
+        closeTimeoutMs: Math.max(1, config.gracefulShutdownTimeoutMs - 3_000),
+      },
+    );
+  }
   if (config.scalping.maximumTopCount >= 2) {
     simulationService = new AiTradingSimulationService(
       scalpingService,
@@ -379,6 +391,7 @@ const scalpingRouter = createScalpingRouter({
   authenticate: requireSession,
   service: scalpingService,
   live: scalpingLiveRuntime,
+  recorder: marketDataRecorder,
   sseConnections,
   config: {
     enabled: config.scalping.enabled,
@@ -530,6 +543,7 @@ async function shutdownStep(name: string, operation: () => void | Promise<void>)
   }
 }
 
+let recorderStartupFailed = false;
 const lifecycle = new GracefulLifecycle({
   server,
   gate: shutdownGate,
@@ -546,6 +560,7 @@ const lifecycle = new GracefulLifecycle({
       shutdownStep("run service", () => runService.close(signal)),
       shutdownStep("simulation", () => simulationService?.close(signal)),
       shutdownStep("scalping runtime", async () => {
+        await marketDataRecorder?.close();
         scalpingLiveRuntime?.close();
         await scalpingLiveRuntime?.waitForIdle();
       }),
@@ -571,10 +586,29 @@ const lifecycle = new GracefulLifecycle({
   onStopped: (signal) => {
     console.info("Portfolio Lens stopped by " + signal);
   },
-  exit: (code) => process.exit(code),
+  exit: (code) => process.exit(recorderStartupFailed ? 1 : code),
 });
 lifecycle.installSignalHandlers();
-server.listen(config.port, config.host, () => {
-  console.info("Portfolio Lens listening on http://" + config.host + ":" + config.port);
-});
+if (marketDataRecorder && !applicationShuttingDown) {
+  try {
+    await marketDataRecorder.start();
+    console.info(
+      `[scalping-recorder] 미국 시세 기록 시작: ${marketDataRecorder.status.instruments
+        .map(({ symbol, exchange }) => `${symbol}:${exchange}`)
+        .join(", ")}`,
+    );
+  } catch (error) {
+    recorderStartupFailed = true;
+    console.error(
+      "[scalping-recorder] 시작 실패:",
+      error instanceof Error ? error.message : "unknown error",
+    );
+    await lifecycle.shutdown("recorder-start-failed");
+  }
+}
+if (!applicationShuttingDown) {
+  server.listen(config.port, config.host, () => {
+    console.info("Portfolio Lens listening on http://" + config.host + ":" + config.port);
+  });
+}
 }

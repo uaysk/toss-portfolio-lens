@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RelationalDatabase, SqliteDatabase } from "../database.js";
-import { ScalpingRepository } from "./scalping-repository.js";
+import {
+  ScalpingRepository,
+  type ScalpingOrderbookRecord,
+  type ScalpingRecordingEventRecord,
+  type ScalpingTradeRecord,
+} from "./scalping-repository.js";
 
 describe("ScalpingRepository", () => {
   let database: SqliteDatabase | undefined;
@@ -15,6 +20,75 @@ describe("ScalpingRepository", () => {
     const repository = new ScalpingRepository(database);
     await repository.initialize();
     return repository;
+  }
+
+  function trade(overrides: Partial<ScalpingTradeRecord> = {}): ScalpingTradeRecord {
+    return {
+      marketCountry: "US",
+      symbol: "TSLA",
+      eventId: "kis:HDFSCNT0:standard:NAS:TSLA:20260724:093000:1:220:1",
+      provider: "kis",
+      venue: "US",
+      exchange: "NAS",
+      sessionFeed: "standard",
+      sessionDate: "2026-07-24",
+      executedAt: "2026-07-24T09:30:00-04:00",
+      receivedAt: "2026-07-24T13:30:00.100Z",
+      price: 220,
+      quantity: 1,
+      tradingAmount: 220,
+      side: "unknown",
+      cumulativeVolume: 1,
+      cumulativeAmount: 220,
+      executionStrength: 101.5,
+      executionClass: "0",
+      bestBidPrice: 219.99,
+      bestAskPrice: 220.01,
+      recordedAt: 1,
+      ...overrides,
+    };
+  }
+
+  function orderbook(overrides: Partial<ScalpingOrderbookRecord> = {}): ScalpingOrderbookRecord {
+    return {
+      snapshotId: "00000000-0000-4000-8000-000000000001",
+      marketCountry: "US",
+      symbol: "TSLA",
+      provider: "kis",
+      venue: "US",
+      exchange: "NAS",
+      sessionFeed: "standard",
+      sessionDate: "2026-07-24",
+      observedAt: "2026-07-24T09:30:00-04:00",
+      receivedAt: "2026-07-24T13:30:00.100Z",
+      depth: "top_of_book",
+      asks: [{ price: 220.01, quantity: 2 }],
+      bids: [{ price: 219.99, quantity: 3 }],
+      totalAskQuantity: 2,
+      totalBidQuantity: 3,
+      bestAskPrice: 220.01,
+      bestAskQuantity: 2,
+      bestBidPrice: 219.99,
+      bestBidQuantity: 3,
+      recordedAt: 1,
+      ...overrides,
+    };
+  }
+
+  function recordingEvent(
+    overrides: Partial<ScalpingRecordingEventRecord> = {},
+  ): ScalpingRecordingEventRecord {
+    return {
+      eventId: "00000000-0000-4000-8000-000000000010",
+      marketCountry: "US",
+      symbol: "TSLA",
+      eventType: "data_gap",
+      occurredAt: "2026-07-24T13:30:00.000Z",
+      code: "trade-feed-silence",
+      details: { feed: "standard", gapMs: 15_000 },
+      recordedAt: 10,
+      ...overrides,
+    };
   }
 
   it("진행 중 봉을 저장하고 더 오래된 update로 되돌리지 않으며 확정 봉으로 전이한다", async () => {
@@ -351,6 +425,258 @@ describe("ScalpingRepository", () => {
     expect(await repository.latestPredictions(["AAPL"], false, "US")).toMatchObject([
       { id: "us-prediction", marketCountry: "US", payload: { p50: 0.02 } },
     ]);
+  });
+
+  it("미국 체결 원본을 시간순으로 보존하고 재전송 eventId를 중복 저장하지 않는다", async () => {
+    const repository = await setup();
+    const first = trade();
+    const sameProviderSecond = trade({
+      eventId: "kis:HDFSCNT0:day:NAS:TSLA:20260724:093000:2:220.1:1",
+      sessionFeed: "day",
+      receivedAt: "2026-07-24T13:30:00.200Z",
+      price: 220.1,
+      tradingAmount: 220.1,
+      cumulativeVolume: 2,
+      cumulativeAmount: 440.1,
+      recordedAt: 2,
+    });
+    await repository.putTrades([sameProviderSecond, first, first]);
+
+    expect(await repository.listTrades({
+      marketCountry: "US",
+      symbol: "tsla",
+      sessionDate: "2026-07-24",
+      from: "2026-07-24T13:30:00.000Z",
+      to: "2026-07-24T13:30:00.000Z",
+    })).toEqual([
+      expect.objectContaining({
+        eventId: first.eventId,
+        exchange: "NAS",
+        sessionFeed: "standard",
+        executedAt: "2026-07-24T13:30:00.000Z",
+        receivedAt: "2026-07-24T13:30:00.100Z",
+        executionStrength: 101.5,
+        bestBidPrice: 219.99,
+      }),
+      expect.objectContaining({
+        eventId: sameProviderSecond.eventId,
+        sessionFeed: "day",
+        receivedAt: "2026-07-24T13:30:00.200Z",
+        cumulativeAmount: 440.1,
+      }),
+    ]);
+  });
+
+  it("호가 JSON과 최우선 호가를 보존하고 같은 초 스냅샷을 수신 시각 순으로 반환한다", async () => {
+    const repository = await setup();
+    const first = orderbook({
+      depth: "ten_level",
+      asks: [{ price: 220.01, quantity: 2 }, { price: 220.02, quantity: 4 }],
+      bids: [{ price: 219.99, quantity: 3 }, { price: 219.98, quantity: 5 }],
+      totalAskQuantity: 6,
+      totalBidQuantity: 8,
+    });
+    const second = orderbook({
+      snapshotId: "00000000-0000-4000-8000-000000000002",
+      receivedAt: "2026-07-24T13:30:00.200Z",
+      asks: [{ price: 220.02, quantity: 1 }],
+      bids: [{ price: 220, quantity: 2 }],
+      bestAskPrice: 220.02,
+      bestAskQuantity: 1,
+      bestBidPrice: 220,
+      bestBidQuantity: 2,
+      recordedAt: 2,
+    });
+    await repository.putOrderbooks([second, first]);
+
+    expect(await repository.listOrderbooks({
+      marketCountry: "US",
+      symbol: "TSLA",
+      sessionDate: "2026-07-24",
+    })).toEqual([
+      expect.objectContaining({
+        snapshotId: first.snapshotId,
+        depth: "ten_level",
+        asks: [{ price: 220.01, quantity: 2 }, { price: 220.02, quantity: 4 }],
+        bids: [{ price: 219.99, quantity: 3 }, { price: 219.98, quantity: 5 }],
+        totalAskQuantity: 6,
+        bestAskPrice: 220.01,
+      }),
+      expect.objectContaining({
+        snapshotId: second.snapshotId,
+        receivedAt: "2026-07-24T13:30:00.200Z",
+        bestBidPrice: 220,
+      }),
+    ]);
+  });
+
+  it("종목별 공백과 전체 운영 이벤트를 JSON 세부정보와 함께 시간순으로 보존한다", async () => {
+    const repository = await setup();
+    const globalStart = recordingEvent({
+      eventId: "00000000-0000-4000-8000-000000000011",
+      symbol: undefined,
+      eventType: "recorder_started",
+      occurredAt: "2026-07-24T13:00:00.000Z",
+      code: undefined,
+      details: { instruments: 9 },
+      recordedAt: 1,
+    });
+    const gap = recordingEvent();
+    const diagnostic = recordingEvent({
+      eventId: "00000000-0000-4000-8000-000000000012",
+      eventType: "diagnostic",
+      code: "recovery-completed",
+      details: null,
+      recordedAt: 11,
+    });
+    await repository.putRecordingEvents([diagnostic, globalStart, gap, gap]);
+
+    expect(await repository.listRecordingEvents({
+      marketCountry: "US",
+      symbol: null,
+    })).toEqual([
+      expect.objectContaining({
+        eventId: globalStart.eventId,
+        eventType: "recorder_started",
+        details: { instruments: 9 },
+      }),
+    ]);
+    expect(await repository.listRecordingEvents({
+      marketCountry: "US",
+      symbol: "tsla",
+      from: "2026-07-24T13:30:00.000Z",
+      to: "2026-07-24T13:30:00.000Z",
+    })).toEqual([
+      expect.objectContaining({
+        eventId: gap.eventId,
+        eventType: "data_gap",
+        code: "trade-feed-silence",
+        details: { feed: "standard", gapMs: 15_000 },
+      }),
+      expect.objectContaining({
+        eventId: diagnostic.eventId,
+        eventType: "diagnostic",
+        details: null,
+      }),
+    ]);
+    expect(await repository.listRecordingEvents({
+      marketCountry: "US",
+      eventTypes: ["data_gap"],
+    })).toHaveLength(1);
+  });
+
+  it("원본 체결과 호가의 식별자·시각·유한값·호가 순서를 검증한다", async () => {
+    const repository = await setup();
+    await expect(repository.putTrades([trade({ eventId: "invalid event id" })]))
+      .rejects.toThrow("eventId");
+    await expect(repository.putTrades([trade({ executedAt: "2026-07-24T13:30:00" })]))
+      .rejects.toThrow("RFC3339");
+    await expect(repository.putTrades([trade({ executionStrength: Number.NaN })]))
+      .rejects.toThrow("executionStrength");
+    await expect(repository.putOrderbooks([orderbook({
+      asks: [{ price: 220.02, quantity: 1 }, { price: 220.01, quantity: 2 }],
+      bestAskPrice: 220.02,
+      bestAskQuantity: 1,
+    })])).rejects.toThrow("정렬");
+    await expect(repository.putOrderbooks([orderbook({
+      snapshotId: "not-a-uuid",
+    })])).rejects.toThrow("UUID");
+    await expect(repository.putOrderbooks([orderbook({
+      bestAskPrice: 221,
+    })])).rejects.toThrow("최우선 호가");
+  });
+
+  it("운영 이벤트의 UUID·유형·시각·코드·JSON 크기를 검증한다", async () => {
+    const repository = await setup();
+    await expect(repository.putRecordingEvents([recordingEvent({ eventId: "not-a-uuid" })]))
+      .rejects.toThrow("UUID");
+    await expect(repository.putRecordingEvents([recordingEvent({ eventType: "other" as never })]))
+      .rejects.toThrow("eventType");
+    await expect(repository.putRecordingEvents([recordingEvent({ occurredAt: "2026-07-24T13:30:00" })]))
+      .rejects.toThrow("RFC3339");
+    await expect(repository.putRecordingEvents([recordingEvent({ code: "invalid code" })]))
+      .rejects.toThrow("code");
+    await expect(repository.putRecordingEvents([recordingEvent({ details: { invalid: Number.NaN } })]))
+      .rejects.toThrow("유한한");
+    await expect(repository.putRecordingEvents([recordingEvent({ details: "x".repeat(65_536) })]))
+      .rejects.toThrow("64KiB");
+  });
+
+  it("원본 체결을 500행 단위로 제한하고 MySQL/PostgreSQL 중복 무시 구문을 사용한다", async () => {
+    const postgresRun = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
+    const postgresTransactionDatabase = {
+      dialect: "postgres" as const,
+      run: postgresRun,
+      query: vi.fn(),
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    const postgresTransaction = vi.fn(
+      async (work: (target: RelationalDatabase) => Promise<unknown>) => work(postgresTransactionDatabase),
+    );
+    const postgres = {
+      dialect: "postgres" as const,
+      run: vi.fn(),
+      query: vi.fn(),
+      transaction: postgresTransaction,
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    await new ScalpingRepository(postgres).putTrades(Array.from({ length: 1_001 }, (_, index) => trade({
+      eventId: `kis:HDFSCNT0:standard:NAS:TSLA:${index}`,
+      recordedAt: index,
+    })));
+
+    expect(postgresTransaction).toHaveBeenCalledOnce();
+    expect(postgresRun).toHaveBeenCalledTimes(3);
+    expect(postgresRun.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 10_500))
+      .toBe(true);
+    expect(String(postgresRun.mock.calls[0]?.[0])).toContain(
+      "ON CONFLICT(market_country, symbol, event_id) DO NOTHING",
+    );
+
+    const mysqlRun = vi.fn().mockResolvedValue({ affectedRows: 1, insertId: 0 });
+    const mysql = {
+      dialect: "mysql" as const,
+      run: mysqlRun,
+      query: vi.fn(),
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    await new ScalpingRepository(mysql).putTrades([trade()]);
+    expect(String(mysqlRun.mock.calls[0]?.[0])).toContain("INSERT IGNORE INTO portfolio_scalping_trades");
+  });
+
+  it("운영 이벤트도 500행 단위 batch와 PostgreSQL 중복 무시를 사용한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
+    const transactionDatabase = {
+      dialect: "postgres" as const,
+      run,
+      query: vi.fn(),
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    const transaction = vi.fn(
+      async (work: (target: RelationalDatabase) => Promise<unknown>) => work(transactionDatabase),
+    );
+    const postgres = {
+      dialect: "postgres" as const,
+      run: vi.fn(),
+      query: vi.fn(),
+      transaction,
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+    await new ScalpingRepository(postgres).putRecordingEvents(
+      Array.from({ length: 501 }, (_, index) => recordingEvent({
+        eventId: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+        recordedAt: index,
+      })),
+    );
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 4_000)).toBe(true);
+    expect(String(run.mock.calls[0]?.[0])).toContain("INTO portfolio_scalping_recording_events");
+    expect(String(run.mock.calls[0]?.[0])).toContain("ON CONFLICT(event_id) DO NOTHING");
   });
 
   it("live와 retrospective 예측을 구분하고 모델 provenance를 보존한다", async () => {

@@ -2,17 +2,43 @@ import { randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
 import { applyPortfolioMigrations } from "../migrations.js";
 import { canonicalJson } from "../worker/contracts.js";
-import type { MarketCountry } from "../scalping/contracts.js";
+import type {
+  MarketCountry,
+  MarketProvider,
+  MarketVenue,
+  OrderbookLevel,
+  UsExchange,
+} from "../scalping/contracts.js";
 
 export const SCALPING_INTERVALS = [1, 5, 15, 30, 60] as const;
 const INTRADAY_BAR_COLUMNS = 18;
+const SCALPING_TRADE_COLUMNS = 21;
+const SCALPING_ORDERBOOK_COLUMNS = 20;
+const SCALPING_RECORDING_EVENT_COLUMNS = 8;
 // Keep every statement comfortably below PostgreSQL's 65,535 bind parameter
 // ceiling as well as the lower limits used by some SQLite builds/proxies.
 const INTRADAY_BAR_UPSERT_BATCH_SIZE = 500;
+const RAW_MARKET_DATA_INSERT_BATCH_SIZE = 500;
+const RAW_MARKET_DATA_INPUT_LIMIT = 100_000;
+const RECORDING_EVENT_DETAILS_MAX_BYTES = 64 * 1_024;
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
 export type IntradayBarState = "forming" | "final";
 export type IntradayBarSource = "kis_ws" | "kis_rest" | "toss_rest" | "recovered";
 export type IntradayQuality = "complete" | "partial" | "recovered" | "stale";
+export type ScalpingSessionFeed = "standard" | "day";
+export type ScalpingTradeSide = "buy" | "sell" | "unknown";
+export type ScalpingOrderbookDepth = "top_of_book" | "ten_level";
+export const SCALPING_RECORDING_EVENT_TYPES = [
+  "recorder_started",
+  "recorder_stopped",
+  "connection_state",
+  "subscription_state",
+  "data_gap",
+  "queue_overflow",
+  "persistence_error",
+  "diagnostic",
+] as const;
+export type ScalpingRecordingEventType = typeof SCALPING_RECORDING_EVENT_TYPES[number];
 
 export type IntradayBarRecord = {
   marketCountry?: MarketCountry;
@@ -32,6 +58,64 @@ export type IntradayBarRecord = {
   tradeCount?: number;
   quality: IntradayQuality;
   updatedAt: number;
+};
+
+export type ScalpingTradeRecord = {
+  marketCountry?: MarketCountry;
+  symbol: string;
+  eventId: string;
+  provider: MarketProvider;
+  venue: MarketVenue;
+  exchange?: UsExchange;
+  sessionFeed?: ScalpingSessionFeed;
+  sessionDate: string;
+  executedAt: string;
+  receivedAt: string;
+  price: number;
+  quantity: number;
+  tradingAmount?: number;
+  side: ScalpingTradeSide;
+  cumulativeVolume?: number;
+  cumulativeAmount?: number;
+  executionStrength?: number;
+  executionClass?: string;
+  bestBidPrice?: number;
+  bestAskPrice?: number;
+  recordedAt: number;
+};
+
+export type ScalpingOrderbookRecord = {
+  snapshotId: string;
+  marketCountry?: MarketCountry;
+  symbol: string;
+  provider: MarketProvider;
+  venue: MarketVenue;
+  exchange?: UsExchange;
+  sessionFeed?: ScalpingSessionFeed;
+  sessionDate: string;
+  observedAt: string;
+  receivedAt: string;
+  depth: ScalpingOrderbookDepth;
+  asks: readonly OrderbookLevel[];
+  bids: readonly OrderbookLevel[];
+  totalAskQuantity?: number;
+  totalBidQuantity?: number;
+  bestAskPrice: number;
+  bestAskQuantity: number;
+  bestBidPrice: number;
+  bestBidQuantity: number;
+  recordedAt: number;
+};
+
+export type ScalpingRecordingEventRecord = {
+  eventId: string;
+  marketCountry: MarketCountry;
+  symbol?: string;
+  eventType: ScalpingRecordingEventType;
+  occurredAt: string;
+  code?: string;
+  details?: unknown;
+  recordedAt: number;
 };
 
 export type ScalpingPredictionStatus = "available" | "unavailable" | "failed";
@@ -94,7 +178,68 @@ type PredictionRow = {
   created_at: number | string;
 };
 
+type ScalpingTradeRow = {
+  market_country: MarketCountry;
+  symbol: string;
+  event_id: string;
+  provider: MarketProvider;
+  venue: MarketVenue;
+  exchange_code: UsExchange | null;
+  session_feed: ScalpingSessionFeed | null;
+  session_date: string;
+  executed_at: string;
+  received_at: string;
+  price: number | string;
+  quantity: number | string;
+  trading_amount: number | string | null;
+  side: ScalpingTradeSide;
+  cumulative_volume: number | string | null;
+  cumulative_amount: number | string | null;
+  execution_strength: number | string | null;
+  execution_class: string | null;
+  best_bid_price: number | string | null;
+  best_ask_price: number | string | null;
+  recorded_at: number | string;
+};
+
+type ScalpingOrderbookRow = {
+  snapshot_id: string;
+  market_country: MarketCountry;
+  symbol: string;
+  provider: MarketProvider;
+  venue: MarketVenue;
+  exchange_code: UsExchange | null;
+  session_feed: ScalpingSessionFeed | null;
+  session_date: string;
+  observed_at: string;
+  received_at: string;
+  depth: ScalpingOrderbookDepth;
+  asks_json: string;
+  bids_json: string;
+  total_ask_quantity: number | string | null;
+  total_bid_quantity: number | string | null;
+  best_ask_price: number | string;
+  best_ask_quantity: number | string;
+  best_bid_price: number | string;
+  best_bid_quantity: number | string;
+  recorded_at: number | string;
+};
+
+type ScalpingRecordingEventRow = {
+  event_id: string;
+  market_country: MarketCountry;
+  symbol: string | null;
+  event_type: ScalpingRecordingEventType;
+  occurred_at: string;
+  code: string | null;
+  details_json: string | null;
+  recorded_at: number | string;
+};
+
 function symbol(value: string): string {
+  if (typeof value !== "string") {
+    throw new Error("단타 종목 코드는 영문 대문자, 숫자, '.', '_', '-' 조합의 1~32자여야 합니다.");
+  }
   const normalized = value.trim().toUpperCase();
   if (!/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(normalized)) {
     throw new Error("단타 종목 코드는 영문 대문자, 숫자, '.', '_', '-' 조합의 1~32자여야 합니다.");
@@ -109,7 +254,9 @@ function marketCountry(value: MarketCountry | undefined): MarketCountry {
 }
 
 function isoTimestamp(value: string, field: string): string {
-  if (value.length > 40 || !/^\d{4}-\d{2}-\d{2}T/.test(value)) {
+  if (typeof value !== "string"
+    || value.length > 40
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
     throw new Error(`${field}는 RFC3339 시각이어야 합니다.`);
   }
   const timestamp = new Date(value);
@@ -119,7 +266,8 @@ function isoTimestamp(value: string, field: string): string {
 
 function date(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)
-    || Number.isNaN(new Date(`${value}T00:00:00.000Z`).getTime())) {
+    || Number.isNaN(new Date(`${value}T00:00:00.000Z`).getTime())
+    || new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) !== value) {
     throw new Error("sessionDate는 YYYY-MM-DD 형식이어야 합니다.");
   }
   return value;
@@ -130,6 +278,208 @@ function finite(value: number, field: string, minimum: number, inclusive = true)
     throw new Error(`${field} 값이 올바르지 않습니다.`);
   }
   return value;
+}
+
+function identifier(value: unknown, field: string, maximumLength: number): string {
+  if (typeof value !== "string") throw new Error(`${field} 식별자가 올바르지 않습니다.`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximumLength || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${field} 식별자가 올바르지 않습니다.`);
+  }
+  return normalized;
+}
+
+function eventId(value: string): string {
+  const normalized = identifier(value, "eventId", 240);
+  if (/\s/.test(normalized)) throw new Error("eventId 식별자가 올바르지 않습니다.");
+  return normalized;
+}
+
+function uuid(value: string, field: string): string {
+  const normalized = identifier(value, field, 36).toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new Error(`${field}는 UUID 형식이어야 합니다.`);
+  }
+  return normalized;
+}
+
+function snapshotId(value: string): string {
+  return uuid(value, "snapshotId");
+}
+
+function provider(value: MarketProvider): MarketProvider {
+  const normalized = identifier(value, "provider", 32).toLowerCase();
+  if (normalized !== "toss" && normalized !== "kis" && normalized !== "derived") {
+    throw new Error("provider 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function venue(value: MarketVenue): MarketVenue {
+  const normalized = identifier(value, "venue", 32).toUpperCase();
+  if (normalized !== "KRX" && normalized !== "NXT" && normalized !== "INTEGRATED" && normalized !== "US") {
+    throw new Error("venue 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function exchange(value: UsExchange | undefined): UsExchange | undefined {
+  if (value === undefined) return undefined;
+  const normalized = identifier(value, "exchange", 8).toUpperCase();
+  if (normalized !== "NAS" && normalized !== "NYS" && normalized !== "AMS") {
+    throw new Error("exchange 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function sessionFeed(value: ScalpingSessionFeed | undefined): ScalpingSessionFeed | undefined {
+  if (value === undefined) return undefined;
+  const normalized = identifier(value, "sessionFeed", 16).toLowerCase();
+  if (normalized !== "standard" && normalized !== "day") {
+    throw new Error("sessionFeed 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function tradeSide(value: ScalpingTradeSide): ScalpingTradeSide {
+  const normalized = identifier(value, "side", 16).toLowerCase();
+  if (normalized !== "buy" && normalized !== "sell" && normalized !== "unknown") {
+    throw new Error("side 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function executionClass(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = identifier(value, "executionClass", 32);
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) {
+    throw new Error("executionClass 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function recordingEventType(value: ScalpingRecordingEventType): ScalpingRecordingEventType {
+  const normalized = identifier(value, "eventType", 64).toLowerCase();
+  if (!(SCALPING_RECORDING_EVENT_TYPES as readonly string[]).includes(normalized)) {
+    throw new Error("eventType 식별자가 올바르지 않습니다.");
+  }
+  return normalized as ScalpingRecordingEventType;
+}
+
+function recordingEventCode(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = identifier(value, "code", 120);
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) {
+    throw new Error("code 식별자가 올바르지 않습니다.");
+  }
+  return normalized;
+}
+
+function recordingEventDetails(value: unknown): string {
+  const json = canonicalJson(value);
+  if (Buffer.byteLength(json, "utf8") > RECORDING_EVENT_DETAILS_MAX_BYTES) {
+    throw new Error("recording event details는 64KiB 이하여야 합니다.");
+  }
+  return json;
+}
+
+function recordedAt(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("recordedAt 값이 올바르지 않습니다.");
+  return value;
+}
+
+function orderbookLevels(value: unknown, side: "asks" | "bids"): OrderbookLevel[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw new Error(`${side} 호가 단계는 1~50개여야 합니다.`);
+  }
+  const levels = value.map((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new Error(`${side}[${index}] 호가 단계가 올바르지 않습니다.`);
+    }
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.price !== "number" || typeof candidate.quantity !== "number") {
+      throw new Error(`${side}[${index}] 호가 단계가 올바르지 않습니다.`);
+    }
+    return {
+      price: finite(candidate.price, `${side}[${index}].price`, 0, false),
+      quantity: finite(candidate.quantity, `${side}[${index}].quantity`, 0),
+    };
+  });
+  for (let index = 1; index < levels.length; index += 1) {
+    const prior = levels[index - 1]!;
+    const current = levels[index]!;
+    if ((side === "asks" && current.price < prior.price)
+      || (side === "bids" && current.price > prior.price)) {
+      throw new Error(`${side} 호가는 최우선 호가부터 가격 순서대로 정렬되어야 합니다.`);
+    }
+  }
+  return levels;
+}
+
+function levelsFromJson(value: string, side: "asks" | "bids"): OrderbookLevel[] {
+  try {
+    return orderbookLevels(JSON.parse(value) as unknown, side);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`저장된 ${side} 호가 JSON이 손상되었습니다.`);
+    throw error;
+  }
+}
+
+function detailsFromJson(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("저장된 recording event details JSON이 손상되었습니다.");
+  }
+}
+
+function queryLimit(value: number | undefined): number {
+  if (value !== undefined && !Number.isFinite(value)) throw new Error("limit 값이 올바르지 않습니다.");
+  return Math.max(1, Math.min(50_000, Math.trunc(value ?? 1_000)));
+}
+
+async function insertAppendOnlyRows(
+  database: RelationalDatabase,
+  input: {
+    table:
+      | "portfolio_scalping_trades"
+      | "portfolio_scalping_orderbooks"
+      | "portfolio_scalping_recording_events";
+    columns: readonly string[];
+    conflictColumns: readonly string[];
+    columnCount: number;
+    rows: readonly unknown[][];
+  },
+): Promise<void> {
+  if (input.columns.length !== input.columnCount
+    || input.rows.some((row) => row.length !== input.columnCount)) {
+    throw new Error(`${input.table} insert column count가 일치하지 않습니다.`);
+  }
+  const batches: unknown[][][] = [];
+  for (let index = 0; index < input.rows.length; index += RAW_MARKET_DATA_INSERT_BATCH_SIZE) {
+    batches.push(input.rows.slice(index, index + RAW_MARKET_DATA_INSERT_BATCH_SIZE));
+  }
+  const write = async (target: RelationalDatabase): Promise<void> => {
+    for (const rows of batches) {
+      const placeholders = rows
+        .map(() => `(${Array.from({ length: input.columnCount }, () => "?").join(", ")})`)
+        .join(", ");
+      const insert = target.dialect === "mysql" ? "INSERT IGNORE" : "INSERT";
+      const conflict = target.dialect === "mysql"
+        ? ""
+        : `ON CONFLICT(${input.conflictColumns.join(", ")}) DO NOTHING`;
+      await target.run(`
+        ${insert} INTO ${input.table} (${input.columns.join(", ")})
+        VALUES ${placeholders}
+        ${conflict}
+      `, rows.flat());
+    }
+  };
+  if (batches.length === 1) {
+    await write(database);
+    return;
+  }
+  await database.transaction(write);
 }
 
 function barFromRow(row: IntradayBarRow): IntradayBarRecord {
@@ -153,6 +503,70 @@ function barFromRow(row: IntradayBarRow): IntradayBarRecord {
     ...(row.trade_count !== null ? { tradeCount: Number(row.trade_count) } : {}),
     quality: row.quality_status,
     updatedAt: Number(row.updated_at),
+  };
+}
+
+function tradeFromRow(row: ScalpingTradeRow): ScalpingTradeRecord {
+  return {
+    marketCountry: row.market_country,
+    symbol: row.symbol,
+    eventId: row.event_id,
+    provider: row.provider,
+    venue: row.venue,
+    ...(row.exchange_code === null ? {} : { exchange: row.exchange_code }),
+    ...(row.session_feed === null ? {} : { sessionFeed: row.session_feed }),
+    sessionDate: row.session_date,
+    executedAt: row.executed_at,
+    receivedAt: row.received_at,
+    price: Number(row.price),
+    quantity: Number(row.quantity),
+    ...(row.trading_amount === null ? {} : { tradingAmount: Number(row.trading_amount) }),
+    side: row.side,
+    ...(row.cumulative_volume === null ? {} : { cumulativeVolume: Number(row.cumulative_volume) }),
+    ...(row.cumulative_amount === null ? {} : { cumulativeAmount: Number(row.cumulative_amount) }),
+    ...(row.execution_strength === null ? {} : { executionStrength: Number(row.execution_strength) }),
+    ...(row.execution_class === null ? {} : { executionClass: row.execution_class }),
+    ...(row.best_bid_price === null ? {} : { bestBidPrice: Number(row.best_bid_price) }),
+    ...(row.best_ask_price === null ? {} : { bestAskPrice: Number(row.best_ask_price) }),
+    recordedAt: Number(row.recorded_at),
+  };
+}
+
+function orderbookFromRow(row: ScalpingOrderbookRow): ScalpingOrderbookRecord {
+  return {
+    snapshotId: row.snapshot_id,
+    marketCountry: row.market_country,
+    symbol: row.symbol,
+    provider: row.provider,
+    venue: row.venue,
+    ...(row.exchange_code === null ? {} : { exchange: row.exchange_code }),
+    ...(row.session_feed === null ? {} : { sessionFeed: row.session_feed }),
+    sessionDate: row.session_date,
+    observedAt: row.observed_at,
+    receivedAt: row.received_at,
+    depth: row.depth,
+    asks: levelsFromJson(row.asks_json, "asks"),
+    bids: levelsFromJson(row.bids_json, "bids"),
+    ...(row.total_ask_quantity === null ? {} : { totalAskQuantity: Number(row.total_ask_quantity) }),
+    ...(row.total_bid_quantity === null ? {} : { totalBidQuantity: Number(row.total_bid_quantity) }),
+    bestAskPrice: Number(row.best_ask_price),
+    bestAskQuantity: Number(row.best_ask_quantity),
+    bestBidPrice: Number(row.best_bid_price),
+    bestBidQuantity: Number(row.best_bid_quantity),
+    recordedAt: Number(row.recorded_at),
+  };
+}
+
+function recordingEventFromRow(row: ScalpingRecordingEventRow): ScalpingRecordingEventRecord {
+  return {
+    eventId: row.event_id,
+    marketCountry: row.market_country,
+    ...(row.symbol === null ? {} : { symbol: row.symbol }),
+    eventType: row.event_type,
+    occurredAt: row.occurred_at,
+    ...(row.code === null ? {} : { code: row.code }),
+    ...(row.details_json === null ? {} : { details: detailsFromJson(row.details_json) }),
+    recordedAt: Number(row.recorded_at),
   };
 }
 
@@ -369,6 +783,295 @@ export class ScalpingRepository {
       LIMIT ${limit}
     `, parameters);
     return rows.reverse().map(barFromRow);
+  }
+
+  async putTrades(input: readonly ScalpingTradeRecord[]): Promise<void> {
+    if (input.length > RAW_MARKET_DATA_INPUT_LIMIT) {
+      throw new Error("한 번에 저장할 체결은 100,000개 이하여야 합니다.");
+    }
+    if (!input.length) return;
+    const rows = input.map((item) => {
+      const normalizedMarketCountry = marketCountry(item.marketCountry);
+      const normalizedVenue = venue(item.venue);
+      const normalizedExchange = exchange(item.exchange);
+      const normalizedSessionFeed = sessionFeed(item.sessionFeed);
+      if ((normalizedMarketCountry === "US") !== (normalizedVenue === "US")) {
+        throw new Error("marketCountry와 venue가 같은 시장을 가리켜야 합니다.");
+      }
+      if (normalizedMarketCountry !== "US" && (normalizedExchange || normalizedSessionFeed)) {
+        throw new Error("exchange와 sessionFeed는 미국 시장 체결에만 사용할 수 있습니다.");
+      }
+      const price = finite(item.price, "price", 0, false);
+      const quantity = finite(item.quantity, "quantity", 0, false);
+      const tradingAmount = item.tradingAmount === undefined
+        ? null
+        : finite(item.tradingAmount, "tradingAmount", 0);
+      const cumulativeVolume = item.cumulativeVolume === undefined
+        ? null
+        : finite(item.cumulativeVolume, "cumulativeVolume", 0);
+      const cumulativeAmount = item.cumulativeAmount === undefined
+        ? null
+        : finite(item.cumulativeAmount, "cumulativeAmount", 0);
+      const strength = item.executionStrength === undefined
+        ? null
+        : finite(item.executionStrength, "executionStrength", 0);
+      const bestBidPrice = item.bestBidPrice === undefined
+        ? null
+        : finite(item.bestBidPrice, "bestBidPrice", 0);
+      const bestAskPrice = item.bestAskPrice === undefined
+        ? null
+        : finite(item.bestAskPrice, "bestAskPrice", 0);
+      return [
+        normalizedMarketCountry,
+        symbol(item.symbol),
+        eventId(item.eventId),
+        provider(item.provider),
+        normalizedVenue,
+        normalizedExchange ?? null,
+        normalizedSessionFeed ?? null,
+        date(item.sessionDate),
+        isoTimestamp(item.executedAt, "executedAt"),
+        isoTimestamp(item.receivedAt, "receivedAt"),
+        price,
+        quantity,
+        tradingAmount,
+        tradeSide(item.side),
+        cumulativeVolume,
+        cumulativeAmount,
+        strength,
+        executionClass(item.executionClass) ?? null,
+        bestBidPrice,
+        bestAskPrice,
+        recordedAt(item.recordedAt),
+      ];
+    });
+    await insertAppendOnlyRows(this.database, {
+      table: "portfolio_scalping_trades",
+      columns: [
+        "market_country", "symbol", "event_id", "provider", "venue", "exchange_code",
+        "session_feed", "session_date", "executed_at", "received_at", "price", "quantity",
+        "trading_amount", "side", "cumulative_volume", "cumulative_amount", "execution_strength",
+        "execution_class", "best_bid_price", "best_ask_price", "recorded_at",
+      ],
+      conflictColumns: ["market_country", "symbol", "event_id"],
+      columnCount: SCALPING_TRADE_COLUMNS,
+      rows,
+    });
+  }
+
+  async listTrades(input: {
+    marketCountry?: MarketCountry;
+    symbol: string;
+    sessionDate?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<ScalpingTradeRecord[]> {
+    const conditions = ["market_country = ?", "symbol = ?"];
+    const parameters: unknown[] = [marketCountry(input.marketCountry), symbol(input.symbol)];
+    if (input.sessionDate) {
+      conditions.push("session_date = ?");
+      parameters.push(date(input.sessionDate));
+    }
+    const from = input.from ? isoTimestamp(input.from, "from") : undefined;
+    const to = input.to ? isoTimestamp(input.to, "to") : undefined;
+    if (from && to && from > to) throw new Error("to는 from보다 빠를 수 없습니다.");
+    if (from) {
+      conditions.push("executed_at >= ?");
+      parameters.push(from);
+    }
+    if (to) {
+      conditions.push("executed_at <= ?");
+      parameters.push(to);
+    }
+    const limit = queryLimit(input.limit);
+    const rows = await this.database.query<ScalpingTradeRow>(`
+      SELECT * FROM portfolio_scalping_trades
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY executed_at DESC, received_at DESC, recorded_at DESC, event_id DESC
+      LIMIT ${limit}
+    `, parameters);
+    return rows.reverse().map(tradeFromRow);
+  }
+
+  async putOrderbooks(input: readonly ScalpingOrderbookRecord[]): Promise<void> {
+    if (input.length > RAW_MARKET_DATA_INPUT_LIMIT) {
+      throw new Error("한 번에 저장할 호가 스냅샷은 100,000개 이하여야 합니다.");
+    }
+    if (!input.length) return;
+    const rows = input.map((item) => {
+      const normalizedMarketCountry = marketCountry(item.marketCountry);
+      const normalizedVenue = venue(item.venue);
+      const normalizedExchange = exchange(item.exchange);
+      const normalizedSessionFeed = sessionFeed(item.sessionFeed);
+      if ((normalizedMarketCountry === "US") !== (normalizedVenue === "US")) {
+        throw new Error("marketCountry와 venue가 같은 시장을 가리켜야 합니다.");
+      }
+      if (normalizedMarketCountry !== "US" && (normalizedExchange || normalizedSessionFeed)) {
+        throw new Error("exchange와 sessionFeed는 미국 시장 호가에만 사용할 수 있습니다.");
+      }
+      if (item.depth !== "top_of_book" && item.depth !== "ten_level") {
+        throw new Error("depth 식별자가 올바르지 않습니다.");
+      }
+      const asks = orderbookLevels(item.asks, "asks");
+      const bids = orderbookLevels(item.bids, "bids");
+      const bestAskPrice = finite(item.bestAskPrice, "bestAskPrice", 0, false);
+      const bestAskQuantity = finite(item.bestAskQuantity, "bestAskQuantity", 0);
+      const bestBidPrice = finite(item.bestBidPrice, "bestBidPrice", 0, false);
+      const bestBidQuantity = finite(item.bestBidQuantity, "bestBidQuantity", 0);
+      if (bestAskPrice !== asks[0]!.price || bestAskQuantity !== asks[0]!.quantity
+        || bestBidPrice !== bids[0]!.price || bestBidQuantity !== bids[0]!.quantity) {
+        throw new Error("최우선 호가 컬럼은 asks/bids의 첫 단계와 일치해야 합니다.");
+      }
+      const totalAskQuantity = item.totalAskQuantity === undefined
+        ? null
+        : finite(item.totalAskQuantity, "totalAskQuantity", 0);
+      const totalBidQuantity = item.totalBidQuantity === undefined
+        ? null
+        : finite(item.totalBidQuantity, "totalBidQuantity", 0);
+      return [
+        snapshotId(item.snapshotId),
+        normalizedMarketCountry,
+        symbol(item.symbol),
+        provider(item.provider),
+        normalizedVenue,
+        normalizedExchange ?? null,
+        normalizedSessionFeed ?? null,
+        date(item.sessionDate),
+        isoTimestamp(item.observedAt, "observedAt"),
+        isoTimestamp(item.receivedAt, "receivedAt"),
+        item.depth,
+        canonicalJson(asks),
+        canonicalJson(bids),
+        totalAskQuantity,
+        totalBidQuantity,
+        bestAskPrice,
+        bestAskQuantity,
+        bestBidPrice,
+        bestBidQuantity,
+        recordedAt(item.recordedAt),
+      ];
+    });
+    await insertAppendOnlyRows(this.database, {
+      table: "portfolio_scalping_orderbooks",
+      columns: [
+        "snapshot_id", "market_country", "symbol", "provider", "venue", "exchange_code",
+        "session_feed", "session_date", "observed_at", "received_at", "depth", "asks_json",
+        "bids_json", "total_ask_quantity", "total_bid_quantity", "best_ask_price",
+        "best_ask_quantity", "best_bid_price", "best_bid_quantity", "recorded_at",
+      ],
+      conflictColumns: ["snapshot_id"],
+      columnCount: SCALPING_ORDERBOOK_COLUMNS,
+      rows,
+    });
+  }
+
+  async listOrderbooks(input: {
+    marketCountry?: MarketCountry;
+    symbol: string;
+    sessionDate?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<ScalpingOrderbookRecord[]> {
+    const conditions = ["market_country = ?", "symbol = ?"];
+    const parameters: unknown[] = [marketCountry(input.marketCountry), symbol(input.symbol)];
+    if (input.sessionDate) {
+      conditions.push("session_date = ?");
+      parameters.push(date(input.sessionDate));
+    }
+    const from = input.from ? isoTimestamp(input.from, "from") : undefined;
+    const to = input.to ? isoTimestamp(input.to, "to") : undefined;
+    if (from && to && from > to) throw new Error("to는 from보다 빠를 수 없습니다.");
+    if (from) {
+      conditions.push("observed_at >= ?");
+      parameters.push(from);
+    }
+    if (to) {
+      conditions.push("observed_at <= ?");
+      parameters.push(to);
+    }
+    const limit = queryLimit(input.limit);
+    const rows = await this.database.query<ScalpingOrderbookRow>(`
+      SELECT * FROM portfolio_scalping_orderbooks
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY observed_at DESC, received_at DESC, recorded_at DESC, snapshot_id DESC
+      LIMIT ${limit}
+    `, parameters);
+    return rows.reverse().map(orderbookFromRow);
+  }
+
+  async putRecordingEvents(input: readonly ScalpingRecordingEventRecord[]): Promise<void> {
+    if (input.length > RAW_MARKET_DATA_INPUT_LIMIT) {
+      throw new Error("한 번에 저장할 recording event는 100,000개 이하여야 합니다.");
+    }
+    if (!input.length) return;
+    const rows = input.map((item) => [
+      uuid(item.eventId, "eventId"),
+      marketCountry(item.marketCountry),
+      item.symbol === undefined ? null : symbol(item.symbol),
+      recordingEventType(item.eventType),
+      isoTimestamp(item.occurredAt, "occurredAt"),
+      recordingEventCode(item.code) ?? null,
+      item.details === undefined ? null : recordingEventDetails(item.details),
+      recordedAt(item.recordedAt),
+    ]);
+    await insertAppendOnlyRows(this.database, {
+      table: "portfolio_scalping_recording_events",
+      columns: [
+        "event_id", "market_country", "symbol", "event_type",
+        "occurred_at", "code", "details_json", "recorded_at",
+      ],
+      conflictColumns: ["event_id"],
+      columnCount: SCALPING_RECORDING_EVENT_COLUMNS,
+      rows,
+    });
+  }
+
+  async listRecordingEvents(input: {
+    marketCountry?: MarketCountry;
+    symbol?: string | null;
+    eventTypes?: readonly ScalpingRecordingEventType[];
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<ScalpingRecordingEventRecord[]> {
+    const conditions = ["market_country = ?"];
+    const parameters: unknown[] = [marketCountry(input.marketCountry)];
+    if (input.symbol === null) {
+      conditions.push("symbol IS NULL");
+    } else if (input.symbol !== undefined) {
+      conditions.push("symbol = ?");
+      parameters.push(symbol(input.symbol));
+    }
+    if (input.eventTypes) {
+      const types = Array.from(new Set(input.eventTypes.map(recordingEventType)));
+      if (!types.length) return [];
+      if (types.length > SCALPING_RECORDING_EVENT_TYPES.length) {
+        throw new Error("조회할 recording event type이 너무 많습니다.");
+      }
+      conditions.push(`event_type IN (${types.map(() => "?").join(", ")})`);
+      parameters.push(...types);
+    }
+    const from = input.from ? isoTimestamp(input.from, "from") : undefined;
+    const to = input.to ? isoTimestamp(input.to, "to") : undefined;
+    if (from && to && from > to) throw new Error("to는 from보다 빠를 수 없습니다.");
+    if (from) {
+      conditions.push("occurred_at >= ?");
+      parameters.push(from);
+    }
+    if (to) {
+      conditions.push("occurred_at <= ?");
+      parameters.push(to);
+    }
+    const limit = queryLimit(input.limit);
+    const rows = await this.database.query<ScalpingRecordingEventRow>(`
+      SELECT * FROM portfolio_scalping_recording_events
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY occurred_at DESC, recorded_at DESC, event_id DESC
+      LIMIT ${limit}
+    `, parameters);
+    return rows.reverse().map(recordingEventFromRow);
   }
 
   async putPrediction(input: Omit<ScalpingPredictionRecord, "id" | "createdAt"> & {

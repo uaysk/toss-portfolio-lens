@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type DatabaseDialect, type RelationalDatabase, SqliteDatabase } from "./database.js";
 import {
   applyPortfolioMigrations,
+  createScalpingRawMarketDataTables,
   ensureMarketCandleVolumeColumn,
   ensureScalpingMarketCountry,
   listAppliedMigrations,
@@ -84,6 +85,62 @@ describe("versioned portfolio migrations", () => {
     ));
     expect(run).toHaveBeenCalledWith(
       "CREATE INDEX idx_portfolio_scalping_prediction_market_latest ON portfolio_scalping_predictions(market_country, symbol, retrospective, generated_at)",
+    );
+  });
+
+  it.each([
+    ["mysql", "DOUBLE", "VARCHAR(36) PRIMARY KEY"],
+    ["postgres", "DOUBLE PRECISION", "TEXT PRIMARY KEY"],
+  ] as const)("%s에 체결·호가·운영 이벤트 원본 테이블과 결정적 시간 인덱스를 생성한다", async (
+    dialect,
+    realType,
+    snapshotPrimaryKey,
+  ) => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 0, insertId: 0 });
+    const query = vi.fn(async (sql: string, parameters: unknown[] = []) => {
+      if (sql.includes("information_schema.tables")) return [{ table_name: parameters[0] }];
+      if (sql.includes("information_schema.statistics") || sql.includes("pg_indexes")) return [];
+      return [];
+    });
+    const relational = {
+      dialect,
+      query,
+      run,
+      transaction: vi.fn(),
+      close: vi.fn(),
+    } as unknown as RelationalDatabase;
+
+    await createScalpingRawMarketDataTables(relational);
+
+    const statements = run.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => (
+      sql.includes("CREATE TABLE IF NOT EXISTS portfolio_scalping_trades")
+      && sql.includes(`price ${realType} NOT NULL`)
+      && sql.includes("PRIMARY KEY(market_country, symbol, event_id)")
+    ))).toBe(true);
+    expect(statements.some((sql) => (
+      sql.includes("CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks")
+      && sql.includes(`snapshot_id ${snapshotPrimaryKey}`)
+      && sql.includes("asks_json")
+      && sql.includes("best_bid_quantity")
+    ))).toBe(true);
+    expect(statements.some((sql) => (
+      sql.includes("CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events")
+      && sql.includes(`event_id ${snapshotPrimaryKey}`)
+      && sql.includes("symbol")
+      && sql.includes("details_json")
+    ))).toBe(true);
+    expect(statements).toContain(
+      "CREATE INDEX idx_portfolio_scalping_trade_session ON portfolio_scalping_trades(market_country, symbol, session_date, executed_at, received_at, recorded_at)",
+    );
+    expect(statements).toContain(
+      "CREATE INDEX idx_portfolio_scalping_orderbook_session ON portfolio_scalping_orderbooks(market_country, symbol, session_date, observed_at, received_at, recorded_at)",
+    );
+    expect(statements).toContain(
+      "CREATE INDEX idx_portfolio_scalping_recording_symbol_time ON portfolio_scalping_recording_events(market_country, symbol, occurred_at, recorded_at, event_id)",
+    );
+    expect(statements).toContain(
+      "CREATE INDEX idx_portfolio_scalping_recording_time_type ON portfolio_scalping_recording_events(market_country, occurred_at, event_type, recorded_at, event_id)",
     );
   });
 
@@ -260,18 +317,28 @@ describe("versioned portfolio migrations", () => {
       "20260721_006_scalping_intraday_storage",
       "20260721_007_scalping_volume_availability",
       "20260721_008_scalping_market_country",
+      "20260724_009_scalping_raw_market_data",
     ]);
-    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(8);
+    expect(new Set(applied.map((migration) => migration.checksum)).size).toBe(9);
     const marketCandleColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_market_candles)");
     expect(marketCandleColumns.map((column) => column.name)).toContain("volume");
     const scalpingTables = await database.query<{ name: string }>(`
       SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name IN ('portfolio_intraday_bars', 'portfolio_scalping_predictions')
+      WHERE type = 'table' AND name IN (
+        'portfolio_intraday_bars',
+        'portfolio_scalping_orderbooks',
+        'portfolio_scalping_predictions',
+        'portfolio_scalping_recording_events',
+        'portfolio_scalping_trades'
+      )
       ORDER BY name
     `);
     expect(scalpingTables.map((row) => row.name)).toEqual([
       "portfolio_intraday_bars",
+      "portfolio_scalping_orderbooks",
       "portfolio_scalping_predictions",
+      "portfolio_scalping_recording_events",
+      "portfolio_scalping_trades",
     ]);
     const intradayColumns = await database.query<{ name: string }>("PRAGMA table_info(portfolio_intraday_bars)");
     expect(intradayColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
@@ -305,6 +372,49 @@ describe("versioned portfolio migrations", () => {
       "idx_portfolio_intraday_market_session",
       "idx_portfolio_intraday_updated",
     ]));
+    const tradePrimaryKey = await database.query<{ name: string; pk: number | string }>(
+      "PRAGMA table_info(portfolio_scalping_trades)",
+    );
+    expect(tradePrimaryKey
+      .filter((column) => Number(column.pk) > 0)
+      .sort((left, right) => Number(left.pk) - Number(right.pk))
+      .map((column) => column.name)).toEqual(["market_country", "symbol", "event_id"]);
+    const orderbookColumns = await database.query<{ name: string }>(
+      "PRAGMA table_info(portfolio_scalping_orderbooks)",
+    );
+    expect(orderbookColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "snapshot_id", "observed_at", "received_at", "asks_json", "bids_json",
+      "best_ask_price", "best_ask_quantity", "best_bid_price", "best_bid_quantity", "recorded_at",
+    ]));
+    const recordingEventColumns = await database.query<{
+      name: string;
+      notnull: number | string;
+      pk: number | string;
+    }>("PRAGMA table_info(portfolio_scalping_recording_events)");
+    expect(recordingEventColumns.map((column) => column.name)).toEqual([
+      "event_id", "market_country", "symbol", "event_type",
+      "occurred_at", "code", "details_json", "recorded_at",
+    ]);
+    expect(recordingEventColumns.find((column) => column.name === "event_id")?.pk).toBe(1);
+    expect(recordingEventColumns.find((column) => column.name === "market_country")?.notnull).toBe(1);
+    expect(recordingEventColumns.find((column) => column.name === "symbol")?.notnull).toBe(0);
+    const rawIndexes = await database.query<{ name: string }>(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index'
+        AND tbl_name IN (
+          'portfolio_scalping_trades',
+          'portfolio_scalping_orderbooks',
+          'portfolio_scalping_recording_events'
+        )
+        AND name NOT LIKE 'sqlite_autoindex%'
+      ORDER BY name ASC
+    `);
+    expect(rawIndexes.map((index) => index.name)).toEqual([
+      "idx_portfolio_scalping_orderbook_session",
+      "idx_portfolio_scalping_recording_symbol_time",
+      "idx_portfolio_scalping_recording_time_type",
+      "idx_portfolio_scalping_trade_session",
+    ]);
 
     const legacy = await runs.get("00000000-0000-4000-8000-000000000001", "owner-a");
     expect(legacy).toMatchObject({ tags: [], input: {}, status: "completed" });

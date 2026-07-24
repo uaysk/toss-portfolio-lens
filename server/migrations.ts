@@ -377,6 +377,162 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
   `);
 }
 
+export async function createScalpingRawMarketDataTables(database: RelationalDatabase): Promise<void> {
+  if (database.dialect === "mysql") {
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
+        market_country VARCHAR(2) NOT NULL,
+        symbol VARCHAR(32) NOT NULL,
+        event_id VARCHAR(240) NOT NULL,
+        provider VARCHAR(32) NOT NULL,
+        venue VARCHAR(32) NOT NULL,
+        exchange_code VARCHAR(8) NULL,
+        session_feed VARCHAR(16) NULL,
+        session_date VARCHAR(10) NOT NULL,
+        executed_at VARCHAR(40) NOT NULL,
+        received_at VARCHAR(40) NOT NULL,
+        price DOUBLE NOT NULL,
+        quantity DOUBLE NOT NULL,
+        trading_amount DOUBLE NULL,
+        side VARCHAR(16) NOT NULL,
+        cumulative_volume DOUBLE NULL,
+        cumulative_amount DOUBLE NULL,
+        execution_strength DOUBLE NULL,
+        execution_class VARCHAR(32) NULL,
+        best_bid_price DOUBLE NULL,
+        best_ask_price DOUBLE NULL,
+        recorded_at BIGINT NOT NULL,
+        PRIMARY KEY(market_country, symbol, event_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
+        snapshot_id VARCHAR(36) PRIMARY KEY,
+        market_country VARCHAR(2) NOT NULL,
+        symbol VARCHAR(32) NOT NULL,
+        provider VARCHAR(32) NOT NULL,
+        venue VARCHAR(32) NOT NULL,
+        exchange_code VARCHAR(8) NULL,
+        session_feed VARCHAR(16) NULL,
+        session_date VARCHAR(10) NOT NULL,
+        observed_at VARCHAR(40) NOT NULL,
+        received_at VARCHAR(40) NOT NULL,
+        depth VARCHAR(24) NOT NULL,
+        asks_json LONGTEXT NOT NULL,
+        bids_json LONGTEXT NOT NULL,
+        total_ask_quantity DOUBLE NULL,
+        total_bid_quantity DOUBLE NULL,
+        best_ask_price DOUBLE NOT NULL,
+        best_ask_quantity DOUBLE NOT NULL,
+        best_bid_price DOUBLE NOT NULL,
+        best_bid_quantity DOUBLE NOT NULL,
+        recorded_at BIGINT NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
+        event_id VARCHAR(36) PRIMARY KEY,
+        market_country VARCHAR(2) NOT NULL,
+        symbol VARCHAR(32) NULL,
+        event_type VARCHAR(64) NOT NULL,
+        occurred_at VARCHAR(40) NOT NULL,
+        code VARCHAR(120) NULL,
+        details_json LONGTEXT NULL,
+        recorded_at BIGINT NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } else {
+    const real = database.dialect === "postgres" ? "DOUBLE PRECISION" : "REAL";
+    const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
+        market_country TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        venue TEXT NOT NULL,
+        exchange_code TEXT,
+        session_feed TEXT,
+        session_date TEXT NOT NULL,
+        executed_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        price ${real} NOT NULL,
+        quantity ${real} NOT NULL,
+        trading_amount ${real},
+        side TEXT NOT NULL,
+        cumulative_volume ${real},
+        cumulative_amount ${real},
+        execution_strength ${real},
+        execution_class TEXT,
+        best_bid_price ${real},
+        best_ask_price ${real},
+        recorded_at ${timestamp} NOT NULL,
+        PRIMARY KEY(market_country, symbol, event_id)
+      )
+    `);
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
+        snapshot_id TEXT PRIMARY KEY,
+        market_country TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        venue TEXT NOT NULL,
+        exchange_code TEXT,
+        session_feed TEXT,
+        session_date TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        depth TEXT NOT NULL,
+        asks_json TEXT NOT NULL,
+        bids_json TEXT NOT NULL,
+        total_ask_quantity ${real},
+        total_bid_quantity ${real},
+        best_ask_price ${real} NOT NULL,
+        best_ask_quantity ${real} NOT NULL,
+        best_bid_price ${real} NOT NULL,
+        best_bid_quantity ${real} NOT NULL,
+        recorded_at ${timestamp} NOT NULL
+      )
+    `);
+    await database.run(`
+      CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
+        event_id TEXT PRIMARY KEY,
+        market_country TEXT NOT NULL,
+        symbol TEXT,
+        event_type TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        code TEXT,
+        details_json TEXT,
+        recorded_at ${timestamp} NOT NULL
+      )
+    `);
+  }
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_trade_session",
+    "portfolio_scalping_trades",
+    "market_country, symbol, session_date, executed_at, received_at, recorded_at",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_orderbook_session",
+    "portfolio_scalping_orderbooks",
+    "market_country, symbol, session_date, observed_at, received_at, recorded_at",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_recording_symbol_time",
+    "portfolio_scalping_recording_events",
+    "market_country, symbol, occurred_at, recorded_at, event_id",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_scalping_recording_time_type",
+    "portfolio_scalping_recording_events",
+    "market_country, occurred_at, event_type, recorded_at, event_id",
+  );
+}
+
 async function hasIndex(database: RelationalDatabase, index: string): Promise<boolean> {
   if (database.dialect === "sqlite") {
     const rows = await database.query<{ index_name: string }>(
@@ -669,6 +825,11 @@ const migrations: readonly Migration[] = [
     id: "20260721_008_scalping_market_country",
     signature: "portfolio_intraday_bars:market-country-composite-pk-v1;portfolio_scalping_predictions:market-country-latest-v1;legacy-default:KR",
     up: ensureScalpingMarketCountry,
+  },
+  {
+    id: "20260724_009_scalping_raw_market_data",
+    signature: "portfolio_scalping_trades-v1;portfolio_scalping_orderbooks-v1;portfolio_scalping_recording_events-v1;raw-us-market-data-session-ordering-v2",
+    up: createScalpingRawMarketDataTables,
   },
 ];
 

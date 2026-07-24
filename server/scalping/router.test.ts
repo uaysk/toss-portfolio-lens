@@ -46,9 +46,63 @@ describe("scalping session-only router", () => {
       config: { enabled: false, maximumSymbols: 50, heartbeatMs: 15_000, analysisDebounceMs: 250, backpressureEventLimit: 100 },
     });
     const source = router.stack.map((layer: { route?: { path?: string } }) => layer.route?.path).filter(Boolean);
-    expect(source).toEqual(expect.arrayContaining(["/status", "/workspace", "/forecast", "/evaluations", "/stream"]));
+    expect(source).toEqual(expect.arrayContaining([
+      "/status",
+      "/recording/status",
+      "/workspace",
+      "/forecast",
+      "/evaluations",
+      "/stream",
+    ]));
     expect(source.some((path) => String(path).includes("order"))).toBe(false);
     expect(router.stack[0]?.handle).toBe(authenticate);
+  });
+
+  it("returns a session-protected recorder status without exposing provider credentials", () => {
+    const recorderStatus = {
+      schemaVersion: "scalping-market-recorder/v1",
+      enabled: true,
+      state: "running",
+      marketCountry: "US",
+      feedProfile: "standard",
+      instruments: [{ symbol: "TSLA", exchange: "NAS" }],
+      counters: {
+        receivedTrades: 12,
+        receivedOrderbooks: 3,
+        persistedTrades: 10,
+        persistedOrderbooks: 3,
+        droppedEvents: 0,
+        pendingTrades: 2,
+        pendingOrderbooks: 0,
+      },
+    };
+    const router = createScalpingRouter({
+      authenticate: vi.fn((_request, _response, next) => next()),
+      recorder: { status: recorderStatus } as never,
+      config: {
+        enabled: true,
+        maximumSymbols: 50,
+        heartbeatMs: 15_000,
+        analysisDebounceMs: 250,
+        backpressureEventLimit: 100,
+      },
+    });
+    const route = router.stack.find(
+      (layer: { route?: { path?: string } }) => layer.route?.path === "/recording/status",
+    ) as any;
+    const handler = route.route.stack.at(-1).handle as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    const response = {
+      setHeader: vi.fn(),
+      json: vi.fn(),
+    };
+
+    handler({}, response);
+
+    expect(response.json).toHaveBeenCalledWith(recorderStatus);
+    expect(JSON.stringify(response.json.mock.calls)).not.toMatch(/secret|token|appKey/i);
   });
 
   it("maps typed failures and never exposes unexpected provider details", async () => {

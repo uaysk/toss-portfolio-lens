@@ -71,6 +71,7 @@ describe("database environment configuration", () => {
         selectionMaximumAttempts: 3,
         selectionRetryDelayMs: 15_000,
       },
+      recorder: { enabled: false },
     });
   });
 
@@ -185,6 +186,49 @@ describe("database environment configuration", () => {
       service: { maximumTopCount: 13, maximumSubscriptions: 40 },
       kisWebSocket: { maxSubscriptions: 40 },
     });
+
+    Object.assign(process.env, {
+      SCALPING_RECORDER_ENABLED: "true",
+      SCALPING_RECORDER_US_SYMBOLS: "AAPL:NAS,IBM:NYS",
+      SCALPING_RECORDER_US_FEED_PROFILE: "standard",
+      SCALPING_RECORDER_FLUSH_INTERVAL_MS: "750",
+      SCALPING_RECORDER_BATCH_SIZE: "250",
+      SCALPING_RECORDER_MAX_QUEUE_SIZE: "50000",
+      AI_COMPUTE_MAX_BATCH_SIZE: "12",
+    });
+    expect(loadConfig().scalping).toMatchObject({
+      enabled: true,
+      maximumTopCount: 12,
+      scanner: { maximumTopCount: 12 },
+      service: { maximumTopCount: 12 },
+      recorder: {
+        enabled: true,
+        instruments: [
+          { symbol: "AAPL", exchange: "NAS" },
+          { symbol: "IBM", exchange: "NYS" },
+        ],
+        feedProfile: "standard",
+        flushIntervalMs: 750,
+        batchSize: 250,
+        maximumQueueSize: 50_000,
+        retryBaseMs: 250,
+        retryMaxMs: 30_000,
+      },
+    });
+    delete process.env.AI_COMPUTE_MAX_BATCH_SIZE;
+    process.env.SCALPING_RECORDER_US_SYMBOLS = Array.from(
+      { length: 13 },
+      (_, index) => `S${index}:NAS`,
+    ).join(",");
+    expect(() => loadConfig()).toThrow("최소 대화형 종목 구독");
+    process.env.SCALPING_RECORDER_US_SYMBOLS = "AAPL:NAS,AAPL:NYS";
+    expect(() => loadConfig()).toThrow("거래소가 충돌");
+    delete process.env.SCALPING_RECORDER_ENABLED;
+    delete process.env.SCALPING_RECORDER_US_SYMBOLS;
+    delete process.env.SCALPING_RECORDER_US_FEED_PROFILE;
+    delete process.env.SCALPING_RECORDER_FLUSH_INTERVAL_MS;
+    delete process.env.SCALPING_RECORDER_BATCH_SIZE;
+    delete process.env.SCALPING_RECORDER_MAX_QUEUE_SIZE;
     process.env.KI_SCALPING_WS_MAX_SUBSCRIPTIONS = "100";
 
     process.env.SCALPING_WORKSPACE_BAR_LIMIT = "4899";

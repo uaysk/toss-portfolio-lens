@@ -106,15 +106,58 @@ describe("KIS common contract adapters", () => {
       askPrice1: 101,
       bidPrice1: 100,
       executionStrength: 110,
+      executionClassCode: "1",
       tradingHalted: false,
     });
     expect(trade).toMatchObject({
       market: "NXT",
       eventId: "kis:event:1",
       eventIdSource: "provider",
+      receivedAt: providerTimestamp,
+      sessionDate: "2026-07-21",
       tradingAmount: 300,
       cumulativeVolume: 50,
+      cumulativeTradingAmount: 5_000,
+      executionStrength: 110,
+      executionClassCode: "1",
+      bestBidPrice: 100,
+      bestAskPrice: 101,
       side: "unknown",
+    });
+  });
+
+  it("preserves US exchange and session-feed provenance on executions", () => {
+    const trade = adaptKisExecution({
+      type: "execution",
+      trId: "HDFSCNT0",
+      market: "US",
+      marketCountry: "US",
+      exchange: "NAS",
+      usFeed: "day",
+      symbol: "AAPL",
+      eventId: "kis:us:event:1",
+      providerTimestamp: "2026-07-21T20:01:00-04:00",
+      receivedAt: "2026-07-22T00:01:00.050Z",
+      sessionDate: "20260722",
+      tradeTime: "200100",
+      price: 200,
+      executionVolume: 2,
+      accumulatedVolume: 50,
+      accumulatedTradingAmount: 10_000,
+      askPrice1: 201,
+      bidPrice1: 199,
+      executionStrength: 105,
+      executionClassCode: "2",
+    });
+    expect(trade).toMatchObject({
+      exchange: "NAS",
+      sessionFeed: "day",
+      sessionDate: "2026-07-22",
+      receivedAt: "2026-07-22T00:01:00.050Z",
+      cumulativeTradingAmount: 10_000,
+      executionClassCode: "2",
+      bestBidPrice: 199,
+      bestAskPrice: 201,
     });
   });
 
@@ -137,7 +180,39 @@ describe("KIS common contract adapters", () => {
       totalBidQuantity: 7,
     });
     expect(book.market).toBe("INTEGRATED");
+    expect(book).toMatchObject({
+      receivedAt: providerTimestamp,
+      sessionDate: "2026-07-21",
+    });
     expect(book.asks.map(({ price }) => price)).toEqual([101, 102]);
     expect(book.bids.map(({ price }) => price)).toEqual([100, 99]);
+  });
+
+  it("preserves US exchange and standard-feed provenance on orderbooks", () => {
+    const book = adaptKisOrderbook({
+      type: "orderbook",
+      trId: "HDFSASP0",
+      market: "US",
+      marketCountry: "US",
+      exchange: "NYS",
+      usFeed: "standard",
+      symbol: "IBM",
+      providerTimestamp: "2026-07-21T09:31:00-04:00",
+      receivedAt: "2026-07-21T13:31:00.010Z",
+      sessionDate: "20260721",
+      quoteTime: "093100",
+      timestampDateSource: "provider-local-date",
+      depth: "top_of_book",
+      asks: [{ level: 1, price: 301, quantity: 2 }],
+      bids: [{ level: 1, price: 300, quantity: 3 }],
+      totalAskQuantity: 2,
+      totalBidQuantity: 3,
+    });
+    expect(book).toMatchObject({
+      exchange: "NYS",
+      sessionFeed: "standard",
+      sessionDate: "2026-07-21",
+      receivedAt: "2026-07-21T13:31:00.010Z",
+    });
   });
 });

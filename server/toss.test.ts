@@ -75,6 +75,7 @@ function staticBearerConfig(): AppConfig {
         selectionMaximumAttempts: 3,
         selectionRetryDelayMs: 15_000,
       },
+      recorder: { enabled: false },
     },
   };
 }

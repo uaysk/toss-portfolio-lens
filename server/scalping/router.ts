@@ -11,6 +11,10 @@ import {
 } from "./contracts.js";
 import type { ScalpingLiveEvent, ScalpingLiveRuntime } from "./live-runtime.js";
 import {
+  MARKET_DATA_RECORDER_SCHEMA_VERSION,
+  type MarketDataRecorder,
+} from "./market-data-recorder.js";
+import {
   ValidationError,
   mapScalpingError,
 } from "./domain-errors.js";
@@ -31,6 +35,7 @@ export type ScalpingRouterDependencies = {
   authenticate: RequestHandler;
   service?: Pick<ScalpingService, "status" | "workspace" | "forecast" | "evaluate" | "realtimeAnalysis">;
   live?: Pick<ScalpingLiveRuntime, "retain" | "onEvent" | "eventsAfter" | "waitForIdle">;
+  recorder?: Pick<MarketDataRecorder, "status">;
   sseConnections?: Pick<SseConnectionTracker, "track">;
   config: ScalpingRouterConfig;
 };
@@ -172,6 +177,31 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
       return;
     }
     response.json(dependencies.service.status(true));
+  });
+
+  router.get("/recording/status", (_request, response) => {
+    setNoStore(response);
+    response.json(dependencies.recorder?.status ?? {
+      schemaVersion: MARKET_DATA_RECORDER_SCHEMA_VERSION,
+      enabled: false,
+      state: "disabled",
+      marketCountry: "US",
+      instruments: [],
+      counters: {
+        receivedTrades: 0,
+        receivedOrderbooks: 0,
+        persistedTrades: 0,
+        persistedOrderbooks: 0,
+        persistedRecordingEvents: 0,
+        droppedEvents: 0,
+        droppedRecordingEvents: 0,
+        rejectedEvents: 0,
+        filteredDayEvents: 0,
+        pendingTrades: 0,
+        pendingOrderbooks: 0,
+        pendingRecordingEvents: 0,
+      },
+    });
   });
 
   router.post("/workspace", async (request, response) => {

@@ -51,5 +51,6 @@ export const verificationConfigDefaults = {
       selectionMaximumAttempts: 3,
       selectionRetryDelayMs: 15_000,
     },
+    recorder: { enabled: false },
   },
 } as const satisfies Partial<AppConfig>;

@@ -64,6 +64,12 @@ export type ScalpingLiveRuntimeConfig = {
   now?: () => number;
 };
 
+export type ScalpingUsFeedProfile = "all" | "standard";
+
+export type ScalpingLiveRetainOptions = {
+  usFeedProfile?: ScalpingUsFeedProfile;
+};
+
 type SocketClient = Pick<
   KisWebSocketClient,
   "onEvent" | "subscribe" | "unsubscribe" | "connect" | "disconnect" | "connectionState" | "subscriptionCount"
@@ -496,8 +502,53 @@ type LiveReference = {
   exchange?: KisUsExchangeCode;
   subscriptions: KisSubscription[];
   count: number;
+  allFeedCount: number;
   closeCursorAt: number;
 };
+
+type RetainedReference = {
+  key: string;
+  profile: ScalpingUsFeedProfile;
+  reference: LiveReference;
+  created: boolean;
+  addedSubscriptions: KisSubscription[];
+};
+
+function requestedSubscriptions(
+  symbol: string,
+  marketCountry: MarketCountry,
+  exchange: KisUsExchangeCode | undefined,
+  profile: ScalpingUsFeedProfile,
+): KisSubscription[] {
+  if (marketCountry !== "US") {
+    return [
+      { trId: "H0UNCNT0", symbol },
+      { trId: "H0UNASP0", symbol },
+    ];
+  }
+  const standard: KisSubscription[] = [
+    { trId: "HDFSCNT0", symbol, exchange, usFeed: "standard" },
+    { trId: "HDFSASP0", symbol, exchange, usFeed: "standard" },
+  ];
+  return profile === "all"
+    ? [
+      standard[0]!,
+      { trId: "HDFSCNT0", symbol, exchange, usFeed: "day" },
+      standard[1]!,
+    ]
+    : standard;
+}
+
+function sameSubscription(left: KisSubscription, right: KisSubscription): boolean {
+  return left.trId === right.trId
+    && left.symbol === right.symbol
+    && left.exchange === right.exchange
+    && (left.usFeed ?? "standard") === (right.usFeed ?? "standard");
+}
+
+function isDayExecutionSubscription(subscription: KisSubscription): boolean {
+  return subscription.trId === "HDFSCNT0" && subscription.usFeed === "day";
+}
 
 export class ScalpingLiveRuntime {
   private readonly listeners = new Set<(event: ScalpingLiveEvent) => void>();
@@ -612,13 +663,18 @@ export class ScalpingLiveRuntime {
     symbols: readonly string[],
     marketCountry: MarketCountry = "KR",
     usExchanges?: Readonly<Record<string, KisUsExchangeCode>>,
+    options: ScalpingLiveRetainOptions = {},
   ): Promise<() => void> {
     if (this.closed) throw new Error("Scalping live runtime is closed.");
     const normalized = Array.from(new Set(symbols.map(normalizedSymbol)));
     if (marketCountry !== "KR" && marketCountry !== "US") throw new Error("Unsupported scalping market country.");
+    const configuredProfile = options.usFeedProfile ?? "all";
+    if (configuredProfile !== "all" && configuredProfile !== "standard") {
+      throw new Error("Unsupported US feed profile.");
+    }
+    const profile = marketCountry === "US" ? configuredProfile : "standard";
     const newlyAdded: LiveReference[] = [];
-    const retainedKeys: string[] = [];
-    const newlyAddedKeys = new Set<string>();
+    const retained: RetainedReference[] = [];
     for (const symbol of normalized) {
       const key = marketSymbolKey(symbol, marketCountry);
       const exchange = marketCountry === "US" ? usExchanges?.[symbol] : undefined;
@@ -630,9 +686,10 @@ export class ScalpingLiveRuntime {
         });
         continue;
       }
-      const current = this.references.get(key);
-      if (current) {
-        if (current.exchange !== exchange) {
+      let reference = this.references.get(key);
+      const created = reference === undefined;
+      if (reference) {
+        if (reference.exchange !== exchange) {
           this.emit("diagnostic", symbol, marketCountry, {
             code: "us-exchange-conflict",
             status: "source_unavailable",
@@ -640,31 +697,32 @@ export class ScalpingLiveRuntime {
           });
           continue;
         }
-        current.count += 1;
-        retainedKeys.push(key);
-        continue;
+      } else {
+        reference = {
+          symbol,
+          marketCountry,
+          ...(exchange ? { exchange } : {}),
+          subscriptions: [],
+          count: 0,
+          allFeedCount: 0,
+          closeCursorAt: this.now(),
+        };
       }
-      const subscriptions: KisSubscription[] = marketCountry === "US" ? [
-        { trId: "HDFSCNT0", symbol, exchange, usFeed: "standard" },
-        { trId: "HDFSCNT0", symbol, exchange, usFeed: "day" },
-        { trId: "HDFSASP0", symbol, exchange, usFeed: "standard" },
-      ] : [
-        { trId: "H0UNCNT0", symbol },
-        { trId: "H0UNASP0", symbol },
-      ];
-      const subscribed: KisSubscription[] = [];
+      const addedSubscriptions: KisSubscription[] = [];
       const failed: Array<{ subscription: KisSubscription; error: unknown }> = [];
-      for (const subscription of subscriptions) {
+      for (const subscription of requestedSubscriptions(symbol, marketCountry, exchange, profile)) {
+        if (reference.subscriptions.some((current) => sameSubscription(current, subscription))) continue;
         try {
           this.socket.subscribe(subscription);
-          subscribed.push(subscription);
+          reference.subscriptions.push(subscription);
+          addedSubscriptions.push(subscription);
         } catch (error) {
           failed.push({ subscription, error });
         }
       }
-      const hasExecution = subscribed.some(({ trId }) => trId.endsWith("CNT0"));
+      const hasExecution = reference.subscriptions.some(({ trId }) => trId.endsWith("CNT0"));
       if (!hasExecution) {
-        for (const subscription of subscribed) this.socket.unsubscribe(subscription);
+        this.unsubscribeSubscriptions(reference, addedSubscriptions);
         this.emit("diagnostic", symbol, marketCountry, {
           code: "subscription-unavailable",
           status: "source_unavailable",
@@ -681,20 +739,15 @@ export class ScalpingLiveRuntime {
           message: error instanceof Error ? error.message : "KIS subscription failed.",
         });
       }
-      const reference = {
-        symbol,
-        marketCountry,
-        ...(exchange ? { exchange } : {}),
-        subscriptions: subscribed,
-        count: 1,
-        closeCursorAt: this.now(),
-      };
-      newlyAdded.push(reference);
-      newlyAddedKeys.add(key);
-      retainedKeys.push(key);
-      this.references.set(key, reference);
+      reference.count += 1;
+      if (profile === "all") reference.allFeedCount += 1;
+      if (created) {
+        newlyAdded.push(reference);
+        this.references.set(key, reference);
+      }
+      retained.push({ key, profile, reference, created, addedSubscriptions });
     }
-    if (retainedKeys.length === 0) return () => {};
+    if (retained.length === 0) return () => {};
     try {
       const retainedAt = new Date(this.now()).toISOString();
       for (const reference of newlyAdded) {
@@ -706,22 +759,19 @@ export class ScalpingLiveRuntime {
       }
     } catch (error) {
       const cleanupErrors: unknown[] = [];
-      for (const reference of newlyAdded) {
+      for (const acquisition of retained) {
         try {
-          this.unsubscribeReference(reference);
+          this.unsubscribeSubscriptions(acquisition.reference, acquisition.addedSubscriptions);
         } catch (firstCleanupError) {
           try {
-            this.unsubscribeReference(reference);
+            this.unsubscribeSubscriptions(acquisition.reference, acquisition.addedSubscriptions);
           } catch (secondCleanupError) {
             cleanupErrors.push(firstCleanupError, secondCleanupError);
           }
         }
-        this.references.delete(marketSymbolKey(reference.symbol, reference.marketCountry));
-      }
-      for (const key of retainedKeys) {
-        if (newlyAddedKeys.has(key)) continue;
-        const reference = this.references.get(key);
-        if (reference) reference.count -= 1;
+        acquisition.reference.count -= 1;
+        if (acquisition.profile === "all") acquisition.reference.allFeedCount -= 1;
+        if (acquisition.created) this.references.delete(acquisition.key);
       }
       if (cleanupErrors.length) {
         throw new AggregateError(
@@ -732,14 +782,14 @@ export class ScalpingLiveRuntime {
       throw error;
     }
     let released = false;
-    const pendingReleaseKeys = new Set(retainedKeys);
+    const pendingReleases = new Map(retained.map((acquisition) => [acquisition.key, acquisition]));
     return () => {
       if (released) return;
       const errors: unknown[] = [];
-      for (const key of [...pendingReleaseKeys]) {
+      for (const [key, acquisition] of pendingReleases) {
         const reference = this.references.get(key);
         if (!reference) {
-          pendingReleaseKeys.delete(key);
+          pendingReleases.delete(key);
           continue;
         }
         if (reference.count <= 1) {
@@ -753,12 +803,25 @@ export class ScalpingLiveRuntime {
           for (const closeKey of this.observedSessionCloses.keys()) {
             if (closeKey.startsWith(`${key}:`)) this.observedSessionCloses.delete(closeKey);
           }
+        } else if (acquisition.profile === "all" && reference.allFeedCount <= 1) {
+          try {
+            this.unsubscribeSubscriptions(
+              reference,
+              reference.subscriptions.filter(isDayExecutionSubscription),
+            );
+          } catch (error) {
+            errors.push(error);
+            continue;
+          }
+          reference.count -= 1;
+          reference.allFeedCount -= 1;
         } else {
           reference.count -= 1;
+          if (acquisition.profile === "all") reference.allFeedCount -= 1;
         }
-        pendingReleaseKeys.delete(key);
+        pendingReleases.delete(key);
       }
-      released = pendingReleaseKeys.size === 0;
+      released = pendingReleases.size === 0;
       if (released && this.config.disconnectWhenIdle && this.references.size === 0) {
         this.socket.disconnect();
       }
@@ -1041,17 +1104,24 @@ export class ScalpingLiveRuntime {
   }
 
   private unsubscribeReference(reference: LiveReference): void {
-    const failed: KisSubscription[] = [];
+    this.unsubscribeSubscriptions(reference, [...reference.subscriptions]);
+  }
+
+  private unsubscribeSubscriptions(
+    reference: LiveReference,
+    subscriptions: readonly KisSubscription[],
+  ): void {
     const errors: unknown[] = [];
-    for (const subscription of reference.subscriptions.splice(0)) {
+    for (const subscription of subscriptions) {
+      const index = reference.subscriptions.indexOf(subscription);
+      if (index < 0) continue;
       try {
         this.socket.unsubscribe(subscription);
+        reference.subscriptions.splice(index, 1);
       } catch (error) {
-        failed.push(subscription);
         errors.push(error);
       }
     }
-    reference.subscriptions.unshift(...failed);
     if (errors.length) throw new AggregateError(errors, "실시간 소켓 구독 해제에 실패했습니다.");
   }
 

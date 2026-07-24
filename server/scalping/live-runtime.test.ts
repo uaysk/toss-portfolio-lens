@@ -510,6 +510,86 @@ describe("ScalpingLiveRuntime", () => {
     runtime.close();
   });
 
+  it("upgrades standard US retains with the day feed and removes it after the last all retain", async () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T14:00:00.000Z"),
+    });
+
+    const releaseStandard = await runtime.retain(
+      ["AAPL"],
+      "US",
+      { AAPL: "NAS" },
+      { usFeedProfile: "standard" },
+    );
+    expect(Array.from(socket.subscriptions.values())).toEqual(expect.arrayContaining([
+      { trId: "HDFSCNT0", symbol: "AAPL", exchange: "NAS", usFeed: "standard" },
+      { trId: "HDFSASP0", symbol: "AAPL", exchange: "NAS", usFeed: "standard" },
+    ]));
+    expect(socket.subscriptionCount).toBe(2);
+
+    const releaseAllFirst = await runtime.retain(
+      ["AAPL"],
+      "US",
+      { AAPL: "NAS" },
+      { usFeedProfile: "all" },
+    );
+    const releaseAllLast = await runtime.retain(["AAPL"], "US", { AAPL: "NAS" });
+    expect(socket.subscriptions.get("HDFSCNT0:NAS:day:AAPL")).toEqual({
+      trId: "HDFSCNT0", symbol: "AAPL", exchange: "NAS", usFeed: "day",
+    });
+    expect(socket.subscriptionCount).toBe(3);
+
+    releaseAllFirst();
+    expect(socket.subscriptionCount).toBe(3);
+    releaseAllLast();
+    expect(socket.subscriptionCount).toBe(2);
+    expect(socket.subscriptions.has("HDFSCNT0:NAS:day:AAPL")).toBe(false);
+    expect(runtime.state.symbols).toEqual([{ symbol: "AAPL", marketCountry: "US", exchange: "NAS" }]);
+
+    releaseStandard();
+    expect(socket.subscriptionCount).toBe(0);
+    expect(runtime.state.connection).toBe("idle");
+    runtime.close();
+  });
+
+  it("keeps standard feeds when an earlier all retain is released before a standard retain", async () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(), getOverseasMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+    } as never, {
+      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 20, disconnectWhenIdle: true, watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3, recoveryBarLimit: 500,
+    });
+
+    const releaseAll = await runtime.retain(["MSFT"], "US", { MSFT: "NAS" });
+    const releaseStandard = await runtime.retain(
+      ["MSFT"],
+      "US",
+      { MSFT: "NAS" },
+      { usFeedProfile: "standard" },
+    );
+    expect(socket.subscriptionCount).toBe(3);
+
+    releaseAll();
+    expect(Array.from(socket.subscriptions.values())).toEqual(expect.arrayContaining([
+      { trId: "HDFSCNT0", symbol: "MSFT", exchange: "NAS", usFeed: "standard" },
+      { trId: "HDFSASP0", symbol: "MSFT", exchange: "NAS", usFeed: "standard" },
+    ]));
+    expect(socket.subscriptionCount).toBe(2);
+    releaseStandard();
+    expect(socket.subscriptionCount).toBe(0);
+    runtime.close();
+  });
+
   it("degrades a per-symbol subscription failure and keeps other US symbols live", async () => {
     const socket = new FakeSocket();
     const originalSubscribe = socket.subscribe.bind(socket);

@@ -11,6 +11,7 @@ import {
   DEFAULT_US_EXTENDED_SESSION_WINDOWS,
   krIntegratedSessionWindows,
 } from "./scalping/market-session.js";
+import type { UsExchange } from "./scalping/contracts.js";
 import type { TossProviderConfig } from "./scalping/toss-provider.js";
 
 export type OpenAiConfig = {
@@ -128,12 +129,29 @@ export type AiTradingSimulationConfig = {
   selectionRetryDelayMs: number;
 };
 
+export type ScalpingRecorderConfig = {
+  enabled: false;
+} | {
+  enabled: true;
+  instruments: Array<{
+    symbol: string;
+    exchange: UsExchange;
+  }>;
+  feedProfile: "standard" | "all";
+  flushIntervalMs: number;
+  batchSize: number;
+  maximumQueueSize: number;
+  retryBaseMs: number;
+  retryMaxMs: number;
+};
+
 export type ScalpingConfig = {
   enabled: false;
   minimumTopCount: number;
   maximumTopCount: number;
   ai: ScalpingAiConfig;
   simulation: AiTradingSimulationConfig;
+  recorder: ScalpingRecorderConfig;
 } | {
   enabled: true;
   minimumTopCount: number;
@@ -146,6 +164,7 @@ export type ScalpingConfig = {
   aggregator: IntradayBarAggregatorConfig;
   ai: ScalpingAiConfig;
   simulation: AiTradingSimulationConfig;
+  recorder: ScalpingRecorderConfig;
   sseHeartbeatMs: number;
   realtimeAnalysisDebounceMs: number;
   sseReplayEvents: number;
@@ -713,6 +732,7 @@ function readKisExchangeRateConfig(): KisExchangeRateConfig | undefined {
 
 function readScalpingConfig(): ScalpingConfig {
   const enabled = readBoolean("SCALPING_ENABLED", false);
+  const recorderEnabled = readBoolean("SCALPING_RECORDER_ENABLED", false);
   const minimumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MIN", 5, 1, 50);
   let maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
   const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
@@ -758,7 +778,19 @@ function readScalpingConfig(): ScalpingConfig {
       120_000,
     ),
   };
-  if (!enabled) return { enabled: false, minimumTopCount, maximumTopCount, ai: aiBase, simulation };
+  if (!enabled) {
+    if (recorderEnabled) {
+      throw new Error("SCALPING_RECORDER_ENABLED=true이면 SCALPING_ENABLED=true도 필요합니다.");
+    }
+    return {
+      enabled: false,
+      minimumTopCount,
+      maximumTopCount,
+      ai: aiBase,
+      simulation,
+      recorder: { enabled: false },
+    };
+  }
 
   const appKey = required("KI_APP_KEY");
   const appSecret = required("KI_APP_SECRET");
@@ -822,6 +854,68 @@ function readScalpingConfig(): ScalpingConfig {
     );
   }
   maximumTopCount = Math.min(maximumTopCount, websocketMaximumTopCount);
+  let recorder: ScalpingRecorderConfig = { enabled: false };
+  if (recorderEnabled) {
+    const rawInstruments = optional("SCALPING_RECORDER_US_SYMBOLS") || "";
+    const bySymbol = new Map<string, UsExchange>();
+    for (const entry of rawInstruments.split(",").map((value) => value.trim()).filter(Boolean)) {
+      const [rawSymbol, rawExchange, extra] = entry.split(":");
+      const recorderSymbol = rawSymbol?.trim().toUpperCase() ?? "";
+      const exchange = rawExchange?.trim().toUpperCase() as UsExchange | undefined;
+      if (extra !== undefined
+        || !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(recorderSymbol)
+        || !exchange
+        || !["NAS", "NYS", "AMS"].includes(exchange)) {
+        throw new Error(
+          "SCALPING_RECORDER_US_SYMBOLS는 SYMBOL:NAS|NYS|AMS 형식을 쉼표로 구분해야 합니다.",
+        );
+      }
+      const existing = bySymbol.get(recorderSymbol);
+      if (existing && existing !== exchange) {
+        throw new Error(`SCALPING_RECORDER_US_SYMBOLS에 ${recorderSymbol} 거래소가 충돌합니다.`);
+      }
+      bySymbol.set(recorderSymbol, exchange);
+    }
+    if (bySymbol.size < 1 || bySymbol.size > 20) {
+      throw new Error("SCALPING_RECORDER_US_SYMBOLS는 중복 없는 1~20개 종목이어야 합니다.");
+    }
+    const feedProfile = (optional("SCALPING_RECORDER_US_FEED_PROFILE") || "standard").toLowerCase();
+    if (feedProfile !== "standard" && feedProfile !== "all") {
+      throw new Error("SCALPING_RECORDER_US_FEED_PROFILE은 standard 또는 all이어야 합니다.");
+    }
+    const recorderSubscriptions = bySymbol.size * (feedProfile === "all" ? 3 : 2);
+    const interactiveMaximumTopCount = Math.floor(
+      (kisWebSocketMaximumSubscriptions - recorderSubscriptions) / 3,
+    );
+    if (interactiveMaximumTopCount < minimumTopCount) {
+      throw new Error(
+        "고정 기록 구독과 최소 대화형 종목 구독의 합이 KI_SCALPING_WS_MAX_SUBSCRIPTIONS를 초과합니다.",
+      );
+    }
+    maximumTopCount = Math.min(maximumTopCount, interactiveMaximumTopCount);
+    const batchSize = readBoundedInteger("SCALPING_RECORDER_BATCH_SIZE", 500, 1, 5_000);
+    const retryBaseMs = readBoundedInteger("SCALPING_RECORDER_RETRY_BASE_MS", 250, 1, 60_000);
+    recorder = {
+      enabled: true,
+      instruments: [...bySymbol].map(([symbol, exchange]) => ({ symbol, exchange })),
+      feedProfile,
+      flushIntervalMs: readBoundedInteger("SCALPING_RECORDER_FLUSH_INTERVAL_MS", 1_000, 50, 60_000),
+      batchSize,
+      maximumQueueSize: readBoundedInteger(
+        "SCALPING_RECORDER_MAX_QUEUE_SIZE",
+        100_000,
+        batchSize,
+        1_000_000,
+      ),
+      retryBaseMs,
+      retryMaxMs: readBoundedInteger(
+        "SCALPING_RECORDER_RETRY_MAX_MS",
+        30_000,
+        retryBaseMs,
+        600_000,
+      ),
+    };
+  }
   if (ai.maximumBatchSize < maximumTopCount) {
     throw new Error("AI_COMPUTE_MAX_BATCH_SIZE는 실제 적용되는 최대 표시 종목 수 이상이어야 합니다.");
   }
@@ -1062,6 +1156,7 @@ function readScalpingConfig(): ScalpingConfig {
     },
     ai,
     simulation,
+    recorder,
     sseHeartbeatMs: readBoundedInteger("SCALPING_SSE_HEARTBEAT_MS", 15_000, 1_000, 60_000),
     realtimeAnalysisDebounceMs: readBoundedInteger("SCALPING_REALTIME_ANALYSIS_DEBOUNCE_MS", 250, 50, 5_000),
     sseReplayEvents: readBoundedInteger("SCALPING_SSE_REPLAY_EVENTS", 2_000, 100, 100_000),
