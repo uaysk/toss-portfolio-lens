@@ -87,7 +87,13 @@ describe("BacktestService report option", () => {
     const context = setup();
     const result = await context.service.run({ ownerSubject: "owner", request: value });
     expect(context.reportGenerate).not.toHaveBeenCalled();
-    expect(result.result.report).toEqual({ requested: false, generated: false });
+    if (!result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
+      throw new Error("백테스트 응답 result가 객체여야 합니다.");
+    }
+    expect(Object.fromEntries(Object.entries(result.result)).report).toEqual({
+      requested: false,
+      generated: false,
+    });
   });
 
   it("동일 request hash와 현재 data revision의 완료 run은 엔진 재계산 없이 재사용한다", async () => {
@@ -104,7 +110,10 @@ describe("BacktestService report option", () => {
 
     expect(context.engine.run).not.toHaveBeenCalled();
     expect(context.runs.execute).not.toHaveBeenCalled();
-    expect(result.result.reused).toBe(true);
+    if (!result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
+      throw new Error("재사용 백테스트 응답 result가 객체여야 합니다.");
+    }
+    expect(Object.fromEntries(Object.entries(result.result)).reused).toBe(true);
   });
 
   it("enabled=true이면 완료된 동일 run으로 보고서를 한 번 생성하고 URL을 반환한다", async () => {
@@ -122,7 +131,9 @@ describe("BacktestService report option", () => {
     expect(generate).toHaveBeenCalledWith(expect.objectContaining({
       backtestRequestHash: "engine-aware-request-hash",
     }));
-    expect(result.result.report).toMatchObject({ generated: true, reused: true, url: expect.stringContaining("/reports/") });
+    expect(result.result).toMatchObject({
+      report: { generated: true, reused: true, url: expect.stringContaining("/reports/") },
+    });
   });
 
   it("failure_mode=warn은 백테스트 성공과 run을 보존하고 오류를 구조화한다", async () => {
@@ -132,10 +143,12 @@ describe("BacktestService report option", () => {
       request: { ...request, report: { enabled: true, failure_mode: "warn" } },
     });
     expect(context.runs.execute).toHaveBeenCalledOnce();
-    expect(result.result.report).toMatchObject({
-      generated: false,
-      status: "failed",
-      error: { code: "REPORT_GENERATION_FAILED", retryable: true },
+    expect(result.result).toMatchObject({
+      report: {
+        generated: false,
+        status: "failed",
+        error: { code: "REPORT_GENERATION_FAILED", retryable: true },
+      },
     });
     expect(JSON.stringify(result)).not.toContain("must-not-leak");
   });

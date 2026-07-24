@@ -24,7 +24,10 @@ function routeHandler(
   }) => candidate.route?.path === path);
   const route = layer?.route?.stack?.find((candidate) => candidate.method === method);
   if (!route) throw new Error(`Missing ${method.toUpperCase()} ${path}`);
-  return route.handle as (request: Record<string, unknown>, response: ReturnType<typeof mockResponse>) => Promise<void>;
+  return route.handle as unknown as (
+    request: Record<string, unknown>,
+    response: ReturnType<typeof mockResponse>,
+  ) => Promise<void>;
 }
 
 function service(overrides: Partial<SimulationRouterService> = {}): SimulationRouterService {

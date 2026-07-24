@@ -41,6 +41,7 @@ import { MONOCHROME_DASHES, MONOCHROME_SERIES, monochromeHeatmapStyle } from "@/
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { parseTargetWeightScheduleJson } from "@/lib/backtest-realism";
+import { BacktestRunController } from "@/lib/backtest-run-controller";
 import {
   TECHNICAL_BATCH_INDICATORS,
   buildTechnicalIndicatorDefinitions,
@@ -218,8 +219,7 @@ export function PortfolioBacktestView({
   const [backtestRuns, setBacktestRuns] = useState<Array<{ runId: string; label: string }>>([]);
   const manuallyEditedStart = useRef(false);
   const handoffInitializationStarted = useRef(Boolean(technicalStrategyHandoff));
-  const runGeneration = useRef(0);
-  const currentExecutionContext = useRef<{ strategyMode: "allocation" | "technical_signal"; fingerprint: string }>({ strategyMode, fingerprint: "" });
+  const runController = useRef(new BacktestRunController({ strategyMode, fingerprint: "" }));
 
   const loadCurrentPortfolio = useCallback(async () => {
     setLoadingCurrent(true);
@@ -471,7 +471,7 @@ export function PortfolioBacktestView({
     : undefined, [baseConfig, technicalAnalysis, technicalStrategy]);
   const technicalRequestFingerprint = technicalEndpointRequest ? JSON.stringify(technicalEndpointRequest) : "";
   const executionFingerprint = strategyMode === "technical_signal" ? technicalRequestFingerprint : JSON.stringify(baseConfig);
-  currentExecutionContext.current = { strategyMode, fingerprint: executionFingerprint };
+  runController.current.updateContext({ strategyMode, fingerprint: executionFingerprint });
   const technicalServerValidated = strategyMode !== "technical_signal"
     || Boolean(technicalValidation?.valid && technicalValidationFingerprint === technicalRequestFingerprint);
   const canRun = assets.length > 0
@@ -588,8 +588,7 @@ export function PortfolioBacktestView({
 
   const runBacktest = async () => {
     if (!canRun) return;
-    const startedContext = { ...currentExecutionContext.current };
-    const generation = ++runGeneration.current;
+    const runToken = runController.current.begin();
     setRunning(true);
     setError("");
     setResult(undefined);
@@ -610,9 +609,7 @@ export function PortfolioBacktestView({
         onUnauthorized();
         return;
       }
-      if (generation !== runGeneration.current
-        || currentExecutionContext.current.strategyMode !== startedContext.strategyMode
-        || currentExecutionContext.current.fingerprint !== startedContext.fingerprint) return;
+      if (!runController.current.accepts(runToken)) return;
       const technicalPayload = technicalRequest ? unwrapTechnicalStrategyRun(raw) : undefined;
       const payload = (technicalPayload?.backtest ?? raw) as BacktestResult & ApiError;
       if (!response.ok) throw new Error((raw as ApiError).error?.message || "백테스트를 실행하지 못했습니다.");
@@ -626,19 +623,17 @@ export function PortfolioBacktestView({
         setTechnicalRunFingerprint("");
       }
       setResult(payload);
-      setResultOrigin(startedContext);
+      setResultOrigin(runToken.context);
       if (payload.runId) {
         const label = `${new Date(payload.generatedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} · ${payload.config.assets.length}종목 · CAGR ${payload.metrics.cagrPercent === null ? "-" : formatPercent(payload.metrics.cagrPercent, true)}`;
         setBacktestRuns((current) => [{ runId: payload.runId!, label }, ...current.filter((item) => item.runId !== payload.runId)].slice(0, 20));
       }
     } catch (caught) {
-      if (generation === runGeneration.current
-        && currentExecutionContext.current.strategyMode === startedContext.strategyMode
-        && currentExecutionContext.current.fingerprint === startedContext.fingerprint) {
+      if (runController.current.accepts(runToken)) {
         setError(caught instanceof Error ? caught.message : "백테스트를 실행하지 못했습니다.");
       }
     } finally {
-      if (generation === runGeneration.current) setRunning(false);
+      if (runController.current.isLatest(runToken)) setRunning(false);
     }
   };
 

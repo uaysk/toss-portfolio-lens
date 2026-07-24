@@ -25,10 +25,12 @@ describe("backtest policy schemas", () => {
         regime: "risk_off",
       }],
     });
-    expect(parsed.targetWeightSchedule[0]).toMatchObject({
-      weights: { AAA: 20, BBB: 70 },
-      cashTargetPercent: 10,
-      regime: "risk_off",
+    expect(parsed).toMatchObject({
+      targetWeightSchedule: [{
+        weights: { AAA: 20, BBB: 70 },
+        cashTargetPercent: 10,
+        regime: "risk_off",
+      }],
     });
   });
 
@@ -56,7 +58,9 @@ describe("backtest policy schemas", () => {
       ],
       realism: { enforcePointInTimeUniverse: true },
     });
-    expect(parsed.realism.enforcePointInTimeUniverse).toBe(true);
+    expect(parsed).toMatchObject({
+      realism: { enforcePointInTimeUniverse: true },
+    });
   });
 });
 
@@ -77,7 +81,9 @@ describe("technical analysis schema", () => {
   it("공개 batch 입력을 strict하게 정규화하고 31개 exact kind만 허용한다", () => {
     const parsed = toolSchemas.analyze_technical_signals.parse(request);
     expect(parsed.symbols).toEqual(["AAA", "BBB"]);
-    expect(parsed.indicators[0]?.instrumentKeys).toEqual(["AAA", "BBB"]);
+    expect(parsed).toMatchObject({
+      indicators: [{ instrumentKeys: ["AAA", "BBB"] }],
+    });
     expect(toolSchemas.analyze_technical_signals.safeParse({
       ...request,
       indicators: [{ id: "unknown", kind: "not_an_indicator" }],

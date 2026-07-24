@@ -78,10 +78,10 @@ export function hasValidSession(request: Request, secret: string): boolean {
   return payload?.version === 1 && typeof payload.exp === "number" && payload.exp > now;
 }
 
-export function hasValidReadOnlyApiSecret(authorization: string | undefined, dashboardPassword: string): boolean {
+export function hasValidReadOnlyApiSecret(authorization: string | undefined, readOnlyApiToken: string): boolean {
   const match = authorization?.match(/^Bearer\s+([^\s]+)$/i);
   if (!match) return false;
-  return passwordsMatch(match[1], dashboardPassword);
+  return passwordsMatch(match[1], readOnlyApiToken);
 }
 
 export function setNoStore(response: Response): void {

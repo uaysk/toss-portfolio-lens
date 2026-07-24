@@ -340,7 +340,7 @@ try {
     schema_version: WORKER_PAYLOAD_SCHEMA_VERSION,
     engine_version: cancellableRun.engineVersion,
     run_id: cancellableRun.id,
-    job_kind: cancellableRun.kind,
+    job_kind: "optimization",
     data_revision: cancellableRun.dataRevision,
     request_hash: cancellableRun.requestHash,
     payload: { optimization: optimizationInput, objective: "robust_score" },

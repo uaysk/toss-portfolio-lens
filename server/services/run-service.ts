@@ -126,8 +126,50 @@ type QueuedTask = {
   deadlineAt: number;
 };
 
+type ExecuteRunInput = {
+  ownerSubject: string;
+  kind: PortfolioRunKind;
+  config: unknown;
+  dataRevision: string;
+  task: (context: RunTaskContext) => Promise<RunTaskResult>;
+};
+
+type CreateRunInput = {
+  ownerSubject: string;
+  kind: PortfolioRunKind;
+  config: unknown;
+  dataRevision: string;
+  totalCandidates?: number;
+};
+
+type RecordPreflightFailureInput = CreateRunInput & {
+  error: unknown;
+};
+
+type EnqueueRunInput = ExecuteRunInput & {
+  totalCandidates?: number;
+  allowInlineInExternal?: boolean;
+};
+
+type EnqueueExternalRunInput = {
+  ownerSubject: string;
+  kind: PortfolioRunKind;
+  config: unknown;
+  dataRevision: string;
+  payload: Record<string, unknown>;
+  totalCandidates?: number;
+  priority?: number;
+  maxAttempts?: number;
+};
+
+type ExecuteExternalRunInput = Omit<
+  EnqueueExternalRunInput,
+  "priority" | "maxAttempts"
+>;
+
 class RunCancelledError extends Error {}
 class RunDeadlineExceededError extends Error {}
+class RunServiceClosedError extends Error {}
 
 export class RunService {
   private readonly queue: QueuedTask[] = [];
@@ -135,7 +177,13 @@ export class RunService {
     controller: AbortController;
     deadlineTimer?: NodeJS.Timeout;
   }>();
+  private readonly admissionTasks = new Set<Promise<unknown>>();
+  private readonly executionTasks = new Set<Promise<unknown>>();
+  private readonly persistenceTasks = new Set<Promise<unknown>>();
+  private readonly shutdownController = new AbortController();
   private running = 0;
+  private accepting = true;
+  private closeTask?: Promise<void>;
 
   constructor(
     private readonly repository: RunRepository,
@@ -158,6 +206,7 @@ export class RunService {
   }
 
   async initialize(): Promise<number> {
+    this.assertAccepting();
     const recoveredJobs = this.options.jobRepository
       ? await this.options.jobRepository.recoverExpiredLeases()
       : { requeued: 0, failed: 0, cancelled: 0 };
@@ -172,13 +221,35 @@ export class RunService {
     return this.options.executionMode ?? "inline";
   }
 
-  async create(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    totalCandidates?: number;
-  }): Promise<PortfolioRunRecord> {
+  async waitForIdle(): Promise<void> {
+    if (this.closeTask) {
+      await this.closeTask;
+      return;
+    }
+    while (true) {
+      this.drain();
+      const tasks = [...this.admissionTasks, ...this.executionTasks, ...this.persistenceTasks];
+      if (!tasks.length && !this.queue.length && this.running === 0) return;
+      if (tasks.length) {
+        await Promise.allSettled(tasks);
+      } else {
+        await Promise.resolve();
+      }
+    }
+  }
+
+  close(reason = "server_shutdown"): Promise<void> {
+    if (!this.closeTask) this.closeTask = this.performClose(reason);
+    return this.closeTask;
+  }
+
+  async create(input: CreateRunInput): Promise<PortfolioRunRecord> {
+    this.assertAccepting();
+    const task = this.createAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async createAccepted(input: CreateRunInput): Promise<PortfolioRunRecord> {
     const { hash, manifest } = runCreationMetadata(input);
     return this.repository.create({
       kind: input.kind,
@@ -192,14 +263,17 @@ export class RunService {
     });
   }
 
-  async recordPreflightFailure(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    error: unknown;
-    totalCandidates?: number;
-  }): Promise<{ run: PortfolioRunRecord; created: boolean }> {
+  async recordPreflightFailure(
+    input: RecordPreflightFailureInput,
+  ): Promise<{ run: PortfolioRunRecord; created: boolean }> {
+    this.assertAccepting();
+    const task = this.recordPreflightFailureAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async recordPreflightFailureAccepted(
+    input: RecordPreflightFailureInput,
+  ): Promise<{ run: PortfolioRunRecord; created: boolean }> {
     const { hash, manifest } = runCreationMetadata(input);
     return this.repository.createPreflightFailureIfAbsent({
       kind: input.kind,
@@ -214,13 +288,15 @@ export class RunService {
     });
   }
 
-  async execute(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    task: (context: RunTaskContext) => Promise<RunTaskResult>;
-  }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+  async execute(input: ExecuteRunInput): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    this.assertAccepting();
+    const task = this.executeAccepted(input);
+    return await this.trackTask(this.executionTasks, task);
+  }
+
+  private async executeAccepted(
+    input: ExecuteRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     let run = await this.create(input);
     if (run.status === "completed") return { run, reused: true };
     if (run.status === "failed" || run.status === "cancelled") {
@@ -254,6 +330,7 @@ export class RunService {
     await this.repository.addEvent(run.id, "started", { kind: input.kind });
     const context = this.activateContext(run.id, Date.now() + (this.options.runDeadlineMs ?? 120_000));
     try {
+      await context.throwIfCancelled();
       const completed = await input.task(context);
       await context.throwIfCancelled();
       await this.persistArtifacts(run.id, input.dataRevision, completed.artifacts ?? [], context);
@@ -268,8 +345,22 @@ export class RunService {
         throw new RunCancelledError("실행이 취소되었습니다.");
       }
     } catch (error) {
-      if (error instanceof RunCancelledError || await this.repository.isCancellationRequested(run.id)) {
+      if (error instanceof RunCancelledError
+        || (context.signal.aborted && context.signal.reason instanceof RunCancelledError)
+        || await this.repository.isCancellationRequested(run.id)) {
         await this.repository.cancel(run.id, { cancelled: true }, ["사용자 요청으로 실행을 취소했습니다."]);
+      } else if (error instanceof RunServiceClosedError
+        || (context.signal.aborted && context.signal.reason instanceof RunServiceClosedError)) {
+        await this.waitForTasks(this.admissionTasks);
+        if (await this.repository.isCancellationRequested(run.id)) {
+          await this.repository.cancel(run.id, { cancelled: true }, ["사용자 요청으로 실행을 취소했습니다."]);
+        } else {
+          await this.repository.fail(run.id, {
+            code: "RUN_SERVICE_SHUTDOWN",
+            message: "서버 종료로 실행이 중단되었습니다.",
+            retryable: true,
+          }, ["중단 전 저장된 artifact는 보존되었습니다."]);
+        }
       } else if (error instanceof RunDeadlineExceededError) {
         await this.repository.fail(run.id, {
           code: "RUN_DEADLINE_EXCEEDED",
@@ -289,15 +380,15 @@ export class RunService {
     return { run: stored, reused: false };
   }
 
-  async enqueue(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    totalCandidates?: number;
-    allowInlineInExternal?: boolean;
-    task: (context: RunTaskContext) => Promise<RunTaskResult>;
-  }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+  async enqueue(input: EnqueueRunInput): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    this.assertAccepting();
+    const task = this.enqueueAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async enqueueAccepted(
+    input: EnqueueRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     if (this.executionMode === "external" && !input.allowInlineInExternal) {
       throw new Error("external 실행은 serializable worker payload로 enqueueExternal을 호출해야 합니다.");
     }
@@ -353,11 +444,20 @@ export class RunService {
       task: input.task,
       deadlineAt: Date.now() + (this.options.runDeadlineMs ?? 120_000),
     });
-    void this.drain();
+    this.drain();
     return { run, reused: false };
   }
 
   async get(runId: string, ownerSubject: string): Promise<PortfolioRunRecord | undefined> {
+    this.assertAccepting();
+    const task = this.getAccepted(runId, ownerSubject);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async getAccepted(
+    runId: string,
+    ownerSubject: string,
+  ): Promise<PortfolioRunRecord | undefined> {
     let run = await this.repository.get(runId, ownerSubject);
     if (run && ["queued", "running", "cancel_requested"].includes(run.status) && this.options.jobRepository) {
       const job = await this.options.jobRepository.get(run.id);
@@ -370,16 +470,17 @@ export class RunService {
     return run;
   }
 
-  async enqueueExternal(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    payload: Record<string, unknown>;
-    totalCandidates?: number;
-    priority?: number;
-    maxAttempts?: number;
-  }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+  async enqueueExternal(
+    input: EnqueueExternalRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    this.assertAccepting();
+    const task = this.enqueueExternalAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async enqueueExternalAccepted(
+    input: EnqueueExternalRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     const jobs = this.options.jobRepository;
     if (!jobs) throw new Error("external compute queue가 초기화되지 않았습니다.");
     let run = await this.create(input);
@@ -490,19 +591,23 @@ export class RunService {
     return { run, reused: false };
   }
 
-  async executeExternal(input: {
-    ownerSubject: string;
-    kind: PortfolioRunKind;
-    config: unknown;
-    dataRevision: string;
-    payload: Record<string, unknown>;
-    totalCandidates?: number;
-  }): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+  async executeExternal(
+    input: ExecuteExternalRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    this.assertAccepting();
+    const task = this.executeExternalAccepted(input);
+    return await this.trackTask(this.executionTasks, task);
+  }
+
+  private async executeExternalAccepted(
+    input: ExecuteExternalRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     const dispatched = await this.enqueueExternal(input);
     if (dispatched.run.status === "completed") return dispatched;
     const deadlineAt = Date.now() + (this.options.resultDeadlineMs ?? 300_000);
     const pollMs = this.options.resultPollMs ?? 250;
     while (Date.now() < deadlineAt) {
+      this.assertAccepting();
       const current = await this.get(dispatched.run.id, input.ownerSubject);
       if (!current) throw new Error("external run을 찾을 수 없습니다.");
       if (current.status === "completed") {
@@ -516,7 +621,7 @@ export class RunService {
           details: { run_id: current.id, error: current.error },
         });
       }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await this.waitForExternalPoll(pollMs);
     }
     await this.options.jobRepository?.cancel(dispatched.run.id, input.ownerSubject);
     throw new ServiceError({
@@ -533,6 +638,17 @@ export class RunService {
     config: unknown;
     dataRevision: string;
   }): Promise<PortfolioRunRecord | undefined> {
+    this.assertAccepting();
+    const task = this.findReusableAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async findReusableAccepted(input: {
+    ownerSubject: string;
+    kind: PortfolioRunKind;
+    config: unknown;
+    dataRevision: string;
+  }): Promise<PortfolioRunRecord | undefined> {
     const run = await this.repository.findByRequest(
       input.ownerSubject,
       input.kind,
@@ -544,7 +660,109 @@ export class RunService {
     return run;
   }
 
+  private assertAccepting(): void {
+    if (!this.accepting) {
+      throw new RunServiceClosedError("Run service가 종료되어 새 실행을 시작할 수 없습니다.");
+    }
+  }
+
+  private trackTask<T>(tasks: Set<Promise<unknown>>, task: Promise<T>): Promise<T> {
+    tasks.add(task);
+    void task.then(
+      () => tasks.delete(task),
+      () => tasks.delete(task),
+    );
+    return task;
+  }
+
+  private async waitForTasks(tasks: Set<Promise<unknown>>): Promise<void> {
+    while (tasks.size) {
+      await Promise.allSettled([...tasks]);
+    }
+  }
+
+  private async waitForOwnedWork(): Promise<void> {
+    while (true) {
+      const tasks = [...this.executionTasks, ...this.persistenceTasks];
+      if (!tasks.length) return;
+      await Promise.allSettled(tasks);
+    }
+  }
+
+  private waitForExternalPoll(milliseconds: number): Promise<void> {
+    const signal = this.shutdownController.signal;
+    if (signal.aborted) {
+      return Promise.reject(
+        signal.reason instanceof Error ? signal.reason : new RunServiceClosedError("Run service가 종료되었습니다."),
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason instanceof Error
+          ? signal.reason
+          : new RunServiceClosedError("Run service가 종료되었습니다."));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, milliseconds);
+      timer.unref();
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private async terminalizeQueuedRun(queued: QueuedTask, reason: string): Promise<void> {
+    if (await this.repository.isCancellationRequested(queued.run.id)) {
+      await this.repository.cancel(
+        queued.run.id,
+        { cancelled: true },
+        ["대기 중 사용자 요청으로 취소했습니다."],
+      );
+      return;
+    }
+    await this.repository.fail(queued.run.id, {
+      code: "RUN_SERVICE_SHUTDOWN",
+      message: "서버 종료로 대기 중 실행이 중단되었습니다.",
+      retryable: true,
+    }, [`대기 중이던 실행을 시작하지 않았습니다: ${reason}`]);
+  }
+
+  private async performClose(reason: string): Promise<void> {
+    this.accepting = false;
+    const shutdown = new RunServiceClosedError(`서버 종료로 실행이 중단되었습니다: ${reason}`);
+    if (!this.shutdownController.signal.aborted) this.shutdownController.abort(shutdown);
+    for (const active of this.activeExecutions.values()) {
+      if (!active.controller.signal.aborted) active.controller.abort(shutdown);
+    }
+
+    await this.waitForTasks(this.admissionTasks);
+    for (const active of this.activeExecutions.values()) {
+      if (!active.controller.signal.aborted) active.controller.abort(shutdown);
+    }
+
+    const queued = this.queue.splice(0);
+    const terminalizations = queued.map((item) => this.terminalizeQueuedRun(item, reason));
+    const [terminalResults] = await Promise.all([
+      Promise.allSettled(terminalizations),
+      this.waitForOwnedWork(),
+    ]);
+    const failures = terminalResults.flatMap((result) => (
+      result.status === "rejected" ? [result.reason] : []
+    ));
+    if (failures.length) {
+      throw new AggregateError(failures, "대기 중 Run service 실행을 모두 종료하지 못했습니다.");
+    }
+  }
+
   async cancel(runId: string, ownerSubject: string): Promise<boolean> {
+    this.assertAccepting();
+    const task = this.cancelAccepted(runId, ownerSubject);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  private async cancelAccepted(runId: string, ownerSubject: string): Promise<boolean> {
     if (this.options.jobRepository && await this.options.jobRepository.get(runId)) {
       return Boolean(await this.options.jobRepository.cancel(runId, ownerSubject));
     }
@@ -569,6 +787,13 @@ export class RunService {
       active.deadlineTimer.unref();
     }
     this.activeExecutions.set(runId, active);
+    if (this.shutdownController.signal.aborted) {
+      controller.abort(
+        this.shutdownController.signal.reason instanceof Error
+          ? this.shutdownController.signal.reason
+          : new RunServiceClosedError("Run service가 종료되었습니다."),
+      );
+    }
     const isCancelled = async () => (
       controller.signal.aborted && controller.signal.reason instanceof RunCancelledError
     ) || this.repository.isCancellationRequested(runId);
@@ -576,7 +801,21 @@ export class RunService {
       runId,
       signal: controller.signal,
       isCancelled,
-      updateProgress: (progress, detail = {}) => this.repository.updateProgress(runId, { progress, ...detail }),
+      updateProgress: (progress, detail = {}) => {
+        if (!this.accepting || controller.signal.aborted) {
+          const error = controller.signal.reason instanceof Error
+            ? controller.signal.reason
+            : new RunServiceClosedError("Run service가 종료되었습니다.");
+          const rejected = Promise.reject(error);
+          void rejected.catch(() => undefined);
+          return rejected;
+        }
+        if (this.activeExecutions.get(runId) !== active) {
+          return Promise.resolve();
+        }
+        const task = this.repository.updateProgress(runId, { progress, ...detail });
+        return this.trackTask(this.persistenceTasks, task);
+      },
       throwIfCancelled: async () => {
         if (controller.signal.aborted) {
           if (controller.signal.reason instanceof Error) throw controller.signal.reason;
@@ -680,13 +919,21 @@ export class RunService {
     }
   }
 
-  private async drain(): Promise<void> {
-    while (this.running < this.maxConcurrentRuns && this.queue.length) {
+  private drain(): void {
+    if (!this.accepting) return;
+    while (this.accepting && this.running < this.maxConcurrentRuns && this.queue.length) {
       const queued = this.queue.shift()!;
       this.running += 1;
-      void this.runQueued(queued).finally(() => {
+      const task = this.runQueued(queued).finally(() => {
         this.running -= 1;
-        void this.drain();
+        this.drain();
+      });
+      this.trackTask(this.executionTasks, task);
+      void task.catch((error) => {
+        console.error(
+          "[runs] background execution failed:",
+          error instanceof Error ? error.message : "unknown error",
+        );
       });
     }
   }
@@ -711,8 +958,26 @@ export class RunService {
         throw new RunCancelledError("실행이 취소되었습니다.");
       }
     } catch (error) {
-      if (error instanceof RunCancelledError || await this.repository.isCancellationRequested(queued.run.id)) {
+      if (error instanceof RunCancelledError
+        || (context.signal.aborted && context.signal.reason instanceof RunCancelledError)
+        || await this.repository.isCancellationRequested(queued.run.id)) {
         await this.repository.cancel(queued.run.id, { cancelled: true }, ["사용자 요청으로 실행을 취소했습니다."]);
+      } else if (error instanceof RunServiceClosedError
+        || (context.signal.aborted && context.signal.reason instanceof RunServiceClosedError)) {
+        await this.waitForTasks(this.admissionTasks);
+        if (await this.repository.isCancellationRequested(queued.run.id)) {
+          await this.repository.cancel(
+            queued.run.id,
+            { cancelled: true },
+            ["사용자 요청으로 실행을 취소했습니다."],
+          );
+        } else {
+          await this.repository.fail(queued.run.id, {
+            code: "RUN_SERVICE_SHUTDOWN",
+            message: "서버 종료로 실행이 중단되었습니다.",
+            retryable: true,
+          }, ["중단 전 저장된 artifact는 보존되었습니다."]);
+        }
       } else if (error instanceof RunDeadlineExceededError) {
         await this.repository.fail(queued.run.id, {
           code: "RUN_DEADLINE_EXCEEDED",

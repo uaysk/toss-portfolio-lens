@@ -5,6 +5,7 @@ import { LoginPage } from "@/components/login-page";
 import { Logo } from "@/components/logo";
 import { ReportPage } from "@/components/report-page";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { safeLocalStorage } from "@/lib/safe-storage";
 import type { Theme } from "@/types";
 
 export default function App() {
@@ -12,14 +13,14 @@ export default function App() {
   const reportId = reportRoute?.[1];
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<Theme>(() =>
-    window.localStorage.getItem("portfolio-theme") === "light" ? "light" : "dark",
+    safeLocalStorage.getItem("portfolio-theme") === "light" ? "light" : "dark",
   );
 
   useLayoutEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     document.documentElement.style.colorScheme = theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#050505" : "#ececea");
-    window.localStorage.setItem("portfolio-theme", theme);
+    safeLocalStorage.setItem("portfolio-theme", theme);
   }, [theme]);
 
   const toggleTheme = useCallback(() => {

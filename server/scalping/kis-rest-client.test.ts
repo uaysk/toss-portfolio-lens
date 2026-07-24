@@ -246,7 +246,7 @@ describe("KisRestClient", () => {
   });
 
   it("strictly validates current-day minute input and returns sorted final/forming bars", async () => {
-    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/oauth2/tokenP")) return json({ access_token: "token", expires_in: 86_400 });
       return json({
@@ -258,7 +258,7 @@ describe("KisRestClient", () => {
           minuteRow({ stck_cntg_hour: "095800", stck_hgpr: "70000" }),
         ],
       });
-    }) as unknown as typeof fetch;
+    });
     const client = new KisRestClient(config, { fetchImpl, sleepImpl: async () => {}, now: () => NOW });
 
     await expect(client.getCurrentDayMinutes({
@@ -377,7 +377,7 @@ describe("KisRestClient", () => {
     }) as unknown as typeof fetch;
     const client = new KisRestClient(config, { fetchImpl, sleepImpl: async () => {}, now: () => NOW });
 
-    await expect(client.getVolumeRanking({ basisCode: "0" })).rejects.toMatchObject<KisRestError>({
+    await expect(client.getVolumeRanking({ basisCode: "0" })).rejects.toMatchObject({
       code: "invalid-response",
       retryable: false,
     });

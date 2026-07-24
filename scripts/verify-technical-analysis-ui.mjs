@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
 
@@ -622,7 +622,7 @@ function observePage(page) {
   return failures;
 }
 
-async function routeApplicationApi(page) {
+export async function routeTechnicalUiApi(page) {
   const state = {
     analyzeRequests: [],
     profileRequests: [],
@@ -1222,7 +1222,7 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
   }, theme);
   const page = await context.newPage();
   const failures = observePage(page);
-  const state = await routeApplicationApi(page);
+  const state = await routeTechnicalUiApi(page);
   const startedAt = Date.now();
   try {
     const navigation = await page.goto(`${baseUrl}/#technical-analysis`, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -1386,10 +1386,11 @@ async function stopProcess(child) {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
-let viteProcess;
-let browser;
-let exitCode = 0;
-try {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  let viteProcess;
+  let browser;
+  let exitCode = 0;
+  try {
   let baseUrl = process.env.TECHNICAL_UI_BASE_URL?.replace(/\/$/, "");
   if (!baseUrl) {
     const viteEntry = path.join(projectRoot, "node_modules", "vite", "bin", "vite.js");
@@ -1422,11 +1423,12 @@ try {
     await verifyViewport(browser, baseUrl, { viewport: { width: 390, height: 844 }, theme: "light", exerciseMutations: false }),
   ];
   console.info(JSON.stringify({ ok: true, results }, null, 2));
-} catch (error) {
-  exitCode = 1;
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-} finally {
-  await browser?.close().catch(() => undefined);
-  await stopProcess(viteProcess);
+  } catch (error) {
+    exitCode = 1;
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+  } finally {
+    await browser?.close().catch(() => undefined);
+    await stopProcess(viteProcess);
+  }
+  process.exitCode = exitCode;
 }
-process.exitCode = exitCode;

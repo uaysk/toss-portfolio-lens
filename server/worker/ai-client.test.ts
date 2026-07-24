@@ -18,8 +18,11 @@ const BAR_TIME = "2026-07-21T00:00:00.000Z";
 const AUTH_TOKEN = "a".repeat(64);
 
 function request(requestId = "request-1"): AiRequest {
+  const base = aiRequestBase(requestId);
   return {
-    ...aiRequestBase(requestId),
+    ...base,
+    horizons_minutes: [...base.horizons_minutes],
+    quantiles: [...base.quantiles],
     mode: "forecast",
     series: [{
       instrument_key: "005930",
@@ -113,7 +116,11 @@ class FakeWebSocket extends EventEmitter implements AiWebSocketLike {
     this.emit("close", code, Buffer.from(reason));
   }
 
-  override on(event: SocketEvent, listener: (...arguments_: never[]) => void): this {
+  override on(event: "open", listener: () => void): this;
+  override on(event: "message", listener: (data: RawData, isBinary: boolean) => void): this;
+  override on(event: "error", listener: (error: Error) => void): this;
+  override on(event: "close", listener: (code: number, reason: Buffer) => void): this;
+  override on(event: SocketEvent, listener: (...arguments_: any[]) => void): this {
     return super.on(event, listener);
   }
 }

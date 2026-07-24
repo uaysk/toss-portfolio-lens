@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
 import { setNoStore } from "../auth.js";
+import type { SseConnectionTracker } from "../lifecycle.js";
 import {
   MarketCountrySchema,
   MinuteIntervalSchema,
@@ -9,12 +10,13 @@ import {
   type UsExchange,
 } from "./contracts.js";
 import type { ScalpingLiveEvent, ScalpingLiveRuntime } from "./live-runtime.js";
+import {
+  ValidationError,
+  mapScalpingError,
+} from "./domain-errors.js";
 import type {
-  ScalpingEvaluationRequest,
-  ScalpingForecastRequest,
   ScalpingRealtimeAnalysisRequest,
   ScalpingService,
-  ScalpingWorkspaceRequest,
 } from "./scalping-service.js";
 
 export type ScalpingRouterConfig = {
@@ -29,6 +31,7 @@ export type ScalpingRouterDependencies = {
   authenticate: RequestHandler;
   service?: Pick<ScalpingService, "status" | "workspace" | "forecast" | "evaluate" | "realtimeAnalysis">;
   live?: Pick<ScalpingLiveRuntime, "retain" | "onEvent" | "eventsAfter" | "waitForIdle">;
+  sseConnections?: Pick<SseConnectionTracker, "track">;
   config: ScalpingRouterConfig;
 };
 
@@ -44,7 +47,7 @@ export function parseStreamSymbols(value: unknown, maximum: number): string[] {
   const raw = typeof value === "string" ? value.split(",") : [];
   const symbols = Array.from(new Set(raw.map((item) => item.trim().toUpperCase()).filter(Boolean)));
   if (!symbols.length || symbols.length > maximum || symbols.some((symbol) => !SYMBOL.test(symbol))) {
-    throw new Error(`symbols must contain 1..${maximum} valid symbols`);
+    throw new ValidationError(`symbols must contain 1..${maximum} valid symbols`);
   }
   return symbols;
 }
@@ -70,7 +73,7 @@ export function parseStreamExchanges(
 ): Readonly<Record<string, UsExchange>> {
   const raw = typeof value === "string" ? value.trim() : "";
   if (marketCountry === "KR") {
-    if (raw) throw new Error("exchanges are only valid for US symbols");
+    if (raw) throw new ValidationError("exchanges are only valid for US symbols");
     return {};
   }
   const requested = new Set(symbols);
@@ -79,10 +82,12 @@ export function parseStreamExchanges(
     const [rawSymbol, rawExchange, extra] = entry.split(":");
     const symbol = rawSymbol?.trim().toUpperCase() ?? "";
     if (!symbol || extra !== undefined || !requested.has(symbol)) {
-      throw new Error("exchanges must only contain requested US symbols");
+      throw new ValidationError("exchanges must only contain requested US symbols");
     }
     const exchange = UsExchangeSchema.parse(rawExchange?.trim().toUpperCase());
-    if (output[symbol] && output[symbol] !== exchange) throw new Error(`conflicting exchange for ${symbol}`);
+    if (output[symbol] && output[symbol] !== exchange) {
+      throw new ValidationError(`conflicting exchange for ${symbol}`);
+    }
     output[symbol] = exchange;
   }
   return output;
@@ -137,19 +142,11 @@ function unavailable(response: Response): void {
 
 function sendError(response: Response, error: unknown): void {
   setNoStore(response);
-  if (error instanceof z.ZodError) {
-    response.status(400).json({
-      error: { code: "invalid-scalping-request", message: "단타 보조 요청 값을 확인해 주세요.", issues: error.issues },
-    });
-    return;
+  const mapped = mapScalpingError(error);
+  for (const [name, value] of Object.entries(mapped.headers ?? {})) {
+    response.setHeader(name, value);
   }
-  if (error instanceof Error && /종목|symbols|interval|평가|분봉|count|layout|preset/i.test(error.message)) {
-    response.status(400).json({ error: { code: "invalid-scalping-request", message: error.message } });
-    return;
-  }
-  response.status(503).json({
-    error: { code: "scalping-unavailable", message: "단타 보조 데이터를 처리하지 못했습니다." },
-  });
+  response.status(mapped.status).json(mapped.body);
 }
 
 export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
@@ -181,7 +178,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     setNoStore(response);
     if (!dependencies.config.enabled || !dependencies.service) return unavailable(response);
     try {
-      response.json(await dependencies.service.workspace(request.body as ScalpingWorkspaceRequest));
+      response.json(await dependencies.service.workspace(request.body));
     } catch (error) {
       sendError(response, error);
     }
@@ -191,7 +188,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     setNoStore(response);
     if (!dependencies.config.enabled || !dependencies.service) return unavailable(response);
     try {
-      response.json(await dependencies.service.forecast(request.body as ScalpingForecastRequest));
+      response.json(await dependencies.service.forecast(request.body));
     } catch (error) {
       sendError(response, error);
     }
@@ -201,7 +198,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     setNoStore(response);
     if (!dependencies.config.enabled || !dependencies.service) return unavailable(response);
     try {
-      response.status(202).json(await dependencies.service.evaluate(request.body as ScalpingEvaluationRequest, "owner"));
+      response.status(202).json(await dependencies.service.evaluate(request.body, "owner"));
     } catch (error) {
       sendError(response, error);
     }
@@ -235,6 +232,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     let analysisTimer: ReturnType<typeof setTimeout> | undefined;
     let analysisRunning = false;
     let analysisQueued = false;
+    const analysisAbort = new AbortController();
     const requested = new Set(symbols);
     const requestedInterval = Number.parseInt(analysisOptions.interval, 10);
 
@@ -251,7 +249,10 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
         void (async () => {
           try {
             await dependencies.live!.waitForIdle();
-            const result = await dependencies.service!.realtimeAnalysis({ symbols, ...analysisOptions });
+            const result = await dependencies.service!.realtimeAnalysis(
+              { symbols, ...analysisOptions },
+              { signal: analysisAbort.signal },
+            );
             if (ended) return;
             if (blocked) pendingAnalysis = result;
             else blocked = !writeAnalysisSse(response, result);
@@ -278,14 +279,34 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     let removeListener: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let release: (() => void) | undefined;
+    let untrack: () => void = () => undefined;
+    const runCleanup = (name: string, operation: (() => void) | undefined) => {
+      if (!operation) return;
+      try {
+        operation();
+      } catch (error) {
+        console.warn(
+          `[scalping] SSE ${name} cleanup failed:`,
+          error instanceof Error ? error.message : "unknown error",
+        );
+      }
+    };
     const cleanup = () => {
       if (ended) return;
       ended = true;
       if (heartbeat) clearInterval(heartbeat);
       if (analysisTimer) clearTimeout(analysisTimer);
+      if (!analysisAbort.signal.aborted) analysisAbort.abort();
       response.off("drain", drain);
-      removeListener?.();
-      release?.();
+      const removeEventListener = removeListener;
+      removeListener = undefined;
+      const releaseSubscription = release;
+      release = undefined;
+      const unregisterConnection = untrack;
+      untrack = () => undefined;
+      runCleanup("listener", removeEventListener);
+      runCleanup("subscription", releaseSubscription);
+      runCleanup("tracker", unregisterConnection);
     };
     const writeLiveEvent = (event: ScalpingLiveEvent) => {
       if (ended || event.id <= lastSent) return;
@@ -333,6 +354,7 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     request.on("close", cleanup);
     response.on("close", cleanup);
     removeListener = dependencies.live.onEvent(sendLive);
+    untrack = dependencies.sseConnections?.track(response, cleanup) ?? (() => undefined);
     if (resumeAfter !== undefined) {
       for (const event of dependencies.live.eventsAfter(resumeAfter).sort((left, right) => left.id - right.id)) send(event);
       replaying = false;
@@ -346,7 +368,11 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     heartbeat.unref();
     try {
       release = await dependencies.live.retain(symbols, analysisOptions.marketCountry, exchanges);
-      if (ended) release();
+      if (ended) {
+        const releaseAfterClose = release;
+        release = undefined;
+        runCleanup("late subscription", releaseAfterClose);
+      }
     } catch {
       if (!ended) {
         response.write("event: unavailable\ndata: {\"type\":\"unavailable\",\"data\":{\"code\":\"live-provider-unavailable\"}}\n\n");

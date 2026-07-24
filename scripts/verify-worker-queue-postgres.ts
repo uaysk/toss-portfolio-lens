@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { openPostgresDatabase } from "../server/database.js";
 import { RunJobRepository } from "../server/repositories/run-job-repository.js";
-import { RunRepository, type PortfolioRunKind } from "../server/repositories/run-repository.js";
+import { RunRepository } from "../server/repositories/run-repository.js";
 import { WORKER_PAYLOAD_SCHEMA_VERSION, type WorkerInput, type WorkerOutput } from "../server/worker/contracts.js";
 
 const database = await openPostgresDatabase({
@@ -27,7 +27,7 @@ for (let pass = 0; pass < 10; pass += 1) {
 let counter = 0;
 const suiteId = randomUUID();
 async function createJob(input: {
-  kind?: PortfolioRunKind;
+  kind?: WorkerInput["job_kind"];
   priority?: number;
   maxAttempts?: number;
   deadlineAt?: number;
@@ -97,7 +97,7 @@ try {
     schema_version: WORKER_PAYLOAD_SCHEMA_VERSION,
     engine_version: identityRun.engineVersion,
     run_id: identityRun.id,
-    job_kind: identityRun.kind,
+    job_kind: "optimization",
     data_revision: identityRun.dataRevision,
     request_hash: identityHash,
     payload: { identity: true },
@@ -153,7 +153,7 @@ try {
     schema_version: WORKER_PAYLOAD_SCHEMA_VERSION,
     engine_version: runningCancellation.run.engineVersion,
     run_id: runningCancellation.run.id,
-    job_kind: runningCancellation.run.kind,
+    job_kind: runningCancellation.payload.job_kind,
     status: "completed",
     summary: {},
     result: {},
@@ -195,7 +195,7 @@ try {
     schema_version: WORKER_PAYLOAD_SCHEMA_VERSION,
     engine_version: completed.run.engineVersion,
     run_id: completed.run.id,
-    job_kind: completed.run.kind,
+    job_kind: completed.payload.job_kind,
     status: "completed",
     summary: { totalReturnPercent: 1.25 },
     result: { points: [{ date: "2026-01-01", balance: 100 }] },

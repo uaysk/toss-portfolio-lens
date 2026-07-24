@@ -1,6 +1,8 @@
 import { loadScalpingConfig } from "../server/env.js";
 import {
   KisWebSocketClient,
+  type KisExecutionEvent,
+  type KisOrderbookEvent,
   type KisSubscriptionEvent,
   type KisWebSocketEvent,
 } from "../server/scalping/kis-websocket-client.js";
@@ -54,13 +56,15 @@ async function main(): Promise<void> {
   }
 
   const subscriptions = events.filter((event): event is KisSubscriptionEvent => event.type === "subscription");
-  const standardExecutions = events.filter((event) => (
+  const standardExecutions = events.filter((event): event is KisExecutionEvent => (
     event.type === "execution" && event.marketCountry === "US" && event.usFeed === "standard"
   ));
-  const dayExecutions = events.filter((event) => (
+  const dayExecutions = events.filter((event): event is KisExecutionEvent => (
     event.type === "execution" && event.marketCountry === "US" && event.usFeed === "day"
   ));
-  const books = events.filter((event) => event.type === "orderbook" && event.marketCountry === "US");
+  const books = events.filter((event): event is KisOrderbookEvent => (
+    event.type === "orderbook" && event.marketCountry === "US"
+  ));
   const parseErrors = events.filter((event) => event.type === "parse_error");
   const latestBook = books.at(-1);
   const latestExecution = standardExecutions.at(-1);

@@ -112,16 +112,19 @@ fi
 [[ "${CLUSTER_PUBLIC_ACCESS_CIDR}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]] || fail "CLUSTER_PUBLIC_ACCESS_CIDR 형식이 올바르지 않습니다."
 
 DASHBOARD_PASSWORD="$(env_value DASHBOARD_PASSWORD)"
+READ_ONLY_API_TOKEN="$(env_value READ_ONLY_API_TOKEN)"
 SESSION_SECRET="$(env_value SESSION_SECRET)"
 [[ -n "${DASHBOARD_PASSWORD}" ]] || fail ".env의 DASHBOARD_PASSWORD가 비어 있습니다."
 [[ ${#SESSION_SECRET} -ge 32 ]] || fail ".env의 SESSION_SECRET은 32자 이상이어야 합니다."
 [[ "${DASHBOARD_PASSWORD}" != *$'\n'* && "${DASHBOARD_PASSWORD}" != *$'\r'* ]] || fail "DASHBOARD_PASSWORD에는 줄바꿈을 사용할 수 없습니다."
+[[ "${READ_ONLY_API_TOKEN}" != *$'\n'* && "${READ_ONLY_API_TOKEN}" != *$'\r'* ]] || fail "READ_ONLY_API_TOKEN에는 줄바꿈을 사용할 수 없습니다."
 [[ "${SESSION_SECRET}" != *$'\n'* && "${SESSION_SECRET}" != *$'\r'* ]] || fail "SESSION_SECRET에는 줄바꿈을 사용할 수 없습니다."
+UPSTREAM_READ_ONLY_API_TOKEN="${READ_ONLY_API_TOKEN:-${DASHBOARD_PASSWORD}}"
 
 TMP_DIR="$(mktemp -d)"
 ECR_REGISTRY=""
 cleanup() {
-  unset DASHBOARD_PASSWORD SESSION_SECRET MYSQL_PASSWORD DB_SECRET_JSON
+  unset DASHBOARD_PASSWORD READ_ONLY_API_TOKEN UPSTREAM_READ_ONLY_API_TOKEN SESSION_SECRET MYSQL_PASSWORD DB_SECRET_JSON
   if [[ -n "${ECR_REGISTRY}" ]]; then
     docker logout "${ECR_REGISTRY}" >/dev/null 2>&1 || true
   fi
@@ -249,8 +252,11 @@ SECRETS_ENV_FILE="${TMP_DIR}/app-secrets.env"
 umask 077
 {
   printf 'DASHBOARD_PASSWORD=%s\n' "${DASHBOARD_PASSWORD}"
+  if [[ -n "${READ_ONLY_API_TOKEN}" ]]; then
+    printf 'READ_ONLY_API_TOKEN=%s\n' "${READ_ONLY_API_TOKEN}"
+  fi
   printf 'SESSION_SECRET=%s\n' "${SESSION_SECRET}"
-  printf 'TOSS_API_BEARER_TOKEN=%s\n' "${DASHBOARD_PASSWORD}"
+  printf 'TOSS_API_BEARER_TOKEN=%s\n' "${UPSTREAM_READ_ONLY_API_TOKEN}"
   printf 'MYSQL_USER=%s\n' "${MYSQL_USER}"
   printf 'MYSQL_PASSWORD=%s\n' "${MYSQL_PASSWORD}"
 } >"${SECRETS_ENV_FILE}"

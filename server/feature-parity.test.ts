@@ -4,7 +4,11 @@ import { dashboardAnalysisOperations } from "./dashboard-analysis.js";
 import { toolSchemas, type ToolName } from "./mcp/schemas.js";
 import { toolMetadata } from "./mcp/tools/metadata.js";
 
-const serverSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+const bootstrapSource = readFileSync(new URL("./bootstrap.ts", import.meta.url), "utf8");
+const dashboardRouteSource = readFileSync(
+  new URL("./routes/dashboard-tools.ts", import.meta.url),
+  "utf8",
+);
 const advancedClientSource = readFileSync(new URL("../src/lib/advanced-analysis.ts", import.meta.url), "utf8");
 const libraryClientSource = readFileSync(new URL("../src/lib/research-library.ts", import.meta.url), "utf8");
 const libraryUiSource = readFileSync(new URL("../src/components/research-library.tsx", import.meta.url), "utf8");
@@ -44,6 +48,12 @@ function exportedFunction(source: string, name: string): boolean {
   return source.includes(`export async function ${name}(`) || source.includes(`export function ${name}(`);
 }
 
+function sourceCall(source: string, receiver: string, argument: string): boolean {
+  const escapedReceiver = receiver.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedArgument = argument.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escapedReceiver}\\(\\s*"${escapedArgument}"`).test(source);
+}
+
 describe("UI / HTTP API / MCP feature parity", () => {
   it("generated MCP inventory, Zod schemas and metadata are exact", () => {
     const expected = generatedContract.tools.map((tool) => tool.name);
@@ -53,9 +63,11 @@ describe("UI / HTTP API / MCP feature parity", () => {
   });
 
   it("every MCP tool is reachable through the schema-validated generic HTTP API", () => {
-    expect(serverSource).toContain('app.post("/api/portfolio/tools/:toolName"');
-    expect(serverSource).toContain("toolSchemas[name].parse(input)");
-    expect(serverSource).toContain("dashboardManagementHandlers[name](parsed, DASHBOARD_RUN_OWNER)");
+    expect(bootstrapSource).toContain("createDashboardToolsRouter({");
+    expect(bootstrapSource).toContain("(application) => application.use(dashboardToolsRouter)");
+    expect(dashboardRouteSource).toContain('router.post("/api/portfolio/tools/:toolName"');
+    expect(dashboardRouteSource).toContain("toolSchemas[name].parse(input)");
+    expect(dashboardRouteSource).toContain("managementHandlers[name](parsed, ownerSubject)");
   });
 
   it("advanced UI operations exactly match the HTTP dispatcher and MCP tool schemas", () => {
@@ -63,7 +75,7 @@ describe("UI / HTTP API / MCP feature parity", () => {
     expect(union, "AdvancedAnalysisOperation union was not found").not.toBeNull();
     const uiOperations = Array.from(union![1].matchAll(/"([a-z][a-z-]+)"/g), (match) => match[1]);
     expect(uiOperations).toEqual(Object.keys(dashboardAnalysisOperations));
-    expect(serverSource).toContain('app.post("/api/portfolio/advanced/:operation"');
+    expect(dashboardRouteSource).toContain('router.post("/api/portfolio/advanced/:operation"');
     for (const tool of Object.values(dashboardAnalysisOperations)) {
       expect(toolSchemas[tool], `${tool} Zod schema`).toBeDefined();
       expect(toolMetadata[tool], `${tool} MCP metadata`).toBeDefined();
@@ -74,10 +86,14 @@ describe("UI / HTTP API / MCP feature parity", () => {
     for (const feature of managementFeatures) {
       expect(toolSchemas[feature.tool], `${feature.tool} Zod schema`).toBeDefined();
       expect(toolMetadata[feature.tool], `${feature.tool} MCP metadata`).toBeDefined();
-      expect(serverSource, `${feature.method.toUpperCase()} ${feature.route}`)
-        .toContain(`app.${feature.method}("${feature.route}"`);
-      expect(serverSource, `${feature.tool} dedicated handler`)
-        .toContain(`executeDashboardManagement("${feature.tool}"`);
+      expect(
+        sourceCall(dashboardRouteSource, `router.${feature.method}`, feature.route),
+        `${feature.method.toUpperCase()} ${feature.route}`,
+      ).toBe(true);
+      expect(
+        sourceCall(dashboardRouteSource, "executeDashboardManagement", feature.tool),
+        `${feature.tool} dedicated handler`,
+      ).toBe(true);
       for (const client of feature.clients) {
         expect(exportedFunction(libraryClientSource, client), `${client} UI client`).toBe(true);
       }
@@ -89,10 +105,10 @@ describe("UI / HTTP API / MCP feature parity", () => {
       expect(toolSchemas[tool]).toBeDefined();
       expect(toolMetadata[tool]).toBeDefined();
     }
-    expect(serverSource).toContain('app.get("/api/portfolio/advanced/runs/:runId"');
-    expect(serverSource).toContain('app.get("/api/portfolio/advanced/runs/:runId/result"');
-    expect(serverSource).toContain('app.post("/api/portfolio/advanced/runs/:runId/cancel"');
-    expect(serverSource).toContain('app.get("/api/portfolio/advanced/runs/:runId/artifacts/:type"');
+    expect(dashboardRouteSource).toContain('router.get("/api/portfolio/advanced/runs/:runId"');
+    expect(dashboardRouteSource).toContain('"/api/portfolio/advanced/runs/:runId/result"');
+    expect(dashboardRouteSource).toContain('"/api/portfolio/advanced/runs/:runId/cancel"');
+    expect(dashboardRouteSource).toContain('"/api/portfolio/advanced/runs/:runId/artifacts/:type"');
     for (const client of ["runAdvancedAnalysis", "loadAdvancedRunSnapshot", "cancelAdvancedAnalysis", "loadAdvancedArtifact"]) {
       expect(exportedFunction(advancedClientSource, client), `${client} UI client`).toBe(true);
     }

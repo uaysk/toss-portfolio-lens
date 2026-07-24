@@ -61,6 +61,7 @@ export type TossApiAuthConfig =
 
 export type DatabaseProvider = "sqlite" | "mysql" | "postgresql";
 export type ComputeExecutionMode = "inline" | "rust_socket" | "external";
+export type ReadOnlyApiTokenSource = "READ_ONLY_API_TOKEN" | "DASHBOARD_PASSWORD";
 
 export type ComputeConfig = {
   executionMode: ComputeExecutionMode;
@@ -156,9 +157,13 @@ export type ScalpingConfig = {
 
 export type AppConfig = TossApiAuthConfig & {
   dashboardPassword: string;
+  readOnlyApiToken: string;
+  readOnlyApiTokenSource: ReadOnlyApiTokenSource;
   sessionSecret: string;
   host: string;
   port: number;
+  trustProxy: string[];
+  gracefulShutdownTimeoutMs: number;
   tossApiBaseUrl: string;
   dbProvider: DatabaseProvider;
   databasePath: string;
@@ -388,6 +393,32 @@ function readSnapshotRefreshHours(): number {
     throw new Error("SNAPSHOT_REFRESH_HOURS는 1~24 범위의 숫자여야 합니다.");
   }
   return value;
+}
+
+function validProxyAddress(value: string): boolean {
+  const [address, prefix, extra] = value.split("/");
+  if (!address || extra !== undefined) return false;
+  const normalized = address.replace(/^\[|\]$/g, "");
+  const version = isIP(normalized);
+  if (!version) return false;
+  if (prefix === undefined) return true;
+  if (!/^\d+$/.test(prefix)) return false;
+  const bits = Number(prefix);
+  return Number.isInteger(bits) && bits >= 0 && bits <= (version === 4 ? 32 : 128);
+}
+
+function readTrustProxy(): string[] {
+  const value = optional("TRUST_PROXY");
+  if (!value) return [];
+  const proxies = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (!proxies.length || proxies.some((entry) => !validProxyAddress(entry))) {
+    throw new Error("TRUST_PROXY는 쉼표로 구분한 IP 또는 CIDR 목록이어야 합니다.");
+  }
+  return proxies.map((entry) => {
+    const [address, prefix] = entry.split("/");
+    const normalized = address!.replace(/^\[|\]$/g, "");
+    return prefix === undefined ? normalized : `${normalized}/${prefix}`;
+  });
 }
 
 function readBoundedInteger(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -1053,6 +1084,14 @@ export function loadScalpingConfig(): ScalpingConfig {
 
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
+  const configuredReadOnlyApiToken = optional("READ_ONLY_API_TOKEN");
+  if (configuredReadOnlyApiToken && /\s/.test(configuredReadOnlyApiToken)) {
+    throw new Error("READ_ONLY_API_TOKEN에는 공백을 사용할 수 없습니다.");
+  }
+  const readOnlyApiToken = configuredReadOnlyApiToken ?? dashboardPassword;
+  const readOnlyApiTokenSource: ReadOnlyApiTokenSource = configuredReadOnlyApiToken
+    ? "READ_ONLY_API_TOKEN"
+    : "DASHBOARD_PASSWORD";
   const sessionSecret = required("SESSION_SECRET");
   const tossApiAuth = readTossApiAuth();
 
@@ -1074,9 +1113,18 @@ export function loadConfig(): AppConfig {
   return {
     ...tossApiAuth,
     dashboardPassword,
+    readOnlyApiToken,
+    readOnlyApiTokenSource,
     sessionSecret,
     host,
     port,
+    trustProxy: readTrustProxy(),
+    gracefulShutdownTimeoutMs: readBoundedInteger(
+      "GRACEFUL_SHUTDOWN_TIMEOUT_MS",
+      30_000,
+      1_000,
+      300_000,
+    ),
     tossApiBaseUrl: normalizedHttpUrl(
       optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
       "TOSS_API_BASE_URL",

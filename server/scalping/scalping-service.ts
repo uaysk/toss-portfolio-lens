@@ -21,10 +21,6 @@ import type {
 } from "../repositories/scalping-repository.js";
 import {
   DataQualitySchema,
-  MarketCountrySchema,
-  MinuteIntervalSchema,
-  ScannerCriterionSchema,
-  createScannerRequestSchema,
   normalizeUsExchange,
   type DataQuality,
   type MarketCountry,
@@ -63,16 +59,51 @@ import {
   validateSessionWindows,
   type MarketSessionWindow,
 } from "./market-session.js";
+import {
+  SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
+  SCALPING_WORKSPACE_SCHEMA_VERSION,
+  ScalpingAnalysisResultSchema,
+  ScalpingUnavailableAnalysisResultSchema,
+  createScalpingEvaluationRequestSchema,
+  createScalpingForecastRequestSchema,
+  createScalpingRealtimeAnalysisRequestSchema,
+  createScalpingWorkspaceRequestSchema,
+  type ScalpingEvaluationRequest,
+  type ScalpingAnalysisResult,
+  type ScalpingAnalysisInstrument,
+  type ScalpingAnalysisSignalPoint,
+  type ScalpingTechnicalAnalysisResult,
+  type ScalpingForecastRequest,
+  type ScalpingForecastResult,
+  type ScalpingRealtimeAnalysisRequest,
+  type ScalpingRealtimeAnalysisResult,
+  type ScalpingWorkspaceRequest,
+  type ScalpingWorkspaceResult,
+  type WorkspacePreset,
+} from "./api-contracts.js";
+import { ProviderUnavailableError, ValidationError } from "./domain-errors.js";
+import { WorkspaceContextCache } from "./workspace-context-cache.js";
+import {
+  CandidateUniverseService,
+  type CandidateUniverseSelector,
+} from "./candidate-universe-service.js";
 
-export const SCALPING_WORKSPACE_SCHEMA_VERSION = "scalping-workspace/v1" as const;
-export const SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION = "scalping-realtime-analysis/v1" as const;
+export {
+  SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
+  SCALPING_WORKSPACE_SCHEMA_VERSION,
+} from "./api-contracts.js";
+export type {
+  ScalpingEvaluationRequest,
+  ScalpingForecastRequest,
+  ScalpingRealtimeAnalysisRequest,
+  ScalpingWorkspaceRequest,
+  WorkspacePreset,
+} from "./api-contracts.js";
 
-const WorkspacePresetSchema = z.enum(["trend", "breakout", "mean_reversion", "risk_management"]);
-export type WorkspacePreset = z.infer<typeof WorkspacePresetSchema>;
-
-const SYMBOL = /^[A-Z0-9][A-Z0-9._-]{0,31}$/;
 const MINUTE_MS = 60_000;
 const MARKET_CALENDAR_LOOKAHEAD_DAYS = 14;
+const DEFAULT_WORKSPACE_CONTEXT_TTL_MS = 5 * 60_000;
+const DEFAULT_WORKSPACE_CONTEXT_MAXIMUM_ENTRIES = 64;
 
 export type ScalpingServiceConfig = {
   minimumTopCount: number;
@@ -98,6 +129,8 @@ export type ScalpingServiceConfig = {
   sessionCloseMinuteKst: number;
   afterMarketOpenMinuteKst: number;
   afterMarketCloseMinuteKst: number;
+  workspaceContextTtlMs?: number;
+  workspaceContextMaximumEntries?: number;
   now?: () => number;
 };
 
@@ -128,54 +161,9 @@ type PortfolioSource = {
 };
 type TradeMarkerSource = Pick<TechnicalTradeMarkerService, "getMarkers">;
 type CausalPosition = Portfolio["holdings"][number] & { asOf: string };
-
-export type ScalpingWorkspaceRequest = {
-  marketCountry?: MarketCountry;
-  criterion: ScannerCriterion;
-  topCount: number;
-  interval: "1m" | "5m" | "15m" | "30m" | "60m";
-  layoutColumns: 1 | 2 | 3 | 4;
-  preset: WorkspacePreset;
-  symbols?: string[];
-  scanOnly?: boolean;
-  analysisSymbol?: string;
-  accountId?: string;
-  includePortfolioContext?: boolean;
-};
-
-export type ScalpingForecastRequest = {
-  marketCountry?: MarketCountry;
-  symbols: string[];
-  interval: "1m" | "5m" | "15m" | "30m" | "60m";
-};
-
-export type ScalpingRealtimeAnalysisRequest = {
-  marketCountry?: MarketCountry;
-  symbols: string[];
-  interval: "1m" | "5m" | "15m" | "30m" | "60m";
-  preset: WorkspacePreset;
-  accountId?: string;
-  positionContext?: {
-    mode: "isolated";
-    positions: Array<{
-      symbol: string;
-      quantity: number;
-      averagePrice: number;
-      asOf: string;
-    }>;
-  };
-};
-
-export type ScalpingEvaluationRequest = ScalpingForecastRequest & {
-  preset?: WorkspacePreset;
-  evaluation: {
-    walkForward: true;
-    retrospective: true;
-    commissionBpsPerSide: number;
-    taxBpsOnExit: number;
-    spreadBpsRoundTrip: number;
-    slippageBpsPerSide: number;
-  };
+type WorkspaceContext = {
+  metadata: Map<string, InstrumentInfo>;
+  holdings: Map<string, CausalPosition>;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -193,12 +181,13 @@ function string(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
-function normalizedSymbols(values: readonly string[], maximum: number): string[] {
-  if (!Array.isArray(values) || values.length < 1 || values.length > maximum) throw new Error(`종목은 1~${maximum}개여야 합니다.`);
-  const output = values.map((value) => value.trim().toUpperCase());
-  if (output.some((value) => !SYMBOL.test(value))) throw new Error("종목 코드 형식이 올바르지 않습니다.");
-  if (new Set(output).size !== output.length) throw new Error("중복 종목을 제거해 주세요.");
-  return output;
+function parseWorkerAnalysisResult(value: unknown): ScalpingAnalysisResult {
+  const parsed = ScalpingAnalysisResultSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new ProviderUnavailableError(
+    "기술 분석 제공자의 응답을 확인할 수 없습니다.",
+    { badGateway: true, cause: parsed.error },
+  );
 }
 
 function intervalMinutes(interval: ScalpingWorkspaceRequest["interval"]): ScalpingInterval {
@@ -334,17 +323,16 @@ function groupBarsBySession(
   return sessions;
 }
 
-function targetStopFromAnalysis(analysis: unknown, symbol: string): z.infer<typeof AiTargetStopSchema> | undefined {
-  const instruments = record(analysis)?.instruments;
-  if (!Array.isArray(instruments)) return undefined;
-  const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  const signals = record(record(instrument)?.signals);
-  const latest = record(signals?.latest) ?? (Array.isArray(signals?.points) ? record(signals.points.at(-1)) : undefined);
-  const stop = finite(latest?.stop_candidate_price);
-  const targetRange = record(latest?.target_price_range);
-  const targetLow = finite(targetRange?.low);
-  const targetHigh = finite(targetRange?.high);
-  const basis = finite(latest?.basis_price);
+function targetStopFromAnalysis(
+  analysis: ScalpingTechnicalAnalysisResult | undefined,
+  symbol: string,
+): z.infer<typeof AiTargetStopSchema> | undefined {
+  const instrument = analysis?.instruments.find((value) => value.instrument_key === symbol);
+  const latest = instrument?.signals?.latest ?? instrument?.signals?.points?.at(-1);
+  const stop = latest?.stop_candidate_price ?? undefined;
+  const targetLow = latest?.target_price_range?.low;
+  const targetHigh = latest?.target_price_range?.high;
+  const basis = latest?.basis_price;
   if (stop === undefined || targetLow === undefined || targetHigh === undefined || basis === undefined) return undefined;
   const target = (targetLow + targetHigh) / 2;
   if (stop < basis && basis < target) return { side: "long", target_price: target, stop_price: stop };
@@ -357,30 +345,26 @@ function timestampKey(value: string): string | undefined {
   return Number.isFinite(instant) ? new Date(instant).toISOString() : undefined;
 }
 
-function evaluationSignalPoints(instrument: UnknownRecord | undefined): unknown[] {
-  const snapshots = instrument?.signal_snapshots;
-  if (Array.isArray(snapshots) && snapshots.length) return snapshots;
-  const points = record(instrument?.signals)?.points;
-  return Array.isArray(points) ? points : [];
+function evaluationSignalPoints(
+  instrument: ScalpingAnalysisInstrument | undefined,
+): ScalpingAnalysisSignalPoint[] {
+  if (instrument?.signal_snapshots?.length) return instrument.signal_snapshots;
+  return instrument?.signals?.points ?? [];
 }
 
 function targetStopsByTimestamp(
-  analysis: unknown,
+  analysis: ScalpingTechnicalAnalysisResult | undefined,
   symbol: string,
 ): Map<string, z.infer<typeof AiTargetStopSchema>> {
   const output = new Map<string, z.infer<typeof AiTargetStopSchema>>();
-  const instruments = record(analysis)?.instruments;
-  if (!Array.isArray(instruments)) return output;
-  const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  for (const value of evaluationSignalPoints(record(instrument))) {
-    const point = record(value);
-    const timestamp = string(point?.calculation_timestamp);
-    const stop = finite(point?.stop_candidate_price);
-    const basis = finite(point?.basis_price);
-    const targetCandidate = finite(point?.target_candidate_price);
-    const targetRange = record(point?.target_price_range);
-    const targetLow = targetCandidate ?? finite(targetRange?.low);
-    const targetHigh = targetCandidate ?? finite(targetRange?.high);
+  const instrument = analysis?.instruments.find((value) => value.instrument_key === symbol);
+  for (const point of evaluationSignalPoints(instrument)) {
+    const timestamp = point.calculation_timestamp;
+    const stop = point.stop_candidate_price ?? undefined;
+    const basis = point.basis_price;
+    const targetCandidate = point.target_candidate_price ?? undefined;
+    const targetLow = targetCandidate ?? point.target_price_range?.low;
+    const targetHigh = targetCandidate ?? point.target_price_range?.high;
     const key = timestamp ? timestampKey(timestamp) : undefined;
     if (!key || stop === undefined || basis === undefined || targetLow === undefined || targetHigh === undefined) continue;
     const target = (targetLow + targetHigh) / 2;
@@ -390,16 +374,16 @@ function targetStopsByTimestamp(
   return output;
 }
 
-function signalByTimestamp(analysis: unknown, symbol: string): Map<string, -1 | 0 | 1> {
+function signalByTimestamp(
+  analysis: ScalpingTechnicalAnalysisResult | undefined,
+  symbol: string,
+): Map<string, -1 | 0 | 1> {
   const output = new Map<string, -1 | 0 | 1>();
-  const instruments = record(analysis)?.instruments;
-  if (!Array.isArray(instruments)) return output;
-  const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  for (const value of evaluationSignalPoints(record(instrument))) {
-    const point = record(value);
-    const timestamp = string(point?.calculation_timestamp);
-    const status = string(point?.status);
-    const compact = finite(point?.technical_signal);
+  const instrument = analysis?.instruments.find((value) => value.instrument_key === symbol);
+  for (const point of evaluationSignalPoints(instrument)) {
+    const timestamp = point.calculation_timestamp;
+    const status = point.status;
+    const compact = point.technical_signal;
     const key = timestamp ? timestampKey(timestamp) : undefined;
     if (!key) continue;
     output.set(key, compact === 1 ? 1 : compact === -1 ? -1 : status === "entry_candidate" ? 1 : status === "exit_candidate" ? -1 : 0);
@@ -407,33 +391,30 @@ function signalByTimestamp(analysis: unknown, symbol: string): Map<string, -1 | 
   return output;
 }
 
-function regimeByTimestamp(analysis: unknown, symbol: string): Map<string, string> {
+function regimeByTimestamp(
+  analysis: ScalpingTechnicalAnalysisResult | undefined,
+  symbol: string,
+): Map<string, string> {
   const output = new Map<string, string>();
-  const instruments = record(analysis)?.instruments;
-  if (!Array.isArray(instruments)) return output;
-  const instrument = instruments.find((value) => record(value)?.instrument_key === symbol);
-  for (const value of evaluationSignalPoints(record(instrument))) {
-    const point = record(value);
-    const timestamp = string(point?.calculation_timestamp);
-    const agreement = string(point?.multi_timeframe_agreement)?.trim();
+  const instrument = analysis?.instruments.find((value) => value.instrument_key === symbol);
+  for (const point of evaluationSignalPoints(instrument)) {
+    const timestamp = point.calculation_timestamp;
+    const agreement = point.multi_timeframe_agreement?.trim();
     const key = timestamp ? timestampKey(timestamp) : undefined;
     if (key && agreement && agreement.length <= 64) output.set(key, agreement);
   }
   return output;
 }
 
-function scannerMetrics(analysis: unknown): Record<string, VolatilityInputs> {
+function scannerMetrics(analysis: ScalpingTechnicalAnalysisResult | undefined): Record<string, VolatilityInputs> {
   const output: Record<string, VolatilityInputs> = {};
-  const instruments = record(analysis)?.instruments;
-  if (!Array.isArray(instruments)) return output;
-  for (const value of instruments) {
-    const item = record(value);
-    const key = string(item?.instrument_key);
-    const metrics = record(item?.scanner_metrics);
-    if (!key || !metrics) continue;
+  for (const item of analysis?.instruments ?? []) {
+    const key = item.instrument_key;
+    const metrics = item.scanner_metrics;
+    if (!metrics) continue;
     const metric = (name: string) => {
-      const entry = record(metrics[name]);
-      return finite(entry?.value ?? record(entry?.values)?.value);
+      const entry = metrics[name];
+      return entry?.value ?? entry?.values?.value ?? undefined;
     };
     output[key] = {
       ...(metric("realized_volatility") === undefined ? {} : { realizedVolatility: metric("realized_volatility") }),
@@ -746,14 +727,13 @@ function configuredKrSessionWindows(config: ScalpingServiceConfig): readonly Mar
 
 export class ScalpingService {
   private readonly now: () => number;
-  private readonly workspaceSchema: z.ZodType<ScalpingWorkspaceRequest>;
-  private readonly realtimeAnalysisInFlight = new Map<string, Promise<unknown>>();
-  private latestWorkspaceContext?: {
-    accountId?: string;
-    marketCountry: MarketCountry;
-    metadata: Map<string, InstrumentInfo>;
-    holdings: Map<string, CausalPosition>;
-  };
+  private readonly workspaceSchema: ReturnType<typeof createScalpingWorkspaceRequestSchema>;
+  private readonly forecastRequestSchema: ReturnType<typeof createScalpingForecastRequestSchema>;
+  private readonly realtimeAnalysisRequestSchema: ReturnType<typeof createScalpingRealtimeAnalysisRequestSchema>;
+  private readonly evaluationRequestSchema: ReturnType<typeof createScalpingEvaluationRequestSchema>;
+  private readonly realtimeAnalysisInFlight = new Map<string, Promise<ScalpingRealtimeAnalysisResult>>();
+  private readonly workspaceContexts: WorkspaceContextCache<WorkspaceContext>;
+  private readonly candidateUniverse: CandidateUniverseSelector;
 
   constructor(
     private readonly toss: TossMarket,
@@ -766,6 +746,7 @@ export class ScalpingService {
     private readonly portfolio: PortfolioSource | undefined,
     private readonly tradeMarkers: TradeMarkerSource | undefined,
     private readonly config: ScalpingServiceConfig,
+    candidateUniverse?: CandidateUniverseSelector,
   ) {
     if (!Number.isInteger(config.maximumSubscriptions)
       || config.maximumSubscriptions < config.maximumTopCount * 3) {
@@ -792,31 +773,18 @@ export class ScalpingService {
     if (config.forecastMinimumBars < 1 || config.forecastMaximumBars < config.forecastMinimumBars) throw new Error("forecast bar limits are invalid.");
     validateSessionWindows(configuredKrSessionWindows(config));
     this.now = config.now ?? Date.now;
-    this.workspaceSchema = createScannerRequestSchema(config).extend({
-      interval: MinuteIntervalSchema,
-      layoutColumns: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
-      preset: WorkspacePresetSchema,
-      symbols: z.array(z.string()).max(config.maximumTopCount).optional(),
-      scanOnly: z.boolean().optional(),
-      analysisSymbol: z.string().optional(),
-      accountId: z.string().trim().min(1).max(128).optional(),
-      includePortfolioContext: z.boolean().optional(),
-    }).superRefine((request, context) => {
-      if ((request.symbols?.length ?? 0) > request.topCount) {
-        context.addIssue({
-          code: "custom",
-          path: ["symbols"],
-          message: "사용자 지정 종목 수는 표시 종목 수를 넘을 수 없습니다.",
-        });
-      }
-      if (request.scanOnly && request.analysisSymbol) {
-        context.addIssue({
-          code: "custom",
-          path: ["analysisSymbol"],
-          message: "목록 스캔과 상세 분석 종목은 한 요청에서 함께 지정할 수 없습니다.",
-        });
-      }
-    }) as z.ZodType<ScalpingWorkspaceRequest>;
+    this.workspaceSchema = createScalpingWorkspaceRequestSchema(config);
+    this.forecastRequestSchema = createScalpingForecastRequestSchema(config.maximumTopCount);
+    this.realtimeAnalysisRequestSchema = createScalpingRealtimeAnalysisRequestSchema(config.maximumTopCount);
+    this.evaluationRequestSchema = createScalpingEvaluationRequestSchema(config.maximumTopCount);
+    this.candidateUniverse = candidateUniverse ?? new CandidateUniverseService({
+      maximumCandidates: config.maximumTopCount,
+    });
+    this.workspaceContexts = new WorkspaceContextCache({
+      maximumEntries: config.workspaceContextMaximumEntries ?? DEFAULT_WORKSPACE_CONTEXT_MAXIMUM_ENTRIES,
+      ttlMs: config.workspaceContextTtlMs ?? DEFAULT_WORKSPACE_CONTEXT_TTL_MS,
+      now: this.now,
+    });
   }
 
   status(enabled = true) {
@@ -876,13 +844,11 @@ export class ScalpingService {
     };
   }
 
-  async workspace(input: ScalpingWorkspaceRequest) {
+  async workspace(input: ScalpingWorkspaceRequest): Promise<ScalpingWorkspaceResult> {
     const request = this.workspaceSchema.parse(input);
-    const marketCountry = request.marketCountry ?? "KR";
-    const analysisSymbol = request.analysisSymbol
-      ? normalizedSymbols([request.analysisSymbol], 1)[0]
-      : undefined;
-    const configuredSymbols = request.symbols ? normalizedSymbols(request.symbols, this.config.maximumTopCount) : [];
+    const marketCountry = request.marketCountry;
+    const analysisSymbol = request.analysisSymbol;
+    const configuredSymbols = request.symbols ?? [];
     const requestedSymbols = analysisSymbol && !configuredSymbols.includes(analysisSymbol)
       ? [analysisSymbol, ...configuredSymbols].slice(0, request.topCount)
       : configuredSymbols;
@@ -895,12 +861,13 @@ export class ScalpingService {
       errors: { toss: "ranking_collection_unavailable", kis: "ranking_collection_unavailable" },
       diagnostics: ["ranking_collection_unavailable"],
     };
-    const universe = this.universe(
-      rankingsResult.rankings,
+    const universe = this.candidateUniverse.select({
+      marketCountry,
+      rankings: rankingsResult.rankings,
       requestedSymbols,
-      request.topCount,
-      request.criterion,
-    );
+      desiredCount: request.topCount,
+      criterion: request.criterion,
+    });
     const calculationSymbols = request.scanOnly
       ? (request.criterion === "volatility" ? universe : [])
       : analysisSymbol ? [analysisSymbol] : universe;
@@ -934,14 +901,6 @@ export class ScalpingService {
         item.symbol.toUpperCase(),
         { ...item, asOf: portfolioValue!.asOf },
       ]));
-    if (request.includePortfolioContext !== false) {
-      this.latestWorkspaceContext = {
-        ...(request.accountId ? { accountId: request.accountId } : {}),
-        marketCountry,
-        metadata: new Map(metadata),
-        holdings: new Map(holdings),
-      };
-    }
     const analysisResult = calculationSymbols.length
       ? await this.safe(() => this.computeAnalysis({
         symbols: calculationSymbols,
@@ -1014,6 +973,26 @@ export class ScalpingService {
     const selectedSymbols = request.scanOnly
       ? []
       : analysisSymbol ? candidateSymbols.filter((symbol) => symbol === analysisSymbol) : candidateSymbols;
+    if (request.includePortfolioContext !== false && selectedSymbols.length) {
+      const selectedSymbolSet = new Set(selectedSymbols);
+      this.workspaceContexts.set({
+        ...(request.accountId ? { accountId: request.accountId } : {}),
+        ...(portfolioValue?.selectedAccountId
+          ? { resolvedAccountId: portfolioValue.selectedAccountId }
+          : request.accountId ? { resolvedAccountId: request.accountId } : {}),
+        marketCountry,
+        symbols: selectedSymbols,
+        revision: [
+          portfolioValue?.selectedAccountId ?? request.accountId ?? "default",
+          portfolioValue?.asOf ?? "portfolio-unavailable",
+          ...selectedSymbols.slice().sort(),
+        ].join(":"),
+        value: {
+          metadata: new Map([...metadata].filter(([symbol]) => selectedSymbolSet.has(symbol))),
+          holdings: new Map([...holdings].filter(([symbol]) => selectedSymbolSet.has(symbol))),
+        },
+      });
+    }
     const predictions = selectedSymbols.length
       ? await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => [])
       : [];
@@ -1026,13 +1005,9 @@ export class ScalpingService {
         ...(markerFromDate ? { fromDate: markerFromDate } : {}),
       }), "trade_markers")
       : { value: undefined };
-    const analysisBySymbol = new Map<string, unknown>();
-    const analysisInstruments = record(analysis)?.instruments;
-    if (Array.isArray(analysisInstruments)) {
-      for (const item of analysisInstruments) {
-        const key = string(record(item)?.instrument_key);
-        if (key) analysisBySymbol.set(key, item);
-      }
+    const analysisBySymbol = new Map<string, ScalpingAnalysisInstrument>();
+    for (const item of analysis?.instruments ?? []) {
+      analysisBySymbol.set(item.instrument_key, item);
     }
     const markerBySymbol = new Map<string, unknown[]>();
     const markers = record(markerResult.value)?.markers;
@@ -1116,9 +1091,12 @@ export class ScalpingService {
     };
   }
 
-  async forecast(input: ScalpingForecastRequest, options: ScalpingComputationOptions = {}) {
+  async forecast(
+    input: ScalpingForecastRequest,
+    options: ScalpingComputationOptions = {},
+  ): Promise<ScalpingForecastResult> {
     throwIfAborted(options.signal);
-    const request = this.forecastSchema(input);
+    const request = this.forecastRequestSchema.parse(input);
     if (!this.ai || !this.rust) {
       return { forecast: { status: "unavailable", code: !this.ai ? "ai_worker_unavailable" : "rust_worker_unavailable" }, predictions: [] };
     }
@@ -1262,47 +1240,10 @@ export class ScalpingService {
   async realtimeAnalysis(
     input: ScalpingRealtimeAnalysisRequest,
     options: ScalpingComputationOptions = {},
-  ): Promise<unknown> {
+  ): Promise<ScalpingRealtimeAnalysisResult> {
     throwIfAborted(options.signal);
-    const parsed = z.object({
-      marketCountry: MarketCountrySchema.default("KR"),
-      symbols: z.array(z.string()),
-      interval: MinuteIntervalSchema,
-      preset: WorkspacePresetSchema,
-      accountId: z.string().trim().min(1).max(128).optional(),
-      positionContext: z.object({
-        mode: z.literal("isolated"),
-        positions: z.array(z.object({
-          symbol: z.string(),
-          quantity: z.number().finite().positive(),
-          averagePrice: z.number().finite().positive(),
-          asOf: z.string().datetime({ offset: true }),
-        }).strict()).max(this.config.maximumTopCount),
-      }).strict().optional(),
-    }).strict().superRefine((request, context) => {
-      if (!request.positionContext) return;
-      const requested = new Set(request.symbols.map((symbol) => symbol.trim().toUpperCase()));
-      const seen = new Set<string>();
-      for (const [index, position] of request.positionContext.positions.entries()) {
-        const symbol = position.symbol.trim().toUpperCase();
-        if (!requested.has(symbol)) {
-          context.addIssue({
-            code: "custom",
-            path: ["positionContext", "positions", index, "symbol"],
-            message: "격리 포지션은 분석 요청 종목에 포함되어야 합니다.",
-          });
-        }
-        if (seen.has(symbol)) {
-          context.addIssue({
-            code: "custom",
-            path: ["positionContext", "positions", index, "symbol"],
-            message: "격리 포지션 종목은 중복될 수 없습니다.",
-          });
-        }
-        seen.add(symbol);
-      }
-    }).parse(input);
-    const symbols = normalizedSymbols(parsed.symbols, this.config.maximumTopCount);
+    const parsed = this.realtimeAnalysisRequestSchema.parse(input);
+    const symbols = parsed.symbols;
     const interval = intervalMinutes(parsed.interval);
     const barsBySymbol = new Map<string, IntradayBarRecord[]>();
     await Promise.all(symbols.map(async (symbol) => {
@@ -1328,16 +1269,22 @@ export class ScalpingService {
     }).join("|");
     const isolatedHoldings = parsed.positionContext
       ? new Map<string, AnalysisPosition>(parsed.positionContext.positions.map((position) => {
-          const symbol = position.symbol.trim().toUpperCase();
-          return [symbol, { ...position, symbol, asOf: new Date(position.asOf).toISOString() }];
+          return [position.symbol, { ...position, asOf: new Date(position.asOf).toISOString() }];
         }))
       : undefined;
+    const workspaceContext = isolatedHoldings
+      ? undefined
+      : this.workspaceContexts.get({
+          ...(parsed.accountId ? { accountId: parsed.accountId } : {}),
+          marketCountry: parsed.marketCountry,
+          symbols,
+        });
     const positionRevision = isolatedHoldings
       ? [...isolatedHoldings.values()]
           .sort((left, right) => left.symbol.localeCompare(right.symbol))
           .map((position) => `${position.symbol}:${position.quantity}:${position.averagePrice}:${position.asOf}`)
           .join("|") || "empty"
-      : `workspace:${parsed.accountId ?? "default"}`;
+      : `workspace:${workspaceContext?.revision ?? "unavailable"}`;
     // A cancellable simulation request must not share its promise with another
     // caller: cancelling one run must never abort a dashboard analysis. The
     // retained-feed and provider-refresh paths are also intentionally isolated.
@@ -1352,13 +1299,9 @@ export class ScalpingService {
     ].join(":");
     const existing = this.realtimeAnalysisInFlight.get(key);
     if (existing) return existing;
-    const task = (async () => {
+    const task: Promise<ScalpingRealtimeAnalysisResult> = (async () => {
       throwIfAborted(options.signal);
-      const context = this.latestWorkspaceContext
-        && this.latestWorkspaceContext.accountId === parsed.accountId
-        && this.latestWorkspaceContext.marketCountry === parsed.marketCountry
-        ? this.latestWorkspaceContext
-        : undefined;
+      const context = workspaceContext?.value;
       const books = new Map<string, NormalizedOrderbook>();
       const trades = new Map<string, NormalizedTrade[]>();
       for (const symbol of symbols) {
@@ -1389,7 +1332,7 @@ export class ScalpingService {
         preset: parsed.preset,
         barRevision: revision,
         technical: technical ?? {
-          status: "unavailable",
+          status: "unavailable" as const,
           reason: this.rust ? "insufficient_final_bars" : "rust_worker_unavailable",
         },
         diagnostics: {
@@ -1412,7 +1355,7 @@ export class ScalpingService {
   }
 
   async evaluate(input: ScalpingEvaluationRequest, ownerSubject = "owner") {
-    const request = this.evaluationSchema(input);
+    const request = this.evaluationRequestSchema.parse(input);
     if (!this.ai || !this.rust) throw new Error(!this.ai ? "AI worker is unavailable." : "Rust worker is unavailable.");
     const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
     const metadata = await this.instrumentMetadata(request.symbols);
@@ -1452,14 +1395,9 @@ export class ScalpingService {
       marketCountry: request.marketCountry,
       signalSnapshotTimestamps,
     });
-    const technicalInstruments = new Map<string, UnknownRecord>();
-    const rawTechnicalInstruments = record(analysis)?.instruments;
-    if (Array.isArray(rawTechnicalInstruments)) {
-      for (const value of rawTechnicalInstruments) {
-        const instrument = record(value);
-        const key = string(instrument?.instrument_key);
-        if (instrument && key) technicalInstruments.set(key, instrument);
-      }
+    const technicalInstruments = new Map<string, ScalpingAnalysisInstrument>();
+    for (const instrument of analysis?.instruments ?? []) {
+      technicalInstruments.set(instrument.instrument_key, instrument);
     }
     const excluded: Array<{
       symbol: string;
@@ -1471,10 +1409,9 @@ export class ScalpingService {
     for (const symbol of request.symbols) {
       const technicalInstrument = technicalInstruments.get(symbol);
       const technicalAvailability = record(technicalInstrument?.availability);
-      const technicalSignals = record(technicalInstrument?.signals);
-      const technicalPoints = technicalSignals?.points;
+      const technicalPoints = technicalInstrument?.signals?.points;
       const technicalSnapshots = technicalInstrument?.signal_snapshots;
-      const explicitUnavailable = string(technicalInstrument?.status) === "unavailable"
+      const explicitUnavailable = technicalInstrument?.status === "unavailable"
         || string(technicalAvailability?.status) === "unavailable";
       if (!technicalInstrument || explicitUnavailable || (
         (!Array.isArray(technicalSnapshots) || !technicalSnapshots.length)
@@ -1520,7 +1457,7 @@ export class ScalpingService {
         walkForward: true as const,
         randomSplit: false as const,
       };
-      throw new Error("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
+      throw new ValidationError("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
     }
     const queued = await this.ai.evaluate({
       schema_version: SCALPING_AI_SCHEMA_VERSION,
@@ -1544,40 +1481,6 @@ export class ScalpingService {
       walkForward: true,
       randomSplit: false,
     };
-  }
-
-  private forecastSchema(
-    input: ScalpingForecastRequest,
-  ): ScalpingForecastRequest & { marketCountry: MarketCountry } {
-    const parsed = z.object({
-      marketCountry: MarketCountrySchema.default("KR"),
-      symbols: z.array(z.string()),
-      interval: MinuteIntervalSchema,
-    }).strict().parse(input);
-    return {
-      marketCountry: parsed.marketCountry,
-      symbols: normalizedSymbols(parsed.symbols, this.config.maximumTopCount),
-      interval: parsed.interval,
-    };
-  }
-
-  private evaluationSchema(
-    input: ScalpingEvaluationRequest,
-  ): ScalpingEvaluationRequest & { marketCountry: MarketCountry; preset: WorkspacePreset } {
-    const parsed = z.object({
-      marketCountry: MarketCountrySchema.default("KR"),
-      symbols: z.array(z.string()),
-      interval: MinuteIntervalSchema,
-      preset: WorkspacePresetSchema.default("risk_management"),
-      evaluation: z.object({
-        walkForward: z.literal(true), retrospective: z.literal(true),
-        commissionBpsPerSide: z.number().finite().min(0).max(1_000),
-        taxBpsOnExit: z.number().finite().min(0).max(1_000),
-        spreadBpsRoundTrip: z.number().finite().min(0).max(5_000),
-        slippageBpsPerSide: z.number().finite().min(0).max(5_000),
-      }).strict(),
-    }).strict().parse(input);
-    return { ...parsed, symbols: normalizedSymbols(parsed.symbols, this.config.maximumTopCount) };
   }
 
   private async collectRankings(
@@ -1671,29 +1574,6 @@ export class ScalpingService {
       errors.kis = globallyRanked.length > 0 ? "kis_ranking_partial" : "kis_ranking_unavailable";
     }
     return { rankings, errors, diagnostics };
-  }
-
-  private universe(
-    rankings: readonly NormalizedRanking[],
-    requested: readonly string[],
-    desiredCount: number,
-    criterion: ScannerCriterion,
-  ): string[] {
-    const ranked = [...rankings].sort((left, right) => left.rank - right.rank || left.symbol.localeCompare(right.symbol));
-    // Keep filter headroom without fetching minute bars and quote enrichment for
-    // an unrelated full provider ranking page on every smaller workspace request.
-    const multiplier = criterion === "volatility" ? 4 : 2;
-    const minimumPool = criterion === "volatility" ? 20 : 10;
-    const rankedLimit = Math.min(
-      this.config.maximumTopCount,
-      Math.max(minimumPool, desiredCount * multiplier),
-    );
-    const universeLimit = Math.min(
-      this.config.maximumTopCount,
-      Math.max(requested.length, rankedLimit),
-    );
-    return Array.from(new Set([...requested, ...ranked.map(({ symbol }) => symbol)]))
-      .slice(0, universeLimit);
   }
 
   private async enrich(symbols: readonly string[], marketCountry: MarketCountry) {
@@ -1997,7 +1877,7 @@ export class ScalpingService {
     includeVolumeProfile: boolean;
     signalSnapshotTimestamps?: ReadonlyMap<string, readonly string[]>;
     signal?: AbortSignal;
-  }): Promise<unknown> {
+  }): Promise<ScalpingTechnicalAnalysisResult | undefined> {
     if (!this.rust) return undefined;
     const prepared = input.symbols.map((symbol) => ({
       symbol,
@@ -2141,7 +2021,9 @@ export class ScalpingService {
       }];
     });
     if (!instruments.length) {
-      return unavailableTechnical.length ? { instruments: unavailableTechnical } : undefined;
+      return unavailableTechnical.length
+        ? ScalpingUnavailableAnalysisResultSchema.parse({ instruments: unavailableTechnical })
+        : undefined;
     }
     const profileKeys = input.includeVolumeProfile
       ? instruments.slice(0, this.config.volumeProfileInstrumentLimit).map(({ key }) => key)
@@ -2175,13 +2057,12 @@ export class ScalpingService {
         },
       },
     }, { includeArtifacts: false, signal: input.signal });
-    if (!unavailableTechnical.length) return output.result;
-    const result = record(output.result);
-    const resultInstruments = Array.isArray(result?.instruments) ? result.instruments : [];
-    return {
-      ...(result ?? {}),
-      instruments: [...resultInstruments, ...unavailableTechnical],
-    };
+    const result = parseWorkerAnalysisResult(output.result);
+    if (!unavailableTechnical.length) return result;
+    return parseWorkerAnalysisResult({
+      ...result,
+      instruments: [...result.instruments, ...unavailableTechnical],
+    });
   }
 
   private withRequestedCandidates(

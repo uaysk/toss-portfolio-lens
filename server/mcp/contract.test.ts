@@ -583,10 +583,11 @@ describe("MCP tool contract", () => {
         }),
         exportPreset: vi.fn().mockImplementation((id, owner) => {
           const preset = presetState.get(id);
-          return Promise.resolve(preset?.ownerSubject === owner ? {
+          if (!preset || preset.ownerSubject !== owner) return Promise.resolve(undefined);
+          return Promise.resolve({
             schema_version: "portfolio-lens-preset/v1", exported_at: "2024-01-01T00:00:00.000Z",
             preset: { name: preset.name, description: preset.description, config: preset.config, tags: preset.tags, source: preset.source },
-          } : undefined);
+          });
         }),
       },
       researchReports: new ResearchReportService(),

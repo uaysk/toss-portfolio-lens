@@ -10,6 +10,20 @@ const bars = Array.from({ length: 65 }, (_, index) => ({
 }));
 const future = (origin: number) => Array.from({ length: 60 }, (_, index) => time(origin + index + 1));
 
+type AiRequestBase = Pick<
+  AiForecastRequest,
+  "schema_version" | "request_id" | "horizons_minutes" | "quantiles" | "seed"
+>;
+
+function requestBase(requestId: string): AiRequestBase {
+  const base = aiRequestBase(requestId);
+  return {
+    ...base,
+    horizons_minutes: [...base.horizons_minutes],
+    quantiles: [...base.quantiles],
+  };
+}
+
 function model() {
   return {
     model_id: "NeoQuasar/Kronos-small",
@@ -57,7 +71,7 @@ function unavailable(mode: "forecast" | "evaluate", requestId: string): AiRespon
 describe("ScalpingAiService", () => {
   it("batch 예측 provenance와 unavailable 상태를 고빈도 전용 저장소에 보존한다", async () => {
     const request: AiForecastRequest = {
-      ...aiRequestBase("forecast-1"), mode: "forecast",
+      ...requestBase("forecast-1"), mode: "forecast",
       series: [{ instrument_key: "005930", timezone: "Asia/Seoul", input_end_at: time(64), bars, future_timestamps: future(64) }],
     };
     const response = unavailable("forecast", request.request_id);
@@ -82,7 +96,7 @@ describe("ScalpingAiService", () => {
 
   it("시간순 retrospective 평가를 run과 다섯 artifact로 예약한다", async () => {
     const request: AiEvaluateRequest = {
-      ...aiRequestBase("evaluate-1"), mode: "evaluate",
+      ...requestBase("evaluate-1"), mode: "evaluate",
       series: [{
         instrument_key: "005930", timezone: "Asia/Seoul", bars,
         origins: [{ origin: time(4), future_timestamps: future(4), technical_signal: 1, regime: "trend" }],
@@ -130,7 +144,7 @@ describe("ScalpingAiService", () => {
       20,
     );
     const baseRequest: AiEvaluateRequest = {
-      ...aiRequestBase("evaluate-dedupe"), mode: "evaluate",
+      ...requestBase("evaluate-dedupe"), mode: "evaluate",
       series: [{
         instrument_key: "005930", timezone: "Asia/Seoul", bars,
         origins: [{ origin: time(4), future_timestamps: future(4), technical_signal: 1, regime: "trend" }],

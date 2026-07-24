@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { AiEvaluateRequestSchema, AiForecastRequestSchema, AiResponseSchema, aiRequestBase } from "./ai-contract.js";
+import {
+  AiEvaluateRequestSchema,
+  AiForecastRequestSchema,
+  AiResponseSchema,
+  aiRequestBase,
+  type AiResponse,
+} from "./ai-contract.js";
 
-const evaluatedResponse = {
+const evaluatedResponse: AiResponse = {
   schema_version: "scalping-ai/v1",
   request_id: "evaluation-1",
   mode: "evaluate",
@@ -89,7 +95,7 @@ const evaluatedResponse = {
       },
     }],
   },
-} as const;
+};
 
 describe("AI worker response contract", () => {
   it("Python walk-forward target/stop first-hit metrics와 동일한 필드를 검증한다", () => {
@@ -112,7 +118,7 @@ describe("AI worker response contract", () => {
   it("unavailable 모델은 실제 기술 baseline은 보존하지만 예측 필드를 허용하지 않는다", () => {
     const input = structuredClone(evaluatedResponse);
     input.status = "unavailable";
-    const record = input.evaluation.records[0];
+    const record = input.evaluation!.records[0]!;
     record.status = "unavailable";
     record.predicted_median_return = null;
     record.predicted_quantiles = [];
@@ -135,24 +141,24 @@ describe("AI worker response contract", () => {
 
   it("replay record의 고정 quantile·비용·net return 위변조를 거부한다", () => {
     const quantileDrift = structuredClone(evaluatedResponse);
-    quantileDrift.evaluation.records[0].predicted_quantiles[0].quantile = 0.1;
+    quantileDrift.evaluation!.records[0]!.predicted_quantiles[0]!.quantile = 0.1;
     expect(() => AiResponseSchema.parse(quantileDrift)).toThrow(/fixed ordered levels/);
 
     const costDrift = structuredClone(evaluatedResponse);
-    costDrift.evaluation.records[0].round_trip_cost_rate = 0.003;
-    costDrift.evaluation.records[0].technical_net_return = 0.0018;
-    costDrift.evaluation.records[0].ai_filtered_net_return = 0.0018;
+    costDrift.evaluation!.records[0]!.round_trip_cost_rate = 0.003;
+    costDrift.evaluation!.records[0]!.technical_net_return = 0.0018;
+    costDrift.evaluation!.records[0]!.ai_filtered_net_return = 0.0018;
     expect(() => AiResponseSchema.parse(costDrift)).toThrow(/cost rate must match cost assumptions/);
 
     const netDrift = structuredClone(evaluatedResponse);
-    netDrift.evaluation.records[0].technical_net_return = 0.1;
+    netDrift.evaluation!.records[0]!.technical_net_return = 0.1;
     expect(() => AiResponseSchema.parse(netDrift)).toThrow(/technical net return/);
   });
 
   it("first-hit 표본이 없을 때 정확도 null을 허용한다", () => {
     const input = structuredClone(evaluatedResponse);
-    input.evaluation.metrics[0].target_stop_first_count = 0;
-    input.evaluation.metrics[0].target_stop_first_accuracy = null as never;
+    input.evaluation!.metrics[0]!.target_stop_first_count = 0;
+    input.evaluation!.metrics[0]!.target_stop_first_accuracy = null;
     expect(AiResponseSchema.parse(input).evaluation?.metrics[0]?.target_stop_first_accuracy).toBeNull();
   });
 

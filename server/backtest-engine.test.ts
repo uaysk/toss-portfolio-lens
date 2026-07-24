@@ -167,7 +167,13 @@ describe("portfolio backtest engine", () => {
     expect(result.advanced.exposure.effectivePositions).toBeGreaterThan(1);
     expect(result.advanced.costEfficiency.transactionCostBps).toBe(12);
     expect(result.advanced.costEfficiency.estimatedTotalCost).toBeGreaterThan(0);
-    expect(result.advanced.costEfficiency.netEstimatedReturnPercent).toBeLessThan(result.advanced.costEfficiency.grossReturnPercent);
+    const { grossReturnPercent, netEstimatedReturnPercent } = result.advanced.costEfficiency;
+    expect(grossReturnPercent).not.toBeNull();
+    expect(netEstimatedReturnPercent).not.toBeNull();
+    if (grossReturnPercent === null || netEstimatedReturnPercent === null) {
+      throw new Error("비용 효율 수익률이 계산되어야 합니다.");
+    }
+    expect(netEstimatedReturnPercent).toBeLessThan(grossReturnPercent);
     expect(result.advanced.costEfficiency.monthly.length).toBeGreaterThan(3);
     expect(result.advanced.tradeBehavior.buyCount).toBeGreaterThan(2);
     expect(result.advanced.tradeBehavior.sellCount).toBeGreaterThan(0);

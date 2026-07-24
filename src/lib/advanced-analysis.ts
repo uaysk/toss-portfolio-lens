@@ -221,17 +221,23 @@ function initialRun(payload: StartEnvelope): AdvancedRunSnapshot | undefined {
     result?: unknown;
   };
   if (!run.run_id || !run.status) return undefined;
-  return {
+  const base = {
     runId: run.run_id,
     kind: run.kind ?? "advanced",
-    status: run.status,
     progress: run.progress ?? 0,
     completedCandidates: run.completed_candidates ?? 0,
     totalCandidates: run.total_candidates ?? 0,
     ...(run.current_validation_window ? { currentValidationWindow: run.current_validation_window } : {}),
-    ...(run.result !== undefined ? { result: run.result } : {}),
     warnings: payload.warnings ?? [],
   };
+  if (run.status === "completed") {
+    return {
+      ...base,
+      status: run.status,
+      ...(run.result !== undefined ? { result: run.result } : {}),
+    };
+  }
+  return { ...base, status: run.status };
 }
 
 function errorMessage(value: unknown): string {

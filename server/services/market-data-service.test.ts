@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PortfolioHistoryStore } from "../history.js";
 import { TossApiError, type DailyCandle, type TossClient } from "../toss.js";
 import type { KisExchangeRateProvider } from "../kis-exchange-rate.js";
-import { ServiceError } from "./service-envelope.js";
 import { MarketDataService } from "./market-data-service.js";
 
 function candle(date: string, open: number, high: number, low: number, close: number, volume?: number): DailyCandle {
@@ -263,7 +262,7 @@ describe("MarketDataService", () => {
     await expect(service.getPriceSeries({
       symbol: "NVDA", fromDate: "2021-04-15", toDate: "2026-07-17",
       interval: "1d", adjusted: true, currencyMode: "KRW",
-    })).rejects.toMatchObject<ServiceError>({
+    })).rejects.toMatchObject({
       detail: {
         code: "FX_HISTORY_UNAVAILABLE",
         retryable: false,
@@ -384,7 +383,7 @@ describe("MarketDataService", () => {
     await expect(new MarketDataService(toss, store).getPriceSeries({
       symbol: "NVDA", fromDate: "2024-01-02", toDate: "2024-01-10",
       interval: "1d", adjusted: true, currencyMode: "KRW",
-    })).rejects.toMatchObject<ServiceError>({
+    })).rejects.toMatchObject({
       detail: {
         code: "FX_HISTORY_UNAVAILABLE",
         retryable: false,

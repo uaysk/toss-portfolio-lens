@@ -22,9 +22,9 @@ describe("OpenAI report evaluation", () => {
   });
 
   it("Responses API와 strict JSON schema를 사용한다", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(narrative) }] }],
-    }), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
     const writer = new OpenAiReportWriter({
       endpoint: "https://api.openai.com/v1",
       apiKey: "secret-key",
@@ -47,11 +47,11 @@ describe("OpenAI report evaluation", () => {
   });
 
   it("모델 설정이 없으면 엔드포인트에서 호환 가능한 GPT-5.6 모델을 찾는다", async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => String(input).endsWith("/models")
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => String(input).endsWith("/models")
       ? new Response(JSON.stringify({ data: [{ id: "gpt-5.5" }, { id: "gpt-5.6-sol" }] }), { status: 200 })
       : new Response(JSON.stringify({
           output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(narrative) }] }],
-        }), { status: 200 })) as unknown as typeof fetch;
+        }), { status: 200 }));
     const writer = new OpenAiReportWriter({
       endpoint: "https://gateway.example/v1",
       apiKey: "secret-key",
@@ -63,7 +63,7 @@ describe("OpenAI report evaluation", () => {
   });
 
   it("Responses API 미지원 모델은 Chat Completions strict JSON schema로 전환한다", async () => {
-    const fetcher = vi.fn(async (input: string | URL | Request) => String(input).endsWith("/responses")
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => String(input).endsWith("/responses")
       ? new Response(JSON.stringify({
           error: {
             type: "invalid_request_error",
@@ -73,7 +73,7 @@ describe("OpenAI report evaluation", () => {
         }), { status: 400, headers: { "Content-Type": "application/json" } })
       : new Response(JSON.stringify({
           choices: [{ message: { role: "assistant", content: JSON.stringify(narrative) } }],
-        }), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
+        }), { status: 200, headers: { "Content-Type": "application/json" } }));
     const writer = new OpenAiReportWriter({
       endpoint: "https://gateway.example/v1",
       apiKey: "secret-key",

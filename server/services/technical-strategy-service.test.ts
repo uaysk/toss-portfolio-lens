@@ -60,7 +60,7 @@ const strategy = {
   },
 } as const;
 
-const calculation = {
+const calculation: TechnicalStrategyWorkerResult["technical_analysis"]["calculations"][number] = {
   instrument_key: "AAA",
   indicator_id: "sma-main",
   kind: "sma",
@@ -72,16 +72,16 @@ const calculation = {
     { date: "2024-01-02", state: "available", values: { value: 11 } },
     { date: "2024-01-03", state: "available", values: { value: 12 } },
   ],
-} as const;
+};
 
-const technicalAnalysisResult = {
+const technicalAnalysisResult: TechnicalStrategyWorkerResult["technical_analysis"] = {
   schema_version: "technical-analysis-result/v1",
   indicator_engine_version: "technical-indicators/1.5.0",
   response_mode: "full_series",
   adjustment_policy: "adjusted",
   calculations: [calculation],
   diagnostics: { validation: "passed" },
-} as const;
+};
 
 const diagnostics = {
   validation: "passed",

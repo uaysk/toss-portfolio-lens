@@ -1,21 +1,19 @@
-export type DashboardView = "overview" | "analysis" | "technical" | "scalping" | "simulation" | "backtest" | "optimization" | "library";
+import {
+  DASHBOARD_VIEW_REGISTRY,
+  dashboardViewMetadata,
+  type DashboardView,
+} from "@/lib/dashboard-view-registry";
 
-const hashes: Record<DashboardView, string> = {
-  overview: "#overview",
-  analysis: "#analysis",
-  technical: "#technical-analysis",
-  scalping: "#scalping-assistant",
-  simulation: "#simulation",
-  backtest: "#backtest",
-  optimization: "#optimization",
-  library: "#library",
-};
+export type { DashboardView } from "@/lib/dashboard-view-registry";
+
+const viewsByHash = new Map<string, DashboardView>(
+  DASHBOARD_VIEW_REGISTRY.map((definition) => [definition.hash, definition.value] as const),
+);
 
 export function dashboardViewFromHash(hash: string): DashboardView {
-  const entry = Object.entries(hashes).find(([, value]) => value === hash);
-  return (entry?.[0] as DashboardView | undefined) ?? "overview";
+  return viewsByHash.get(hash) ?? "overview";
 }
 
 export function dashboardHash(view: DashboardView): string {
-  return hashes[view];
+  return dashboardViewMetadata(view).hash;
 }

@@ -8,6 +8,7 @@ import { OptimizationRepository } from "../server/repositories/optimization-repo
 import { ReportRepository } from "../server/repositories/report-repository.js";
 import { RunRepository } from "../server/repositories/run-repository.js";
 import type { Holding, Portfolio } from "../server/toss.js";
+import { verificationConfigDefaults } from "./verification-config.js";
 
 const databasePath = "/tmp/toss-portfolio-lens-postgres-integration.sqlite";
 for (const suffix of ["", "-wal", "-shm"]) rmSync(`${databasePath}${suffix}`, { force: true });
@@ -111,6 +112,8 @@ try {
   });
 
   postgres = await openConfiguredHistoryStore({
+    ...verificationConfigDefaults,
+    tossApiAuthMode: "oauth_client_credentials",
     clientId: "synthetic-client",
     clientSecret: "synthetic-secret",
     dashboardPassword: "synthetic-dashboard-password",
@@ -159,6 +162,8 @@ try {
   await postgres.close();
   postgres = undefined;
   const repeated = await openConfiguredHistoryStore({
+    ...verificationConfigDefaults,
+    tossApiAuthMode: "oauth_client_credentials",
     clientId: "synthetic-client",
     clientSecret: "synthetic-secret",
     dashboardPassword: "synthetic-dashboard-password",

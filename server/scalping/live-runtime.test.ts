@@ -43,7 +43,7 @@ function recoveryPage(localTimes: readonly string[]) {
 }
 
 class FakeSocket {
-  connectionState = "idle" as const | "connected";
+  connectionState: "idle" | "connected" = "idle";
   readonly subscriptions = new Map<string, KisSubscription>();
   private readonly listeners = new Set<(event: KisWebSocketEvent) => void>();
 
@@ -386,7 +386,10 @@ describe("ScalpingLiveRuntime", () => {
 
   it("reference-counts two provider subscriptions per symbol", async () => {
     const socket = new FakeSocket();
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")) }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
       replayEventLimit: 10,
@@ -653,7 +656,10 @@ describe("ScalpingLiveRuntime", () => {
       advanceWatermark: vi.fn(),
       recentFinalBars: vi.fn(),
     };
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")) }, aggregator as never, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+      getOverseasMinutes: vi.fn(),
+    }, aggregator as never, {
       putBars, listBars: vi.fn(),
     } as never, {
       replayEventLimit: 20, disconnectWhenIdle: false, watermarkAdvanceMs: 60_000,
@@ -1245,16 +1251,19 @@ describe("ScalpingLiveRuntime", () => {
   it("keeps accepted KIS OHLCV rows recovered when a peer provider row is malformed", async () => {
     const socket = new FakeSocket();
     const putBars = vi.fn().mockResolvedValue(undefined);
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockResolvedValue({
-      items: [{
-        symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:00:00+09:00",
-        open: 100, high: 101, low: 99, close: 100, volume: 10,
-        status: "final", source: "kis_rest_recovery",
-      }],
-      quality: "partial",
-      diagnostics: [{ index: 1, code: "malformed-row", fields: ["volume"], message: "peer row excluded" }],
-      providerTimestamp: "2026-07-21T00:10:00Z",
-    }) }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockResolvedValue({
+        items: [{
+          symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:00:00+09:00",
+          open: 100, high: 101, low: 99, close: 100, volume: 10,
+          status: "final", source: "kis_rest_recovery",
+        }],
+        quality: "partial",
+        diagnostics: [{ index: 1, code: "malformed-row", fields: ["volume"], message: "peer row excluded" }],
+        providerTimestamp: "2026-07-21T00:10:00Z",
+      }),
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, { putBars, listBars: vi.fn() } as never, {
       replayEventLimit: 10, disconnectWhenIdle: false, watermarkAdvanceMs: 60_000,
@@ -1276,16 +1285,19 @@ describe("ScalpingLiveRuntime", () => {
   it("keeps an accepted but still-forming KIS minute partial", async () => {
     const socket = new FakeSocket();
     const putBars = vi.fn().mockResolvedValue(undefined);
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes: vi.fn().mockResolvedValue({
-      items: [{
-        symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:10:00+09:00",
-        open: 100, high: 101, low: 99, close: 100, volume: 10,
-        status: "forming", source: "kis_rest_recovery",
-      }],
-      quality: "available",
-      diagnostics: [],
-      providerTimestamp: "2026-07-21T00:10:30Z",
-    }) }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn().mockResolvedValue({
+        items: [{
+          symbol: "005930", sessionDate: "20260721", timestamp: "2026-07-21T09:10:00+09:00",
+          open: 100, high: 101, low: 99, close: 100, volume: 10,
+          status: "forming", source: "kis_rest_recovery",
+        }],
+        quality: "available",
+        diagnostics: [],
+        providerTimestamp: "2026-07-21T00:10:30Z",
+      }),
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, { putBars, listBars: vi.fn() } as never, {
       replayEventLimit: 10, disconnectWhenIdle: false, watermarkAdvanceMs: 60_000,
@@ -1329,7 +1341,10 @@ describe("ScalpingLiveRuntime", () => {
     const listBars = vi.fn()
       .mockResolvedValueOnce([known])
       .mockResolvedValueOnce([known]);
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes,
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, { putBars, listBars } as never, {
       replayEventLimit: 20,
@@ -1371,7 +1386,10 @@ describe("ScalpingLiveRuntime", () => {
       .mockResolvedValueOnce(recoveryPage(["2026-07-21T09:30:00+09:00", "2026-07-21T09:59:00+09:00"]))
       .mockResolvedValueOnce(recoveryPage(["2026-07-21T09:06:00+09:00", "2026-07-21T09:29:00+09:00"]))
       .mockResolvedValueOnce(recoveryPage(["2026-07-21T09:04:00+09:00", "2026-07-21T09:05:00+09:00"]));
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes,
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, {
       putBars: vi.fn().mockResolvedValue(undefined),
@@ -1403,7 +1421,10 @@ describe("ScalpingLiveRuntime", () => {
     const getCurrentDayMinutes = vi.fn().mockResolvedValue(
       recoveryPage(["2026-07-21T09:09:00+09:00", "2026-07-21T09:10:00+09:00"]),
     );
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes,
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, {
       putBars: vi.fn().mockResolvedValue(undefined),
@@ -1432,7 +1453,10 @@ describe("ScalpingLiveRuntime", () => {
     const getCurrentDayMinutes = vi.fn().mockResolvedValue(
       recoveryPage(["2026-07-21T15:40:00+09:00"]),
     );
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes,
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, {
       putBars: vi.fn().mockResolvedValue(undefined),
@@ -1458,7 +1482,10 @@ describe("ScalpingLiveRuntime", () => {
     const getCurrentDayMinutes = vi.fn()
       .mockResolvedValueOnce(recoveryPage(["2026-07-21T09:30:00+09:00", "2026-07-21T09:59:00+09:00"]))
       .mockResolvedValueOnce(recoveryPage(["2026-07-21T09:10:00+09:00", "2026-07-21T09:29:00+09:00"]));
-    const runtime = new ScalpingLiveRuntime(socket as never, { getCurrentDayMinutes }, {
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes,
+      getOverseasMinutes: vi.fn(),
+    }, {
       ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
     } as never, {
       putBars: vi.fn().mockResolvedValue(undefined),
@@ -1488,6 +1515,7 @@ describe("ScalpingLiveRuntime", () => {
     };
     const runtime = new ScalpingLiveRuntime(socket as never, {
       getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
+      getOverseasMinutes: vi.fn(),
     }, aggregator as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
       replayEventLimit: 10,
       disconnectWhenIdle: true,

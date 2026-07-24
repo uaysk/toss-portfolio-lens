@@ -5,8 +5,9 @@ import {
   ScalpingService,
   type ScalpingServiceConfig,
 } from "./scalping-service.js";
+import { ProviderUnavailableError, ValidationError } from "./domain-errors.js";
 import { marketLocalTimestamp } from "./market-session.js";
-import { ScalpingScanner } from "./scanner-service.js";
+import { ScalpingScanner, type ScannerResult } from "./scanner-service.js";
 
 const NOW = Date.parse("2026-07-21T03:00:30.000Z");
 
@@ -200,7 +201,7 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     putBars: vi.fn().mockResolvedValue(undefined),
     latestPredictions: vi.fn().mockResolvedValue([]),
   };
-  const scanner = { scan: vi.fn((request, snapshot) => ({
+  const scanner = { scan: vi.fn((request, _snapshot: unknown): ScannerResult => ({
     generatedAt: new Date(NOW).toISOString(),
     criterion: request.criterion,
     requestedTopCount: request.topCount,
@@ -213,7 +214,6 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     }],
     excluded: [],
     quality: { status: "available", missing: [], reasons: [], sources: ["toss"], observedAt: new Date(NOW).toISOString() },
-    _snapshot: snapshot,
   })) };
   const live = {
     snapshot: vi.fn().mockReturnValue({}),
@@ -221,6 +221,7 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     state: { connection: "connected", subscriptions: 2, symbols: ["005930"], historicalOrderbookAvailable: false },
   };
   const analysis = {
+    schema_version: "scalping-analysis-result/v3",
     instruments: [{
       instrument_key: "005930",
       scanner_metrics: {
@@ -1039,6 +1040,7 @@ describe("ScalpingService", () => {
     });
     parts.rust.compute.mockImplementation(async (_job: string, request: Record<string, any>) => ({
       result: {
+        schema_version: "scalping-analysis-result/v3",
         instruments: request.scalping_analysis.instruments.map((instrument: Record<string, any>) => ({
           instrument_key: instrument.key,
           signals: {
@@ -1332,6 +1334,81 @@ describe("ScalpingService", () => {
       preset: "trend",
     }) as Record<string, any>;
     expect(realtime.diagnostics.positionContext).toBe("unavailable");
+  });
+
+  it("workspace 포지션 문맥은 계좌·종목 집합·TTL이 모두 일치할 때만 재사용한다", async () => {
+    let currentNow = NOW;
+    const parts = dependencies();
+    const portfolio = {
+      getInstruments: vi.fn().mockResolvedValue([]),
+      getPortfolio: vi.fn().mockResolvedValue({
+        selectedAccountId: "account-1",
+        asOf: parts.series.at(-1)!.closeTime,
+        holdings: [{ symbol: "005930", quantity: 7, averagePrice: 190 }],
+      }),
+    };
+    const subject = new ScalpingService(
+      parts.toss as never, parts.kis as never, parts.scanner as never, parts.live as never,
+      parts.repository as never, parts.rust as never, parts.ai as never,
+      portfolio as never, undefined, {
+        ...config(),
+        workspaceContextTtlMs: 10,
+        now: () => currentNow,
+      },
+    );
+    await subject.workspace({
+      accountId: "account-1",
+      criterion: "volume",
+      topCount: 1,
+      interval: "1m",
+      layoutColumns: 1,
+      preset: "trend",
+    });
+
+    parts.rust.compute.mockClear();
+    const matching = await subject.realtimeAnalysis({
+      accountId: "account-1",
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    });
+    expect((parts.rust.compute.mock.calls[0]![1] as Record<string, any>)
+      .scalping_analysis.instruments[0].position).toMatchObject({ quantity: 7 });
+    expect(matching.diagnostics.positionContext).toBe("latest_workspace_snapshot");
+
+    parts.rust.compute.mockClear();
+    const otherAccount = await subject.realtimeAnalysis({
+      accountId: "account-2",
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    });
+    expect((parts.rust.compute.mock.calls[0]![1] as Record<string, any>)
+      .scalping_analysis.instruments[0].position).toBeUndefined();
+    expect(otherAccount.diagnostics.positionContext).toBe("unavailable");
+
+    parts.rust.compute.mockClear();
+    const otherSymbols = await subject.realtimeAnalysis({
+      accountId: "account-1",
+      symbols: ["000660"],
+      interval: "1m",
+      preset: "trend",
+    });
+    expect((parts.rust.compute.mock.calls[0]![1] as Record<string, any>)
+      .scalping_analysis.instruments[0].position).toBeUndefined();
+    expect(otherSymbols.diagnostics.positionContext).toBe("unavailable");
+
+    currentNow += 10;
+    parts.rust.compute.mockClear();
+    const expired = await subject.realtimeAnalysis({
+      accountId: "account-1",
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    });
+    expect((parts.rust.compute.mock.calls[0]![1] as Record<string, any>)
+      .scalping_analysis.instruments[0].position).toBeUndefined();
+    expect(expired.diagnostics.positionContext).toBe("unavailable");
   });
 
   it("실시간 Rust 분석은 공유 실제 holdings 대신 명시한 가상 포지션만 사용한다", async () => {
@@ -1880,6 +1957,7 @@ describe("ScalpingService", () => {
     const parts = dependencies();
     parts.rust.compute.mockImplementation(async (_job: string, payload: Record<string, any>) => ({
       result: {
+        schema_version: "scalping-analysis-result/v3",
         instruments: payload.scalping_analysis.instruments.map((instrument: Record<string, any>) => {
           const selection = payload.scalping_analysis.output_projection.signal_snapshots
             .find((item: Record<string, unknown>) => item.instrument_key === instrument.key);
@@ -1966,13 +2044,17 @@ describe("ScalpingService", () => {
       ...krBarsFromClose("2026-07-21T15:41:00+09:00", 60),
     ];
     parts.repository.listBars.mockResolvedValue(sequence.filter((_, index) => index !== 30));
-    await expect(service(parts).evaluate({
+    const error: unknown = await service(parts).evaluate({
       symbols: ["005930"], interval: "1m",
       evaluation: {
         walkForward: true, retrospective: true,
         commissionBpsPerSide: 1, taxBpsOnExit: 1, spreadBpsRoundTrip: 1, slippageBpsPerSide: 1,
       },
-    })).rejects.toThrow("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
+    }).then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ValidationError);
+    expect(error).toMatchObject({
+      message: "시간 순서 평가에 필요한 과거 분봉이 부족합니다.",
+    });
     expect(parts.ai.evaluate).not.toHaveBeenCalled();
   });
 
@@ -2114,6 +2196,26 @@ describe("ScalpingService", () => {
         providerRescan: false,
       },
     });
+  });
+
+  it("분석 worker의 잘못된 schema를 client validation 오류로 노출하지 않는다", async () => {
+    const parts = dependencies();
+    parts.rust.compute.mockResolvedValue({
+      result: {
+        schema_version: "scalping-analysis-result/v2",
+        instruments: [],
+        private_provider_detail: "must-not-leak",
+      },
+      summary: {},
+      warnings: [],
+      artifacts: [],
+    });
+
+    await expect(service(parts).realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
   });
 
   it("returns unavailable instead of fabricated forecasts when the AI worker is absent", async () => {

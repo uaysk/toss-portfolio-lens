@@ -1260,12 +1260,11 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
     let instrument_count = request.instruments.len();
     let series_per_instrument = 8_usize
         .checked_add(
-            request
-                .signal
-                .as_ref()
-                .is_some_and(|signal| signal.enabled)
-                .then_some(5)
-                .unwrap_or_default(),
+            if request.signal.as_ref().is_some_and(|signal| signal.enabled) {
+                5
+            } else {
+                0
+            },
         )
         .context("output projection series count overflow")?;
     let point_multiplier = if request.response_mode == ResponseMode::FullSeries {
@@ -1287,13 +1286,12 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
     let profile_units = request
         .volume_profile
         .as_ref()
-        .map(|profile| {
+        .and_then(|profile| {
             profile
                 .instrument_keys
                 .len()
                 .checked_mul(profile.bucket_count)
         })
-        .flatten()
         .unwrap_or_default();
     let output_units = series_units
         .checked_add(snapshot_units)
@@ -4065,7 +4063,7 @@ mod tests {
             .retain(|window| window.kind == "regular_market");
         instrument.bars.retain(|bar| {
             let minute = parse_timestamp(&bar.timestamp).unwrap().local_minute_of_day;
-            minute > 540 && minute <= 930 && (minute - 540) % 60 == 0
+            minute > 540 && minute <= 930 && (minute - 540).is_multiple_of(60)
         });
         instrument.session_start_confirmed_dates = vec!["2026-07-21".into()];
         instrument.complete_session_dates.clear();
@@ -4282,7 +4280,7 @@ mod tests {
                 .iter()
                 .find(|window| minute > window.open_minute && minute <= window.close_minute)
                 .unwrap();
-            (minute - window.open_minute) % 15 == 0
+            (minute - window.open_minute).is_multiple_of(15)
         });
         instrument.complete_session_dates.clear();
         instrument.anchored_vwap_timestamp = Some(instrument.bars[0].timestamp.clone());

@@ -73,7 +73,6 @@ import {
   technicalMarkerBarDate,
   technicalAvailabilityLabel,
   technicalTradeMarkerStatusNotice,
-  unwrapTechnicalAnalysisPayload,
   volumeProfileCalculation,
   visibleDateCutoff,
   type TechnicalAnalysisPayload,
@@ -84,10 +83,15 @@ import {
   type TechnicalInstrumentChoice,
   type TechnicalPriceSeries,
   type TechnicalTradeMarker,
-  type TechnicalTradeMarkersPayload,
   type TechnicalVolumeProfileSettings,
   type TechnicalVwapSettings,
 } from "@/lib/technical-analysis";
+import {
+  TechnicalAnalysisApiError,
+  requestTechnicalAnalysis,
+  requestTechnicalTradeMarkers,
+  searchTechnicalInstruments,
+} from "@/lib/technical-analysis-api";
 import {
   MAX_TECHNICAL_STRATEGY_SYMBOLS,
   TECHNICAL_STRATEGY_PRESET_TYPE,
@@ -120,56 +124,7 @@ type PriceMode = "actual" | "starting100";
 type CurrencyMode = "local" | "KRW";
 type SortMode = "weight" | "return" | "indicator";
 
-type SearchResponseInstrument = {
-  symbol?: unknown;
-  name?: unknown;
-  market?: unknown;
-  currency?: unknown;
-  assetType?: unknown;
-  securityType?: unknown;
-};
-
 type ChartDatum = TechnicalChartRow & Record<string, unknown>;
-
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function errorMessage(value: unknown, fallback: string): string {
-  const outer = record(value);
-  const error = record(outer.error);
-  const message = error.message ?? outer.message;
-  return typeof message === "string" && message.trim() ? message : fallback;
-}
-
-function normalizeSearchResults(payload: unknown): TechnicalInstrumentChoice[] {
-  const outer = record(payload);
-  const result = record(outer.result);
-  const raw = Array.isArray(result.instruments)
-    ? result.instruments
-    : Array.isArray(outer.instruments) ? outer.instruments : [];
-  return raw.flatMap((item): TechnicalInstrumentChoice[] => {
-    const candidate = item as SearchResponseInstrument;
-    if (typeof candidate.symbol !== "string") return [];
-    const symbol = candidate.symbol.trim().toUpperCase();
-    if (!symbol) return [];
-    return [{
-      symbol,
-      name: typeof candidate.name === "string" && candidate.name.trim() ? candidate.name.trim() : symbol,
-      market: typeof candidate.market === "string" ? candidate.market : "",
-      currency: candidate.currency === "USD" ? "USD" : "KRW",
-      assetType: typeof candidate.assetType === "string"
-        ? candidate.assetType
-        : typeof candidate.securityType === "string" ? candidate.securityType : undefined,
-    }];
-  });
-}
-
-function unwrapTradeMarkers(value: unknown): TechnicalTradeMarkersPayload | undefined {
-  const outer = record(value);
-  const candidate = record(outer.result).markers ? record(outer.result) : outer;
-  return Array.isArray(candidate.markers) ? candidate as unknown as TechnicalTradeMarkersPayload : undefined;
-}
 
 function toInstrument(holding: Holding): TechnicalInstrumentChoice {
   return {
@@ -1100,23 +1055,16 @@ export function TechnicalAnalysisView({
     const timer = window.setTimeout(() => {
       setSearching(true);
       setSearchError("");
-      fetch("/api/portfolio/tools/search_instruments", {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ query, limit: 12 }),
-        signal: controller.signal,
-      })
-        .then(async (response) => {
-          const payload = await response.json().catch(() => ({}));
-          if (response.status === 401) {
-            onUnauthorized();
-            return;
-          }
-          if (!response.ok) throw new Error(errorMessage(payload, "종목을 검색하지 못했습니다."));
-          setSearchResults(normalizeSearchResults(payload));
+      searchTechnicalInstruments(query, { signal: controller.signal })
+        .then((results) => {
+          setSearchResults(results);
         })
         .catch((caught: unknown) => {
           if (caught instanceof DOMException && caught.name === "AbortError") return;
+          if (caught instanceof TechnicalAnalysisApiError && caught.status === 401) {
+            onUnauthorized();
+            return;
+          }
           setSearchError(caught instanceof Error ? caught.message : "종목을 검색하지 못했습니다.");
         })
         .finally(() => {
@@ -1205,51 +1153,39 @@ export function TechnicalAnalysisView({
       indicators: indicatorDefinitions,
     };
     try {
-      const markerParams = new URLSearchParams({
-        account: portfolio.selectedAccountId,
-        from: fromDate,
-        to: toDate,
-        symbols: symbols.join(","),
-      });
-      const [analysisResponse, markerResult] = await Promise.all([
-        fetch("/api/portfolio/tools/analyze_technical_signals", {
-          method: "POST",
-          headers: { Accept: "application/json", "Content-Type": "application/json" },
-          body: JSON.stringify(request),
+      const [payload, markerResult] = await Promise.all([
+        requestTechnicalAnalysis(request, {
           signal: controller.signal,
+          failureMessage: "기술적 분석을 실행하지 못했습니다.",
+          invalidResponseMessage: "기술적 분석 응답 형식을 확인하지 못했습니다.",
         }),
-        fetch(`/api/portfolio/technical/trades?${markerParams.toString()}`, {
-          headers: { Accept: "application/json" },
-          signal: controller.signal,
-        }).then(async (response) => ({ response, payload: await response.json().catch(() => ({})) })).catch((error: unknown) => ({ error })),
+        requestTechnicalTradeMarkers({
+          accountId: portfolio.selectedAccountId,
+          fromDate,
+          toDate,
+          symbols,
+        }, { signal: controller.signal })
+          .then((markers) => ({ markers }))
+          .catch((error: unknown) => ({ error })),
       ]);
-      const rawAnalysis = await analysisResponse.json().catch(() => ({}));
-      if (analysisResponse.status === 401) {
-        onUnauthorized();
-        return;
-      }
-      if (!analysisResponse.ok) throw new Error(errorMessage(rawAnalysis, "기술적 분석을 실행하지 못했습니다."));
-      const payload = unwrapTechnicalAnalysisPayload(rawAnalysis);
-      if (!payload) throw new Error("기술적 분석 응답 형식을 확인하지 못했습니다.");
       setAnalysis(payload);
       setLastRequestSignature(requestSignature);
-      if ("response" in markerResult) {
-        if (markerResult.response.status === 401) onUnauthorized();
-        const markerPayload = unwrapTradeMarkers(markerResult.payload);
-        if (markerResult.response.ok && markerPayload) {
-          setTradeMarkers(markerPayload.markers);
-          setMarkerNotice(technicalTradeMarkerStatusNotice(markerPayload));
-        }
-        else {
-          setTradeMarkers([]);
-          setMarkerNotice(errorMessage(markerResult.payload, "거래 marker를 불러오지 못했습니다. 가격 차트와 지표는 정상 표시됩니다."));
-        }
+      if ("markers" in markerResult) {
+        setTradeMarkers(markerResult.markers.markers);
+        setMarkerNotice(technicalTradeMarkerStatusNotice(markerResult.markers));
       } else {
+        if (markerResult.error instanceof TechnicalAnalysisApiError && markerResult.error.status === 401) onUnauthorized();
         setTradeMarkers([]);
-        setMarkerNotice("거래 marker를 불러오지 못했습니다. 가격 차트와 지표는 정상 표시됩니다.");
+        setMarkerNotice(markerResult.error instanceof Error
+          ? markerResult.error.message
+          : "거래 marker를 불러오지 못했습니다. 가격 차트와 지표는 정상 표시됩니다.");
       }
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (caught instanceof TechnicalAnalysisApiError && caught.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setAnalysisError(caught instanceof Error ? caught.message : "기술적 분석을 실행하지 못했습니다.");
     } finally {
       if (!controller.signal.aborted) setLoading(false);
@@ -1273,25 +1209,21 @@ export function TechnicalAnalysisView({
         currencyMode,
         settings: volumeProfileSettings,
       });
-      const response = await fetch("/api/portfolio/tools/analyze_technical_signals", {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(request),
+      const payload = await requestTechnicalAnalysis(request, {
         signal: controller.signal,
+        failureMessage: "Volume Profile을 계산하지 못했습니다.",
+        invalidResponseMessage: "Volume Profile 응답 형식을 확인하지 못했습니다.",
       });
-      const raw = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        onUnauthorized();
-        return;
-      }
-      if (!response.ok) throw new Error(errorMessage(raw, "Volume Profile을 계산하지 못했습니다."));
-      const payload = unwrapTechnicalAnalysisPayload(raw);
-      const calculation = payload ? volumeProfileCalculation(payload) : undefined;
-      if (!payload || !calculation) throw new Error("Volume Profile 응답 형식을 확인하지 못했습니다.");
+      const calculation = volumeProfileCalculation(payload);
+      if (!calculation) throw new Error("Volume Profile 응답 형식을 확인하지 못했습니다.");
       if (calculation.profile && calculation.profile.buckets.length > 200) throw new Error("Volume Profile bucket 응답 상한을 초과했습니다.");
       setProfileAnalysis(payload);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (caught instanceof TechnicalAnalysisApiError && caught.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setProfileError(caught instanceof Error ? caught.message : "Volume Profile을 계산하지 못했습니다.");
     } finally {
       if (!controller.signal.aborted) setProfileLoading(false);

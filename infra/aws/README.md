@@ -2,7 +2,7 @@
 
 이 디렉터리는 `toss-portfolio-lens`를 AWS에 반복 배포하기 위한 실행 자산입니다. 애플리케이션 코드는 서울 리전의 EKS에서 실행하고, 보고서 JSON은 S3, 관계형 데이터는 비공개 RDS MariaDB에 저장합니다. AI 평가는 스톡홀름 리전의 Amazon Bedrock Kimi K2.5를 호출합니다.
 
-배포된 애플리케이션의 토스증권 업스트림은 항상 `https://tpl.uaysk.com/`입니다. 인증에는 로컬 `.env`의 `DASHBOARD_PASSWORD`를 정적 Bearer 토큰으로 사용하며 토큰 값은 CloudFormation, 이미지, Git 또는 명령 출력에 기록하지 않습니다.
+배포된 애플리케이션의 토스증권 업스트림은 항상 `https://tpl.uaysk.com/`입니다. 인증에는 로컬 `.env`의 `READ_ONLY_API_TOKEN`을 정적 Bearer 토큰으로 사용하며 토큰 값은 CloudFormation, 이미지, Git 또는 명령 출력에 기록하지 않습니다. 기존 설치 호환을 위해 값이 없을 때만 `DASHBOARD_PASSWORD`를 사용합니다.
 
 ## 생성되는 구성
 
@@ -23,7 +23,7 @@
 
 - AWS CLI v2 자격 증명과 CloudFormation, EKS, EC2, IAM, ECR, RDS, Secrets Manager, S3, Bedrock, ELB 리소스를 만들 권한
 - Docker, kubectl, Helm, jq, curl, Git
-- 프로젝트 루트의 `.env`에 비어 있지 않은 `DASHBOARD_PASSWORD`와 32자 이상 `SESSION_SECRET`
+- 프로젝트 루트의 `.env`에 `DASHBOARD_PASSWORD`와 32자 이상 `SESSION_SECRET`. 신규 배포는 별도 `READ_ONLY_API_TOKEN`도 설정
 - 이 계정에서 Bedrock Kimi K2.5 약관/모델 접근이 활성화된 상태
 - Docker 빌드 및 Helm/ECR/공개 이미지 레지스트리에 접근 가능한 네트워크
 
@@ -68,7 +68,7 @@ CLUSTER_PUBLIC_ACCESS_CIDR=203.0.113.10/32 \
 
 ## 보안과 운영상 주의점
 
-- Kubernetes Secret에는 대시보드 비밀번호, 세션 비밀, 업스트림 Bearer 토큰, RDS 자격 증명만 저장합니다. Git에 생성형 Secret manifest를 남기지 않습니다.
+- Kubernetes Secret에는 대시보드 비밀번호, 읽기 전용 API token, 세션 비밀, 업스트림 Bearer 토큰, RDS 자격 증명만 저장합니다. Git에 생성형 Secret manifest를 남기지 않습니다.
 - RDS는 `require_secure_transport=1`이고 클라이언트도 TLS를 사용합니다. 배포 스크립트가 AWS 공식 global RDS CA bundle을 받아 ConfigMap으로 마운트하고 `MYSQL_SSL_REJECT_UNAUTHORIZED=true`로 서버 인증서 체인을 검증합니다.
 - 기본 NLB 주소는 HTTP라 브라우저와 NLB 사이의 로그인 비밀번호가 암호화되지 않습니다. 실제 사용자 로그인 전 ACM 인증서와 소유한 도메인으로 TLS listener를 구성하고 `PUBLIC_APP_URL=https://...`를 지정해야 합니다.
 - EKS API의 공개 접근은 배포 시점 공인 IPv4 `/32`로 제한됩니다. 운영자 IP가 바뀌면 `CLUSTER_PUBLIC_ACCESS_CIDR`을 새 값으로 지정해 스택을 다시 갱신합니다. 노드는 private EKS endpoint를 사용합니다.

@@ -6,6 +6,16 @@ import { ArtifactService } from "./artifact-service.js";
 import { PORTFOLIO_ENGINE_VERSION, requestHash } from "./service-envelope.js";
 import { RunService } from "./run-service.js";
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("RunService persistence and cancellation", () => {
   const databases: SqliteDatabase[] = [];
 
@@ -224,7 +234,7 @@ describe("RunService persistence and cancellation", () => {
       task: async (context) => {
         observedSignal = context.signal;
         started();
-        await new Promise<never>((_resolve, reject) => {
+        return new Promise<never>((_resolve, reject) => {
           const rejectFromSignal = () => reject(context.signal.reason);
           if (context.signal.aborted) rejectFromSignal();
           else context.signal.addEventListener("abort", rejectFromSignal, { once: true });
@@ -362,6 +372,274 @@ describe("RunService persistence and cancellation", () => {
     expect(retried.run).toMatchObject({ status: "completed", summary: { retried: true }, result: { ok: true } });
     expect(retried.run.error).toBeUndefined();
     expect(retryTask).toHaveBeenCalledOnce();
+  });
+
+  it("close는 활성 실행을 중단하고 대기 실행을 terminalize한 뒤에만 같은 Promise로 완료된다", async () => {
+    const { runs, artifacts, service } = await setup();
+    const activeStarted = deferred();
+    const failuresStarted = deferred();
+    const releaseFailures = deferred();
+    const activeTask = vi.fn(async (context) => {
+      activeStarted.resolve();
+      await new Promise<void>((resolve) => {
+        if (context.signal.aborted) resolve();
+        else context.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      await context.updateProgress(0.75);
+      return { summary: { shouldNotComplete: true }, result: {} };
+    });
+    const queuedTask = vi.fn().mockResolvedValue({ summary: {}, result: {} });
+    const updateProgress = vi.spyOn(runs, "updateProgress");
+    const addEvent = vi.spyOn(runs, "addEvent");
+    const complete = vi.spyOn(runs, "complete");
+    const originalFail = runs.fail.bind(runs);
+    let failureCount = 0;
+    const fail = vi.spyOn(runs, "fail").mockImplementation(async (...args) => {
+      failureCount += 1;
+      if (failureCount === 2) failuresStarted.resolve();
+      await releaseFailures.promise;
+      return originalFail(...args);
+    });
+
+    const active = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 31 },
+      dataRevision: "shutdown-active",
+      task: activeTask,
+    });
+    await activeStarted.promise;
+    const queued = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 32 },
+      dataRevision: "shutdown-queued",
+      task: queuedTask,
+    });
+
+    const firstClose = service.close("SIGTERM");
+    const secondClose = service.close("SIGINT");
+    expect(secondClose).toBe(firstClose);
+    let closeSettled = false;
+    void firstClose.then(
+      () => { closeSettled = true; },
+      () => { closeSettled = true; },
+    );
+    await failuresStarted.promise;
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+
+    releaseFailures.resolve();
+    await firstClose;
+    expect(closeSettled).toBe(true);
+    expect(activeTask).toHaveBeenCalledOnce();
+    expect(queuedTask).not.toHaveBeenCalled();
+    expect(updateProgress).not.toHaveBeenCalled();
+    expect(await artifacts.get(active.run.id, "result")).toBeUndefined();
+    expect(await runs.get(active.run.id, "owner")).toMatchObject({
+      status: "failed",
+      error: { code: "RUN_SERVICE_SHUTDOWN", retryable: true },
+    });
+    expect(await runs.get(queued.run.id, "owner")).toMatchObject({
+      status: "failed",
+      error: { code: "RUN_SERVICE_SHUTDOWN", retryable: true },
+    });
+
+    const mutationCounts = {
+      addEvent: addEvent.mock.calls.length,
+      complete: complete.mock.calls.length,
+      fail: fail.mock.calls.length,
+      updateProgress: updateProgress.mock.calls.length,
+    };
+    const rejectedExecuteTask = vi.fn();
+    const rejectedEnqueueTask = vi.fn();
+    await expect(service.execute({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"] },
+      dataRevision: "after-close-execute",
+      task: rejectedExecuteTask,
+    })).rejects.toThrow("종료");
+    await expect(service.enqueue({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"] },
+      dataRevision: "after-close-enqueue",
+      task: rejectedEnqueueTask,
+    })).rejects.toThrow("종료");
+    await expect(service.enqueueExternal({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"] },
+      dataRevision: "after-close-external-enqueue",
+      payload: {},
+    })).rejects.toThrow("종료");
+    await expect(service.executeExternal({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"] },
+      dataRevision: "after-close-external-execute",
+      payload: {},
+    })).rejects.toThrow("종료");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rejectedExecuteTask).not.toHaveBeenCalled();
+    expect(rejectedEnqueueTask).not.toHaveBeenCalled();
+    expect({
+      addEvent: addEvent.mock.calls.length,
+      complete: complete.mock.calls.length,
+      fail: fail.mock.calls.length,
+      updateProgress: updateProgress.mock.calls.length,
+    }).toEqual(mutationCounts);
+  });
+
+  it("close는 이미 시작된 fire-and-forget progress 저장과 종료 상태 저장을 모두 기다린다", async () => {
+    const { runs, service } = await setup();
+    const progressStarted = deferred();
+    const releaseProgress = deferred();
+    const originalUpdateProgress = runs.updateProgress.bind(runs);
+    vi.spyOn(runs, "updateProgress").mockImplementation(async (...args) => {
+      progressStarted.resolve();
+      await releaseProgress.promise;
+      return originalUpdateProgress(...args);
+    });
+    const active = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 33 },
+      dataRevision: "shutdown-progress-tail",
+      task: async (context) => {
+        void context.updateProgress(0.5, { completedCandidates: 1, totalCandidates: 2 });
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve();
+          else context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await context.throwIfCancelled();
+        return { summary: {}, result: {} };
+      },
+    });
+    await progressStarted.promise;
+
+    const closing = service.close();
+    let settled = false;
+    void closing.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseProgress.resolve();
+    await closing;
+    expect(await runs.get(active.run.id, "owner")).toMatchObject({
+      status: "failed",
+      error: { code: "RUN_SERVICE_SHUTDOWN" },
+    });
+  });
+
+  it("완료 후 보관된 context의 progress 호출은 저장소를 다시 쓰지 않는다", async () => {
+    const { runs, service } = await setup();
+    const updateProgress = vi.spyOn(runs, "updateProgress");
+    let lateProgress!: () => Promise<void>;
+    const completed = await service.execute({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"], seed: 37 },
+      dataRevision: "late-progress-after-deactivate",
+      task: async (context) => {
+        lateProgress = () => context.updateProgress(0.25, { completedCandidates: 1 });
+        return { summary: { ok: true }, result: { ok: true } };
+      },
+    });
+    const writesAtCompletion = updateProgress.mock.calls.length;
+
+    await expect(lateProgress()).resolves.toBeUndefined();
+    expect(updateProgress).toHaveBeenCalledTimes(writesAtCompletion);
+    expect(await runs.get(completed.run.id, "owner")).toMatchObject({
+      status: "completed",
+      progress: 1,
+    });
+  });
+
+  it("close가 markRunning 중 시작되면 task를 호출하지 않고 늦게 생성된 context도 종료한다", async () => {
+    const { runs, service } = await setup();
+    const markRunningStarted = deferred();
+    const releaseMarkRunning = deferred();
+    const originalMarkRunning = runs.markRunning.bind(runs);
+    vi.spyOn(runs, "markRunning").mockImplementation(async (...args) => {
+      markRunningStarted.resolve();
+      await releaseMarkRunning.promise;
+      return originalMarkRunning(...args);
+    });
+    const config = { assets: ["AAA"], seed: 34 };
+    const task = vi.fn().mockResolvedValue({ summary: {}, result: {} });
+    const execution = service.execute({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config,
+      dataRevision: "shutdown-late-context",
+      task,
+    });
+    const executionOutcome = execution.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await markRunningStarted.promise;
+    const closing = service.close();
+    releaseMarkRunning.resolve();
+
+    expect(await executionOutcome).toBeInstanceOf(Error);
+    await closing;
+    expect(task).not.toHaveBeenCalled();
+    const stored = await runs.findByRequest(
+      "owner",
+      "backtest",
+      requestHash({ config, engineVersion: PORTFOLIO_ENGINE_VERSION }),
+      "shutdown-late-context",
+    );
+    expect(stored).toMatchObject({
+      status: "failed",
+      error: { code: "RUN_SERVICE_SHUTDOWN", retryable: true },
+    });
+  });
+
+  it("close는 대기 run의 이미 기록된 사용자 취소 의도를 shutdown 실패로 덮어쓰지 않는다", async () => {
+    const { runs, service } = await setup();
+    const activeStarted = deferred();
+    const active = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 35 },
+      dataRevision: "shutdown-cancel-priority-active",
+      task: async (context) => {
+        activeStarted.resolve();
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve();
+          else context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await context.throwIfCancelled();
+        return { summary: {}, result: {} };
+      },
+    });
+    await activeStarted.promise;
+    const queuedTask = vi.fn().mockResolvedValue({ summary: {}, result: {} });
+    const queued = await service.enqueue({
+      ownerSubject: "owner",
+      kind: "optimization",
+      config: { seed: 36 },
+      dataRevision: "shutdown-cancel-priority-queued",
+      task: queuedTask,
+    });
+    expect(await runs.requestCancellation(queued.run.id, "owner")).toBe(true);
+
+    await service.close();
+    expect(await runs.get(active.run.id, "owner")).toMatchObject({
+      status: "failed",
+      error: { code: "RUN_SERVICE_SHUTDOWN" },
+    });
+    expect(await runs.get(queued.run.id, "owner")).toMatchObject({
+      status: "cancelled",
+      summary: { cancelled: true },
+    });
+    expect(queuedTask).not.toHaveBeenCalled();
   });
 
   it("서버 재시작 시 queued/running/cancel_requested run을 failed로 복구한다", async () => {

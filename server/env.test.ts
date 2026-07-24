@@ -34,6 +34,10 @@ describe("database environment configuration", () => {
       tossApiAuthMode: "oauth_client_credentials",
       clientId: "client-id",
       clientSecret: "client-secret",
+      readOnlyApiToken: "dashboard-password-long",
+      readOnlyApiTokenSource: "DASHBOARD_PASSWORD",
+      trustProxy: [],
+      gracefulShutdownTimeoutMs: 30_000,
       tossApiBaseUrl: "https://openapi.tossinvest.com",
       dbProvider: "sqlite",
     });
@@ -359,6 +363,46 @@ describe("database environment configuration", () => {
 
     process.env.DASHBOARD_PASSWORD = "   ";
     expect(() => loadConfig()).toThrow("필수 환경 변수 DASHBOARD_PASSWORD");
+  });
+
+  it("READ_ONLY_API_TOKEN을 웹 로그인 비밀번호와 분리하고 legacy fallback을 표시한다", () => {
+    process.env.READ_ONLY_API_TOKEN = "dedicated-read-only-token";
+    expect(loadConfig()).toMatchObject({
+      dashboardPassword: "dashboard-password-long",
+      readOnlyApiToken: "dedicated-read-only-token",
+      readOnlyApiTokenSource: "READ_ONLY_API_TOKEN",
+    });
+
+    delete process.env.READ_ONLY_API_TOKEN;
+    expect(loadConfig()).toMatchObject({
+      readOnlyApiToken: "dashboard-password-long",
+      readOnlyApiTokenSource: "DASHBOARD_PASSWORD",
+    });
+  });
+
+  it("READ_ONLY_API_TOKEN의 Bearer 형식과 shutdown deadline을 검증한다", () => {
+    process.env.READ_ONLY_API_TOKEN = "token with spaces";
+    expect(() => loadConfig()).toThrow("READ_ONLY_API_TOKEN에는 공백");
+
+    process.env.READ_ONLY_API_TOKEN = "read-only-token";
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS = "999";
+    expect(() => loadConfig()).toThrow("GRACEFUL_SHUTDOWN_TIMEOUT_MS");
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS = "45000";
+    expect(loadConfig().gracefulShutdownTimeoutMs).toBe(45_000);
+  });
+
+  it("TRUST_PROXY는 명시적인 IP 또는 CIDR만 허용한다", () => {
+    process.env.TRUST_PROXY = "127.0.0.1,10.0.0.0/8,2001:db8::/32";
+    expect(loadConfig().trustProxy).toEqual([
+      "127.0.0.1",
+      "10.0.0.0/8",
+      "2001:db8::/32",
+    ]);
+
+    for (const invalid of ["true", "*", "proxy.internal", "10.0.0.0/33", "2001:db8::/129"]) {
+      process.env.TRUST_PROXY = invalid;
+      expect(() => loadConfig()).toThrow("TRUST_PROXY");
+    }
   });
 
   it("개별 MySQL 값을 모두 설정하면 연결 구성을 만든다", () => {

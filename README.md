@@ -285,12 +285,19 @@ cd toss-portfolio-lens
 cp .env.example .env
 ```
 
-`.env`에서 웹 로그인과 세션 값을 먼저 설정합니다.
+`.env`에서 웹 로그인, 읽기 전용 API와 세션 값을 먼저 설정합니다. 두 인증 값은
+서로 다르게 생성하는 것이 기본입니다.
 
 ```dotenv
 DASHBOARD_PASSWORD=replace-with-a-strong-password
+READ_ONLY_API_TOKEN=replace-with-a-distinct-read-only-api-token
 SESSION_SECRET=replace-with-at-least-32-random-characters
 ```
+
+기존 설치에서는 `READ_ONLY_API_TOKEN`을 생략하면 한시적으로
+`DASHBOARD_PASSWORD`를 `/api/v1` Bearer 인증에도 사용합니다. 서버는 secret을
+포함하지 않는 deprecation warning을 시작 시 한 번 출력하므로 별도 토큰으로
+전환해야 합니다.
 
 토스증권 OAuth Client Credentials를 사용한다면 다음 값을 설정합니다.
 
@@ -367,8 +374,11 @@ EXECUTION_MODE=inline docker compose up -d --no-deps web
 
 | 변수 | 설명 |
 | --- | --- |
-| `DASHBOARD_PASSWORD` | 웹 로그인 비밀번호와 앱의 읽기 전용 API Bearer token |
+| `DASHBOARD_PASSWORD` | 웹 로그인 비밀번호 |
+| `READ_ONLY_API_TOKEN` | 앱이 제공하는 `/api/v1` 읽기 전용 API Bearer token. 미설정 시 deprecated 호환 fallback 적용 |
 | `SESSION_SECRET` | 로그인 세션 HMAC 서명 값, 32자 이상 |
+| `TRUST_PROXY` | 명시적으로 신뢰할 reverse proxy IP/CIDR 목록. 미설정 시 forwarded header를 신뢰하지 않음 |
+| `GRACEFUL_SHUTDOWN_TIMEOUT_MS` | SSE와 장시간 작업을 정리할 graceful shutdown 제한 시간, 기본 30000ms |
 | `APP_GIT_SHA` | `.git`이 없는 배포 이미지의 health/MCP build identity에 주입할 commit SHA |
 | `TOSS_API_AUTH_MODE` | `oauth_client_credentials` 또는 `static_bearer` |
 | `TOSS_API_BASE_URL` | 토스증권 또는 호환 API 주소 |

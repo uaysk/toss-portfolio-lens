@@ -633,6 +633,7 @@ export async function routeApplicationApi(page) {
     if (url.pathname === "/api/portfolio/backtest/current") return json(fixtures.currentBacktest);
     if (url.pathname === "/api/portfolio/backtest" && request.method() === "POST") return json(fixtures.backtest);
     if (url.pathname === "/api/portfolio/backtest/instruments") return json({ instruments: [] });
+    if (url.pathname === "/api/portfolio/presets" && request.method() === "GET") return json({ result: { items: [] } });
     if (url.pathname === "/api/portfolio/advanced/monte-carlo" && request.method() === "POST") {
       const body = request.postDataJSON();
       if (!body.fromDate || !body.toDate) return json({ error: { code: "invalid-fixture-request", message: "Monte Carlo 요청에는 fromDate와 toDate가 모두 필요합니다." } }, 400);

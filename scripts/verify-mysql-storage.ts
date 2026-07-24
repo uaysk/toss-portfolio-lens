@@ -6,6 +6,7 @@ import { PortfolioHistoryStore } from "../server/history.js";
 import { openConfiguredHistoryStore } from "../server/storage.js";
 import { RunRepository } from "../server/repositories/run-repository.js";
 import type { Holding, Portfolio } from "../server/toss.js";
+import { verificationConfigDefaults } from "./verification-config.js";
 
 const databasePath = "/tmp/toss-portfolio-lens-mysql-integration.sqlite";
 rmSync(databasePath, { force: true });
@@ -180,6 +181,8 @@ try {
   });
 
   const configured = await openConfiguredHistoryStore({
+    ...verificationConfigDefaults,
+    tossApiAuthMode: "oauth_client_credentials",
     clientId: "integration-client",
     clientSecret: "integration-secret",
     dashboardPassword: "integration-dashboard-password",

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
 
@@ -150,7 +150,7 @@ function predictions(body) {
   };
 }
 
-async function routeApi(page) {
+export async function routeScalpingUiApi(page) {
   const state = { workspaces: [], forecasts: [], evaluations: [] };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -223,7 +223,7 @@ async function verify(browser, baseUrl, viewport, theme) {
   page.on("pageerror", (error) => errors.page.push(error.message));
   page.on("requestfailed", (request) => errors.request.push(`${request.method()} ${request.url()}`));
   page.on("response", (response) => { if (response.status() >= 400) errors.response.push(`${response.status()} ${response.url()}`); });
-  const state = await routeApi(page);
+  const state = await routeScalpingUiApi(page);
   try {
     await page.goto(`${baseUrl}/?capture=${viewport.width}#scalping-assistant`, { waitUntil: "domcontentloaded" });
     const actualViewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
@@ -365,9 +365,10 @@ async function stop(child) {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
-let preview;
-let browser;
-try {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  let preview;
+  let browser;
+  try {
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
@@ -382,10 +383,11 @@ try {
     await verify(browser, baseUrl, { width: 390, height: 844 }, "light"),
   ];
   console.info(JSON.stringify({ ok: true, results }, null, 2));
-} catch (error) {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-} finally {
-  await browser?.close().catch(() => undefined);
-  await stop(preview);
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  } finally {
+    await browser?.close().catch(() => undefined);
+    await stop(preview);
+  }
 }

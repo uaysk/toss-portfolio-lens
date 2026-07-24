@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "server/**/*.test.ts",
+    "scripts/**/*.ts",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "vite.config.ts"
+  ],
+  "exclude": ["node_modules", "dist", "worker"]
+}

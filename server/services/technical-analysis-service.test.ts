@@ -123,7 +123,9 @@ async function harness(input: {
   mismatchedArtifact?: boolean;
   engineVersion?: string;
   echoFirstIndicator?: boolean;
-  getPriceSeries?: (request: { symbol: string; requireVolume?: boolean }) => Promise<MarketSeriesResult>;
+  getPriceSeries?: (
+    request: Parameters<MarketDataService["getPriceSeries"]>[0],
+  ) => Promise<MarketSeriesResult>;
   profileBucketCount?: number;
 } = {}) {
   const database = new SqliteDatabase(":memory:");
@@ -321,9 +323,10 @@ describe("TechnicalAnalysisService", () => {
       { key: "AAPL", type: "stock", volumes: [1_000, null] },
       { key: "SPY", type: "etf", volumes: [1_000, null] },
     ]);
-    const volumeQuality = (response as {
-      data_quality: { volume: Record<string, Record<string, unknown>> };
-    }).data_quality.volume;
+    const volumeQuality = response.data_quality.volume;
+    if (!volumeQuality || typeof volumeQuality !== "object" || Array.isArray(volumeQuality)) {
+      throw new Error("Expected per-symbol volume data quality.");
+    }
     expect(volumeQuality).toEqual(Object.fromEntries(Array.from(metadata.keys()).sort().map((symbol) => [
       symbol,
       expect.objectContaining({

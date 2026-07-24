@@ -21,6 +21,9 @@ describe("Bedrock report evaluation", () => {
       ): Promise<ConverseCommandOutput> => ({
         stopReason: "end_turn",
         output: { message: { role: "assistant", content: [{ text: JSON.stringify(narrative) }] } },
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        metrics: { latencyMs: 1 },
+        $metadata: {},
       })),
     };
     const writer = new BedrockReportWriter({ modelId: "moonshotai.kimi-k2.5", timeoutMs: 5_000 }, client);
@@ -32,7 +35,7 @@ describe("Bedrock report evaluation", () => {
     expect(command.input.system?.[0]?.text).toContain("롤링 성과");
     expect(command.input.system?.[0]?.text).toContain("성과·위험 기여도");
     expect(command.input.system?.[0]?.text).toContain('"additionalProperties":false');
-    expect(JSON.parse(command.input.messages[0].content?.[0]?.text ?? "")).toEqual({
+    expect(JSON.parse(command.input.messages?.[0]?.content?.[0]?.text ?? "")).toEqual({
       metrics: { sharpeRatio: 1.2 },
       correlations: [],
     });

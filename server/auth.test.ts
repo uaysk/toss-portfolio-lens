@@ -8,11 +8,13 @@ import {
 } from "./auth.js";
 
 describe("read-only compatible API authentication", () => {
-  it("DASHBOARD_PASSWORD 자체를 Bearer 토큰으로 허용한다", () => {
-    const dashboardPassword = "dashboard-password";
-    expect(hasValidReadOnlyApiSecret(`Bearer ${dashboardPassword}`, dashboardPassword)).toBe(true);
-    expect(hasValidReadOnlyApiSecret("Bearer wrong", dashboardPassword)).toBe(false);
-    expect(hasValidReadOnlyApiSecret(dashboardPassword, dashboardPassword)).toBe(false);
+  it("별도 읽기 전용 secret만 올바른 Bearer 토큰으로 허용한다", () => {
+    const readOnlyApiToken = "dedicated-read-only-token";
+    expect(hasValidReadOnlyApiSecret(`Bearer ${readOnlyApiToken}`, readOnlyApiToken)).toBe(true);
+    expect(hasValidReadOnlyApiSecret("Bearer dashboard-password", readOnlyApiToken)).toBe(false);
+    expect(hasValidReadOnlyApiSecret("Bearer wrong", readOnlyApiToken)).toBe(false);
+    expect(hasValidReadOnlyApiSecret(readOnlyApiToken, readOnlyApiToken)).toBe(false);
+    expect(hasValidReadOnlyApiSecret(undefined, readOnlyApiToken)).toBe(false);
   });
 
   it("API 비밀값 비교에도 일정 시간 비교 함수를 사용할 수 있다", () => {

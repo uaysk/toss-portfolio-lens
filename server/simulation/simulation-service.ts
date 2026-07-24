@@ -4,6 +4,12 @@ import type { RunRepository, PortfolioRunRecord } from "../repositories/run-repo
 import type { ScalpingLiveEvent } from "../scalping/live-runtime.js";
 import type { MarketCountry, ScannerCriterion, UsExchange } from "../scalping/contracts.js";
 import type {
+  ScalpingForecastResult,
+  ScalpingRealtimeAnalysisResult,
+  ScalpingWorkspaceResult,
+} from "../scalping/api-contracts.js";
+import type { ScalpingService } from "../scalping/scalping-service.js";
+import type {
   SimulationCosts,
   SimulationPreset,
   SimulationStartRequest,
@@ -21,6 +27,19 @@ import {
   type PaperPolicyAction,
   type PaperTrade,
 } from "./policy.js";
+import {
+  calculateCadenceTick,
+  planDecisionTimer,
+  reduceDecisionQueueTick,
+  transitionSimulationPhase,
+  type SimulationPhase,
+  type SimulationPhaseEvent,
+} from "./session-state.js";
+import {
+  cleanupSimulationRuntime,
+  combinedRelease,
+  type SimulationRuntimeHandles,
+} from "./session-runtime.js";
 
 const MINUTE_MS = 60_000;
 const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
@@ -56,15 +75,20 @@ function uniqueWarnings(values: readonly string[]): string[] {
   return Array.from(new Set(values.filter(Boolean))).slice(-200);
 }
 
-function forecastUnavailableCodes(value: unknown): string[] {
-  const root = record(value);
-  const direct = Array.isArray(root?.unavailable) ? root.unavailable : [];
-  const predictions = Array.isArray(root?.predictions) ? root.predictions : [];
-  return Array.from(new Set([...direct, ...predictions].flatMap((item) => {
-    const source = record(item);
-    const unavailable = record(source?.unavailable);
-    const symbol = nonempty(source?.symbol, 32);
-    const code = nonempty(source?.code, 128) ?? nonempty(unavailable?.code, 128);
+function forecastUnavailableCodes(value: ScalpingForecastResult): string[] {
+  const direct = value.unavailable ?? (
+    !("schema_version" in value.forecast) ? value.forecast.series ?? [] : []
+  );
+  return Array.from(new Set([
+    ...direct,
+    ...(value.predictions ?? []).flatMap((prediction) => (
+      "unavailable" in prediction
+        ? [{ symbol: prediction.symbol, code: prediction.unavailable.code }]
+        : []
+    )),
+  ].flatMap((item) => {
+    const symbol = nonempty(item.symbol, 32);
+    const code = nonempty(item.code, 128);
     return code ? [`${symbol ? `${symbol}:` : ""}${code}`] : [];
   })));
 }
@@ -100,22 +124,18 @@ type CandidateMetadata = {
   price?: number;
 };
 
-function workspaceCandidates(value: unknown): CandidateMetadata[] {
-  const workspace = record(record(value)?.workspace);
-  const candidates = workspace?.candidates;
-  if (!Array.isArray(candidates)) return [];
+function workspaceCandidates(value: ScalpingWorkspaceResult): CandidateMetadata[] {
+  const candidates = value.workspace.candidates;
   const seen = new Set<string>();
   const output: CandidateMetadata[] = [];
-  for (const value of candidates) {
-    const item = record(value);
-    const symbol = nonempty(item?.symbol, 32)?.toUpperCase();
-    if (!symbol || seen.has(symbol) || item?.filtered === true) continue;
-    const exchange = item?.exchange;
+  for (const item of candidates) {
+    const symbol = item.symbol.toUpperCase();
+    if (seen.has(symbol) || item.filtered) continue;
     output.push({
       symbol,
-      ...(nonempty(item?.name, 160) ? { name: nonempty(item?.name, 160) } : {}),
-      ...(["NAS", "NYS", "AMS"].includes(String(exchange)) ? { exchange: exchange as UsExchange } : {}),
-      ...(finite(item?.price) !== undefined && finite(item?.price)! > 0 ? { price: finite(item?.price) } : {}),
+      ...(item.name ? { name: item.name } : {}),
+      ...(item.exchange ? { exchange: item.exchange } : {}),
+      ...(item.price !== undefined && item.price > 0 ? { price: item.price } : {}),
     });
     seen.add(symbol);
   }
@@ -130,25 +150,21 @@ function latestTimestamp(values: readonly unknown[]): string | undefined {
   return timestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0];
 }
 
-function technicalStates(value: unknown): Record<string, unknown> {
-  const root = record(value);
-  const technical = record(root?.technical);
-  const instruments = technical?.instruments;
-  if (!Array.isArray(instruments)) return {};
+function technicalStates(value: ScalpingRealtimeAnalysisResult): Record<string, unknown> {
+  const technical = value.technical;
+  if (!("instruments" in technical)) return {};
   const output: Record<string, unknown> = {};
-  for (const value of instruments) {
-    const instrument = record(value);
-    const symbol = nonempty(instrument?.instrument_key, 128)?.toUpperCase();
-    const latest = record(record(instrument?.signals)?.latest);
-    const state = nonempty(latest?.status, 64);
+  for (const instrument of technical.instruments) {
+    const symbol = instrument.instrument_key.toUpperCase();
+    const latest = instrument.signals?.latest;
+    const state = latest?.status;
     if (symbol && state) {
       output[symbol] = {
         status: state,
         observedAt: latestTimestamp([
-          root?.generatedAt,
-          root?.generated_at,
-          latest?.calculation_timestamp,
-          latest?.signal_timestamp,
+          value.generatedAt,
+          latest.calculation_timestamp,
+          latest.signal_timestamp,
         ]),
       };
     }
@@ -157,7 +173,7 @@ function technicalStates(value: unknown): Record<string, unknown> {
 }
 
 type SimulationMarketSource = {
-  status(enabled?: boolean): unknown;
+  status: ScalpingService["status"];
   workspace(input: {
     marketCountry: MarketCountry;
     criterion: ScannerCriterion;
@@ -167,14 +183,14 @@ type SimulationMarketSource = {
     preset: SimulationPreset;
     scanOnly: true;
     includePortfolioContext: false;
-  }): Promise<unknown>;
+  }): Promise<ScalpingWorkspaceResult>;
   forecast(input: {
     marketCountry: MarketCountry;
     symbols: string[];
     interval: "1m";
   }, options?: {
     signal?: AbortSignal;
-  }): Promise<unknown>;
+  }): Promise<ScalpingForecastResult>;
   realtimeAnalysis(input: {
     marketCountry: MarketCountry;
     symbols: string[];
@@ -192,7 +208,7 @@ type SimulationMarketSource = {
   }, options?: {
     signal?: AbortSignal;
     skipAutomaticRefresh?: boolean;
-  }): Promise<unknown>;
+  }): Promise<ScalpingRealtimeAnalysisResult>;
 };
 
 type SimulationLiveSource = {
@@ -218,14 +234,6 @@ export type AiTradingSimulationConfig = {
   progressUpdateMs?: number;
   now?: () => number;
 };
-
-type SimulationPhase =
-  | "selecting"
-  | "running"
-  | "finalizing"
-  | "completed"
-  | "cancelled"
-  | "failed";
 
 type SimulationDecision = {
   symbol: string;
@@ -264,7 +272,7 @@ type ObservedMark = {
   observedAt: string;
 };
 
-type ActiveSession = {
+type ActiveSession = SimulationRuntimeHandles & {
   id: string;
   ownerSubject: string;
   request: SimulationStartRequest;
@@ -285,14 +293,6 @@ type ActiveSession = {
   trades: SimulationTrade[];
   equity: EquityPoint[];
   warnings: string[];
-  release?: () => void;
-  selectionRetryTimer?: NodeJS.Timeout;
-  selectionRetryResolve?: () => void;
-  endTimer?: NodeJS.Timeout;
-  progressTimer?: NodeJS.Timeout;
-  decisionTimer?: NodeJS.Timeout;
-  decisionAbort: AbortController;
-  nextDecisionAtMs?: number;
   lastDecisionScheduledAt?: string;
   lastDecisionStartedAt?: string;
   lastDecisionFinishedAt?: string;
@@ -301,37 +301,15 @@ type ActiveSession = {
   decisionSkippedTicks: number;
   lastArtifactPersistedAtMs?: number;
   analysisRunning: boolean;
-  analysisQueued: boolean;
   persistenceTail: Promise<void>;
+  finalizationTask?: Promise<void>;
 };
 
-function combinedRelease(...releases: Array<() => void>): () => void {
-  return () => {
-    const errors: unknown[] = [];
-    for (const release of releases) {
-      try {
-        release();
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (errors.length) throw new AggregateError(errors, "일부 실시간 구독을 해제하지 못했습니다.");
-  };
-}
-
-function releaseWithRetry(release: () => void): void {
-  try {
-    release();
-  } catch (firstError) {
-    try {
-      release();
-    } catch (secondError) {
-      throw new AggregateError(
-        [firstError, secondError],
-        "실시간 구독 해제 재시도가 실패했습니다.",
-      );
-    }
-  }
+function applyPhaseTransition(session: ActiveSession, event: SimulationPhaseEvent): boolean {
+  const transition = transitionSimulationPhase(session.phase, event);
+  if (!transition.accepted) return false;
+  session.phase = transition.phase;
+  return true;
 }
 
 function selectedSymbols(session: ActiveSession): string[] {
@@ -443,12 +421,14 @@ export class AiTradingSimulationService {
   private readonly startingOwners = new Set<string>();
   private readonly startTasks = new Set<Promise<unknown>>();
   private readonly startTasksByOwner = new Map<string, Promise<unknown>>();
+  private readonly progressTasks = new Set<Promise<void>>();
   private readonly now: () => number;
   private readonly progressUpdateMs: number;
   private readonly selectionMaximumAttempts: number;
   private readonly selectionRetryDelayMs: number;
   private readonly removeLiveListener: () => void;
   private closed = false;
+  private closeTask?: Promise<void>;
 
   constructor(
     private readonly market: SimulationMarketSource,
@@ -489,7 +469,7 @@ export class AiTradingSimulationService {
   }
 
   status(enabled = true) {
-    const provider = record(this.market.status(enabled));
+    const provider = this.market.status(enabled);
     return {
       schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
       enabled,
@@ -505,7 +485,7 @@ export class AiTradingSimulationService {
         selectionMaximumAttempts: this.selectionMaximumAttempts,
         selectionRetryDelayMs: this.selectionRetryDelayMs,
       },
-      providers: provider?.providers,
+      providers: provider.providers,
       capabilities: {
         realOrder: false,
         orderApiDependency: false,
@@ -747,14 +727,21 @@ export class AiTradingSimulationService {
     return this.get(runId, ownerSubject);
   }
 
-  async close(reason = "server_shutdown"): Promise<void> {
-    if (this.closed) return;
+  close(reason = "server_shutdown"): Promise<void> {
+    if (this.closeTask) return this.closeTask;
     this.closed = true;
     this.removeLiveListener();
+    this.closeTask = this.closeActiveSessions(reason);
+    return this.closeTask;
+  }
+
+  private async closeActiveSessions(reason: string): Promise<void> {
     await Promise.allSettled([...this.startTasks]);
-    await Promise.allSettled([...this.active.values()].map((session) => (
+    const sessions = [...this.active.values()];
+    await Promise.allSettled(sessions.map((session) => (
       this.finish(session, "cancelled", `시뮬레이션이 중단되었습니다: ${reason}`)
     )));
+    await Promise.allSettled([...this.progressTasks]);
   }
 
   private async initialize(session: ActiveSession): Promise<void> {
@@ -838,7 +825,7 @@ export class AiTradingSimulationService {
         signal: session.decisionAbort.signal,
       });
       if (session.phase !== "selecting") return;
-      selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
+      selection = selectAiForecastSeries(forecastResult.forecast, {
         symbolCount: session.request.symbolCount,
         roundTripCostRate: roundTripCostRate(session.request.costs),
         notBeforeMs: this.now(),
@@ -915,25 +902,29 @@ export class AiTradingSimulationService {
     const startedAtMs = this.now();
     session.startedAt = new Date(startedAtMs).toISOString();
     session.expiresAt = new Date(startedAtMs + session.request.durationMinutes * MINUTE_MS).toISOString();
-    session.phase = "running";
+    const runningTransition = transitionSimulationPhase(session.phase, "selection_ready");
+    if (!runningTransition.accepted) return;
+    session.phase = runningTransition.phase;
     session.lastDecisionScheduledAt = session.startedAt;
     session.lastDecisionStartedAt = session.startedAt;
     const decisionRecordedAt = this.recordActions(session, selection, technicalStates(technical));
     session.lastDecisionFinishedAt = decisionRecordedAt;
     this.recordEquity(session, decisionRecordedAt);
-    await this.repository.addEvent(session.id, "simulation_ready", {
-      symbols,
-      model_id: selection.model?.modelId,
-      model_revision: selection.model?.modelRevision,
-      expires_at: session.expiresAt,
-    }, startedAtMs);
-    if (session.phase !== "running") return;
-    await this.repository.updateProgress(session.id, {
-      progress: 0,
-      completedCandidates: symbols.length,
-      totalCandidates: session.request.symbolCount,
-      currentValidationWindow: session.startedAt,
-    }, startedAtMs);
+    await this.enqueuePersistence(session, async () => {
+      await this.repository.addEvent(session.id, "simulation_ready", {
+        symbols,
+        model_id: selection.model?.modelId,
+        model_revision: selection.model?.modelRevision,
+        expires_at: session.expiresAt,
+      }, startedAtMs);
+      if (session.phase !== "running") return;
+      await this.repository.updateProgress(session.id, {
+        progress: 0,
+        completedCandidates: symbols.length,
+        totalCandidates: session.request.symbolCount,
+        currentValidationWindow: session.startedAt,
+      }, startedAtMs);
+    });
     if (session.phase !== "running") return;
     await this.persistArtifacts(session);
     if (session.phase !== "running") return;
@@ -946,7 +937,7 @@ export class AiTradingSimulationService {
         ));
     }, remainingMs);
     session.endTimer.unref();
-    session.progressTimer = setInterval(() => void this.progress(session), this.progressUpdateMs);
+    session.progressTimer = setInterval(() => this.queueProgress(session), this.progressUpdateMs);
     session.progressTimer.unref();
     this.scheduleNextDecision(
       session,
@@ -1028,14 +1019,6 @@ export class AiTradingSimulationService {
     });
   }
 
-  private clearSelectionRetry(session: ActiveSession): void {
-    if (session.selectionRetryTimer) clearTimeout(session.selectionRetryTimer);
-    const resolve = session.selectionRetryResolve;
-    session.selectionRetryTimer = undefined;
-    session.selectionRetryResolve = undefined;
-    resolve?.();
-  }
-
   private async handleLiveEvent(event: ScalpingLiveEvent): Promise<void> {
     if (!event.symbol || !event.marketCountry) return;
     const sessions = [...this.active.values()].filter((session) => (
@@ -1084,37 +1067,40 @@ export class AiTradingSimulationService {
   }
 
   private scheduleNextDecision(session: ActiveSession, scheduledAtMs: number): void {
-    if (session.phase !== "running" || !Number.isFinite(scheduledAtMs)) return;
+    if (session.phase !== "running") return;
     const expiresAtMs = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN;
-    if (Number.isFinite(expiresAtMs) && scheduledAtMs >= expiresAtMs) return;
-    if (session.decisionTimer) clearTimeout(session.decisionTimer);
+    const timerPlan = planDecisionTimer(
+      scheduledAtMs,
+      this.now(),
+      Number.isFinite(expiresAtMs) ? expiresAtMs : undefined,
+    );
+    if (timerPlan.status !== "scheduled") return;
+    if (session.decisionTimer !== undefined) clearTimeout(session.decisionTimer);
     session.nextDecisionAtMs = scheduledAtMs;
-    const delayMs = Math.max(0, scheduledAtMs - this.now());
     session.decisionTimer = setTimeout(() => {
       session.decisionTimer = undefined;
       if (session.phase !== "running") return;
       const intervalMs = this.config.decisionIntervalSeconds * 1_000;
-      const observedAtMs = this.now();
-      const missedTicks = Math.max(0, Math.floor((observedAtMs - scheduledAtMs) / intervalMs));
-      if (missedTicks > 0) session.decisionSkippedTicks += missedTicks;
-      const effectiveScheduledAtMs = scheduledAtMs + missedTicks * intervalMs;
-      this.queueAnalysis(session, effectiveScheduledAtMs);
-      this.scheduleNextDecision(session, effectiveScheduledAtMs + intervalMs);
-    }, delayMs);
+      const tick = calculateCadenceTick(scheduledAtMs, this.now(), intervalMs);
+      session.decisionSkippedTicks += tick.missedTicks;
+      this.queueAnalysis(session, tick.effectiveScheduledAtMs);
+      this.scheduleNextDecision(session, tick.nextScheduledAtMs);
+    }, timerPlan.delayMs);
     session.decisionTimer.unref();
   }
 
   private queueAnalysis(session: ActiveSession, scheduledAtMs: number): void {
-    session.decisionScheduledTicks += 1;
+    const tick = reduceDecisionQueueTick({
+      analysisRunning: session.analysisRunning,
+      analysisQueued: session.analysisQueued,
+    });
+    session.decisionScheduledTicks += tick.scheduledTickDelta;
+    session.decisionCoalescedTicks += tick.coalescedTickDelta;
+    session.decisionSkippedTicks += tick.skippedTickDelta;
     session.lastDecisionScheduledAt = new Date(scheduledAtMs).toISOString();
-    const alreadyQueued = session.analysisQueued;
-    session.analysisQueued = true;
-    if (session.analysisRunning) {
-      if (alreadyQueued) session.decisionSkippedTicks += 1;
-      else session.decisionCoalescedTicks += 1;
-      return;
-    }
-    session.analysisRunning = true;
+    session.analysisQueued = tick.analysisQueued;
+    session.analysisRunning = tick.analysisRunning;
+    if (!tick.shouldStartRunner) return;
     void (async () => {
       try {
         while (session.analysisQueued && session.phase === "running") {
@@ -1173,7 +1159,7 @@ export class AiTradingSimulationService {
       session.analysisQueued = true;
       return;
     }
-    const selection = selectAiForecastSeries(record(forecastResult)?.forecast, {
+    const selection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: session.request.symbolCount,
       roundTripCostRate: roundTripCostRate(session.request.costs),
       notBeforeMs: this.now(),
@@ -1190,17 +1176,19 @@ export class AiTradingSimulationService {
     session.selection = selection;
     const decisionRecordedAt = this.recordActions(session, selection, technicalStates(technical));
     this.recordEquity(session, decisionRecordedAt);
-    await this.repository.addEvent(session.id, "simulation_decision", {
-      generated_at: selection.generatedAt,
-      symbols,
-      pending_actions: [...session.pending.values()].map(({ symbol, action, eligibleAfter }) => ({
-        symbol, action, eligible_after: eligibleAfter,
-      })),
+    const checkpoint = this.now() - (session.lastArtifactPersistedAtMs ?? Number.NEGATIVE_INFINITY)
+      >= DECISION_ARTIFACT_CHECKPOINT_MS;
+    await this.enqueuePersistence(session, async () => {
+      await this.repository.addEvent(session.id, "simulation_decision", {
+        generated_at: selection.generatedAt,
+        symbols,
+        pending_actions: [...session.pending.values()].map(({ symbol, action, eligibleAfter }) => ({
+          symbol, action, eligible_after: eligibleAfter,
+        })),
+      });
+      if (checkpoint) await this.writeArtifacts(session);
     });
-    if (this.now() - (session.lastArtifactPersistedAtMs ?? Number.NEGATIVE_INFINITY)
-      >= DECISION_ARTIFACT_CHECKPOINT_MS) {
-      await this.persistArtifacts(session);
-    }
+    if (checkpoint) session.lastArtifactPersistedAtMs = this.now();
   }
 
   private async tryFill(
@@ -1249,16 +1237,19 @@ export class AiTradingSimulationService {
     };
     session.trades.push(trade);
     this.recordEquity(session, trade.executedAt);
-    await this.repository.addEvent(session.id, "simulation_fill", {
-      symbol: trade.symbol,
-      side: trade.side,
-      executed_at: trade.executedAt,
-      source,
-      quantity: trade.quantity,
-      price: trade.price,
-      real_order_api: false,
+    await this.enqueuePersistence(session, async () => {
+      await this.repository.addEvent(session.id, "simulation_fill", {
+        symbol: trade.symbol,
+        side: trade.side,
+        executed_at: trade.executedAt,
+        source,
+        quantity: trade.quantity,
+        price: trade.price,
+        real_order_api: false,
+      });
+      await this.writeArtifacts(session);
     });
-    await this.persistArtifacts(session);
+    session.lastArtifactPersistedAtMs = this.now();
   }
 
   private recordEquity(session: ActiveSession, observedAt: string): void {
@@ -1281,7 +1272,9 @@ export class AiTradingSimulationService {
 
   private async progress(session: ActiveSession): Promise<void> {
     if (session.phase !== "running" || !session.startedAt || !session.expiresAt) return;
-    if (await this.repository.isCancellationRequested(session.id)) {
+    const cancellationRequested = await this.repository.isCancellationRequested(session.id);
+    if (session.phase !== "running") return;
+    if (cancellationRequested) {
       await this.finish(session, "cancelled", "취소 요청을 반영했습니다.");
       return;
     }
@@ -1292,13 +1285,27 @@ export class AiTradingSimulationService {
       return;
     }
     const progress = expires > started ? (this.now() - started) / (expires - started) : 0;
-    await this.repository.updateProgress(session.id, {
+    await this.enqueuePersistence(session, () => this.repository.updateProgress(session.id, {
       progress,
       completedCandidates: selectedSymbols(session).length,
       totalCandidates: session.request.symbolCount,
       currentValidationWindow: new Date(this.now()).toISOString(),
       warnings: session.warnings,
+    }));
+  }
+
+  private queueProgress(session: ActiveSession): void {
+    if (this.closed || session.phase !== "running") return;
+    const task = this.progress(session).catch((error) => {
+      if (session.phase === "running") {
+        this.warn(
+          session,
+          `진행 상태 저장 실패: ${error instanceof Error ? error.message : "unknown"}`,
+        );
+      }
     });
+    this.progressTasks.add(task);
+    void task.finally(() => this.progressTasks.delete(task));
   }
 
   private snapshot(session: ActiveSession) {
@@ -1384,101 +1391,114 @@ export class AiTradingSimulationService {
     };
   }
 
-  private async persistArtifacts(session: ActiveSession): Promise<void> {
-    const task = session.persistenceTail.then(async () => {
-      const snapshot = this.snapshot(session);
-      await Promise.all([
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-selection",
-          content: {
-            policy_version: AI_PAPER_POLICY_VERSION,
-            selection: session.selection,
-            metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
-          },
-          rowCount: selectedSymbols(session).length,
-          dataRevision: session.dataRevision,
-        }),
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-decisions",
-          content: session.decisions,
-          rowCount: session.decisions.length,
-          dataRevision: session.dataRevision,
-        }),
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-equity",
-          content: session.equity,
-          rowCount: session.equity.length,
-          dataRevision: session.dataRevision,
-        }),
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-trades",
-          content: session.trades,
-          rowCount: session.trades.length,
-          dataRevision: session.dataRevision,
-        }),
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-diagnostics",
-          content: {
-            phase: session.phase,
-            policy_version: AI_PAPER_POLICY_VERSION,
-            contract_version: AI_SIMULATION_CONTRACT_VERSION,
-            mode: "forward_paper_session",
-            real_order_api_used: false,
-            order_api_dependency: false,
-            mcp_exposed: false,
-            execution_policy: "strictly_after_ai_generation",
-            same_bar_fill_allowed: false,
-            next_trade_preferred: true,
-            later_final_bar_open_fallback: true,
-            open_positions_are_not_force_filled_at_end: true,
-            selected_symbol_limit: session.request.symbolCount,
-            decision_interval_seconds: this.config.decisionIntervalSeconds,
-            decision_cadence: snapshot.decisionCadence,
-            decision_artifact_checkpoint_seconds: DECISION_ARTIFACT_CHECKPOINT_MS / 1_000,
-            selection_maximum_attempts: this.selectionMaximumAttempts,
-            selection_retry_delay_ms: this.selectionRetryDelayMs,
-            costs: session.request.costs,
-            warnings: snapshot.warnings,
-            snapshot,
-          },
-          rowCount: 1,
-          dataRevision: session.dataRevision,
-        }),
-      ]);
-    });
+  private async enqueuePersistence(
+    session: ActiveSession,
+    operation: () => void | Promise<void>,
+  ): Promise<void> {
+    const task = session.persistenceTail.then(operation);
     session.persistenceTail = task.catch(() => undefined);
     await task;
+  }
+
+  private async writeArtifacts(session: ActiveSession): Promise<void> {
+    const snapshot = this.snapshot(session);
+    await Promise.all([
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-selection",
+        content: {
+          policy_version: AI_PAPER_POLICY_VERSION,
+          selection: session.selection,
+          metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
+        },
+        rowCount: selectedSymbols(session).length,
+        dataRevision: session.dataRevision,
+      }),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-decisions",
+        content: session.decisions,
+        rowCount: session.decisions.length,
+        dataRevision: session.dataRevision,
+      }),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-equity",
+        content: session.equity,
+        rowCount: session.equity.length,
+        dataRevision: session.dataRevision,
+      }),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-trades",
+        content: session.trades,
+        rowCount: session.trades.length,
+        dataRevision: session.dataRevision,
+      }),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-diagnostics",
+        content: {
+          phase: session.phase,
+          policy_version: AI_PAPER_POLICY_VERSION,
+          contract_version: AI_SIMULATION_CONTRACT_VERSION,
+          mode: "forward_paper_session",
+          real_order_api_used: false,
+          order_api_dependency: false,
+          mcp_exposed: false,
+          execution_policy: "strictly_after_ai_generation",
+          same_bar_fill_allowed: false,
+          next_trade_preferred: true,
+          later_final_bar_open_fallback: true,
+          open_positions_are_not_force_filled_at_end: true,
+          selected_symbol_limit: session.request.symbolCount,
+          decision_interval_seconds: this.config.decisionIntervalSeconds,
+          decision_cadence: snapshot.decisionCadence,
+          decision_artifact_checkpoint_seconds: DECISION_ARTIFACT_CHECKPOINT_MS / 1_000,
+          selection_maximum_attempts: this.selectionMaximumAttempts,
+          selection_retry_delay_ms: this.selectionRetryDelayMs,
+          costs: session.request.costs,
+          warnings: snapshot.warnings,
+          snapshot,
+        },
+        rowCount: 1,
+        dataRevision: session.dataRevision,
+      }),
+    ]);
+  }
+
+  private async persistArtifacts(session: ActiveSession): Promise<void> {
+    await this.enqueuePersistence(session, () => this.writeArtifacts(session));
     session.lastArtifactPersistedAtMs = this.now();
   }
 
-  private async finish(
+  private finish(
     session: ActiveSession,
     terminal: "completed" | "cancelled",
     reason: string,
   ): Promise<void> {
-    if (!["selecting", "running"].includes(session.phase)) return;
-    session.phase = "finalizing";
-    this.clearSelectionRetry(session);
-    if (session.endTimer) clearTimeout(session.endTimer);
-    if (session.progressTimer) clearInterval(session.progressTimer);
-    if (session.decisionTimer) clearTimeout(session.decisionTimer);
-    session.decisionTimer = undefined;
-    session.nextDecisionAtMs = undefined;
-    session.analysisQueued = false;
-    if (!session.decisionAbort.signal.aborted) {
-      session.decisionAbort.abort(new Error(`AI simulation ${terminal}.`));
+    if (session.finalizationTask) return session.finalizationTask;
+    if (!applyPhaseTransition(session, "begin_finalization")) return Promise.resolve();
+    const task = this.finalize(session, terminal, reason);
+    session.finalizationTask = task;
+    return task;
+  }
+
+  private async finalize(
+    session: ActiveSession,
+    terminal: "completed" | "cancelled",
+    reason: string,
+  ): Promise<void> {
+    const cleanup = cleanupSimulationRuntime(
+      session,
+      new Error(`AI simulation ${terminal}.`),
+    );
+    if (cleanup.releaseError) {
+      this.warn(
+        session,
+        `실시간 구독 해제 실패: ${cleanup.releaseError instanceof Error ? cleanup.releaseError.message : "unknown"}`,
+      );
     }
-    try {
-      if (session.release) releaseWithRetry(session.release);
-    } catch (error) {
-      this.warn(session, `실시간 구독 해제 실패: ${error instanceof Error ? error.message : "unknown"}`);
-    }
-    session.release = undefined;
     if (Object.keys(session.ledger.positions).length) {
       this.warn(session, "기간 종료 후 유효한 신규 체결을 만들지 않아 보유분을 마지막 관측가로만 평가했습니다.");
     }
@@ -1491,7 +1511,9 @@ export class AiTradingSimulationService {
         this.warn(session, "완료 처리와 동시에 도착한 취소 요청을 반영했습니다.");
       }
       const terminalPayload = async (phase: "completed" | "cancelled") => {
-        session.phase = phase;
+        if (!applyPhaseTransition(session, phase === "completed" ? "complete" : "cancel")) {
+          throw new Error(`허용되지 않은 AI simulation phase 전이입니다: ${session.phase} -> ${phase}`);
+        }
         session.equity.length = preTerminalEquityLength;
         this.recordEquity(
           session,
@@ -1574,28 +1596,30 @@ export class AiTradingSimulationService {
     }
   }
 
-  private async fail(session: ActiveSession, error: unknown): Promise<void> {
-    if (session.phase !== "selecting" && session.phase !== "running") return;
-    session.phase = "finalizing";
-    this.clearSelectionRetry(session);
-    if (session.endTimer) clearTimeout(session.endTimer);
-    if (session.progressTimer) clearInterval(session.progressTimer);
-    if (session.decisionTimer) clearTimeout(session.decisionTimer);
-    session.decisionTimer = undefined;
-    session.nextDecisionAtMs = undefined;
-    session.analysisQueued = false;
-    if (!session.decisionAbort.signal.aborted) {
-      session.decisionAbort.abort(new Error("AI simulation failed."));
+  private fail(session: ActiveSession, error: unknown): Promise<void> {
+    if (session.finalizationTask) return session.finalizationTask;
+    if (!applyPhaseTransition(session, "begin_finalization")) return Promise.resolve();
+    const task = this.finalizeFailure(session, error);
+    session.finalizationTask = task;
+    return task;
+  }
+
+  private async finalizeFailure(session: ActiveSession, error: unknown): Promise<void> {
+    const cleanup = cleanupSimulationRuntime(
+      session,
+      new Error("AI simulation failed."),
+    );
+    if (cleanup.releaseError) {
+      this.warn(
+        session,
+        `실시간 구독 해제 실패: ${cleanup.releaseError instanceof Error ? cleanup.releaseError.message : "unknown"}`,
+      );
     }
-    try {
-      if (session.release) releaseWithRetry(session.release);
-    } catch (releaseError) {
-      this.warn(session, `실시간 구독 해제 실패: ${releaseError instanceof Error ? releaseError.message : "unknown"}`);
-    }
-    session.release = undefined;
     const message = error instanceof Error ? error.message : "unknown simulation error";
     this.warn(session, message);
-    session.phase = "failed";
+    if (!applyPhaseTransition(session, "fail")) {
+      throw new Error(`허용되지 않은 AI simulation failure 전이입니다: ${session.phase}`);
+    }
     try {
       await this.persistArtifacts(session).catch(() => undefined);
       await this.repository.fail(session.id, {

@@ -7,6 +7,7 @@ import {
   parseStreamExchanges,
   parseStreamSymbols,
 } from "./router.js";
+import { ProviderUnavailableError } from "./domain-errors.js";
 
 describe("scalping session-only router", () => {
   it("normalizes and bounds SSE symbols", () => {
@@ -48,6 +49,59 @@ describe("scalping session-only router", () => {
     expect(source).toEqual(expect.arrayContaining(["/status", "/workspace", "/forecast", "/evaluations", "/stream"]));
     expect(source.some((path) => String(path).includes("order"))).toBe(false);
     expect(router.stack[0]?.handle).toBe(authenticate);
+  });
+
+  it("maps typed failures and never exposes unexpected provider details", async () => {
+    const privateProviderDetail = "upstream private provider detail";
+    const workspace = vi.fn()
+      .mockRejectedValueOnce(new ProviderUnavailableError(
+        "현재 시세 제공자를 사용할 수 없습니다.",
+        { badGateway: true },
+      ))
+      .mockRejectedValueOnce(new Error(privateProviderDetail));
+    const router = createScalpingRouter({
+      authenticate: vi.fn((_request, _response, next) => next()),
+      service: { workspace } as never,
+      config: {
+        enabled: true,
+        maximumSymbols: 50,
+        heartbeatMs: 15_000,
+        analysisDebounceMs: 250,
+        backpressureEventLimit: 100,
+      },
+    });
+    const route = router.stack.find(
+      (layer: { route?: { path?: string } }) => layer.route?.path === "/workspace",
+    ) as any;
+    const handler = route.route.stack.at(-1).handle as (
+      request: unknown,
+      response: unknown,
+    ) => Promise<void>;
+    const response = {
+      setHeader: vi.fn(),
+      status: vi.fn(),
+      json: vi.fn(),
+    };
+    response.status.mockReturnValue(response);
+
+    await handler({ body: {} }, response);
+    expect(response.status).toHaveBeenLastCalledWith(502);
+    expect(response.json).toHaveBeenLastCalledWith({
+      error: {
+        code: "scalping-provider-unavailable",
+        message: "현재 시세 제공자를 사용할 수 없습니다.",
+      },
+    });
+
+    await handler({ body: {} }, response);
+    expect(response.status).toHaveBeenLastCalledWith(503);
+    expect(response.json).toHaveBeenLastCalledWith({
+      error: {
+        code: "scalping-unavailable",
+        message: "단타 보조 데이터를 처리하지 못했습니다.",
+      },
+    });
+    expect(JSON.stringify(response.json.mock.calls.at(-1))).not.toContain(privateProviderDetail);
   });
 
   it("filters bar intervals and debounces finalized bars into one connection-local analysis batch", async () => {
@@ -114,9 +168,14 @@ describe("scalping session-only router", () => {
     expect(live.waitForIdle).toHaveBeenCalledTimes(1);
     expect(live.waitForIdle.mock.invocationCallOrder[0])
       .toBeLessThan(realtimeAnalysis.mock.invocationCallOrder[0]!);
-    expect(realtimeAnalysis).toHaveBeenCalledWith({
-      symbols: ["005930", "000660"], marketCountry: "KR", interval: "5m", preset: "trend",
-    });
+    expect(realtimeAnalysis).toHaveBeenCalledWith(
+      {
+        symbols: ["005930", "000660"], marketCountry: "KR", interval: "5m", preset: "trend",
+      },
+      { signal: expect.any(AbortSignal) },
+    );
+    const analysisSignal = realtimeAnalysis.mock.calls[0]?.[1]?.signal as AbortSignal;
+    expect(analysisSignal.aborted).toBe(false);
     expect(live.retain).toHaveBeenCalledWith(["005930", "000660"], "KR", {});
     expect(live.eventsAfter).not.toHaveBeenCalled();
     expect(writes.join("\n")).not.toContain('"intervalMinutes":1');
@@ -124,6 +183,7 @@ describe("scalping session-only router", () => {
     expect(writes.join("\n")).toContain('"marketCountry":"KR"');
     expect(writes.join("\n")).toContain("event: analysis");
     request.emit("close");
+    expect(analysisSignal.aborted).toBe(true);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
@@ -240,11 +300,76 @@ describe("scalping session-only router", () => {
     request.emit("close");
   });
 
+  it("runs every SSE cleanup once when listeners fail and retain resolves after close", async () => {
+    const release = vi.fn(() => {
+      throw new Error("release failed");
+    });
+    let resolveRetain!: (value: () => void) => void;
+    const retain = vi.fn(() => new Promise<() => void>((resolve) => {
+      resolveRetain = resolve;
+    }));
+    const removeListener = vi.fn(() => {
+      throw new Error("listener failed");
+    });
+    const untrack = vi.fn();
+    const router = createScalpingRouter({
+      authenticate: vi.fn((_request, _response, next) => next()),
+      service: { realtimeAnalysis: vi.fn() } as never,
+      live: {
+        retain,
+        onEvent: vi.fn().mockReturnValue(removeListener),
+        eventsAfter: vi.fn().mockReturnValue([]),
+        waitForIdle: vi.fn().mockResolvedValue(undefined),
+      } as never,
+      sseConnections: {
+        track: vi.fn().mockReturnValue(untrack),
+      },
+      config: {
+        enabled: true,
+        maximumSymbols: 50,
+        heartbeatMs: 15_000,
+        analysisDebounceMs: 50,
+        backpressureEventLimit: 100,
+      },
+    });
+    const route = router.stack.find((layer: { route?: { path?: string } }) => layer.route?.path === "/stream") as any;
+    const handler = route.route.stack.at(-1).handle as (request: unknown, response: unknown) => Promise<void>;
+    const request = new EventEmitter() as EventEmitter & Record<string, any>;
+    request.query = { symbols: "005930", interval: "1m", preset: "trend" };
+    request.get = vi.fn().mockReturnValue(undefined);
+    const response = new EventEmitter() as EventEmitter & Record<string, any>;
+    response.status = vi.fn().mockReturnValue(response);
+    response.setHeader = vi.fn();
+    response.flushHeaders = vi.fn();
+    response.write = vi.fn().mockReturnValue(true);
+    response.end = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const handling = handler(request, response);
+    request.emit("close");
+    resolveRetain(release);
+    await handling;
+    response.emit("close");
+
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(untrack).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(
+      "[scalping] SSE listener cleanup failed:",
+      "listener failed",
+    );
+    expect(warning).toHaveBeenCalledWith(
+      "[scalping] SSE late subscription cleanup failed:",
+      "release failed",
+    );
+  });
+
   it("is mounted separately from MCP and generic tool execution", () => {
-    const server = readFileSync("server/index.ts", "utf8");
+    const server = readFileSync("server/bootstrap.ts", "utf8");
     const schemas = readFileSync("server/mcp/schemas.ts", "utf8");
     const docs = readFileSync("docs/mcp-chatgpt.md", "utf8");
-    expect(server).toContain('app.use("/api/portfolio/scalping", createScalpingRouter');
+    expect(server).toContain("const scalpingRouter = createScalpingRouter");
+    expect(server).toContain('application.use("/api/portfolio/scalping", scalpingRouter)');
     expect(server).not.toContain('app.post("/api/portfolio/tools/scalping');
     expect(schemas).not.toMatch(/scalping|단타/i);
     expect(docs).not.toMatch(/scalping|단타/i);

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
 
@@ -105,7 +105,7 @@ function snapshot({
   };
 }
 
-async function routeApi(page) {
+export async function routeSimulationUiApi(page) {
   const state = {
     starts: [],
     polls: 0,
@@ -239,7 +239,7 @@ async function verify(browser, baseUrl, viewport, theme) {
   page.on("response", (response) => {
     if (response.status() >= 400) errors.response.push(`${response.status()} ${response.url()}`);
   });
-  const state = await routeApi(page);
+  const state = await routeSimulationUiApi(page);
   const requestedSymbolCount = viewport.width >= 1_000 ? 2 : 1;
   try {
     await page.goto(`${baseUrl}/?simulation-ui=${viewport.width}#simulation`, {
@@ -424,9 +424,10 @@ async function stop(child) {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
-let preview;
-let browser;
-try {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  let preview;
+  let browser;
+  try {
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
@@ -462,10 +463,11 @@ try {
     await verify(browser, baseUrl, { width: 390, height: 844 }, "light"),
   ];
   console.info(JSON.stringify({ ok: true, results }, null, 2));
-} catch (error) {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-} finally {
-  await browser?.close().catch(() => undefined);
-  await stop(preview);
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  } finally {
+    await browser?.close().catch(() => undefined);
+    await stop(preview);
+  }
 }

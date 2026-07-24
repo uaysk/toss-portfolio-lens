@@ -214,6 +214,7 @@ function harness(options: {
   artifactGate?: Promise<void>;
   createGate?: Promise<void>;
   decisionIntervalSeconds?: number;
+  fillEventGate?: Promise<void>;
   now?: () => number;
   releaseFailureCalls?: number[];
   selectionMaximumAttempts?: number;
@@ -285,6 +286,7 @@ function harness(options: {
       return true;
     }),
     addEvent: vi.fn(async (_id: string, type: string, detail: unknown) => {
+      if (type === "simulation_fill") await options.fillEventGate;
       events.push({ type, detail: clone(detail) });
     }),
     updateProgress: vi.fn(async (_id: string, update: {
@@ -385,7 +387,7 @@ function harness(options: {
     }),
   };
   const service = new AiTradingSimulationService(
-    market,
+    market as unknown as ConstructorParameters<typeof AiTradingSimulationService>[0],
     live,
     runService as unknown as RunService,
     repository as unknown as RunRepository,
@@ -1334,12 +1336,86 @@ describe("AI trading simulation service", () => {
     });
   });
 
+  it("makes concurrent close wait for the finalization that owns an in-flight fill", async () => {
+    const fillGate = deferred();
+    const setup = harness({ fillEventGate: fillGate.promise });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+
+    setup.emit(tradeEvent("2026-07-24T00:06:00.000Z", 100));
+    await vi.waitFor(() => expect(setup.repository.addEvent).toHaveBeenCalledWith(
+      started.runId,
+      "simulation_fill",
+      expect.objectContaining({ symbol: "BBB", real_order_api: false }),
+    ));
+
+    let cancellationSettled = false;
+    const cancelling = setup.service.cancel(started.runId, "owner").finally(() => {
+      cancellationSettled = true;
+    });
+    const session = (setup.service as unknown as {
+      active: Map<string, { phase: string }>;
+    }).active.get(started.runId)!;
+    await vi.waitFor(() => expect(["finalizing", "cancelled"]).toContain(session.phase));
+
+    let closeSettled = false;
+    const closing = setup.service.close("test_shutdown").finally(() => {
+      closeSettled = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(cancellationSettled).toBe(false);
+    expect(closeSettled).toBe(false);
+    expect(setup.repository.cancel).not.toHaveBeenCalled();
+
+    fillGate.resolve();
+    const [cancelled] = await Promise.all([cancelling, closing]) as [{
+      run: { status: string };
+      snapshot: { trades: unknown[] };
+    }, void];
+
+    expect(cancelled.run.status).toBe("cancelled");
+    expect(cancelled.snapshot.trades).toHaveLength(1);
+    expect(setup.repository.cancel).toHaveBeenCalledTimes(1);
+    expect(setup.artifactService.put.mock.invocationCallOrder.at(-1)!)
+      .toBeLessThan(setup.repository.cancel.mock.invocationCallOrder[0]!);
+  });
+
+  it("drains an in-flight progress read without writing after terminalization", async () => {
+    const progressGate = deferred<boolean>();
+    const setup = harness();
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const initialProgressWrites = setup.repository.updateProgress.mock.calls.length;
+    setup.repository.isCancellationRequested.mockImplementationOnce(() => progressGate.promise);
+
+    const internals = setup.service as unknown as {
+      active: Map<string, unknown>;
+      queueProgress(session: unknown): void;
+    };
+    const session = internals.active.get(started.runId)!;
+    internals.queueProgress(session);
+    await vi.waitFor(() => expect(setup.repository.isCancellationRequested).toHaveBeenCalledTimes(1));
+
+    let closeSettled = false;
+    const closing = setup.service.close("test_shutdown").finally(() => {
+      closeSettled = true;
+    });
+    await vi.waitFor(() => expect(setup.repository.cancel).toHaveBeenCalledTimes(1));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(closeSettled).toBe(false);
+
+    progressGate.resolve(false);
+    await closing;
+    expect(setup.repository.updateProgress).toHaveBeenCalledTimes(initialProgressWrites);
+    expect(closeSettled).toBe(true);
+  });
+
   it("does not install cadence timers when cancellation races initial checkpoint persistence", async () => {
     const gate = deferred();
     const setup = harness({ artifactGate: gate.promise });
     const started = await setup.service.start(request(1), "owner");
     const running = await waitForPhase(setup, started.runId, "running");
-    expect(running.snapshot.phase).toBe("running");
+    expect(running).toMatchObject({ snapshot: { phase: "running" } });
     const session = (setup.service as unknown as {
       active: Map<string, {
         phase: string;

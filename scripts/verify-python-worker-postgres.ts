@@ -274,7 +274,7 @@ try {
     schema_version: WORKER_PAYLOAD_SCHEMA_VERSION,
     engine_version: unsupportedRun.engineVersion,
     run_id: unsupportedRun.id,
-    job_kind: unsupportedRun.kind,
+    job_kind: "optimization",
     data_revision: unsupportedRun.dataRevision,
     request_hash: unsupportedRun.requestHash,
     payload: { optimization: optimizationInput, objective: "robust_score" },
