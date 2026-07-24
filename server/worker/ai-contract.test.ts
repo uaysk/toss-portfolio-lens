@@ -13,8 +13,8 @@ const evaluatedResponse: AiResponse = {
   mode: "evaluate",
   status: "available",
   model: {
-    model_id: "NeoQuasar/Kronos-small",
-    model_revision: "901c26c1332695a2a8f243eb2f37243a37bea320",
+    model_id: "NeoQuasar/Kronos-base",
+    model_revision: "kronos-base-pinned-revision",
     tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
     tokenizer_revision: "0e0117387f39004a9016484a186a908917e22426",
     source_revision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
@@ -99,18 +99,8 @@ const evaluatedResponse: AiResponse = {
   },
 };
 
-function dualForecastResponse(): unknown {
+function kronosForecastResponse(): unknown {
   const rawSeries = structuredClone(evaluatedResponse.series);
-  const chronosModel = {
-    ...structuredClone(evaluatedResponse.model),
-    model_id: "amazon/chronos-2",
-    model_revision: "254b5357164a84326913b0695216f690752ac55d",
-    tokenizer_id: null,
-    tokenizer_revision: null,
-    source_revision: "chronos-forecasting-2.1.0",
-    loader_version: "chronos-forecasting-2.1.0",
-    license: "Apache-2.0",
-  };
   const kronosModel = structuredClone(evaluatedResponse.model);
   const inputOrigins = [{
     instrument_key: rawSeries[0]!.instrument_key,
@@ -121,30 +111,16 @@ function dualForecastResponse(): unknown {
   }];
   return {
     schema_version: "scalping-ai/v1",
-    request_id: "dual-model-forecast",
+    request_id: "kronos-base-forecast",
     mode: "forecast",
     status: "unavailable",
-    model: chronosModel,
+    model: kronosModel,
     generated_at: "2026-07-21T01:30:02.000Z",
     series: rawSeries,
     model_runs: [
       {
-        role: "chronos2",
-        expected_model_id: "amazon/chronos-2",
-        status: "unavailable",
-        model: chronosModel,
-        generated_at: "2026-07-21T01:30:01.000Z",
-        latency_ms: 10.5,
-        degraded: false,
-        fallback_used: false,
-        fallback_reason: null,
-        input_origins: inputOrigins,
-        input_end_aligned: true,
-        raw_series: rawSeries,
-      },
-      {
-        role: "kronos_small",
-        expected_model_id: "NeoQuasar/Kronos-small",
+        role: "kronos_base",
+        expected_model_id: "NeoQuasar/Kronos-base",
         status: "unavailable",
         model: kronosModel,
         generated_at: "2026-07-21T01:30:02.000Z",
@@ -321,14 +297,12 @@ describe("AI worker response contract", () => {
     expect(() => AiResponseSchema.parse(input)).toThrow(/without series or evaluation/);
   });
 
-  it("Chronos-2와 Kronos-small의 동일 origin run과 latency provenance를 검증한다", () => {
-    const parsed = AiResponseSchema.parse(dualForecastResponse());
-    expect(parsed.model_runs?.map((run) => run.role)).toEqual(["chronos2", "kronos_small"]);
+  it("Kronos-base 단일 origin run과 latency provenance를 검증한다", () => {
+    const parsed = AiResponseSchema.parse(kronosForecastResponse());
+    expect(parsed.model_runs?.map((run) => run.role)).toEqual(["kronos_base"]);
     expect(parsed.model_runs?.map((run) => run.expected_model_id)).toEqual([
-      "amazon/chronos-2",
-      "NeoQuasar/Kronos-small",
+      "NeoQuasar/Kronos-base",
     ]);
-    expect(parsed.model_runs?.[0]?.input_origins).toEqual(parsed.model_runs?.[1]?.input_origins);
     expect(parsed.model_runs?.every((run) => run.input_end_aligned && run.latency_ms >= 0)).toBe(true);
     expect(parsed.model_runs?.[0]?.input_origins[0]).toMatchObject({
       context_start_at: "2026-07-21T00:30:00.000Z",
@@ -341,60 +315,28 @@ describe("AI worker response contract", () => {
     });
   });
 
-  it("모델 간 input 범위·digest drift와 legacy Chronos mirror 위변조를 거부한다", () => {
-    const originDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    originDrift.model_runs![1]!.input_origins[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
-    originDrift.model_runs![1]!.raw_series[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
-    expect(() => AiResponseSchema.parse(originDrift)).toThrow(/identical input origins/);
+  it("Kronos-base origin/result 정렬과 top-level mirror 위변조를 거부한다", () => {
+    const originDrift = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    originDrift.model_runs![0]!.input_origins[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
+    expect(() => AiResponseSchema.parse(originDrift)).toThrow(/align exactly/);
 
-    const digestDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    digestDrift.model_runs![1]!.input_origins[0]!.input_digest = "b".repeat(64);
-    expect(() => AiResponseSchema.parse(digestDrift)).toThrow(/identical input origins/);
-
-    const rangeDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    rangeDrift.model_runs![1]!.input_origins[0]!.bar_count -= 1;
-    expect(() => AiResponseSchema.parse(rangeDrift)).toThrow(/identical input origins/);
-
-    const legacyDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    legacyDrift.series[0]!.unavailable!.code = "FORGED";
-    expect(() => AiResponseSchema.parse(legacyDrift)).toThrow(/legacy response fields/);
+    const mirrorDrift = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    mirrorDrift.series[0]!.unavailable!.code = "FORGED";
+    expect(() => AiResponseSchema.parse(mirrorDrift)).toThrow(/top-level response fields/);
   });
 
-  it("명시적 Bolt fallback은 실제 모델 ID와 degraded 원인을 요구한다", () => {
-    const fallback = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    const chronos = fallback.model_runs![0]!;
-    chronos.model.model_id = "amazon/chronos-bolt-small";
-    chronos.model.model_revision = "772f3d25d38aec6d914c8949dab4462e2d46f5d8";
-    chronos.model.fallback_from = "amazon/chronos-2";
-    chronos.model.fallback_reason = "Chronos-2 cache missing";
-    chronos.degraded = true;
-    chronos.fallback_used = true;
-    chronos.fallback_reason = "Chronos-2 cache missing";
-    fallback.model = structuredClone(chronos.model);
-    expect(AiResponseSchema.parse(fallback).model_runs?.[0]).toMatchObject({
-      expected_model_id: "amazon/chronos-2",
-      degraded: true,
-      fallback_used: true,
-      fallback_reason: "Chronos-2 cache missing",
-      model: { model_id: "amazon/chronos-bolt-small" },
-    });
+  it("Kronos-base run의 degraded·fallback 및 다른 모델 ID를 거부한다", () => {
+    const response = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    response.model_runs![0]!.degraded = true;
+    expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain degraded or fallback/);
 
-    const wrongSource = structuredClone(fallback);
-    wrongSource.model_runs![0]!.model.fallback_from = "unexpected/model";
-    wrongSource.model = structuredClone(wrongSource.model_runs![0]!.model);
-    expect(() => AiResponseSchema.parse(wrongSource)).toThrow(/degraded Chronos-2 fallback/);
+    const fallback = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    fallback.model_runs![0]!.fallback_used = true;
+    fallback.model_runs![0]!.fallback_reason = "unexpected fallback";
+    expect(() => AiResponseSchema.parse(fallback)).toThrow(/cannot contain degraded or fallback/);
 
-    chronos.degraded = false;
-    expect(() => AiResponseSchema.parse(fallback)).toThrow(/degraded Chronos-2 fallback/);
-  });
-
-  it("fallback_used=false run에 fallback provenance가 섞이는 것을 거부한다", () => {
-    const response = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
-    const chronos = response.model_runs![0]!;
-    chronos.model.fallback_from = "amazon/chronos-2";
-    chronos.model.fallback_reason = "unexpected fallback marker";
-    chronos.fallback_reason = "unexpected fallback marker";
-    response.model = structuredClone(chronos.model);
-    expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain fallback provenance/);
+    const otherModel = structuredClone(evaluatedResponse);
+    otherModel.model.model_id = "amazon/chronos-2";
+    expect(() => AiResponseSchema.parse(otherModel)).toThrow(/pinned to NeoQuasar\/Kronos-base/);
   });
 });

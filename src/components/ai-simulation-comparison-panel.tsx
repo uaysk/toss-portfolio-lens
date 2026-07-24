@@ -9,10 +9,9 @@ import { formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const LANE_LABELS: Record<AiSimulationStrategyComparisonLane["id"], string> = {
-  chronos2: "Chronos-2",
-  kronos: "Kronos-small",
-  rust: "Rust",
-  ensemble: "Ensemble",
+  kronos: "Kronos-base",
+  rust: "Rust 기술 지표",
+  ensemble: "최종 전략",
 };
 
 function ratio(value?: number, signed = false): string {
@@ -172,7 +171,7 @@ export function AiSimulationComparisonPanel({
         <div className="min-w-0">
           <p className="flex items-center gap-2 text-[10px] font-black">
             <GitCompareArrows className="size-3.5 shrink-0" aria-hidden="true" />
-            동일 조건 4전략 비교
+            동일 조건 3전략 비교
           </p>
           {!compact || pairLabel ? (
             <p className="mt-1 break-words text-[8px] text-muted-foreground">
@@ -214,9 +213,9 @@ export function AiSimulationComparisonPanel({
         )}
         data-simulation-comparison-analytical-disclosure
       >
-        모든 lane의 비교 성과는 분석·검증용이며, 실제 가상 원장은 Ensemble forward 실행 정책만 사용합니다.
+        모든 lane의 비교 성과는 분석·검증용이며, 실제 가상 원장은 Kronos-base와 Rust를 결합한 최종 전략만 사용합니다.
       </p>
-      <div className={cn("grid grid-cols-2 gap-2 md:grid-cols-4", compact ? "mt-2" : "mt-4")}>
+      <div className={cn("grid grid-cols-1 gap-2 sm:grid-cols-3", compact ? "mt-2" : "mt-4")}>
         {comparison.lanes.map((lane) => (
           <LaneCard key={lane.id} lane={lane} currency={currency} compact={compact} />
         ))}

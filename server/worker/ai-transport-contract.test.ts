@@ -66,7 +66,7 @@ describe("scalping AI WebSocket transport contract", () => {
       request_id: "status-1",
       status: {
         status: "available",
-        model: { loaded: true, device: "cuda", model_id: "kronos-small", model_revision: "pinned" },
+        model: { loaded: true, device: "cuda", model_id: "kronos-base", model_revision: "pinned" },
         active_requests: 1,
         queued_requests: 0,
         generated_at: "2026-07-21T00:00:01.000Z",

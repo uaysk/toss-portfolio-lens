@@ -26,7 +26,6 @@ type QuoteMode = "available" | "missing" | "stale";
 
 type Scenario = {
   origin: string;
-  chronosDirection: Direction;
   kronosDirection: Direction;
   technicalState: TechnicalState;
   technicalSignal: -1 | 0 | 1;
@@ -79,11 +78,6 @@ type PairSnapshot = {
     modelOutputs?: {
       alignmentStatus: string;
       alignedOrigin?: string;
-      chronos2: {
-        inputEndAt?: string;
-        rawOutput: { role?: string; raw_series?: unknown[] };
-        provenance: { modelId?: string; deviceName?: string };
-      };
       kronos: {
         inputEndAt?: string;
         rawOutput: { role?: string; raw_series?: unknown[] };
@@ -120,17 +114,13 @@ function at(origin: string, offsetMs: number): string {
   return new Date(Date.parse(origin) + offsetMs).toISOString();
 }
 
-function workerModel(modelId: "amazon/chronos-2" | "NeoQuasar/Kronos-small") {
+function workerModel() {
   return {
-    model_id: modelId,
-    model_revision: modelId === "amazon/chronos-2"
-      ? "254b5357164a84326913b0695216f690752ac55d"
-      : "kronos-small-pinned-test-revision",
-    tokenizer_id: null,
-    tokenizer_revision: null,
-    source_revision: modelId === "amazon/chronos-2"
-      ? "chronos-forecasting-pinned"
-      : "kronos-pinned",
+    model_id: "NeoQuasar/Kronos-base",
+    model_revision: "2b554741eca47781b64468546e77fef3e85130e6",
+    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_revision: "0e0117387f39004a9016484a186a908917e22426",
+    source_revision: "kronos-pinned",
     loader_version: "pair-worker/v1",
     license: "Apache-2.0",
     device: "cuda",
@@ -204,20 +194,17 @@ function rawSeries(origin: string, direction: Direction) {
 }
 
 function modelRun(
-  role: "chronos2" | "kronos_small",
   origin: string,
   direction: Direction,
 ) {
-  const modelId = role === "chronos2"
-    ? "amazon/chronos-2" as const
-    : "NeoQuasar/Kronos-small" as const;
+  const modelId = "NeoQuasar/Kronos-base" as const;
   return {
-    role,
+    role: "kronos_base",
     expected_model_id: modelId,
     status: "available",
-    model: workerModel(modelId),
-    generated_at: at(origin, role === "chronos2" ? 1_000 : 2_000),
-    latency_ms: role === "chronos2" ? 125 : 185,
+    model: workerModel(),
+    generated_at: at(origin, 2_000),
+    latency_ms: 185,
     degraded: false,
     fallback_used: false,
     input_origins: [{
@@ -232,14 +219,8 @@ function modelRun(
   };
 }
 
-function dualModelForecast(scenario: Scenario) {
-  const chronos = modelRun(
-    "chronos2",
-    scenario.origin,
-    scenario.chronosDirection,
-  );
+function kronosForecast(scenario: Scenario) {
   const kronos = modelRun(
-    "kronos_small",
     scenario.origin,
     scenario.kronosDirection,
   );
@@ -249,10 +230,10 @@ function dualModelForecast(scenario: Scenario) {
       request_id: `pair-${Date.parse(scenario.origin)}`,
       mode: "forecast",
       status: "available",
-      model: chronos.model,
+      model: kronos.model,
       generated_at: kronos.generated_at,
-      series: chronos.raw_series,
-      model_runs: [chronos, kronos],
+      series: kronos.raw_series,
+      model_runs: [kronos],
       evaluation: null,
       error: null,
     },
@@ -427,7 +408,6 @@ function clone<T>(value: T): T {
 function harness(overrides: Partial<Scenario> = {}) {
   const scenario: Scenario = {
     origin: INITIAL_ORIGIN,
-    chronosDirection: "bull",
     kronosDirection: "bull",
     technicalState: "entry_candidate",
     technicalSignal: 1,
@@ -452,7 +432,7 @@ function harness(overrides: Partial<Scenario> = {}) {
     forecast: vi.fn((
       _input: unknown,
       _options?: { signal?: AbortSignal; maximumInputEndAt?: string },
-    ) => Promise.resolve(dualModelForecast(scenario))),
+    ) => Promise.resolve(kronosForecast(scenario))),
     realtimeAnalysis: vi.fn((
       _input: unknown,
       _options?: {
@@ -740,7 +720,7 @@ function expectMutuallyExclusive(snapshot: PairSnapshot): void {
 }
 
 describe("AI trading simulation pair integration", () => {
-  it("retains the exact catalog triplet and aligns Chronos-2, Kronos-small, and Rust at one origin", async () => {
+  it("retains the exact catalog triplet and aligns Kronos-base and Rust at one origin", async () => {
     const setup = harness();
     try {
       const status = setup.service.status() as {
@@ -751,7 +731,7 @@ describe("AI trading simulation pair integration", () => {
         orderApiDependency: false,
         mcp: false,
         pairStrategy: true,
-        dualModelEnsemble: true,
+        kronosRustEnsemble: true,
       });
 
       const snapshot = await startRunning(setup);
@@ -787,27 +767,16 @@ describe("AI trading simulation pair integration", () => {
       expect(decision?.modelOutputs).toMatchObject({
         alignmentStatus: "aligned",
         alignedOrigin: INITIAL_ORIGIN,
-        chronos2: {
-          inputEndAt: INITIAL_ORIGIN,
-          provenance: {
-            modelId: "amazon/chronos-2",
-            deviceName: "Tesla P40",
-          },
-        },
         kronos: {
           inputEndAt: INITIAL_ORIGIN,
           provenance: {
-            modelId: "NeoQuasar/Kronos-small",
+            modelId: "NeoQuasar/Kronos-base",
             deviceName: "Tesla P40",
           },
         },
       });
-      expect(decision?.modelOutputs?.chronos2.rawOutput).toMatchObject({
-        role: "chronos2",
-        raw_series: [expect.objectContaining({ input_end_at: INITIAL_ORIGIN })],
-      });
       expect(decision?.modelOutputs?.kronos.rawOutput).toMatchObject({
-        role: "kronos_small",
+        role: "kronos_base",
         raw_series: [expect.objectContaining({ input_end_at: INITIAL_ORIGIN })],
       });
       expect(decision?.rustSignal).toMatchObject({
@@ -836,11 +805,10 @@ describe("AI trading simulation pair integration", () => {
       });
       expect(provenanceArtifact![0]).toMatchObject({
         rawInputs: {
-          chronos2: expect.any(Object),
           kronos: expect.any(Object),
           rust: expect.any(Object),
         },
-        weights: { chronos2: 0.35, kronos: 0.35, rust: 0.3 },
+        weights: { kronos: 0.72, rust: 0.28 },
       });
       expect(setup.storedArtifacts.some(
         ({ type }) => type === "simulation-comparison",
@@ -860,7 +828,7 @@ describe("AI trading simulation pair integration", () => {
       const origin = options?.maximumInputEndAt;
       await Promise.resolve();
       completedForecastOrigin = origin;
-      return dualModelForecast({
+      return kronosForecast({
         ...setup.scenario,
         ...(origin ? { origin } : {}),
       });
@@ -926,7 +894,7 @@ describe("AI trading simulation pair integration", () => {
     }
   });
 
-  it("fails closed to cash without pending execution when the AI model directions conflict", async () => {
+  it("fails closed to cash without pending execution when Kronos and Rust conflict", async () => {
     const setup = harness({ kronosDirection: "bear" });
     try {
       const snapshot = await startRunning(setup);
@@ -934,7 +902,7 @@ describe("AI trading simulation pair integration", () => {
       expect(decision?.ensemble).toMatchObject({
         origin: INITIAL_ORIGIN,
         direction: "cash",
-        reasonCodes: expect.arrayContaining(["ai_model_direction_conflict"]),
+        reasonCodes: expect.arrayContaining(["rust_direction_conflict"]),
       });
       expect(snapshot.pairState).toEqual({
         direction: "cash",
@@ -1009,7 +977,6 @@ describe("AI trading simulation pair integration", () => {
       setup.scenario.technicalSignal = -1;
       setup.setNow(at(exitOrigin, 5_000));
       setup.emit(orderbookEvent("TSLL", at(exitOrigin, 4_000)));
-      setup.emit(orderbookEvent("TSLQ", at(exitOrigin, 4_000)));
       await settleEvents();
       setup.emit(finalSignalBar(exitOrigin));
 
@@ -1053,7 +1020,6 @@ describe("AI trading simulation pair integration", () => {
 
       const bearOrigin = "2026-07-24T14:37:00.000Z";
       setup.scenario.origin = bearOrigin;
-      setup.scenario.chronosDirection = "bear";
       setup.scenario.kronosDirection = "bear";
       setup.scenario.technicalState = "exit_candidate";
       setup.scenario.technicalSignal = -1;
@@ -1250,7 +1216,7 @@ describe("AI trading simulation pair integration", () => {
         expect.objectContaining({ symbol: "TSLL", action: "buy" }),
       ]);
       expect(blocked.warnings.some((warning) => (
-        warning.includes("bull/bear") && warning.includes("TSLQ")
+        warning.includes("진입") && warning.includes("TSLQ")
       ))).toBe(true);
     } finally {
       await setup.service.close("pair_test_complete");
@@ -1292,17 +1258,21 @@ describe("AI trading simulation pair integration", () => {
     }
   });
 
-  it("requires an exact signal-origin mark before completing a comparison", async () => {
+  it("captures the exact finalized chart origin so startup comparison does not lose it", async () => {
     const setup = harness();
     try {
       await startRunning(setup);
       const internal = setup.service as unknown as {
         active: Map<string, {
           markHistory: Record<string, Array<{ price: number; observedAt: string }>>;
+          pair: {
+            comparisonPending: Array<{ signalOriginPrice?: number }>;
+          };
         }>;
         refreshPairComparison: (session: unknown) => void;
       };
       const active = internal.active.get(RUN_ID)!;
+      expect(active.pair.comparisonPending[0]?.signalOriginPrice).toBe(250.2);
       active.markHistory.TSLA = [{
         price: 249,
         observedAt: at(INITIAL_ORIGIN, -60_000),
@@ -1310,12 +1280,12 @@ describe("AI trading simulation pair integration", () => {
       setup.setNow("2026-07-24T14:36:00.000Z");
       internal.refreshPairComparison(active);
       const snapshot = await readSnapshot(setup);
-      expect(snapshot.strategyComparison?.skippedOrigins).toEqual([
-        expect.objectContaining({
-          origin: INITIAL_ORIGIN,
-          reasonCodes: expect.arrayContaining(["signal_origin_mark_not_exact"]),
-        }),
-      ]);
+      expect(snapshot.strategyComparison?.skippedOrigins?.[0]).toMatchObject({
+        origin: INITIAL_ORIGIN,
+      });
+      expect(snapshot.strategyComparison?.skippedOrigins?.[0]?.reasonCodes).not.toContain(
+        "signal_origin_mark_not_exact",
+      );
     } finally {
       await setup.service.close("pair_test_complete");
     }

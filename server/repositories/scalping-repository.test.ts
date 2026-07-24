@@ -683,7 +683,7 @@ describe("ScalpingRepository", () => {
     const repository = await setup();
     const input = {
       symbol: "005930",
-      modelName: "NeoQuasar/Kronos-small",
+      modelName: "NeoQuasar/Kronos-base",
       modelVersion: "revision-a",
       inputEndedAt: "2026-07-21T09:30:00+09:00",
       generatedAt: "2026-07-21T09:30:01+09:00",
@@ -701,7 +701,7 @@ describe("ScalpingRepository", () => {
 
     expect(await repository.latestPredictions(["005930"])).toMatchObject([{
       retrospective: false,
-      modelName: "NeoQuasar/Kronos-small",
+      modelName: "NeoQuasar/Kronos-base",
       modelVersion: "revision-a",
       status: "available",
     }]);

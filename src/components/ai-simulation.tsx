@@ -18,6 +18,7 @@ import {
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import { AiSimulationHistory } from "@/components/ai-simulation-history";
+import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -78,9 +79,9 @@ const PRESET_DETAILS: Record<AiSimulationPreset, {
     recommendedRisk: 60,
   },
   breakout: {
-    label: "돌파 가속",
-    description: "거래량과 가격 돌파를 빠르게 포착하는 가장 공격적인 구성입니다.",
-    recommendedRisk: 80,
+    label: "돌파 가속 · 최대 공격",
+    description: "거래량과 가격 돌파를 빠르게 포착하고 위험 성향 100을 적용하는 최대 공격 구성입니다.",
+    recommendedRisk: 100,
   },
   mean_reversion: {
     label: "반등 수익",
@@ -163,6 +164,7 @@ export function aiSimulationRequestWithStrategy(
 }
 
 function riskDispositionLabel(value: number): string {
+  if (value >= 100) return "최대 공격";
   if (value <= 33) return "방어";
   if (value >= 67) return "공격";
   return "균형";
@@ -220,7 +222,6 @@ export function AiSimulationStrategySettings({
   disabled,
   onModeChange,
   onPairIdChange,
-  onAllowDegradedModeChange,
 }: {
   request: AiSimulationRequest;
   catalog: readonly AiSimulationPairCatalogItem[];
@@ -229,7 +230,6 @@ export function AiSimulationStrategySettings({
   disabled: boolean;
   onModeChange: (mode: "single" | "pair") => void;
   onPairIdChange: (pairId: AiSimulationPairId) => void;
-  onAllowDegradedModeChange: (allowed: boolean) => void;
 }) {
   return (
     <div className="rounded-2xl bg-secondary p-4" data-simulation-strategy-settings>
@@ -237,7 +237,7 @@ export function AiSimulationStrategySettings({
         <div>
           <p className="text-xs font-black">전략 실행 방식</p>
           <p className="mt-1 text-[9px] leading-4 text-muted-foreground">
-            페어 비교는 네 전략에 같은 미국 시장 원천·비용·체결 정책을 적용합니다.
+            페어 비교는 Kronos-base, Rust 기술 지표와 두 신호를 결합한 최종 전략에 같은 미국 시장 원천·비용·체결 정책을 적용합니다.
           </p>
         </div>
         <div
@@ -280,7 +280,7 @@ export function AiSimulationStrategySettings({
         </p>
       ) : null}
       {request.strategy.mode === "pair" ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]" data-simulation-pair-settings>
+        <div className="mt-4" data-simulation-pair-settings>
           <label className="min-w-0">
             <span className="mb-2 block text-[10px] font-black text-muted-foreground">미국 페어 카탈로그</span>
             <Select
@@ -296,18 +296,8 @@ export function AiSimulationStrategySettings({
               </SelectContent>
             </Select>
           </label>
-          <label className="flex items-center gap-3 rounded-xl bg-card px-4 py-3 text-[10px] font-black sm:self-end">
-            <input
-              type="checkbox"
-              aria-label="일부 전략 unavailable 시 degraded 실행 허용"
-              checked={request.strategy.allowDegradedMode}
-              disabled={disabled}
-              onChange={(event) => onAllowDegradedModeChange(event.target.checked)}
-            />
-            degraded 실행 허용
-          </label>
-          <p className="text-[9px] leading-4 text-muted-foreground sm:col-span-2">
-            페어 비교를 선택하면 시장은 미국으로 고정됩니다. degraded 허용 시에도 unavailable 전략은 임의 결과로 대체하지 않고 미완료로 표시합니다.
+          <p className="mt-3 rounded-xl bg-card p-3 text-[9px] leading-4 text-muted-foreground">
+            페어 비교를 선택하면 시장은 미국으로 고정됩니다. Kronos-base가 unavailable 또는 degraded이거나 Rust 입력이 유효하지 않으면 거래하지 않고 cash로 닫습니다.
           </p>
         </div>
       ) : null}
@@ -518,14 +508,14 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
 
       <Card className="min-w-0 bg-card p-5 sm:p-6" data-simulation-decisions>
         <div className="flex items-center justify-between gap-3">
-          <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">DECISIONS</p><h2 className="mt-1 text-lg font-black">AI 판단 기록</h2></div>
+          <div><p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">DECISIONS</p><h2 className="mt-1 text-lg font-black">전략 판단 기록</h2></div>
           <span className="text-[10px] font-black text-muted-foreground">{snapshot.decisions.length}건</span>
         </div>
         <div
           className="mt-4 max-h-[28rem] min-h-0 overflow-y-auto overscroll-contain pr-1"
           data-simulation-decisions-scroll
           tabIndex={0}
-          aria-label="AI 판단 기록 스크롤 목록"
+          aria-label="전략 판단 기록 스크롤 목록"
         >
           {decisions.length ? (
           <div className="space-y-2">
@@ -596,7 +586,7 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
               </article>
             ))}
           </div>
-          ) : <p className="text-xs text-muted-foreground">AI 판단을 기다리고 있습니다.</p>}
+          ) : <p className="text-xs text-muted-foreground">전략 판단을 기다리고 있습니다.</p>}
         </div>
       </Card>
     </div>
@@ -723,6 +713,11 @@ function RunPanel({
           ))}
         </div>
       ) : null}
+      <AiSimulationKronosForecastSection
+        forecasts={snapshot.kronosForecasts}
+        charts={snapshot.charts}
+        currency={snapshot.currency}
+      />
       <TradesAndDecisions snapshot={snapshot} />
       {snapshot.warnings.length ? (
         <Card className="bg-secondary p-5" role="status">
@@ -1044,14 +1039,14 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               AI가 고르고,<br />가상 원장으로 검증합니다.
             </h2>
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
-              보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 GPU AI 예측, 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다.
+              보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 Kronos-base 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">AI 또는 직접 선택</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">현금 100% · 0주</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">AI · 지표 · 패턴</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">Kronos-base · Rust · 패턴</p></div>
           </div>
         </div>
       </Card>
@@ -1137,9 +1132,6 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             onPairIdChange={(pairId) => setRequest((current) => current.strategy.mode === "pair"
               ? { ...current, strategy: { ...current.strategy, pairId } }
               : current)}
-            onAllowDegradedModeChange={(allowDegradedMode) => setRequest((current) => current.strategy.mode === "pair"
-              ? { ...current, strategy: { ...current.strategy, allowDegradedMode } }
-              : current)}
           />
 
           <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
@@ -1175,7 +1167,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               />
               <span className="mt-2 flex justify-between text-[9px] font-black text-muted-foreground">
                 <span>방어 · 더 많은 현금</span>
-                <span>공격 · 더 큰 배분</span>
+                <span>최대 공격 · 최대 배분</span>
               </span>
             </label>
           </div>

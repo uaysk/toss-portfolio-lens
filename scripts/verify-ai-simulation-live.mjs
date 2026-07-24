@@ -190,7 +190,7 @@ const sessionCookie = cookie(loginResponse);
 const headers = { accept: "application/json", cookie: sessionCookie };
 
 const status = await json(await fetch(`${baseUrl}/api/portfolio/simulation/status`, { headers }), "상태 조회 실패");
-assert(status.schemaVersion === "ai-paper-simulation/v4", "시뮬레이션 status 계약이 v4가 아닙니다.");
+assert(status.schemaVersion === "ai-paper-simulation/v5", "시뮬레이션 status 계약이 v5가 아닙니다.");
 assert(status.enabled === true, "AI 시뮬레이션이 비활성 상태입니다.");
 assert(status.capabilities?.realOrder === false, "realOrder capability가 false가 아닙니다.");
 assert(status.capabilities?.orderApiDependency === false, "orderApiDependency capability가 false가 아닙니다.");
@@ -253,7 +253,7 @@ try {
     latest.snapshot.phase === "running" || latest.snapshot.phase === "completed",
     `시뮬레이션이 실행 상태에 도달하지 못했습니다: ${latest.snapshot.phase}`,
   );
-  assert(latest.snapshot.schemaVersion === "ai-paper-simulation/v4", "run snapshot 계약이 v4가 아닙니다.");
+  assert(latest.snapshot.schemaVersion === "ai-paper-simulation/v5", "run snapshot 계약이 v5가 아닙니다.");
   assert(latest.snapshot.selection?.mode === selection.mode, "run snapshot 선택 방식이 요청과 다릅니다.");
   if (selection.mode === "manual") {
     assert(

@@ -3,9 +3,7 @@ import { z } from "zod";
 export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1" as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
-export const CHRONOS2_MODEL_ID = "amazon/chronos-2" as const;
-export const KRONOS_SMALL_MODEL_ID = "NeoQuasar/Kronos-small" as const;
-export const CHRONOS_BOLT_FALLBACK_MODEL_ID = "amazon/chronos-bolt-small" as const;
+export const KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
 
 const finite = z.number().finite();
 const positive = finite.positive();
@@ -331,8 +329,8 @@ const ModelRunInputOriginSchema = z.object({
 });
 
 const ModelRunSchema = z.object({
-  role: z.enum(["chronos2", "kronos_small"]),
-  expected_model_id: z.enum([CHRONOS2_MODEL_ID, KRONOS_SMALL_MODEL_ID]),
+  role: z.literal("kronos_base"),
+  expected_model_id: z.literal(KRONOS_BASE_MODEL_ID),
   status: z.enum(["available", "partial", "unavailable"]),
   model: ModelProvenanceSchema,
   generated_at: timestamp,
@@ -344,40 +342,16 @@ const ModelRunSchema = z.object({
   input_end_aligned: z.literal(true),
   raw_series: z.array(SeriesForecastResultSchema).min(1).max(10_000),
 }).strict().superRefine((run, context) => {
-  const expected = run.role === "chronos2" ? CHRONOS2_MODEL_ID : KRONOS_SMALL_MODEL_ID;
-  if (run.expected_model_id !== expected) {
-    context.addIssue({ code: "custom", path: ["expected_model_id"], message: "role and expected model ID do not match" });
-  }
-  if (run.fallback_used) {
-    if (run.role !== "chronos2"
-      || run.expected_model_id !== CHRONOS2_MODEL_ID
-      || run.model.model_id !== CHRONOS_BOLT_FALLBACK_MODEL_ID
-      || !run.model.loaded
-      || !run.degraded
-      || !run.fallback_reason
-      || run.model.fallback_from !== CHRONOS2_MODEL_ID) {
-      context.addIssue({
-        code: "custom",
-        path: ["fallback_used"],
-        message: "only loaded Chronos-Bolt may be a degraded Chronos-2 fallback",
-      });
-    }
-  } else if (run.model.model_id !== run.expected_model_id
+  if (run.model.model_id !== run.expected_model_id
     || run.degraded
+    || run.fallback_used
     || (run.fallback_reason ?? null) !== null
     || (run.model.fallback_from ?? null) !== null
     || (run.model.fallback_reason ?? null) !== null) {
     context.addIssue({
       code: "custom",
       path: ["model"],
-      message: "non-fallback run cannot contain fallback provenance",
-    });
-  }
-  if ((run.fallback_reason ?? null) !== (run.model.fallback_reason ?? null)) {
-    context.addIssue({
-      code: "custom",
-      path: ["fallback_reason"],
-      message: "run fallback reason must match model provenance",
+      message: "Kronos-base run cannot contain degraded or fallback provenance",
     });
   }
   if (run.input_origins.length !== run.raw_series.length) {
@@ -576,10 +550,17 @@ export const AiResponseSchema = z.object({
   model: ModelProvenanceSchema,
   generated_at: timestamp,
   series: z.array(SeriesForecastResultSchema).max(10_000),
-  model_runs: z.array(ModelRunSchema).length(2).nullable().optional(),
+  model_runs: z.array(ModelRunSchema).length(1).nullable().optional(),
   evaluation: EvaluationResultSchema.nullable().optional(),
   error: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((response, context) => {
+  if (response.model.model_id !== KRONOS_BASE_MODEL_ID) {
+    context.addIssue({
+      code: "custom",
+      path: ["model", "model_id"],
+      message: "AI backend is pinned to NeoQuasar/Kronos-base",
+    });
+  }
   if (response.mode === "evaluate" && response.status !== "unavailable" && !response.evaluation) {
     context.addIssue({ code: "custom", path: ["evaluation"], message: "evaluate response requires evaluation" });
   }
@@ -612,44 +593,34 @@ export const AiResponseSchema = z.object({
       context.addIssue({ code: "custom", path: ["status"], message: "evaluate status must summarize records" });
     }
   }
+  if (!response.error && response.mode === "forecast" && !response.model_runs) {
+    context.addIssue({
+      code: "custom",
+      path: ["model_runs"],
+      message: "successful forecast requires the Kronos-base model run",
+    });
+  }
   if (response.model_runs) {
     if (response.mode !== "forecast" || response.error) {
       context.addIssue({ code: "custom", path: ["model_runs"], message: "model runs require a successful forecast" });
       return;
     }
-    if (response.model_runs[0]?.role !== "chronos2" || response.model_runs[1]?.role !== "kronos_small") {
+    if (response.model_runs[0]?.role !== "kronos_base") {
       context.addIssue({
         code: "custom",
         path: ["model_runs"],
-        message: "model runs must be ordered Chronos-2 then Kronos-small",
+        message: "model runs must contain only Kronos-base",
       });
       return;
     }
-    const chronos = response.model_runs[0]!;
-    const kronos = response.model_runs[1]!;
-    const alignedOrigins = chronos.input_origins.length === kronos.input_origins.length
-      && chronos.input_origins.every((origin, index) => {
-        const other = kronos.input_origins[index]!;
-        return origin.instrument_key === other.instrument_key
-          && timestampMillis(origin.context_start_at) === timestampMillis(other.context_start_at)
-          && timestampMillis(origin.input_end_at) === timestampMillis(other.input_end_at)
-          && origin.bar_count === other.bar_count
-          && origin.input_digest === other.input_digest;
-      });
-    if (!alignedOrigins) {
-      context.addIssue({
-        code: "custom",
-        path: ["model_runs"],
-        message: "Chronos-2 and Kronos-small must share identical input origins",
-      });
-    }
-    if (JSON.stringify(response.model) !== JSON.stringify(chronos.model)
-      || JSON.stringify(response.series) !== JSON.stringify(chronos.raw_series)
-      || response.status !== chronos.status) {
+    const kronos = response.model_runs[0]!;
+    if (JSON.stringify(response.model) !== JSON.stringify(kronos.model)
+      || JSON.stringify(response.series) !== JSON.stringify(kronos.raw_series)
+      || response.status !== kronos.status) {
       context.addIssue({
         code: "custom",
         path: ["model_runs", 0],
-        message: "legacy response fields must mirror the Chronos-2 run",
+        message: "top-level response fields must mirror the Kronos-base run",
       });
     }
     if (response.model_runs.some((run) => timestampMillis(run.generated_at) > timestampMillis(response.generated_at))) {

@@ -37,39 +37,65 @@ function request(requestId = "request-1"): AiRequest {
 }
 
 function unavailableResponse(requestId = "request-1") {
+  const model = {
+    model_id: "NeoQuasar/Kronos-base",
+    model_revision: "pinned",
+    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_revision: "tokenizer-pinned",
+    source_revision: "source-pinned",
+    loader_version: "portfolio-ai-loader/v1",
+    license: "MIT",
+    device: "unavailable",
+    dtype: "float32",
+    attention_backend: "unavailable",
+    loaded: false,
+  } as const;
+  const series = [{
+    instrument_key: "005930",
+    status: "unavailable" as const,
+    input_end_at: BAR_TIME,
+    horizons: [],
+    input_quality: {
+      status: "partial" as const,
+      bar_count: 1,
+      missing_volume_ratio: 1,
+      missing_amount_ratio: 1,
+      irregular_interval_count: 0,
+      warnings: ["insufficient history"],
+    },
+    distribution_shift: {
+      status: "unavailable" as const,
+      reason: "reference_statistics_not_published" as const,
+    },
+    unavailable: { code: "model-unavailable", message: "model cache missing" },
+  }];
   return {
     schema_version: "scalping-ai/v1",
     request_id: requestId,
     mode: "forecast",
     status: "unavailable",
-    model: {
-      model_id: "NeoQuasar/Kronos-small",
-      model_revision: "pinned",
-      source_revision: "source-pinned",
-      loader_version: "portfolio-ai-loader/v1",
-      license: "MIT",
-      device: "unavailable",
-      dtype: "float32",
-      attention_backend: "unavailable",
-      loaded: false,
-      fallback_reason: "model cache missing",
-    },
+    model,
     generated_at: "2026-07-21T00:00:01.000Z",
-    series: [{
-      instrument_key: "005930",
+    series,
+    model_runs: [{
+      role: "kronos_base",
+      expected_model_id: "NeoQuasar/Kronos-base",
       status: "unavailable",
-      input_end_at: BAR_TIME,
-      horizons: [],
-      input_quality: {
-        status: "partial",
+      model,
+      generated_at: "2026-07-21T00:00:01.000Z",
+      latency_ms: 1,
+      degraded: false,
+      fallback_used: false,
+      fallback_reason: null,
+      input_origins: [{
+        instrument_key: "005930",
+        context_start_at: BAR_TIME,
+        input_end_at: BAR_TIME,
         bar_count: 1,
-        missing_volume_ratio: 1,
-        missing_amount_ratio: 1,
-        irregular_interval_count: 0,
-        warnings: ["insufficient history"],
-      },
-      distribution_shift: { status: "unavailable", reason: "reference_statistics_not_published" },
-      unavailable: { code: "model-unavailable", message: "model cache missing" },
+        input_digest: "a".repeat(64),
+      }],
+      input_end_aligned: true,
+      raw_series: series,
     }],
   };
 }
@@ -176,7 +202,7 @@ function answerStatus(socket: FakeWebSocket): void {
       model: {
         loaded: false,
         device: "unavailable",
-        model_id: "NeoQuasar/Kronos-small",
+        model_id: "NeoQuasar/Kronos-base",
         model_revision: "pinned",
       },
       active_requests: 0,

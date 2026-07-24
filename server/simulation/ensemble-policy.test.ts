@@ -1,71 +1,90 @@
 import { describe, expect, it } from "vitest";
-import type {
-  NormalizedPairModelOutput,
-  NormalizedPairModelSet,
-} from "./model-output-normalization.js";
 import {
   DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE,
   evaluatePairEnsemble,
+  validatePairEnsemblePolicyProfile,
   type PairEnsembleInput,
-  type PairEnsemblePolicyProfile,
+  type PairRustTechnicalInput,
 } from "./ensemble-policy.js";
+import {
+  PAIR_MODEL_NORMALIZATION_VERSION,
+  type NormalizedPairModelOutput,
+  type NormalizedPairModelSet,
+} from "./model-output-normalization.js";
 import { getPairCatalogEntry } from "./pair-catalog.js";
 
 const ORIGIN = "2026-07-24T14:30:00.000Z";
-const DECISION_AT = "2026-07-24T14:30:05.000Z";
+const GENERATED = "2026-07-24T14:30:03.000Z";
+const DECISION = "2026-07-24T14:30:05.000Z";
 
 function model(
-  component: "chronos2" | "kronos",
-  medianReturn = 0.012,
-  upProbability = 0.72,
+  medianReturn = 0.015,
+  upProbability = 0.75,
+  status: NormalizedPairModelOutput["status"] = "available",
 ): NormalizedPairModelOutput {
   return {
-    normalizationVersion: "pair-model-normalization/v1",
-    component,
-    status: "available",
-    reasonCodes: [],
+    normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
+    component: "kronos",
+    status,
+    reasonCodes: status === "available" ? [] : [`model_${status}`],
     signalSymbol: "TSLA",
     horizonMinutes: 5,
     inputEndAt: ORIGIN,
-    generatedAt: component === "chronos2"
-      ? "2026-07-24T14:30:01.000Z"
-      : "2026-07-24T14:30:02.000Z",
+    generatedAt: GENERATED,
     targetTimestamp: "2026-07-24T14:35:00.000Z",
     medianReturn,
     q10Return: medianReturn - 0.01,
     q90Return: medianReturn + 0.01,
+    uncertaintyWidth: 0.02,
     upProbability,
     downProbability: 1 - upProbability,
-    uncertaintyWidth: 0.02,
+    flatProbability: 0,
     expectedVolatility: 0.01,
-    calibration: { status: "good" },
-    inputQuality: { status: "good", warnings: [] },
-    provenance: {
-      modelId: component === "chronos2"
-        ? "amazon/chronos-2"
-        : "NeoQuasar/Kronos-small",
-      modelRevision: "revision-a",
-      device: "cuda",
-      loaded: true,
+    calibration: { status: "good", brierScore: 0.1 },
+    inputQuality: {
+      status: status === "degraded" ? "partial" : "good",
+      warnings: [],
     },
-    rawOutput: { component },
+    provenance: {
+      modelId: "NeoQuasar/Kronos-base",
+      modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
+      device: "cuda",
+      deviceName: "Tesla P40",
+      latencyMs: 180,
+      loaded: status !== "unavailable",
+    },
+    rawOutput: { role: "kronos_base" },
   };
 }
 
-function models(
-  chronos = model("chronos2"),
-  kronos = model("kronos"),
-): NormalizedPairModelSet {
+function models(kronos = model()): NormalizedPairModelSet {
   return {
-    normalizationVersion: "pair-model-normalization/v1",
+    normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
     signalSymbol: "TSLA",
     expectedOrigin: ORIGIN,
     alignedOrigin: ORIGIN,
     alignmentStatus: "aligned",
     reasonCodes: [],
-    chronos2: chronos,
     kronos,
     rawResponse: {},
+  };
+}
+
+function rust(
+  overrides: Partial<PairRustTechnicalInput> = {},
+): PairRustTechnicalInput {
+  return {
+    status: "entry_candidate",
+    signalOriginAt: ORIGIN,
+    observedAt: "2026-07-24T14:30:04.000Z",
+    earliestEligibleAt: "2026-07-24T14:30:04.000Z",
+    technicalSignal: 1,
+    multiTimeframeAgreement: "aligned_bullish",
+    confidence: 0.9,
+    chartPatternBias: "bullish",
+    dataQuality: "good",
+    rawOutput: { status: "entry_candidate" },
+    ...overrides,
   };
 }
 
@@ -73,41 +92,49 @@ function input(overrides: Partial<PairEnsembleInput> = {}): PairEnsembleInput {
   return {
     pair: getPairCatalogEntry("tsla-tsll-tslq"),
     models: models(),
-    rust: {
-      status: "entry_candidate",
-      signalOriginAt: ORIGIN,
-      observedAt: "2026-07-24T14:30:03.000Z",
-      earliestEligibleAt: "2026-07-24T14:30:01.000Z",
-      technicalSignal: 1,
-      multiTimeframeAgreement: "aligned_bullish",
-      confidence: 1,
-      chartPatternBias: "bullish",
-      dataQuality: "good",
-    },
+    rust: rust(),
     currentDirection: "cash",
-    decisionAt: DECISION_AT,
-    riskTolerance: 70,
+    decisionAt: DECISION,
+    riskTolerance: 100,
     costs: {
-      commissionBpsPerSide: 1.5,
+      commissionBpsPerSide: 0.5,
       taxBpsOnExit: 0,
       spreadBpsRoundTrip: 5,
       slippageBpsPerSide: 2,
-      switchCostBps: 10,
+      switchCostBps: 5,
     },
     market: {
       session: "regular",
       dataQuality: "good",
       quotes: {
-        bull: { status: "available", observedAt: "2026-07-24T14:30:04.000Z", spreadBps: 8 },
-        bear: { status: "available", observedAt: "2026-07-24T14:30:04.000Z", spreadBps: 9 },
+        bull: { status: "available", observedAt: DECISION, spreadBps: 4 },
+        bear: { status: "available", observedAt: DECISION, spreadBps: 4 },
       },
     },
     ...overrides,
   };
 }
 
-describe("pair ensemble policy", () => {
-  it("enters with the highest confidence when both models and Rust agree", () => {
+describe("Kronos-base and Rust pair ensemble policy", () => {
+  it("uses an explicit aggressive versioned profile without hidden weight redistribution", () => {
+    expect(validatePairEnsemblePolicyProfile(
+      structuredClone(DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE),
+    )).toMatchObject({
+      policyVersion: "pair-ensemble-policy/v2",
+      profileId: "aggressive-kronos-rust-v2",
+      weights: { kronos: 0.72, rust: 0.28 },
+      entryScoreThreshold: 0.045,
+      holdScoreThreshold: 0.01,
+      minimumScoreMargin: 0.015,
+      cooldownMs: 60_000,
+    });
+    expect(() => validatePairEnsemblePolicyProfile({
+      ...structuredClone(DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE),
+      holdScoreThreshold: 0.1,
+    })).toThrow(/profile values/);
+  });
+
+  it("enters the leveraged bull leg when Kronos-base and Rust agree", () => {
     const decision = evaluatePairEnsemble(input());
     expect(decision).toMatchObject({
       direction: "bull",
@@ -116,152 +143,107 @@ describe("pair ensemble policy", () => {
       decisionKind: "enter",
       degraded: false,
       origin: ORIGIN,
-      eligibleAfter: DECISION_AT,
-      weights: { chronos2: 0.35, kronos: 0.35, rust: 0.3 },
+      eligibleAfter: DECISION,
+      weights: { kronos: 0.72, rust: 0.28 },
     });
-    expect(decision.reasonCodes).toContain("full_ensemble_available");
-    expect(decision.finalScores.bull).toBeGreaterThan(decision.finalScores.bear);
+    expect(decision.reasonCodes).toEqual(expect.arrayContaining([
+      "kronos_direction_actionable",
+      "rust_direction_supports_ai",
+      "cost_and_uncertainty_adjusted_score_passed",
+    ]));
   });
 
-  it("chooses cash without weighted arbitration when AI directions conflict", () => {
-    const conflicting = models(
-      model("chronos2", 0.015, 0.75),
-      model("kronos", -0.015, 0.25),
-    );
-    const decision = evaluatePairEnsemble(input({ models: conflicting }));
-    expect(decision.direction).toBe("cash");
-    expect(decision.reasonCodes).toContain("ai_model_direction_conflict");
+  it("allows a high-risk reduced entry while Rust watch is genuinely neutral", () => {
+    const decision = evaluatePairEnsemble(input({
+      rust: rust({
+        status: "watch",
+        technicalSignal: 0,
+        multiTimeframeAgreement: "mixed",
+        chartPatternBias: "neutral",
+        confidence: 0.8,
+      }),
+    }));
+    expect(decision).toMatchObject({
+      direction: "bull",
+      exposureScale: 0.8,
+      degraded: false,
+    });
+    expect(decision.reasonCodes).toContain("rust_neutral_reduced_exposure");
   });
 
-  it("prioritizes liquidation when Rust returns exit_candidate for a held pair", () => {
-    const base = input({ currentDirection: "bull" });
-    const decision = evaluatePairEnsemble({
-      ...base,
-      rust: {
-        ...base.rust,
+  it("chooses cash when Rust has a real opposing direction", () => {
+    const decision = evaluatePairEnsemble(input({
+      rust: rust({
         status: "exit_candidate",
         technicalSignal: -1,
         multiTimeframeAgreement: "aligned_bearish",
         chartPatternBias: "bearish",
-      },
-    });
-    expect(decision).toMatchObject({
-      direction: "cash",
-      decisionKind: "exit",
-    });
-    expect(decision.reasonCodes).toContain("rust_exit_candidate");
-  });
-
-  it("does not redistribute a missing model weight and defaults degraded mode to cash", () => {
-    const missing = {
-      ...model("kronos"),
-      status: "unavailable" as const,
-      reasonCodes: ["model_run_missing"],
-    };
-    const decision = evaluatePairEnsemble(input({ models: models(model("chronos2"), missing) }));
-    expect(decision.direction).toBe("cash");
-    expect(decision.reasonCodes).toContain("degraded_mode_disabled");
-    expect(decision.weights).toEqual({ chronos2: 0.35, kronos: 0.35, rust: 0.3 });
-  });
-
-  it("requires a higher threshold plus Rust agreement when degraded mode is explicitly enabled", () => {
-    const profile: PairEnsemblePolicyProfile = {
-      ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE,
-      weights: { ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.weights },
-      modelScoreWeights: { ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.modelScoreWeights },
-      allowDegradedMode: true,
-      degradedEntryScoreThreshold: 0.45,
-    };
-    const missing = {
-      ...model("kronos"),
-      status: "unavailable" as const,
-      reasonCodes: ["model_run_missing"],
-    };
-    const fullModels = models(model("chronos2", 0.025, 0.8), missing);
-    const {
-      alignedOrigin: _alignedOrigin,
-      ...withoutAlignedOrigin
-    } = fullModels;
-    const degradedModels = {
-      ...withoutAlignedOrigin,
-      alignmentStatus: "unavailable" as const,
-    };
-    const decision = evaluatePairEnsemble(input({
-      models: degradedModels,
-      profile,
+      }),
     }));
-    expect(decision.direction).toBe("bull");
-    expect(decision.degraded).toBe(true);
-    expect(decision.weights.kronos).toBe(0.35);
-    expect(decision.reasonCodes).toContain(
-      "degraded_threshold_applied_without_weight_redistribution",
+    expect(decision.direction).toBe("cash");
+    expect(decision.reasonCodes).toContain("rust_direction_conflict");
+  });
+
+  it("prioritizes liquidation for Rust exit and nonpositive held net return", () => {
+    const rustExit = evaluatePairEnsemble(input({
+      currentDirection: "bull",
+      rust: rust({ status: "exit_candidate" }),
+    }));
+    expect(rustExit).toMatchObject({ direction: "cash", decisionKind: "exit" });
+    expect(rustExit.reasonCodes).toContain("rust_exit_candidate");
+
+    const negative = evaluatePairEnsemble(input({
+      currentDirection: "bull",
+      models: models(model(-0.002, 0.4)),
+      rust: rust({ status: "hold" }),
+    }));
+    expect(negative.direction).toBe("cash");
+    expect(negative.reasonCodes).toContain(
+      "held_direction_net_expected_return_nonpositive",
     );
   });
 
-  it("fails closed for origin mismatch, stale data, missing quote, wide spread, and cooldown", () => {
-    const cases: PairEnsembleInput[] = [
-      {
-        ...input(),
-        rust: { ...input().rust, signalOriginAt: "2026-07-24T14:29:00.000Z" },
-      },
-      {
-        ...input(),
-        market: { ...input().market, dataQuality: "stale" },
-      },
-      {
-        ...input(),
-        market: { ...input().market, quotes: {} },
-      },
-      {
-        ...input(),
-        market: {
-          ...input().market,
-          quotes: {
-            ...input().market.quotes,
-            bull: {
-              status: "available",
-              observedAt: "2026-07-24T14:30:04.000Z",
-              spreadBps: 100,
-            },
-          },
-        },
-      },
-      {
-        ...input(),
-        currentDirection: "bear",
-        cooldownUntil: "2026-07-24T14:35:00.000Z",
-      },
-    ];
-    for (const value of cases) expect(evaluatePairEnsemble(value).direction).toBe("cash");
+  it("fails closed for unavailable/degraded models and origin mismatch", () => {
+    const unavailable = evaluatePairEnsemble(input({
+      models: models(model(0.015, 0.75, "unavailable")),
+    }));
+    expect(unavailable.direction).toBe("cash");
+    expect(unavailable.reasonCodes).toContain("kronos_model_unavailable");
+    expect(unavailable.weights).toEqual({ kronos: 0.72, rust: 0.28 });
+
+    const degraded = evaluatePairEnsemble(input({
+      models: models(model(0.015, 0.75, "degraded")),
+    }));
+    expect(degraded).toMatchObject({ direction: "cash", degraded: true });
+    expect(degraded.reasonCodes).toContain("kronos_model_degraded");
+
+    const misaligned = models();
+    misaligned.alignmentStatus = "misaligned";
+    delete misaligned.alignedOrigin;
+    expect(evaluatePairEnsemble(input({ models: misaligned })).reasonCodes).toContain(
+      "model_origin_not_aligned",
+    );
   });
 
-  it("requires fresh and bounded quotes for both execution legs before scoring", () => {
-    const base = input();
-    for (const bear of [
-      undefined,
-      {
-        status: "available" as const,
-        observedAt: "2026-07-24T14:29:00.000Z",
-        spreadBps: 9,
-      },
-      {
-        status: "available" as const,
-        observedAt: "2026-07-24T14:30:04.000Z",
-        spreadBps: 100,
-      },
-    ]) {
-      const decision = evaluatePairEnsemble({
-        ...base,
-        market: {
-          ...base.market,
-          dataQuality: bear ? "good" : "partial",
-          quotes: {
-            bull: base.market.quotes.bull,
-            ...(bear ? { bear } : {}),
-          },
-        },
-      });
-      expect(decision.direction).toBe("cash");
-    }
+  it("fails closed for stale/missing quotes, session boundary, and cooldown", () => {
+    const staleMarket = structuredClone(input().market);
+    staleMarket.quotes.bull!.observedAt = "2026-07-24T14:29:00.000Z";
+    expect(evaluatePairEnsemble(input({ market: staleMarket })).reasonCodes).toContain(
+      "execution_quote_stale",
+    );
+
+    const missingMarket = structuredClone(input().market);
+    delete missingMarket.quotes.bear;
+    expect(evaluatePairEnsemble(input({ market: missingMarket })).reasonCodes).toContain(
+      "execution_quote_unavailable",
+    );
+
+    expect(evaluatePairEnsemble(input({
+      market: { ...input().market, session: "session_boundary" },
+    })).reasonCodes).toContain("session_not_allowed");
+
+    expect(evaluatePairEnsemble(input({
+      cooldownUntil: "2026-07-24T14:31:00.000Z",
+    })).reasonCodes).toContain("cooldown_active");
   });
 });

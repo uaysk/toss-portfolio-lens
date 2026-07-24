@@ -6,29 +6,13 @@
     "license": "MIT"
   },
   "models": {
-    "chronos-2": {
-      "model_id": "amazon/chronos-2",
-      "revision": "254b5357164a84326913b0695216f690752ac55d",
-      "tokenizer_id": null,
-      "tokenizer_revision": null,
-      "license": "Apache-2.0",
-      "loader_version": "chronos-forecasting-2.1.0"
-    },
-    "kronos-small": {
-      "model_id": "NeoQuasar/Kronos-small",
-      "revision": "901c26c1332695a2a8f243eb2f37243a37bea320",
+    "kronos-base": {
+      "model_id": "NeoQuasar/Kronos-base",
+      "revision": "2b554741eca47781b64468546e77fef3e85130e6",
       "tokenizer_id": "NeoQuasar/Kronos-Tokenizer-base",
       "tokenizer_revision": "0e0117387f39004a9016484a186a908917e22426",
       "license": "MIT",
       "loader_version": "kronos-source-67b630e"
-    },
-    "chronos-bolt-small": {
-      "model_id": "amazon/chronos-bolt-small",
-      "revision": "772f3d25d38aec6d914c8949dab4462e2d46f5d8",
-      "tokenizer_id": null,
-      "tokenizer_revision": null,
-      "license": "Apache-2.0",
-      "loader_version": "chronos-forecasting-2.1.0"
     }
   }
 }

@@ -54,20 +54,21 @@
 
 ### AI 가상매매 시뮬레이션
 
-- `ai-paper-simulation/v4` 계약에서 예수금·실행 시간·국내/미국 시장·AI 선정 종목 수 1~2개를 지정하는 기존 단일 종목 forward paper-session과 `ai-paper-policy/v2`를 그대로 지원
+- `ai-paper-simulation/v5` 계약에서 예수금·실행 시간·국내/미국 시장·AI 선정 종목 수 1~2개를 지정하는 기존 단일 종목 forward paper-session과 `ai-paper-policy/v2`를 그대로 지원
 - 미국 페어 전략은 SOXX 또는 SMH→SOXL/SOXS, TSLA→TSLL/TSLS 또는 TSLQ, QQQ→TQQQ/SQQQ의 versioned strict catalog를 사용하고 기초자산 `signalSymbol`과 가상 체결 ETF `executionSymbol`을 분리
 - 페어마다 bull·bear·cash 중 하나만 활성화하고, 레버리지 배수·예측 변동성·위험 성향으로 기초자산 노출 기준 정수 수량을 계산
-- 기본 AI 집합은 pinned `amazon/chronos-2`와 `NeoQuasar/Kronos-small`이며 동일한 확정봉 origin에서 Chronos-2 다변량 시계열과 Kronos 금융 OHLCV 예측을 함께 실행
-- 두 AI 모델의 비용 차감 기대수익·방향 확률·분위수 폭·calibration과 Rust `watch`/`entry_candidate`/`hold`/`exit_candidate`, 다중 시간대 일치·차트 패턴·데이터 품질을 고정된 versioned ensemble policy로 정규화·결합
-- 모델 간 방향 충돌, Rust 반대 exit, stale·unavailable·불량 calibration, 비정상 spread, 호가 부재 또는 세션 경계에서는 가중치를 재분배하지 않고 기본 cash로 처리하며 degraded mode는 별도 높은 임계값과 상태로 구분
+- AI 모델은 pinned `NeoQuasar/Kronos-base` 하나만 사용하며 기초자산의 동일한 확정봉 origin에서 금융 OHLCV 경로를 예측
+- Kronos-base의 비용 차감 기대수익·방향 확률·분위수 폭·calibration과 Rust `watch`/`entry_candidate`/`hold`/`exit_candidate`, 다중 시간대 일치·차트 패턴·데이터 품질을 `pair-ensemble-policy/v2`에서 정규화·결합
+- Kronos-base와 Rust 방향이 충돌하거나 Rust가 반대 exit를 내면 cash를 우선하고, 모델·Rust origin 불일치, stale·unavailable, 불량 calibration, 비정상 spread, 호가 부재 또는 세션 경계에서는 가중치를 재분배하지 않고 fail-closed
 - hysteresis, 최소 score margin, 전환 비용과 cooldown으로 횡보장의 반복 방향 전환을 제한
-- Chronos-2·Kronos-small·Rust 단독과 앙상블 비교 성과는 같은 origin·비용·실행 가능 가격·평가 기간에 노출을 정규화한 분석 lane으로 계산하고, 별도 실제 forward 가상 원장은 세 구성요소 앙상블 결정만 체결
+- Kronos-base 단독·Rust 단독·Kronos-base+Rust 앙상블 비교 성과는 같은 origin·비용·실행 가능 가격·평가 기간에 노출을 정규화한 분석 lane으로 계산하고, 실제 forward 가상 원장은 앙상블 결정만 체결
 - Rust 신호에는 실제 계좌 holdings가 아니라 시각이 명시된 가상 원장 포지션만 격리 전달
 - 정수 수량 가상 원장에 편도 수수료, 청산 세금, 왕복 스프레드·슬리피지와 페어 전환 비용을 차감
-- 모델 입력 종료·두 모델 생성·Rust 계산·최종 판단·실행 ETF 호가 시각보다 엄격히 늦고 설정 기간 안에 있는 실행 상품 KIS 체결을 우선 사용하며, 없으면 그보다 늦게 시작한 실행 상품 확정 분봉 시가만 사용
+- 모델 입력 종료·Kronos-base 생성·Rust 계산·최종 판단·실행 ETF 호가 시각보다 엄격히 늦고 설정 기간 안에 있는 실행 상품 KIS 체결을 우선 사용하며, 없으면 그보다 늦게 시작한 실행 상품 확정 분봉 시가만 사용
 - 기간 종료 때 새 체결이 없으면 임의 청산하지 않고 마지막 관측가 평가와 open-position 경고를 보존
-- 모델별 raw output·revision·입력 종료·생성 시각·device·latency, Rust 원신호, 적용 가중치·최종 점수·결정 이유와 비교 성과를 재현 가능한 전용 run/artifact로 저장
-- Chronos-2 또는 Kronos-small의 pinned cache와 P40/CUDA 실행 조건이 없으면 자동 다운로드나 임의 예측을 하지 않으며, Chronos-Bolt-small은 명시적으로 설정한 fallback에서만 실제 model ID·원인·degraded 정책을 표시
+- Kronos-base raw output·model/tokenizer/source revision·입력 종료·생성 시각·device·latency, Rust 원신호, 적용 가중치·최종 점수·결정 이유와 비교 성과를 재현 가능한 전용 run/artifact로 저장
+- 실행 화면과 결과 보고서에서 최신 Kronos-base 원시 `price_quantiles`의 Q10·중앙값·Q90 미래 가격 경로를 확정봉 origin 가격과 분리해 표시하며 누락 horizon은 보간하지 않음
+- Kronos-base의 pinned cache와 P40/CUDA 실행 조건이 없으면 자동 다운로드·fallback·임의 예측 없이 unavailable로 반환하고 페어 판단은 cash로 닫힘
 - 새로고침 뒤 최근 실행을 복원하며 서버 재시작 중이던 forward session은 재개하지 않고 fail-closed 처리
 - 신규 실시간 구독 직후 완전한 확정봉이 늦게 도착하면 `stale_final_bar`로 구분하고 설정된 횟수만 재동기화하며, 미국 거래일 캘린더가 확인되지 않으면 `future_market_schedule_unavailable`로 fail-closed 처리
 - 실제 주문 API dependency와 MCP 노출이 모두 없으며 투자 지시 또는 수익 보장으로 표시하지 않음

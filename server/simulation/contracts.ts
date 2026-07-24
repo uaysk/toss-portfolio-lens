@@ -4,7 +4,7 @@ import {
   ScannerCriterionSchema,
 } from "../scalping/contracts.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v4" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v5" as const;
 
 export const SimulationPresetSchema = z.enum([
   "trend",
@@ -96,7 +96,9 @@ export const SimulationStrategySchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("pair"),
     pairId: SimulationPairIdSchema,
-    allowDegradedMode: z.boolean().default(false),
+    // Keep the legacy field shape for v4 false-valued requests, while v5
+    // cannot opt a degraded model into forward execution.
+    allowDegradedMode: z.literal(false).default(false),
   }).strict(),
 ]);
 export type SimulationStrategy = z.infer<typeof SimulationStrategySchema>;

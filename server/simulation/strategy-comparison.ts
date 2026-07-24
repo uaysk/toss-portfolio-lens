@@ -1,10 +1,9 @@
 import type { PairTradingCosts } from "./ensemble-policy.js";
 import type { PairDirection } from "./pair-catalog.js";
 
-export const PAIR_STRATEGY_COMPARISON_VERSION = "pair-strategy-comparison/v1" as const;
+export const PAIR_STRATEGY_COMPARISON_VERSION = "pair-strategy-comparison/v2" as const;
 
 export const PAIR_STRATEGY_LANES = [
-  "chronos2",
   "kronos",
   "rust",
   "ensemble",
@@ -30,6 +29,16 @@ export type PairStrategyLaneObservation =
 export type PairExecutableOutcome = {
   executionSymbol: string;
   grossReturn: number;
+};
+
+export type PairExecutableOutcomeSelection = {
+  direction: PairDirection;
+  executionSymbol: string | null;
+  netReturns: {
+    bull: number;
+    bear: number;
+    cash: 0;
+  };
 };
 
 export type PairStrategyComparisonObservation = {
@@ -129,6 +138,41 @@ function costRate(costs: PairTradingCosts): number {
     + costs.spreadBpsRoundTrip
     + costs.slippageBpsPerSide * 2
   ) / 10_000;
+}
+
+export function selectBestExecutablePairOutcome(
+  outcomes: PairStrategyComparisonObservation["executableOutcomes"],
+  costs: PairTradingCosts,
+): PairExecutableOutcomeSelection {
+  for (const [name, value] of Object.entries(costs)) validateBps(value, name);
+  for (const direction of ["bull", "bear"] as const) {
+    const outcome = outcomes[direction];
+    if (!outcome.executionSymbol.trim()
+      || !Number.isFinite(outcome.grossReturn)
+      || outcome.grossReturn <= -1) {
+      throw new Error(`Executable ${direction} outcome is invalid.`);
+    }
+  }
+  const commonRoundTripRate = costRate(costs);
+  const rawNetReturns = {
+    bull: outcomes.bull.grossReturn - commonRoundTripRate,
+    bear: outcomes.bear.grossReturn - commonRoundTripRate,
+  };
+  const direction: PairDirection = rawNetReturns.bull > 0
+    && rawNetReturns.bull > rawNetReturns.bear
+    ? "bull"
+    : rawNetReturns.bear > 0 && rawNetReturns.bear > rawNetReturns.bull
+      ? "bear"
+      : "cash";
+  return {
+    direction,
+    executionSymbol: direction === "cash" ? null : outcomes[direction].executionSymbol,
+    netReturns: {
+      bull: rounded(rawNetReturns.bull),
+      bear: rounded(rawNetReturns.bear),
+      cash: 0,
+    },
+  };
 }
 
 function maximumDrawdown(values: readonly number[]): number {
@@ -256,7 +300,7 @@ function metricsForLane(
   const originCount = input.observations.length;
   return {
     status: availableStatus(availableCount, originCount),
-    // All four lanes are normalized analytical comparisons. Only the service
+    // All three lanes are normalized analytical comparisons. Only the service
     // ledger driven by the ensemble decision is allowed to create forward
     // paper fills.
     analyticalOnly: true,

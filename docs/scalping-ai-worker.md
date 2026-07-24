@@ -2,7 +2,7 @@
 
 단타 보조의 공개 시계열 모델은 Node control plane, 메인 web image, Rust worker에 포함되지 않는다.
 `Dockerfile.worker.ai`로만 빌드되는 별도 `${AI_WORKER_IMAGE}`가 예측과 retrospective 평가를 수행하며 주문이나
-기술 신호를 결정하지 않는다. PyTorch·CUDA·Kronos·Chronos 의존성은 AI image에만 설치되므로 원격 GPU 서버는
+기술 신호를 결정하지 않는다. PyTorch·CUDA·Kronos 의존성은 AI image에만 설치되므로 원격 GPU 서버는
 이 image와 `ai-worker` 서비스만 pull/build/run할 수 있다.
 
 ## 기본 Compose 토폴로지
@@ -45,12 +45,12 @@ image는 바뀌지 않는다.
 Transformers offline 모드로 실행하고 `/models`를 read-only로 mount한다. revision marker나 필수 파일이
 없으면 시작 중 다운로드하지 않고 unavailable 상태를 제공한다.
 
-기본 실행 집합은 pinned `amazon/chronos-2`와 `NeoQuasar/Kronos-small`이다. 두 모델은 같은 확정봉
-`input_end_at`을 사용하고 결과별 revision, 입력 종료 시각, 생성 시각, device와 latency를 응답에 남긴다.
-둘 중 하나라도 cache 또는 CUDA/P40 실행 조건을 충족하지 못하면 임의 출력이나 자동 다운로드 없이 해당
-run을 unavailable로 반환한다.
+실행 모델은 pinned `NeoQuasar/Kronos-base` 하나다. worker 응답은 `model_runs`에 `kronos_base` role 하나만
+포함하고 top-level model·status·series도 그 결과를 그대로 반영한다. model/tokenizer/source revision,
+`input_end_at`, 확정봉 수와 digest, 생성 시각, device와 latency를 응답에 남긴다. cache 또는 CUDA/P40 실행
+조건을 충족하지 못하면 fallback이나 임의 출력 없이 run을 unavailable로 반환한다.
 
-현재 제공되는 준비 스크립트는 명시적 degraded fallback인 pinned Chronos-Bolt-small만 지원한다. 이 명령은
+준비 스크립트는 manifest에 고정된 Kronos-base와 `Kronos-Tokenizer-base` snapshot만 준비한다. 이 명령은
 runtime과 분리된 운영자 작업이며 외부 다운로드가 허용된 시점과 호스트에서만 실행한다.
 
 ```bash
@@ -65,11 +65,15 @@ python3 scripts/prepare-ai-model-cache.py \
 
 스크립트는 manifest의 정확한 revision으로 임시 sibling directory에 내려받고 `config.json`과
 `model.safetensors`가 실제 regular file인지 확인한 다음 `.revision`을 원자 기록한다. 기존 invalid directory는
-덮어쓰지 않는다. Chronos-2와 Kronos-small(source·tokenizer·model)은 별도 검토 절차로 정확한 pinned snapshot을
-준비해야 한다. Bolt fallback을 허용할 때만 `AI_MODEL_FALLBACK=chronos-bolt-small`을 명시한다. 이 경우에도
-응답의 실제 model ID와 fallback 원인, degraded 상태가 보존되며 Chronos-2 정상 실행으로 집계하지 않는다.
-public model cache directory는 container UID 10001이 탐색할 수 있도록 보통 `0755`, 필수 artifact는
-read-only로 둔다.
+덮어쓰지 않는다. Kronos source는 별도 검토 절차로 manifest의 정확한 revision을 `kronos-source`에 준비한다.
+완성된 cache에는 `kronos-base`, `kronos-tokenizer-base`, `kronos-source` 세 directory가 있어야 한다.
+public model cache directory는 container UID 10001이 탐색할 수 있도록 보통 `0755`, 필수 artifact는 read-only로
+둔다.
+
+페어 가상매매에서 Node control plane은 이 Kronos-base 출력과 같은 origin의 Rust 기술 신호만
+`pair-ensemble-policy/v2`로 결합한다. Kronos-base 또는 Rust가 unavailable/stale이거나 origin이 다르면
+가중치를 재분배하지 않고 cash로 fail-closed한다. Kronos-base 단독과 Rust 단독 lane은 같은 체결 조건의
+비교·검증용이며 실제 forward 원장은 Kronos-base+Rust 앙상블 결정만 체결한다.
 
 호스트 cache를 mount할 때 `.env`에 절대 경로를 지정한다. 이 경로와 `data/`는 Git 대상이 아니다.
 
@@ -94,11 +98,9 @@ AI_REMOTE_BIND_ADDRESS=172.30.1.14
 AI_REMOTE_PORT=18765
 AI_MODEL_CACHE_SOURCE=/opt/toss-portfolio-lens/ai-model-cache
 AI_AUTH_SECRET_SOURCE=/opt/toss-portfolio-lens/ai-auth
-AI_MODEL_PRIMARY=chronos-2
-AI_MODEL_COMPANION=kronos-small
-AI_MODEL_FALLBACK=
 AI_DEVICE=cuda
 AI_ALLOW_CPU_FALLBACK=false
+AI_EXPECTED_CUDA_CAPABILITY=6.1
 AI_EXPECTED_CUDA_DEVICE_NAME=Tesla P40
 ```
 

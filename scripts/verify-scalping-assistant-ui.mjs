@@ -129,7 +129,7 @@ function workspace(body) {
 
 function predictions(body) {
   const generatedAt = "2026-07-21T01:21:00.000Z";
-  const model = { model_id: "NeoQuasar/Kronos-small", model_revision: "pinned-test", source_revision: "source-test", device: "cuda", dtype: "float32" };
+  const model = { model_id: "NeoQuasar/Kronos-base", model_revision: "pinned-test", source_revision: "source-test", device: "cuda", dtype: "float32" };
   return {
     forecast: { generated_at: generatedAt, model },
     predictions: body.symbols.map((symbol) => ({

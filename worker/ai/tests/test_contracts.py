@@ -102,11 +102,11 @@ def test_unknown_wire_fields_are_rejected() -> None:
 
 def test_cuda_device_provenance_is_optional_for_legacy_but_atomic_when_present() -> None:
     common = {
-        "model_id": "amazon/chronos-2",
+        "model_id": "NeoQuasar/Kronos-base",
         "model_revision": "pinned",
         "source_revision": "pinned-loader",
-        "loader_version": "chronos-forecasting-test",
-        "license": "Apache-2.0",
+        "loader_version": "kronos-source-test",
+        "license": "MIT",
         "device": "cuda",
         "dtype": "float32",
         "attention_backend": "math",

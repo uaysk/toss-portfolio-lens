@@ -41,6 +41,9 @@ describe("AiSimulation", () => {
     expect(markup).toContain("페어 전략 capability를 확인하고 있습니다.");
     expect(markup).toContain('aria-label="AI 선정 종목 수"');
     expect(markup).toContain('aria-label="공격 방어 성향"');
+    expect(markup).toContain("Kronos-base 예측");
+    expect(markup).toContain("Kronos-base · Rust · 패턴");
+    expect(markup).toContain("최대 공격 · 최대 배분");
     expect(markup).toContain("현금 100% · 0주");
     expect(markup).toContain("확정봉 이벤트 즉시");
     expect(markup).toContain("AI 시뮬레이션 시작");
@@ -70,6 +73,7 @@ describe("AiSimulation", () => {
       charts: [],
       trades: [],
       decisions,
+      kronosForecasts: [],
       warnings: [],
       capabilities: {},
     };
@@ -80,7 +84,7 @@ describe("AiSimulation", () => {
     expect(markup).toContain("decision-25");
   });
 
-  it("renders the US pair catalog and degraded-mode control when pair mode is enabled", () => {
+  it("renders the US pair catalog with a fixed fail-closed policy", () => {
     const markup = renderToStaticMarkup(
       <AiSimulationStrategySettings
         request={{
@@ -89,7 +93,7 @@ describe("AiSimulation", () => {
           strategy: {
             mode: "pair",
             pairId: "tsla-tsll-tslq",
-            allowDegradedMode: true,
+            allowDegradedMode: false,
           },
         }}
         catalog={AI_SIMULATION_PAIR_CATALOG}
@@ -97,14 +101,15 @@ describe("AiSimulation", () => {
         disabled={false}
         onModeChange={() => undefined}
         onPairIdChange={() => undefined}
-        onAllowDegradedModeChange={() => undefined}
       />,
     );
     expect(markup).toContain('data-simulation-pair-settings="true"');
     expect(markup).toContain('aria-label="미국 페어 카탈로그"');
-    expect(markup).toContain('aria-label="일부 전략 unavailable 시 degraded 실행 허용"');
-    expect(markup).toContain("checked");
     expect(markup).toContain("시장은 미국으로 고정");
+    expect(markup).toContain("Kronos-base, Rust 기술 지표");
+    expect(markup).toContain("거래하지 않고 cash로 닫습니다.");
+    expect(markup).not.toContain('type="checkbox"');
+    expect(markup).not.toContain("degraded 실행 허용");
   });
 
   it("switches pair requests to US defaults without retaining manual symbols", () => {
@@ -127,7 +132,7 @@ describe("AiSimulation", () => {
     });
   });
 
-  it("renders mobile two-column and desktop four-column comparison lanes with ensemble forward evidence", () => {
+  it("renders mobile one-column and desktop three-column Kronos-base/Rust/final comparisons", () => {
     const comparison: AiSimulationStrategyComparison = {
       conditionId: "ui-condition-1",
       pairId: "tsla-tsll-tslq",
@@ -137,7 +142,7 @@ describe("AiSimulation", () => {
       incompleteCount: 0,
       lanes: [
         {
-          id: "chronos2",
+          id: "kronos",
           status: "completed",
           analyticalOnly: true,
           cumulativeReturn: 0.012,
@@ -154,7 +159,6 @@ describe("AiSimulation", () => {
             action: "bull",
           }],
         },
-        { id: "kronos", status: "completed", analyticalOnly: true, cumulativeReturn: 0.008, decisionReasons: [] },
         { id: "rust", status: "completed", analyticalOnly: true, cumulativeReturn: 0.004, decisionReasons: [] },
         { id: "ensemble", status: "completed", analyticalOnly: true, cumulativeReturn: 0.011, decisionReasons: [] },
       ],
@@ -163,15 +167,20 @@ describe("AiSimulation", () => {
       <AiSimulationComparisonPanel comparison={comparison} currency="USD" />,
     );
     expect(markup).toContain('data-simulation-strategy-comparison="ui-condition-1"');
-    expect(markup).toContain("grid-cols-2");
-    expect(markup).toContain("md:grid-cols-4");
-    expect(markup).toContain('data-simulation-comparison-lane="chronos2"');
+    expect(markup).toContain("grid-cols-1");
+    expect(markup).toContain("sm:grid-cols-3");
+    expect(markup).toContain('data-simulation-comparison-lane="kronos"');
     expect(markup).toContain('data-simulation-comparison-lane="ensemble"');
+    expect(markup).toContain("Kronos-base");
+    expect(markup).toContain("Rust 기술 지표");
+    expect(markup).toContain("최종 전략");
     expect(markup).toContain("forward 실행 정책");
-    expect(markup.match(/비교 성과 분석용/g)).toHaveLength(4);
+    expect(markup.match(/비교 성과 분석용/g)).toHaveLength(3);
     expect(markup).toContain("모든 lane의 비교 성과는 분석·검증용");
     expect(markup).toContain("bull 3 · bear 1 · cash 5");
-    expect(markup.match(/data-simulation-comparison-analytical-only="true"/g)).toHaveLength(4);
+    expect(markup.match(/data-simulation-comparison-analytical-only="true"/g)).toHaveLength(3);
     expect(markup).toContain("technical_confirmed");
+    expect(markup).not.toContain("Chronos");
+    expect(markup).not.toContain("Kronos-small");
   });
 });

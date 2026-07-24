@@ -26,13 +26,13 @@ type StoredArtifact = {
 
 function model(loaded = true) {
   return {
-    model_id: "amazon/chronos-bolt-small",
+    model_id: "NeoQuasar/Kronos-base",
     model_revision: "revision-a",
-    tokenizer_id: null,
-    tokenizer_revision: null,
-    source_revision: "chronos-forecasting-2.1.0",
-    loader_version: "chronos-forecasting-2.1.0",
-    license: "Apache-2.0",
+    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_revision: "tokenizer-revision-a",
+    source_revision: "kronos-source-revision-a",
+    loader_version: "kronos-source-revision-a",
+    license: "MIT",
     device: loaded ? "cuda" : "unavailable",
     dtype: "float32",
     attention_backend: loaded ? "math" : "unavailable",

@@ -112,9 +112,18 @@ describe("AI simulation request validation", () => {
       strategy: {
         mode: "pair",
         pairId: "qqq-tqqq-sqqq",
-        allowDegradedMode: true,
+        allowDegradedMode: false,
       },
     })).toContain("페어 전략은 미국 시장에서만 실행할 수 있습니다.");
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      marketCountry: "US",
+      strategy: {
+        mode: "pair",
+        pairId: "qqq-tqqq-sqqq",
+        allowDegradedMode: true,
+      },
+    } as unknown as AiSimulationRequest)).toContain("페어 전략은 degraded 실행을 허용하지 않습니다.");
     expect(validateAiSimulationRequest({
       ...DEFAULT_AI_SIMULATION_REQUEST,
       marketCountry: "US",
@@ -210,7 +219,7 @@ describe("AI simulation response normalization", () => {
           predictedMedianReturn: 0.004,
           currentPrice: 171.25,
           priceObservedAt: "2026-07-24T00:01:12.345Z",
-          model: { modelId: "chronos", modelRevision: "pinned", device: "cuda" },
+          model: { modelId: "NeoQuasar/Kronos-base", modelRevision: "pinned", device: "cuda" },
         },
         { score: 1 },
       ],
@@ -241,10 +250,10 @@ describe("AI simulation response normalization", () => {
           components: { forecast: 0.7, technical: 0.3 },
           weights: { forecast: 0.6, technical: 0.4 },
           finalScores: { bull: 0.72, cash: 0.28 },
-          provenance: [{ modelId: "chronos", revision: "pinned" }],
+          provenance: [{ modelId: "NeoQuasar/Kronos-base", revision: "pinned" }],
           chartPatternBias: "bullish",
           chartPatterns: ["bullish_engulfing"],
-          model: "chronos",
+          model: "NeoQuasar/Kronos-base",
         },
         { symbol: "BAD", action: "buy" },
       ],
@@ -285,7 +294,7 @@ describe("AI simulation response normalization", () => {
         symbol: "NVDA",
         currentPrice: 171.25,
         priceObservedAt: "2026-07-24T00:01:12.345Z",
-        model: "chronos · pinned · CUDA",
+        model: "NeoQuasar/Kronos-base · pinned · CUDA",
       }],
       positions: [{ symbol: "NVDA", quantity: 3 }],
       trades: [{ symbol: "NVDA", source: "next_valid_quote" }],
@@ -304,7 +313,7 @@ describe("AI simulation response normalization", () => {
         components: { forecast: 0.7, technical: 0.3 },
         weights: { forecast: 0.6, technical: 0.4 },
         finalScores: { bull: 0.72, cash: 0.28 },
-        provenance: ["chronos · pinned"],
+        provenance: ["NeoQuasar/Kronos-base · pinned"],
         chartPatterns: ["bullish_engulfing"],
       }],
       charts: [{ symbol: "NVDA", bars: [{ close: 170 }] }],
@@ -316,9 +325,9 @@ describe("AI simulation response normalization", () => {
     expect(snapshot.decisions).toHaveLength(1);
   });
 
-  it("normalizes snake-case four-lane comparisons and rejects malformed optional blocks", () => {
+  it("normalizes snake-case three-lane comparisons and rejects removed or malformed lanes", () => {
     const lanes = {
-      chronos2: {
+      kronos_base: {
         status: "completed",
         analytical_only: true,
         cumulative_return: 0.012,
@@ -344,7 +353,6 @@ describe("AI simulation response normalization", () => {
           reasons: ["forecast_up", "execution_available"],
         }],
       },
-      kronos_small: { status: "completed", cumulative_return: 0.009 },
       rust: { status: "completed", cumulative_return: 0.006 },
       ensemble: { status: "running", cumulative_return: 0.011 },
     };
@@ -374,7 +382,7 @@ describe("AI simulation response normalization", () => {
       incompleteCount: 0,
       lanes: [
         {
-          id: "chronos2",
+          id: "kronos",
           analyticalOnly: true,
           cumulativeReturn: 0.012,
           netReturn: 0.01,
@@ -393,7 +401,6 @@ describe("AI simulation response normalization", () => {
             reasons: ["forecast_up", "execution_available"],
           }],
         },
-        { id: "kronos" },
         { id: "rust" },
         { id: "ensemble" },
       ],
@@ -411,10 +418,32 @@ describe("AI simulation response normalization", () => {
         sameOrigin: true,
         sameCosts: true,
         sameExecutionPolicy: true,
-        lanes: [lanes.chronos2, lanes.rust],
+        lanes: [lanes.kronos_base, lanes.rust],
       },
     });
     expect(malformed.strategyComparison).toBeUndefined();
+
+    const removedModelLane = normalizeAiSimulationSnapshot({
+      phase: "running",
+      currency: "USD",
+      initialCash: 1,
+      cash: 1,
+      equity: 1,
+      progress: 0,
+      strategyComparison: {
+        conditionId: "condition-legacy",
+        sameOrigin: true,
+        sameCosts: true,
+        sameExecutionPolicy: true,
+        lanes: [
+          { id: "chronos2", status: "completed" },
+          { id: "kronos-small", status: "completed" },
+          lanes.rust,
+          lanes.ensemble,
+        ],
+      },
+    });
+    expect(removedModelLane.strategyComparison).toBeUndefined();
   });
 
   it("unwraps start and status responses and keeps errors explicit", () => {
@@ -461,7 +490,7 @@ describe("AI simulation response normalization", () => {
         selected: [{
           symbol: "NVDA",
           name: "NVIDIA",
-          model: { modelId: "chronos", device: "cuda" },
+          model: { modelId: "NeoQuasar/Kronos-base", device: "cuda" },
         }],
         performance: {
           currency: "USD",
@@ -486,7 +515,7 @@ describe("AI simulation response normalization", () => {
         preset: "breakout",
         riskTolerance: 92,
         selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
-        selected: [{ symbol: "NVDA", name: "NVIDIA", model: "chronos · CUDA" }],
+        selected: [{ symbol: "NVDA", name: "NVIDIA", model: "NeoQuasar/Kronos-base · CUDA" }],
         finalEquity: 10_125,
         returnRatio: 0.0125,
         tradeCount: 4,
@@ -505,7 +534,6 @@ describe("AI simulation response normalization", () => {
       sameExecutionPolicy: true,
       incompleteCount: 1,
       lanes: [
-        { id: "chronos2", status: "completed", cumulativeReturn: 0.01 },
         { id: "kronos", status: "unavailable", unavailableReason: "model unavailable" },
         { id: "rust", status: "completed", cumulativeReturn: 0.004 },
         { id: "ensemble", status: "completed", cumulativeReturn: 0.008 },
@@ -530,13 +558,12 @@ describe("AI simulation response normalization", () => {
       strategy: {
         mode: "pair",
         pairId: "qqq-tqqq-sqqq",
-        allowDegradedMode: true,
+        allowDegradedMode: false,
       },
       strategyComparison: {
         conditionId: "condition-history-report",
         incompleteCount: 1,
         lanes: [
-          { id: "chronos2" },
           { id: "kronos", unavailableReason: "model unavailable" },
           { id: "rust" },
           { id: "ensemble" },
@@ -564,12 +591,12 @@ describe("AI simulation response normalization", () => {
         strategy: {
           mode: "pair",
           pairId: "qqq-tqqq-sqqq",
-          allowDegradedMode: true,
+          allowDegradedMode: false,
         },
       },
       strategyComparison: {
         conditionId: "condition-history-report",
-        lanes: [{ id: "chronos2" }, { id: "kronos" }, { id: "rust" }, { id: "ensemble" }],
+        lanes: [{ id: "kronos" }, { id: "rust" }, { id: "ensemble" }],
       },
     });
   });
@@ -628,7 +655,7 @@ describe("AI simulation response normalization", () => {
           decidedAt: "2026-07-24T02:01:00.000Z",
           reason: "forecast_and_signal_aligned",
           chartPatterns: ["bullish_engulfing"],
-          model: { modelId: "chronos", revision: "pinned", device: "cuda" },
+          model: { modelId: "NeoQuasar/Kronos-base", revision: "pinned", device: "cuda" },
         }],
         trades: [{
           symbol: "NVDA",
@@ -661,7 +688,7 @@ describe("AI simulation response normalization", () => {
           patterns: [],
         }],
         modelProvenance: [{
-          modelId: "chronos",
+          modelId: "NeoQuasar/Kronos-base",
           revision: "pinned",
           device: "cuda",
         }],
@@ -673,31 +700,15 @@ describe("AI simulation response normalization", () => {
           direction: "bull",
           origin: "2026-07-24T02:01:00.000Z",
           decision_at: "2026-07-24T02:01:01.000Z",
-          degraded: true,
+          degraded: false,
           replay_input: {
             models: {
-              chronos2: {
-                status: "degraded",
-                input_end_at: "2026-07-24T02:01:00.000Z",
-                generated_at: "2026-07-24T02:01:00.300Z",
-                provenance: {
-                  model_id: "amazon/chronos-bolt-small",
-                  model_revision: "bolt-revision",
-                  device: "cuda:0",
-                  device_name: "Tesla P40",
-                  latency_ms: 321,
-                  fallback_used: true,
-                  fallback_from: "amazon/chronos-2",
-                  fallback_reason: "cache missing",
-                  degraded: true,
-                },
-              },
-              kronos_small: {
+              kronos_base: {
                 status: "available",
                 inputEndAt: "2026-07-24T02:01:00.000Z",
                 generatedAt: "2026-07-24T02:01:00.400Z",
                 provenance: {
-                  modelId: "NeoQuasar/Kronos-small",
+                  modelId: "NeoQuasar/Kronos-base",
                   modelRevision: "kronos-revision",
                   device: "cuda:0",
                   deviceName: "Tesla P40",
@@ -740,7 +751,7 @@ describe("AI simulation response normalization", () => {
       },
       equity: [{ equity: 20_100, cash: 20_100 }],
       charts: [{ symbol: "NVDA" }],
-      modelProvenance: ["chronos · pinned · CUDA"],
+      modelProvenance: ["NeoQuasar/Kronos-base · pinned · CUDA"],
       decisionProvenance: [{
         decisionId: "decision-1",
         pairId: "tsla-tsll-tslq",
@@ -749,27 +760,12 @@ describe("AI simulation response normalization", () => {
         direction: "bull",
         origin: "2026-07-24T02:01:00.000Z",
         decisionAt: "2026-07-24T02:01:01.000Z",
-        degraded: true,
+        degraded: false,
         models: [
-          {
-            component: "chronos2",
-            status: "degraded",
-            modelId: "amazon/chronos-bolt-small",
-            modelRevision: "bolt-revision",
-            origin: "2026-07-24T02:01:00.000Z",
-            generatedAt: "2026-07-24T02:01:00.300Z",
-            device: "cuda:0",
-            deviceName: "Tesla P40",
-            latencyMs: 321,
-            degraded: true,
-            fallbackUsed: true,
-            fallbackFrom: "amazon/chronos-2",
-            fallbackReason: "cache missing",
-          },
           {
             component: "kronos",
             status: "available",
-            modelId: "NeoQuasar/Kronos-small",
+            modelId: "NeoQuasar/Kronos-base",
             modelRevision: "kronos-revision",
             origin: "2026-07-24T02:01:00.000Z",
             generatedAt: "2026-07-24T02:01:00.400Z",
@@ -777,7 +773,6 @@ describe("AI simulation response normalization", () => {
             deviceName: "Tesla P40",
             latencyMs: 456,
             degraded: false,
-            fallbackUsed: false,
           },
         ],
       }],

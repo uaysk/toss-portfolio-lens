@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  AI_SIMULATION_CONTRACT_VERSION,
   DEFAULT_SIMULATION_COSTS,
   createSimulationStartRequestSchema,
 } from "./contracts.js";
 
 describe("AI paper simulation contracts", () => {
   const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
+
+  it("publishes the Kronos-base and Rust contract as v5", () => {
+    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v5");
+  });
 
   it("applies market, strategy, risk, scanner, and cost defaults", () => {
     expect(schema.parse({
@@ -115,6 +120,17 @@ describe("AI paper simulation contracts", () => {
       strategy: {
         mode: "single",
         pairId: "soxx-soxl-soxs",
+      },
+    })).toThrow();
+    expect(() => schema.parse({
+      marketCountry: "US",
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["TSLA"] },
+      strategy: {
+        mode: "pair",
+        pairId: "tsla-tsll-tslq",
+        allowDegradedMode: true,
       },
     })).toThrow();
   });

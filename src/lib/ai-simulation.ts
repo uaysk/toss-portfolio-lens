@@ -1,3 +1,9 @@
+import {
+  mergeLatestKronosForecasts,
+  selectLatestKronosForecasts,
+  type AiSimulationKronosForecast,
+} from "./ai-simulation-forecast";
+
 export const AI_SIMULATION_MARKETS = ["KR", "US"] as const;
 export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
 export const AI_SIMULATION_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
@@ -9,7 +15,7 @@ export const AI_SIMULATION_PAIR_IDS = [
   "tsla-tsll-tslq",
   "qqq-tqqq-sqqq",
 ] as const;
-export const AI_SIMULATION_COMPARISON_LANES = ["chronos2", "kronos", "rust", "ensemble"] as const;
+export const AI_SIMULATION_COMPARISON_LANES = ["kronos", "rust", "ensemble"] as const;
 
 export type AiSimulationMarketCountry = (typeof AI_SIMULATION_MARKETS)[number];
 export type AiSimulationCriterion = (typeof AI_SIMULATION_CRITERIA)[number];
@@ -37,7 +43,7 @@ export type AiSimulationStrategyRequest =
   | {
       mode: "pair";
       pairId: AiSimulationPairId;
-      allowDegradedMode: boolean;
+      allowDegradedMode: false;
     };
 
 export type AiSimulationSelectionRequest =
@@ -85,7 +91,6 @@ export type AiSimulationStatus = {
   pairStrategy?: {
     enabled: boolean;
     message?: string;
-    allowDegradedMode?: boolean;
     catalog: AiSimulationPairCatalogItem[];
   };
 };
@@ -267,6 +272,7 @@ export type AiSimulationSnapshot = {
   charts: AiSimulationChartView[];
   trades: AiSimulationTrade[];
   decisions: AiSimulationDecision[];
+  kronosForecasts: AiSimulationKronosForecast[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
   strategyComparison?: AiSimulationStrategyComparison;
@@ -345,7 +351,7 @@ export type AiSimulationReportEvidence = {
 };
 
 export type AiSimulationDecisionModelProvenance = {
-  component: "chronos2" | "kronos";
+  component: "kronos";
   status: string;
   modelId?: string;
   modelRevision?: string;
@@ -355,9 +361,6 @@ export type AiSimulationDecisionModelProvenance = {
   deviceName?: string;
   latencyMs?: number;
   degraded: boolean;
-  fallbackUsed: boolean;
-  fallbackFrom?: string;
-  fallbackReason?: string;
 };
 
 export type AiSimulationDecisionProvenance = {
@@ -388,6 +391,7 @@ export type AiSimulationRunReport = {
   charts: AiSimulationChartView[];
   modelProvenance: string[];
   decisionProvenance: AiSimulationDecisionProvenance[];
+  kronosForecasts: AiSimulationKronosForecast[];
   evidence: AiSimulationReportEvidence[];
   warnings: string[];
   limits: string[];
@@ -567,7 +571,7 @@ function normalizeStrategyRequest(value: unknown): AiSimulationStrategyRequest |
     "allow_degraded_mode",
   ));
   return pairId && allowDegradedMode !== undefined
-    ? { mode, pairId, allowDegradedMode }
+    ? { mode, pairId, allowDegradedMode: false }
     : undefined;
 }
 
@@ -592,6 +596,13 @@ function modelLabel(value: unknown): string | undefined {
     device ? device.toUpperCase() : undefined,
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : undefined;
+}
+
+function kronosBaseModelLabel(value: unknown): string | undefined {
+  const label = modelLabel(value);
+  return label?.toLowerCase().includes("neoquasar/kronos-base")
+    ? label
+    : undefined;
 }
 
 export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatus {
@@ -663,13 +674,6 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
       pairStrategy: {
         enabled: pairEnabled ?? false,
         message: textValue(first(pairStrategy, "message", "reason", "limitation")),
-        allowDegradedMode: booleanValue(first(
-          pairStrategy,
-          "allowDegradedMode",
-          "allow_degraded_mode",
-          "degradedMode",
-          "degraded_mode",
-        )),
         catalog: pairCatalog,
       },
     } : {}),
@@ -730,7 +734,7 @@ function normalizeSelection(value: unknown): AiSimulationSelection | undefined {
       "updatedAt",
       "updated_at",
     )),
-    model: modelLabel(item.model),
+    model: kronosBaseModelLabel(item.model),
   };
 }
 
@@ -844,7 +848,7 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
       ["bullish", "bearish", "neutral"] as const
     ).find((candidate) => candidate === first(item, "chartPatternBias", "chart_pattern_bias")),
     chartPatterns: stringList(first(item, "chartPatterns", "chart_patterns")),
-    model: modelLabel(item.model),
+    model: kronosBaseModelLabel(item.model),
   };
 }
 
@@ -929,11 +933,9 @@ function mapValid<T>(value: unknown, normalizer: (item: unknown) => T | undefine
 
 function comparisonLaneId(value: unknown): AiSimulationComparisonLaneId | undefined {
   const raw = textValue(value)?.toLowerCase().replaceAll("_", "-");
-  const candidate = raw === "chronos-2" || raw === "chronos2-base"
-    ? "chronos2"
-    : raw === "kronos-small" || raw === "kronossmall"
-      ? "kronos"
-      : raw;
+  const candidate = raw === "kronos-base" || raw === "kronosbase"
+    ? "kronos"
+    : raw;
   return AI_SIMULATION_COMPARISON_LANES.includes(candidate as AiSimulationComparisonLaneId)
     ? candidate as AiSimulationComparisonLaneId
     : undefined;
@@ -1205,6 +1207,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     charts: mapValid(source.charts, normalizeChartView),
     trades: mapValid(source.trades, normalizeTrade),
     decisions: mapValid(source.decisions, normalizeDecision),
+    kronosForecasts: selectLatestKronosForecasts(source.decisions),
     warnings: stringList(source.warnings),
     capabilities: capabilityRecord(source.capabilities),
     ...(strategyComparison ? { strategyComparison } : {}),
@@ -1316,7 +1319,7 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     "returnRate",
     "return_rate",
   )) ?? finiteNumber(first(item, "returnRatio", "return_ratio", "returnRate", "return_rate"));
-  const model = modelLabel(first(item, "model", "modelProvenance", "model_provenance"))
+  const model = kronosBaseModelLabel(first(item, "model", "modelProvenance", "model_provenance"))
     ?? selected.map((entry) => entry.model).find((entry): entry is string => Boolean(entry));
 
   return {
@@ -1410,22 +1413,19 @@ function normalizeEvidence(value: unknown): AiSimulationReportEvidence | undefin
 }
 
 function normalizeModelProvenance(value: unknown): string[] {
-  const direct = modelLabel(value);
+  const direct = kronosBaseModelLabel(value);
   if (direct && (typeof value === "string" || !Array.isArray(value))) return [direct];
   const values = Array.isArray(value) ? value : Object.values(asRecord(value));
   return values
-    .map(modelLabel)
+    .map(kronosBaseModelLabel)
     .filter((item): item is string => Boolean(item))
     .filter((item, index, all) => all.indexOf(item) === index);
 }
 
 function decisionModelValue(
   modelsValue: unknown,
-  component: AiSimulationDecisionModelProvenance["component"],
 ): unknown {
-  const aliases = component === "chronos2"
-    ? ["chronos2", "chronos_2", "chronos-2", "chronos"]
-    : ["kronos", "kronosSmall", "kronos_small", "kronos-small"];
+  const aliases = ["kronos", "kronosBase", "kronos_base", "kronos-base"];
   if (Array.isArray(modelsValue)) {
     return modelsValue.find((value) => {
       const model = asRecord(value);
@@ -1442,7 +1442,6 @@ function decisionModelValue(
 
 function normalizeDecisionModelProvenance(
   value: unknown,
-  component: AiSimulationDecisionModelProvenance["component"],
   parentOrigin: string | undefined,
 ): AiSimulationDecisionModelProvenance | undefined {
   const model = asRecord(value);
@@ -1470,19 +1469,23 @@ function normalizeDecisionModelProvenance(
     "fallback_used",
   )) ?? booleanValue(first(model, "fallbackUsed", "fallback_used"));
   const fallbackUsed = explicitFallback ?? Boolean(fallbackFrom || fallbackReason);
+  const modelId = textValue(first(
+    provenance,
+    "modelId",
+    "model_id",
+  )) ?? textValue(first(model, "modelId", "model_id", "model"));
+  if (fallbackUsed
+    || (modelId && modelId.toLowerCase() !== "neoquasar/kronos-base")) {
+    return undefined;
+  }
   const explicitDegraded = booleanValue(provenance.degraded)
     ?? booleanValue(model.degraded);
   const degraded = explicitDegraded === true
-    || status?.toLowerCase() === "degraded"
-    || fallbackUsed;
+    || status?.toLowerCase() === "degraded";
   return {
-    component,
+    component: "kronos",
     status: status ?? (degraded ? "degraded" : "unknown"),
-    modelId: textValue(first(
-      provenance,
-      "modelId",
-      "model_id",
-    )) ?? textValue(first(model, "modelId", "model_id", "model")),
+    modelId,
     modelRevision: textValue(first(
       provenance,
       "modelRevision",
@@ -1518,9 +1521,6 @@ function normalizeDecisionModelProvenance(
       "latency_ms",
     )) ?? finiteNumber(first(model, "latencyMs", "latency_ms", "latency")),
     degraded,
-    fallbackUsed,
-    fallbackFrom,
-    fallbackReason,
   };
 }
 
@@ -1543,14 +1543,11 @@ function normalizeDecisionProvenance(
     "input_end_at",
   )) ?? textValue(first(replayInput, "origin", "inputEndAt", "input_end_at"));
   const parentDegraded = booleanValue(provenance.degraded) ?? false;
-  const models = (["chronos2", "kronos"] as const).flatMap((component) => {
-    const normalized = normalizeDecisionModelProvenance(
-      decisionModelValue(modelsValue, component),
-      component,
-      origin,
-    );
-    return normalized ? [normalized] : [];
-  });
+  const kronos = normalizeDecisionModelProvenance(
+    decisionModelValue(modelsValue),
+    origin,
+  );
+  const models = kronos ? [kronos] : [];
   if (!models.length) return undefined;
   const decision = asRecord(provenance.decision);
   return {
@@ -1732,6 +1729,15 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       ?? first(root, "decisionProvenance", "decision_provenance"),
     normalizeDecisionProvenance,
   );
+  const rawDecisionProvenance = first(report, "decisionProvenance", "decision_provenance")
+    ?? first(root, "decisionProvenance", "decision_provenance");
+  const kronosForecasts = mergeLatestKronosForecasts(
+    snapshot?.kronosForecasts ?? [],
+    selectLatestKronosForecasts([
+      report.decisions,
+      rawDecisionProvenance,
+    ]),
+  );
   const inferredModels = [
     ...selected.map((item) => item.model),
     ...decisions.map((item) => item.model),
@@ -1805,6 +1811,7 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     charts,
     modelProvenance: [...new Set([...reportModels, ...inferredModels])],
     decisionProvenance,
+    kronosForecasts,
     evidence: normalizeReportEvidence(report.evidence),
     warnings: stringList(first(report, "warnings", "limitations"))
       .concat(snapshot?.warnings ?? [])
@@ -1835,8 +1842,8 @@ export function validateAiSimulationRequest(
     if (!pairIdValue(first(strategy, "pairId", "pair_id"))) {
       issues.push("페어 전략 카탈로그를 확인해 주세요.");
     }
-    if (booleanValue(first(strategy, "allowDegradedMode", "allow_degraded_mode")) === undefined) {
-      issues.push("페어 전략 degraded 실행 설정이 올바르지 않습니다.");
+    if (booleanValue(first(strategy, "allowDegradedMode", "allow_degraded_mode")) !== false) {
+      issues.push("페어 전략은 degraded 실행을 허용하지 않습니다.");
     }
   } else if (strategyMode !== "single") {
     issues.push("전략 실행 방식이 올바르지 않습니다.");

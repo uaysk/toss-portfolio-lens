@@ -7,7 +7,7 @@ import {
 import { PAIR_CATALOG_VERSION } from "./pair-catalog.js";
 import { PAIR_MODEL_NORMALIZATION_VERSION } from "./model-output-normalization.js";
 
-export const PAIR_DECISION_PROVENANCE_VERSION = "pair-decision-provenance/v1" as const;
+export const PAIR_DECISION_PROVENANCE_VERSION = "pair-decision-provenance/v2" as const;
 
 export type PairDecisionProvenance = {
   schemaVersion: typeof PAIR_DECISION_PROVENANCE_VERSION;
@@ -31,7 +31,6 @@ export type PairDecisionProvenance = {
   reasons: string[];
   provenance: string[];
   rawInputs: {
-    chronos2: unknown;
     kronos: unknown;
     rust: unknown;
     market: unknown;
@@ -106,7 +105,6 @@ function decisionComparable(value: PairEnsembleDecision) {
     reasonCodes: [...value.reasonCodes],
     weights: { ...value.weights },
     componentScores: {
-      chronos2: { ...value.componentScores.chronos2 },
       kronos: { ...value.componentScores.kronos },
       rust: { ...value.componentScores.rust },
     },
@@ -115,7 +113,7 @@ function decisionComparable(value: PairEnsembleDecision) {
   };
 }
 
-function modelLabel(input: PairEnsembleInput, component: "chronos2" | "kronos"): string {
+function modelLabel(input: PairEnsembleInput, component: "kronos"): string {
   const model = input.models[component].provenance;
   return `${model.modelId ?? component}@${model.modelRevision ?? "unavailable"}`
     + `:${input.models[component].status}`;
@@ -123,8 +121,6 @@ function modelLabel(input: PairEnsembleInput, component: "chronos2" | "kronos"):
 
 function flatComponents(decision: PairEnsembleDecision): Record<string, number> {
   return {
-    chronos2Bull: decision.componentScores.chronos2.bull,
-    chronos2Bear: decision.componentScores.chronos2.bear,
     kronosBull: decision.componentScores.kronos.bull,
     kronosBear: decision.componentScores.kronos.bear,
     rustBull: decision.componentScores.rust.bull,
@@ -169,12 +165,10 @@ export function createPairDecisionProvenance(input: {
     finalScores: { ...decision.finalScores },
     reasons: [...decision.reasonCodes],
     provenance: [
-      modelLabel(replayInput, "chronos2"),
       modelLabel(replayInput, "kronos"),
       `rust:${replayInput.rust.status ?? "unavailable"}`,
     ],
     rawInputs: {
-      chronos2: clone(replayInput.models.chronos2.rawOutput),
       kronos: clone(replayInput.models.kronos.rawOutput),
       rust: clone(replayInput.rust.rawOutput ?? replayInput.rust),
       market: clone(replayInput.market),

@@ -13,9 +13,7 @@ FIXED_HORIZONS = (5, 15, 30, 60)
 FIXED_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 FORECAST_STEPS = max(FIXED_HORIZONS)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-CHRONOS2_MODEL_ID = "amazon/chronos-2"
-KRONOS_SMALL_MODEL_ID = "NeoQuasar/Kronos-small"
-CHRONOS_BOLT_FALLBACK_MODEL_ID = "amazon/chronos-bolt-small"
+KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 
 
 class StrictModel(BaseModel):
@@ -427,15 +425,15 @@ class ModelRunInputOrigin(StrictModel):
 
 
 class ModelRun(StrictModel):
-    role: Literal["chronos2", "kronos_small"]
-    expected_model_id: Literal["amazon/chronos-2", "NeoQuasar/Kronos-small"]
+    role: Literal["kronos_base"]
+    expected_model_id: Literal["NeoQuasar/Kronos-base"]
     status: Literal["available", "partial", "unavailable"]
     model: ModelProvenance
     generated_at: datetime
     latency_ms: float = Field(ge=0)
-    degraded: bool
-    fallback_used: bool
-    fallback_reason: str | None = Field(default=None, min_length=1, max_length=500)
+    degraded: Literal[False]
+    fallback_used: Literal[False]
+    fallback_reason: None = None
     input_origins: tuple[ModelRunInputOrigin, ...] = Field(min_length=1)
     input_end_aligned: Literal[True]
     raw_series: tuple[SeriesForecastResult, ...] = Field(min_length=1)
@@ -447,33 +445,14 @@ class ModelRun(StrictModel):
 
     @model_validator(mode="after")
     def validate_run(self) -> "ModelRun":
-        expected_by_role = {
-            "chronos2": CHRONOS2_MODEL_ID,
-            "kronos_small": KRONOS_SMALL_MODEL_ID,
-        }
-        if self.expected_model_id != expected_by_role[self.role]:
+        if self.expected_model_id != KRONOS_BASE_MODEL_ID:
             raise ValueError("model run role and expected model ID do not match")
-        if self.fallback_used:
-            if (
-                self.role != "chronos2"
-                or self.expected_model_id != CHRONOS2_MODEL_ID
-                or self.model.model_id != CHRONOS_BOLT_FALLBACK_MODEL_ID
-                or not self.model.loaded
-                or not self.degraded
-                or self.fallback_reason is None
-                or self.model.fallback_from != CHRONOS2_MODEL_ID
-            ):
-                raise ValueError("only a loaded Chronos-Bolt model can be a degraded Chronos-2 fallback")
-        elif (
+        if (
             self.model.model_id != self.expected_model_id
-            or self.degraded
-            or self.fallback_reason is not None
             or self.model.fallback_from is not None
             or self.model.fallback_reason is not None
         ):
-            raise ValueError("a non-fallback model run cannot contain fallback provenance")
-        if self.fallback_reason != self.model.fallback_reason:
-            raise ValueError("model run fallback reason must match model provenance")
+            raise ValueError("Kronos-base model runs cannot contain fallback provenance")
 
         origins = tuple((item.instrument_key, item.input_end_at) for item in self.input_origins)
         results = tuple((item.instrument_key, item.input_end_at) for item in self.raw_series)
@@ -700,13 +679,11 @@ class AIResponse(StrictModel):
         if self.model_runs is not None:
             if self.mode != "forecast" or self.error is not None:
                 raise ValueError("per-model runs are supported only on successful forecast responses")
-            if tuple(item.role for item in self.model_runs) != ("chronos2", "kronos_small"):
-                raise ValueError("model runs must contain ordered Chronos-2 and Kronos-small results")
-            if self.model_runs[0].input_origins != self.model_runs[1].input_origins:
-                raise ValueError("Chronos-2 and Kronos-small model runs must share identical input origins")
+            if tuple(item.role for item in self.model_runs) != ("kronos_base",):
+                raise ValueError("model runs must contain exactly one Kronos-base result")
             primary = self.model_runs[0]
             if self.model != primary.model or self.series != primary.raw_series or self.status != primary.status:
-                raise ValueError("legacy response fields must mirror the Chronos-2 model run")
+                raise ValueError("top-level response fields must mirror the Kronos-base model run")
             if any(item.generated_at > self.generated_at for item in self.model_runs):
                 raise ValueError("response generated_at cannot precede a model run")
         return self

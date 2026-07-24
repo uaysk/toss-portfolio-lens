@@ -19,9 +19,10 @@ const strategyComparison: AiSimulationStrategyComparison = {
   incompleteCount: 1,
   lanes: [
     {
-      id: "chronos2",
-      status: "completed",
+      id: "kronos",
+      status: "unavailable",
       analyticalOnly: true,
+      unavailableReason: "model unavailable",
       cumulativeReturn: 0.01,
       bullCount: 2,
       bearCount: 1,
@@ -32,12 +33,6 @@ const strategyComparison: AiSimulationStrategyComparison = {
         signalSymbol: "QQQ",
         executionSymbol: "TQQQ",
       }],
-    },
-    {
-      id: "kronos",
-      status: "unavailable",
-      unavailableReason: "model unavailable",
-      decisionReasons: [],
     },
     { id: "rust", status: "completed", analyticalOnly: true, cumulativeReturn: 0.004, decisionReasons: [] },
     { id: "ensemble", status: "completed", analyticalOnly: true, cumulativeReturn: 0.008, decisionReasons: [] },
@@ -78,7 +73,10 @@ describe("AI simulation history", () => {
     expect(markup).toContain('data-simulation-history-item="run-24"');
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain("변동성 자동 선정 · 2종목");
-    expect(markup).toContain("동일 조건 4전략 비교");
+    expect(markup).toContain("동일 조건 3전략 비교");
+    expect(markup).toContain("Kronos-base");
+    expect(markup).toContain("Rust 기술 지표");
+    expect(markup).toContain("최종 전략");
     expect(markup).toContain("forward 실행 정책");
     expect(markup).toContain("모든 lane의 비교 성과는 분석·검증용");
     expect(markup).toContain("bull 2 · bear 1 · cash 4");
@@ -95,7 +93,7 @@ describe("AI simulation history", () => {
         initialCash: 10_000,
         durationMinutes: 30,
         preset: "breakout",
-        riskTolerance: 95,
+        riskTolerance: 100,
         selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
         costs: { commissionBpsPerSide: 1 },
       },
@@ -104,7 +102,7 @@ describe("AI simulation history", () => {
         name: "NVIDIA",
         upProbability: 0.67,
         predictedMedianReturn: 0.005,
-        model: "chronos · pinned · CUDA",
+        model: "NeoQuasar/Kronos-base · pinned · CUDA",
       }],
       performance: {
         currency: "USD",
@@ -147,7 +145,8 @@ describe("AI simulation history", () => {
         cash: 10_100,
       }],
       charts: [],
-      modelProvenance: ["chronos · pinned · CUDA"],
+      modelProvenance: ["NeoQuasar/Kronos-base · pinned · CUDA"],
+      kronosForecasts: [],
       decisionProvenance: [{
         decisionId: "pair-decision-1",
         pairId: "tsla-tsll-tslq",
@@ -159,32 +158,16 @@ describe("AI simulation history", () => {
         degraded: true,
         models: [
           {
-            component: "chronos2",
-            status: "degraded",
-            modelId: "amazon/chronos-bolt-small",
-            modelRevision: "bolt-revision",
-            origin: "2026-07-24T01:01:00.000Z",
-            generatedAt: "2026-07-24T01:01:00.300Z",
-            device: "cuda:0",
-            deviceName: "Tesla P40",
-            latencyMs: 321,
-            degraded: true,
-            fallbackUsed: true,
-            fallbackFrom: "amazon/chronos-2",
-            fallbackReason: "cache missing",
-          },
-          {
             component: "kronos",
-            status: "available",
-            modelId: "NeoQuasar/Kronos-small",
+            status: "degraded",
+            modelId: "NeoQuasar/Kronos-base",
             modelRevision: "kronos-revision",
             origin: "2026-07-24T01:01:00.000Z",
             generatedAt: "2026-07-24T01:01:00.400Z",
             device: "cuda:0",
             deviceName: "Tesla P40",
             latencyMs: 456,
-            degraded: false,
-            fallbackUsed: false,
+            degraded: true,
           },
         ],
       }],
@@ -200,20 +183,16 @@ describe("AI simulation history", () => {
     expect(markup).toContain("돌파 가속");
     expect(markup).toContain("변동성 자동 선정 · 2종목");
     expect(markup).toContain("NVIDIA");
-    expect(markup).toContain("chronos · pinned · CUDA");
+    expect(markup).toContain("NeoQuasar/Kronos-base · pinned · CUDA");
     expect(markup).toContain('data-simulation-report-decision-provenance="true"');
-    expect(markup).toContain('data-simulation-model-provenance="chronos2"');
     expect(markup).toContain('data-simulation-model-provenance="kronos"');
     expect(markup).toContain("판단 provenance 1건");
-    expect(markup).toContain("amazon/chronos-bolt-small");
-    expect(markup).toContain("bolt-revision");
-    expect(markup).toContain("NeoQuasar/Kronos-small");
+    expect(markup).toContain("NeoQuasar/Kronos-base");
     expect(markup).toContain("kronos-revision");
     expect(markup).toContain("Tesla P40");
-    expect(markup).toContain("321ms");
-    expect(markup).toContain("fallback from amazon/chronos-2");
-    expect(markup).toContain("cache missing");
-    expect(markup).toContain("AI 판단");
+    expect(markup).toContain("456ms");
+    expect(markup).toContain("최대 공격 · 100");
+    expect(markup).toContain("전략 판단");
     expect(markup).toContain("가상 체결");
     expect(markup).toContain("자산 추이");
     expect(markup).toContain("chart_pattern");
@@ -222,5 +201,7 @@ describe("AI simulation history", () => {
     expect(markup).toContain("동일 원천");
     expect(markup).toContain("model unavailable");
     expect(markup).toContain("costs_passed");
+    expect(markup).not.toContain("Chronos");
+    expect(markup).not.toContain("Kronos-small");
   });
 });

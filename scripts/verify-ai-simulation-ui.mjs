@@ -40,6 +40,49 @@ function portfolio() {
   };
 }
 
+function kronosBaseForecastOutput(symbol, origin, basePrice) {
+  const quantiles = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95];
+  const offsets = [-0.012, -0.008, -0.003, 0.004, 0.009, 0.015, 0.02];
+  return {
+    status: "available",
+    signalSymbol: symbol,
+    inputEndAt: origin,
+    generatedAt: new Date(Date.parse(origin) + 320).toISOString(),
+    provenance: {
+      modelId: "NeoQuasar/Kronos-base",
+      modelRevision: "ui-fixture",
+      device: "cuda:0",
+      deviceName: "Tesla P40",
+    },
+    rawOutput: {
+      role: "kronos_base",
+      expected_model_id: "NeoQuasar/Kronos-base",
+      status: "available",
+      model: {
+        model_id: "NeoQuasar/Kronos-base",
+        model_revision: "ui-fixture",
+        device: "cuda:0",
+        device_name: "Tesla P40",
+        loaded: true,
+      },
+      raw_series: [{
+        instrument_key: symbol,
+        status: "available",
+        input_end_at: origin,
+        horizons: [5, 15, 30, 60].map((minutes, horizonIndex) => ({
+          horizon_minutes: minutes,
+          target_timestamp: new Date(Date.parse(origin) + minutes * 60_000).toISOString(),
+          price_quantiles: quantiles.map((quantile, quantileIndex) => ({
+            quantile,
+            value: basePrice * (1 + offsets[quantileIndex] + horizonIndex * 0.001),
+          })),
+          up_probability: 0.64 + horizonIndex * 0.02,
+        })),
+      }],
+    },
+  };
+}
+
 function snapshot({
   phase,
   request,
@@ -60,7 +103,7 @@ function snapshot({
     currentPrice: 50_600 + index * 100,
     priceObservedAt: "2026-07-24T00:23:12.345Z",
     model: {
-      modelId: "amazon/chronos-bolt-small",
+      modelId: "NeoQuasar/Kronos-base",
       modelRevision: "ui-fixture",
       device: "cuda",
     },
@@ -87,8 +130,9 @@ function snapshot({
   });
   const decisions = Array.from({ length: historyCount }, (_, index) => {
     const decidedAt = new Date(Date.parse("2026-07-24T00:21:00.000Z") + index * 1_000).toISOString();
+    const decisionSymbol = symbols[index % symbols.length];
     return {
-      symbol: symbols[index % symbols.length],
+      symbol: decisionSymbol,
       action: index % 2 === 0 ? "buy" : "hold",
       decidedAt,
       eligibleAfter: new Date(Date.parse(decidedAt) + 1_000).toISOString(),
@@ -100,7 +144,13 @@ function snapshot({
       upProbability: 0.64,
       chartPatternBias: index % 3 === 0 ? "bullish" : "neutral",
       chartPatterns: index % 3 === 0 ? ["bullish_engulfing"] : ["inside_bar"],
-      model: "amazon/chronos-bolt-small · ui-fixture",
+      model: "NeoQuasar/Kronos-base · ui-fixture",
+      ...(index === 0 ? {
+        signalSymbol: decisionSymbol,
+        modelOutputs: {
+          kronos: kronosBaseForecastOutput(decisionSymbol, decidedAt, 50_220),
+        },
+      } : {}),
     };
   });
   const charts = symbols.map((symbol, symbolIndex) => ({
@@ -602,6 +652,8 @@ async function verify(browser, baseUrl, viewport, theme) {
     await historyPanel.locator(`[data-simulation-report="${state.archivedRunId}"]`).waitFor({ timeout: 10_000 });
     await historyPanel.getByText("실행 설정", { exact: true }).waitFor();
     await historyPanel.getByText("캔들·지표·패턴 근거", { exact: true }).waitFor();
+    await historyPanel.locator("[data-ai-simulation-kronos-forecast-chart]").first().waitFor();
+    await historyPanel.locator('[data-ai-simulation-kronos-origin-mark="exact-final"]').first().waitFor();
     const historyScroll = historyPanel.locator("[data-simulation-history-scroll]");
     const historyScrollMetrics = await historyScroll.evaluate((element) => ({
       clientHeight: element.clientHeight,
@@ -635,10 +687,10 @@ async function verify(browser, baseUrl, viewport, theme) {
 
     const presetSelect = page.getByRole("combobox", { name: "AI 판단 프리셋" });
     await presetSelect.click();
-    for (const presetLabel of ["추세 수익", "돌파 가속", "반등 수익", "방어 수익"]) {
+    for (const presetLabel of ["추세 수익", "돌파 가속 · 최대 공격", "반등 수익", "방어 수익"]) {
       await page.getByRole("option", { name: presetLabel, exact: true }).waitFor();
     }
-    await page.getByRole("option", { name: "돌파 가속", exact: true }).click();
+    await page.getByRole("option", { name: "돌파 가속 · 최대 공격", exact: true }).click();
 
     const riskSlider = page.getByRole("slider", { name: "공격 방어 성향" });
     await riskSlider.evaluate((element, value) => {
@@ -748,6 +800,17 @@ async function verify(browser, baseUrl, viewport, theme) {
     await chartGrid.locator('[data-ai-simulation-price-overlay="trend-ema:value"]').first().waitFor();
     await chartGrid.locator('[data-ai-simulation-pattern="bullish"]').first().waitFor();
     await chartGrid.locator('[data-ai-simulation-trade-marker="buy"]').first().waitFor();
+    const liveForecastSection = currentRunPanel.locator("[data-ai-simulation-kronos-forecast-section]");
+    await liveForecastSection.waitFor();
+    await liveForecastSection.locator("[data-ai-simulation-kronos-forecast-chart]").first().waitFor();
+    await liveForecastSection.locator('[data-ai-simulation-kronos-origin-mark="exact-final"]').first().waitFor();
+    for (const horizon of [5, 15, 30, 60]) {
+      await liveForecastSection.locator(`[data-ai-simulation-kronos-horizon="${horizon}"]`).waitFor();
+    }
+    const liveForecastCount = await liveForecastSection
+      .locator("[data-ai-simulation-kronos-forecast-chart]")
+      .count();
+    check(liveForecastCount === 1, `Kronos-base 예측 그래프가 1개가 아니라 ${liveForecastCount}개입니다.`);
 
     const scrollMetrics = {};
     for (const [name, selector] of [
@@ -782,6 +845,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       "[data-simulation-selected]",
       "[data-simulation-positions]",
       "[data-simulation-charts]",
+      "[data-ai-simulation-kronos-forecast-section]",
       "[data-simulation-trades]",
       "[data-simulation-decisions]",
     ].join(",")).evaluateAll((items) => items.map((item) => ({
@@ -824,6 +888,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       requestedRiskTolerance,
       selectedCount,
       chartCount,
+      liveForecastCount,
       historyScrollMetrics,
       historyRequests: state.historyRequests,
       reportRequests: state.reportRequests,

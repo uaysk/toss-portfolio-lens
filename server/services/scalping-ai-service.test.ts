@@ -26,7 +26,7 @@ function requestBase(requestId: string): AiRequestBase {
 
 function model() {
   return {
-    model_id: "NeoQuasar/Kronos-small",
+    model_id: "NeoQuasar/Kronos-base",
     model_revision: "revision-a",
     tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
     tokenizer_revision: "revision-t",
@@ -87,7 +87,7 @@ describe("ScalpingAiService", () => {
     expect(putPrediction).toHaveBeenCalledWith(expect.objectContaining({
       status: "unavailable",
       dataQuality: "model_unavailable",
-      modelName: "NeoQuasar/Kronos-small",
+      modelName: "NeoQuasar/Kronos-base",
       modelVersion: "revision-a",
       marketCountry: "US",
       retrospective: false,

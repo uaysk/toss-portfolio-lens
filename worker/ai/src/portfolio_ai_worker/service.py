@@ -286,7 +286,6 @@ class AIService:
         latency_ms = (perf_counter() - started) * 1_000
         generated_at = datetime.now(timezone.utc)
         provenance = binding.adapter.provenance
-        fallback_used = provenance.loaded and provenance.model_id != binding.expected_model_id
         return ModelRun(
             role=binding.role,
             expected_model_id=binding.expected_model_id,
@@ -294,9 +293,9 @@ class AIService:
             model=provenance,
             generated_at=generated_at,
             latency_ms=latency_ms,
-            degraded=fallback_used,
-            fallback_used=fallback_used,
-            fallback_reason=provenance.fallback_reason if fallback_used else None,
+            degraded=False,
+            fallback_used=False,
+            fallback_reason=None,
             input_origins=input_origins,
             input_end_aligned=True,
             raw_series=results,

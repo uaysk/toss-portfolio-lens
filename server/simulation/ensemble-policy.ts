@@ -10,7 +10,7 @@ import {
   type PairSession,
 } from "./pair-catalog.js";
 
-export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v1" as const;
+export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v2" as const;
 
 export type PairRustTechnicalState =
   | "watch"
@@ -58,7 +58,6 @@ export type PairEnsemblePolicyProfile = {
   policyVersion: typeof PAIR_ENSEMBLE_POLICY_VERSION;
   profileId: string;
   weights: {
-    chronos2: number;
     kronos: number;
     rust: number;
   };
@@ -70,7 +69,6 @@ export type PairEnsemblePolicyProfile = {
   returnScale: number;
   uncertaintyScale: number;
   entryScoreThreshold: number;
-  degradedEntryScoreThreshold: number;
   holdScoreThreshold: number;
   minimumScoreMargin: number;
   modelDirectionMargin: number;
@@ -78,36 +76,32 @@ export type PairEnsemblePolicyProfile = {
   minimumRiskForNeutralRust: number;
   cooldownMs: number;
   quoteMaximumAgeMs: number;
-  allowDegradedMode: boolean;
   requireCalibration: boolean;
 };
 
 export const DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE: Readonly<PairEnsemblePolicyProfile> =
   Object.freeze({
     policyVersion: PAIR_ENSEMBLE_POLICY_VERSION,
-    profileId: "conservative-v1",
+    profileId: "aggressive-kronos-rust-v2",
     weights: Object.freeze({
-      chronos2: 0.35,
-      kronos: 0.35,
-      rust: 0.3,
+      kronos: 0.72,
+      rust: 0.28,
     }),
     modelScoreWeights: Object.freeze({
-      netExpectedReturn: 0.55,
-      directionProbability: 0.3,
-      uncertaintyPenalty: 0.15,
+      netExpectedReturn: 0.6,
+      directionProbability: 0.32,
+      uncertaintyPenalty: 0.08,
     }),
-    returnScale: 0.02,
-    uncertaintyScale: 0.08,
-    entryScoreThreshold: 0.24,
-    degradedEntryScoreThreshold: 0.5,
-    holdScoreThreshold: 0.08,
-    minimumScoreMargin: 0.12,
-    modelDirectionMargin: 0.05,
-    neutralRustExposureScale: 0.5,
-    minimumRiskForNeutralRust: 60,
-    cooldownMs: 5 * 60_000,
+    returnScale: 0.01,
+    uncertaintyScale: 0.1,
+    entryScoreThreshold: 0.045,
+    holdScoreThreshold: 0.01,
+    minimumScoreMargin: 0.015,
+    modelDirectionMargin: 0.015,
+    neutralRustExposureScale: 0.8,
+    minimumRiskForNeutralRust: 70,
+    cooldownMs: 60_000,
     quoteMaximumAgeMs: 30_000,
-    allowDegradedMode: false,
     requireCalibration: false,
   });
 
@@ -147,7 +141,6 @@ export type PairEnsembleDecision = {
   reasonCodes: string[];
   weights: PairEnsemblePolicyProfile["weights"];
   componentScores: {
-    chronos2: PairModelDirectionScore;
     kronos: PairModelDirectionScore;
     rust: PairRustDirectionScore;
   };
@@ -207,7 +200,7 @@ export function validatePairEnsemblePolicyProfile(
     || !profile.profileId.trim()) {
     throw new Error("Pair ensemble policy profile identity is invalid.");
   }
-  const componentWeight = profile.weights.chronos2 + profile.weights.kronos + profile.weights.rust;
+  const componentWeight = profile.weights.kronos + profile.weights.rust;
   const scoreWeight = profile.modelScoreWeights.netExpectedReturn
     + profile.modelScoreWeights.directionProbability
     + profile.modelScoreWeights.uncertaintyPenalty;
@@ -218,11 +211,14 @@ export function validatePairEnsemblePolicyProfile(
     || !Number.isFinite(profile.returnScale) || profile.returnScale <= 0
     || !Number.isFinite(profile.uncertaintyScale) || profile.uncertaintyScale <= 0
     || !Number.isFinite(profile.entryScoreThreshold)
-    || !Number.isFinite(profile.degradedEntryScoreThreshold)
-    || profile.degradedEntryScoreThreshold < profile.entryScoreThreshold
+    || profile.entryScoreThreshold < 0 || profile.entryScoreThreshold > 1
     || !Number.isFinite(profile.holdScoreThreshold)
-    || !Number.isFinite(profile.minimumScoreMargin) || profile.minimumScoreMargin < 0
-    || !Number.isFinite(profile.modelDirectionMargin) || profile.modelDirectionMargin < 0
+    || profile.holdScoreThreshold < 0
+    || profile.holdScoreThreshold > profile.entryScoreThreshold
+    || !Number.isFinite(profile.minimumScoreMargin)
+    || profile.minimumScoreMargin < 0 || profile.minimumScoreMargin > 2
+    || !Number.isFinite(profile.modelDirectionMargin)
+    || profile.modelDirectionMargin < 0 || profile.modelDirectionMargin > 2
     || !Number.isFinite(profile.neutralRustExposureScale)
     || profile.neutralRustExposureScale < 0 || profile.neutralRustExposureScale > 1
     || !Number.isSafeInteger(profile.minimumRiskForNeutralRust)
@@ -364,7 +360,6 @@ function scoreRust(
 
 function latestEligibleAt(input: PairEnsembleInput, quote?: PairExecutionQuote): string {
   const candidates = [
-    input.models.chronos2.generatedAt,
     input.models.kronos.generatedAt,
     input.rust.observedAt,
     input.rust.earliestEligibleAt,
@@ -426,24 +421,19 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   if (input.models.signalSymbol !== pair.signalSymbol) {
     throw new Error("Normalized model signal symbol does not match the pair catalog.");
   }
-  const chronos2 = scoreModel(input.models.chronos2, pair, input, profile);
   const kronos = scoreModel(input.models.kronos, pair, input, profile);
   const rust = scoreRust(input.rust, input.currentDirection);
-  const componentScores = { chronos2, kronos, rust };
+  const componentScores = { kronos, rust };
   const finalScores = {
     bull: rounded(
-      chronos2.bull * profile.weights.chronos2
-      + kronos.bull * profile.weights.kronos
+      kronos.bull * profile.weights.kronos
       + rust.bull * profile.weights.rust
     ),
     bear: rounded(
-      chronos2.bear * profile.weights.chronos2
-      + kronos.bear * profile.weights.kronos
+      kronos.bear * profile.weights.kronos
       + rust.bear * profile.weights.rust
     ),
     cash: rounded(Math.max(0, 1 - Math.max(
-      chronos2.bull,
-      chronos2.bear,
       kronos.bull,
       kronos.bear,
       rust.bull,
@@ -456,20 +446,11 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     switchCostApplied: input.currentDirection !== "cash",
   };
   const reasons: string[] = [];
-  const modelOutputs = [input.models.chronos2, input.models.kronos];
-  const usableModels = modelOutputs.filter((model) => model.status !== "unavailable");
-  const degraded = usableModels.length < 2
-    || usableModels.some((model) => model.status === "degraded");
-  const degradedOrigin = usableModels.length === 1
-    && profile.allowDegradedMode
-    && input.models.expectedOrigin
-    && usableModels[0]?.inputEndAt
-    && Date.parse(usableModels[0].inputEndAt) === Date.parse(input.models.expectedOrigin)
-    ? finiteTimestamp(input.models.expectedOrigin)
-    : undefined;
+  const model = input.models.kronos;
+  const degraded = model.status === "degraded";
   const origin = input.models.alignmentStatus === "aligned"
     ? input.models.alignedOrigin
-    : degradedOrigin;
+    : undefined;
 
   if (!origin) {
     reasons.push("model_origin_not_aligned");
@@ -484,7 +465,14 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   if (input.market.dataQuality === "stale" || input.market.dataQuality === "unavailable") {
     reasons.push("execution_data_unavailable_or_stale");
   }
-  for (const direction of ["bull", "bear"] as const) {
+  // A new position is admitted only when both legs are executable. Once a
+  // position is held, the immediate executable action is a hold or liquidation
+  // of that held leg; an unavailable opposite-leg quote must not trap it.
+  const requiredQuoteDirections: readonly ("bull" | "bear")[] =
+    input.currentDirection === "cash"
+      ? ["bull", "bear"]
+      : [input.currentDirection];
+  for (const direction of requiredQuoteDirections) {
     const quote = input.market.quotes[direction];
     const observedAt = finiteTimestamp(quote?.observedAt);
     if (!quote || quote.status !== "available" || !observedAt) {
@@ -505,40 +493,33 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   if (!pair.allowedSessions.includes(input.market.session as PairSession)) {
     reasons.push("session_not_allowed");
   }
-  if (!usableModels.length) reasons.push("all_models_unavailable");
-  if (usableModels.length < 2 && !profile.allowDegradedMode) {
-    reasons.push("degraded_mode_disabled");
-  }
-  if (profile.requireCalibration && usableModels.some((model) => (
-    model.calibration.status !== "good"
-  ))) {
+  if (model.status === "unavailable") reasons.push("kronos_model_unavailable");
+  // A partially degraded base model is never promoted by reweighting Rust.
+  // The aggressive profile changes thresholds only for a fully available,
+  // aligned model; data/model degradation remains fail-closed.
+  if (model.status === "degraded") reasons.push("kronos_model_degraded");
+  if (profile.requireCalibration && model.calibration.status !== "good") {
     reasons.push("calibration_required");
   }
-  if (modelOutputs.some((model) => model.calibration.status === "poor")) {
+  if (model.calibration.status === "poor") {
     reasons.push("calibration_poor");
   }
   if (input.currentDirection !== "cash" && input.rust.status === "exit_candidate") {
     reasons.push("rust_exit_candidate");
   }
   const currentNetReturns = input.currentDirection === "bull"
-    ? [chronos2.bullNetExpectedReturn, kronos.bullNetExpectedReturn]
+    ? [kronos.bullNetExpectedReturn]
     : input.currentDirection === "bear"
-      ? [chronos2.bearNetExpectedReturn, kronos.bearNetExpectedReturn]
+      ? [kronos.bearNetExpectedReturn]
       : [];
-  if (currentNetReturns.length === 2 && currentNetReturns.every((value) => value <= 0)) {
+  if (currentNetReturns.length === 1 && currentNetReturns[0]! <= 0) {
     reasons.push("held_direction_net_expected_return_nonpositive");
   }
   if (reasons.length) {
     return cashDecision(input, profile, componentScores, finalScores, costs, reasons, degraded, origin);
   }
 
-  const modelDirections = usableModels.map((model) => (
-    model.component === "chronos2" ? chronos2.preferredDirection : kronos.preferredDirection
-  ));
-  const nonCashModelDirections = modelDirections.filter(
-    (direction): direction is "bull" | "bear" => direction !== "cash",
-  );
-  if (nonCashModelDirections.length !== modelDirections.length) {
+  if (kronos.preferredDirection === "cash") {
     return cashDecision(
       input,
       profile,
@@ -550,31 +531,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
       origin,
     );
   }
-  if (new Set(nonCashModelDirections).size !== 1) {
-    return cashDecision(
-      input,
-      profile,
-      componentScores,
-      finalScores,
-      costs,
-      ["ai_model_direction_conflict"],
-      degraded,
-      origin,
-    );
-  }
-  const candidate = nonCashModelDirections[0]!;
-  if (degraded && rust.preferredDirection !== candidate) {
-    return cashDecision(
-      input,
-      profile,
-      componentScores,
-      finalScores,
-      costs,
-      ["degraded_requires_rust_direction_agreement"],
-      degraded,
-      origin,
-    );
-  }
+  const candidate = kronos.preferredDirection;
   if (rust.preferredDirection !== "cash" && rust.preferredDirection !== candidate) {
     return cashDecision(
       input,
@@ -587,7 +544,10 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
       origin,
     );
   }
-  const quote = input.market.quotes[candidate];
+  const immediateExecutionDirection = input.currentDirection === "cash"
+    ? candidate
+    : input.currentDirection;
+  const quote = input.market.quotes[immediateExecutionDirection];
   const quoteObservedAt = finiteTimestamp(quote?.observedAt);
   if (!quote || quote.status !== "available" || !quoteObservedAt) {
     return cashDecision(
@@ -648,7 +608,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   }
   const threshold = input.currentDirection === candidate
     ? profile.holdScoreThreshold
-    : degraded ? profile.degradedEntryScoreThreshold : profile.entryScoreThreshold;
+    : profile.entryScoreThreshold;
   const riskAdjustment = input.currentDirection === candidate
     ? 0
     : (100 - input.riskTolerance) / 1_000;
@@ -714,9 +674,9 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     degraded,
     exposureScale,
     reasonCodes: unique([
-      "ai_models_direction_agree",
+      "kronos_direction_actionable",
       rustNeutral ? "rust_neutral_reduced_exposure" : "rust_direction_supports_ai",
-      degraded ? "degraded_threshold_applied_without_weight_redistribution" : "full_ensemble_available",
+      "kronos_rust_ensemble_available",
       "cost_and_uncertainty_adjusted_score_passed",
     ]),
     weights: { ...profile.weights },

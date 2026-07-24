@@ -89,8 +89,6 @@ def settings(tmp_path: Path, **updates: object) -> AISettings:
     value = AISettings(
         model_cache_dir=tmp_path / "models",
         manifest_path=tmp_path / "manifest.json",
-        primary_model="kronos-small",
-        fallback_model="chronos-bolt-small",
         device="cpu",
         allow_cpu_fallback=True,
         expected_cuda_capability="6.1",

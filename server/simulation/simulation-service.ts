@@ -63,6 +63,7 @@ import {
 import {
   comparePairStrategies,
   isNonOverlappingPairComparisonOrigin,
+  selectBestExecutablePairOutcome,
   type PairStrategyComparisonObservation,
   type PairStrategyLaneObservation,
 } from "./strategy-comparison.js";
@@ -501,6 +502,7 @@ type PairPendingComparison = {
   origin: string;
   eligibleAfter: string;
   targetTimestamp: string;
+  signalOriginPrice?: number;
   lanes: PairStrategyComparisonObservation["lanes"];
 };
 
@@ -652,9 +654,7 @@ function pairExecutionMarketInput(
 }
 
 function pairActionModel(models: NormalizedPairModelSet): AiPaperForecastCandidate["model"] {
-  const source = [models.chronos2, models.kronos].find(({ status }) => status !== "unavailable")
-    ?? models.chronos2;
-  const provenance = source.provenance;
+  const provenance = models.kronos.provenance;
   const device = provenance.device === "cuda" || provenance.device === "cpu"
     || provenance.device === "unavailable"
     ? provenance.device
@@ -684,25 +684,20 @@ function pairModelAverage(
   models: NormalizedPairModelSet,
   key: "medianReturn" | "q10Return" | "q90Return" | "upProbability",
 ): number {
-  const values = [models.chronos2[key], models.kronos[key]].filter(
-    (value): value is number => value !== undefined && Number.isFinite(value),
-  );
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const value = models.kronos[key];
+  return value !== undefined && Number.isFinite(value) ? value : 0;
 }
 
 function pairCommonTargetTimestamp(
   models: NormalizedPairModelSet,
 ): string | undefined {
-  const targets = [...new Set(
-    [models.chronos2, models.kronos]
-      .filter((model) => model.status !== "unavailable")
-      .flatMap((model) => model.targetTimestamp ?? []),
-  )];
-  return targets.length === 1 ? targets[0] : undefined;
+  return models.kronos.status !== "unavailable"
+    ? models.kronos.targetTimestamp
+    : undefined;
 }
 
 function pairProvenanceStrings(models: NormalizedPairModelSet): string[] {
-  return [models.chronos2, models.kronos].flatMap((model) => {
+  return [models.kronos].flatMap((model) => {
     const provenance = model.provenance;
     return [
       `${model.component}:${model.status}`,
@@ -912,6 +907,25 @@ function latestFinalChartOrigin(
     .at(-1)?.timestamp;
 }
 
+function finalizedChartMarkAt(
+  session: ActiveSession,
+  symbol: string,
+  origin: string,
+): ObservedMark | undefined {
+  const expected = Date.parse(origin);
+  if (!Number.isFinite(expected)) return undefined;
+  const bar = session.charts.find((chart) => chart.symbol === symbol)?.bars.find((candidate) => (
+    candidate.status === "final"
+    && Date.parse(candidate.timestamp) === expected
+    && Number.isFinite(candidate.close)
+    && candidate.close > 0
+  ));
+  return bar ? {
+    price: bar.close,
+    observedAt: new Date(expected).toISOString(),
+  } : undefined;
+}
+
 function insideSessionBoundary(session: ActiveSession, value: string): boolean {
   const instant = Date.parse(value);
   const started = session.startedAt ? Date.parse(session.startedAt) : Number.NEGATIVE_INFINITY;
@@ -985,7 +999,7 @@ function firstObservedMarkAtOrAfter(
 function pairModelComparisonLane(
   pair: PairCatalogEntry,
   model: NormalizedPairModelOutput,
-  score: PairEnsembleDecision["componentScores"]["chronos2"],
+  score: PairEnsembleDecision["componentScores"]["kronos"],
 ): PairStrategyLaneObservation {
   if (model.status === "unavailable") {
     return {
@@ -1067,7 +1081,7 @@ function pairEnsembleComparisonLane(
 
 function pairComparisonReasons(
   session: ActiveSession,
-  lane: "chronos2" | "kronos" | "rust" | "ensemble",
+  lane: "kronos" | "rust" | "ensemble",
 ): UnknownRecord[] {
   return session.decisions.flatMap((decision) => {
     if (!decision.ensemble || !decision.modelOutputs || !decision.rustSignal) return [];
@@ -1153,7 +1167,7 @@ function buildPairStrategyComparison(session: ActiveSession): unknown {
       latencyMs: metrics.averageLatencyMs,
       decisionReasons: pairComparisonReasons(
         session,
-        id as "chronos2" | "kronos" | "rust" | "ensemble",
+        id as "kronos" | "rust" | "ensemble",
       ),
       ...(metrics.status === "unavailable" ? {
         unavailableReason: pending
@@ -1634,19 +1648,17 @@ export class AiTradingSimulationService {
         gpuForecastWorker: "provenance_reported_per_run",
         nextObservedExecutionOnly: true,
         pairStrategy: true,
-        dualModelEnsemble: true,
+        kronosRustEnsemble: true,
         marketCountries: "KR,US",
       },
       pairStrategy: {
         enabled: true,
         catalogVersion: PAIR_CATALOG_VERSION,
-        allowDegradedMode: true,
+        allowDegradedMode: false,
         directions: ["bull", "bear", "cash"],
         exclusivity: "one_active_direction_per_pair",
         models: {
-          chronos2: "amazon/chronos-2",
-          kronos: "NeoQuasar/Kronos-small",
-          explicitChronosFallback: "amazon/chronos-bolt-small",
+          kronos: "NeoQuasar/Kronos-base",
         },
         pairs: [...DEFAULT_PAIR_CATALOG.values()].map((pair) => ({
           pairId: pair.pairId,
@@ -1673,7 +1685,7 @@ export class AiTradingSimulationService {
         "진행 중인 봉을 미래정보처럼 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "페어 전략은 기초자산 신호와 실행 ETF를 분리하며 bull·bear·cash 중 하나만 활성화합니다.",
-        "Chronos-2, Kronos-small 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
+        "Kronos-base 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
         "서버 재시작 중이던 forward session은 이어서 체결하지 않고 fail-closed 처리합니다.",
@@ -1727,7 +1739,6 @@ export class AiTradingSimulationService {
       modelScoreWeights: {
         ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.modelScoreWeights,
       },
-      allowDegradedMode: strategy.mode === "pair" && strategy.allowDegradedMode,
     } : resolvePaperPolicyProfile(input.preset, input.riskTolerance);
     const config = {
       schema_version: AI_SIMULATION_CONTRACT_VERSION,
@@ -2536,7 +2547,6 @@ export class AiTradingSimulationService {
         execution_symbols: executionSymbols(session),
         direction: session.pair?.lastDecision?.direction ?? "cash",
         model_ids: [
-          session.pair?.lastModels?.chronos2.provenance.modelId,
           session.pair?.lastModels?.kronos.provenance.modelId,
         ].filter(Boolean),
         expires_at: session.expiresAt,
@@ -2742,17 +2752,26 @@ export class AiTradingSimulationService {
       || session.pair.comparisonObservations.some((item) => item.observationId === observationId)) {
       return;
     }
+    const observedSignal = observedMarkAt(
+      session,
+      session.pair.catalog.signalSymbol,
+      decision.origin,
+    );
+    const signalAtOrigin = observedSignal
+      && Date.parse(observedSignal.observedAt) === Date.parse(decision.origin)
+      ? observedSignal
+      : finalizedChartMarkAt(
+          session,
+          session.pair.catalog.signalSymbol,
+          decision.origin,
+        );
     session.pair.comparisonPending.push({
       observationId,
       origin: decision.origin,
       eligibleAfter: decision.eligibleAfter,
       targetTimestamp,
+      ...(signalAtOrigin ? { signalOriginPrice: signalAtOrigin.price } : {}),
       lanes: {
-        chronos2: pairModelComparisonLane(
-          session.pair.catalog,
-          models.chronos2,
-          decision.componentScores.chronos2,
-        ),
         kronos: pairModelComparisonLane(
           session.pair.catalog,
           models.kronos,
@@ -2789,7 +2808,9 @@ export class AiTradingSimulationService {
       const signalAtOrigin = signalAtOrBeforeOrigin
         && Date.parse(signalAtOrBeforeOrigin.observedAt) === Date.parse(pending.origin)
         ? signalAtOrBeforeOrigin
-        : undefined;
+        : pending.signalOriginPrice !== undefined
+          ? { price: pending.signalOriginPrice, observedAt: pending.origin }
+          : undefined;
       const signalAtTarget = firstObservedMarkAtOrAfter(
         session,
         session.pair.catalog.signalSymbol,
@@ -2855,42 +2876,31 @@ export class AiTradingSimulationService {
         );
         continue;
       }
-      const signalReturn = signalAtTarget.price / signalAtOrigin.price - 1;
-      const baseCostRate = (
-        session.request.costs.commissionBpsPerSide * 2
-        + session.request.costs.taxBpsOnExit
-        + session.request.costs.spreadBpsRoundTrip
-        + session.request.costs.slippageBpsPerSide * 2
-      ) / 10_000;
-      const leverage = Math.max(
-        Math.abs(session.pair.catalog.bull.leverageMultiplier),
-        Math.abs(session.pair.catalog.bear.leverageMultiplier),
-      );
-      const neutralThreshold = baseCostRate / leverage;
-      const actualDirection: PairDirection = signalReturn > neutralThreshold
-        ? "bull"
-        : signalReturn < -neutralThreshold ? "bear" : "cash";
-      const actualExecutionSymbol = mapPairDirection(
-        session.pair.catalog,
-        actualDirection,
-      ).executionSymbol;
+      const executableOutcomes = {
+        bull: {
+          executionSymbol: bullSymbol,
+          grossReturn: bullExit.price / bullEntry.price - 1,
+        },
+        bear: {
+          executionSymbol: bearSymbol,
+          grossReturn: bearExit.price / bearEntry.price - 1,
+        },
+      };
+      const actual = selectBestExecutablePairOutcome(executableOutcomes, {
+        commissionBpsPerSide: session.request.costs.commissionBpsPerSide,
+        taxBpsOnExit: session.request.costs.taxBpsOnExit,
+        spreadBpsRoundTrip: session.request.costs.spreadBpsRoundTrip,
+        slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
+        switchCostBps: Math.max(5, session.request.costs.spreadBpsRoundTrip),
+      });
       session.pair.comparisonObservations.push({
         observationId: pending.observationId,
         origin: pending.origin,
         eligibleAfter: pending.eligibleAfter,
         targetTimestamp: pending.targetTimestamp,
-        actualDirection,
-        ...(actualExecutionSymbol ? { actualExecutionSymbol } : {}),
-        executableOutcomes: {
-          bull: {
-            executionSymbol: bullSymbol,
-            grossReturn: bullExit.price / bullEntry.price - 1,
-          },
-          bear: {
-            executionSymbol: bearSymbol,
-            grossReturn: bearExit.price / bearEntry.price - 1,
-          },
-        },
+        actualDirection: actual.direction,
+        ...(actual.executionSymbol ? { actualExecutionSymbol: actual.executionSymbol } : {}),
+        executableOutcomes,
         lanes: pending.lanes,
       });
     }
@@ -2959,8 +2969,6 @@ export class AiTradingSimulationService {
       });
     }
     const rust = pairRustTechnicalInput(technicalValue);
-    const allowDegradedMode = session.request.strategy?.mode === "pair"
-      && session.request.strategy.allowDegradedMode;
     const models = normalizePairModelOutputs(forecast, {
       signalSymbol: session.pair.catalog.signalSymbol,
       ...(expectedOrigin ? { expectedOrigin } : {}),
@@ -2968,13 +2976,11 @@ export class AiTradingSimulationService {
       maximumOriginAgeMs: 180_000,
       requireCuda: true,
       requiredDeviceName: "Tesla P40",
-      allowChronosFallback: allowDegradedMode,
     });
     const profile = {
       ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE,
       weights: { ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.weights },
       modelScoreWeights: { ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.modelScoreWeights },
-      allowDegradedMode,
     };
     const ensembleInput: PairEnsembleInput = {
       pair: session.pair.catalog,
@@ -3041,14 +3047,13 @@ export class AiTradingSimulationService {
       ...stateTransition.reasonCodes,
     ]);
     const forecastGeneratedAt = latestTimestamp([
-      models.chronos2.generatedAt,
       models.kronos.generatedAt,
       decisionAt,
     ]) ?? decisionAt;
     const model = pairActionModel(models);
     const predictedVolatility = Math.max(
       0,
-      ...[models.chronos2, models.kronos]
+      ...[models.kronos]
         .filter((output) => output.status !== "unavailable")
         .map((output) => (
         output.expectedVolatility ?? (output.uncertaintyWidth ?? 0) / 2
@@ -3113,8 +3118,6 @@ export class AiTradingSimulationService {
       session.pair.provenanceRecords.shift();
     }
     const components = {
-      chronos2Bull: decision.componentScores.chronos2.bull,
-      chronos2Bear: decision.componentScores.chronos2.bear,
       kronosBull: decision.componentScores.kronos.bull,
       kronosBear: decision.componentScores.kronos.bear,
       rustBull: decision.componentScores.rust.bull,
@@ -3549,7 +3552,10 @@ export class AiTradingSimulationService {
     }
     let pairEntrySignalMark: ObservedMark | undefined;
     if (session.pair) {
-      const quotes = executionSymbols(session).map((executionSymbol) => ({
+      const requiredExecutionSymbols = action.action === "sell"
+        ? [symbol]
+        : executionSymbols(session);
+      const quotes = requiredExecutionSymbols.map((executionSymbol) => ({
         executionSymbol,
         quote: session.pair!.quotes[executionSymbol],
       }));
@@ -3564,7 +3570,8 @@ export class AiTradingSimulationService {
       if (invalidQuote) {
         this.warn(
           session,
-          `체결 시점의 bull/bear 호가가 없거나 stale/wide라 가상 체결을 보류했습니다: `
+          `${action.action === "sell" ? "청산" : "진입"} 체결 시점의 필수 호가가 `
+          + `없거나 stale/wide라 가상 체결을 보류했습니다: `
           + invalidQuote.executionSymbol,
         );
         return;
@@ -3913,8 +3920,7 @@ export class AiTradingSimulationService {
           bear: session.pair.catalog.bear,
           allowedSessions: session.pair.catalog.allowedSessions,
           maxSpreadBps: session.pair.catalog.maxSpreadBps,
-          allowDegradedMode: session.request.strategy?.mode === "pair"
-            && session.request.strategy.allowDegradedMode,
+          allowDegradedMode: false,
         },
         pairState: {
           direction: session.pair.direction,
@@ -3931,8 +3937,6 @@ export class AiTradingSimulationService {
         modelScoreWeights: {
           ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.modelScoreWeights,
         },
-        allowDegradedMode: session.request.strategy?.mode === "pair"
-          && session.request.strategy.allowDegradedMode,
       } : resolvePaperPolicyProfile(
         session.request.preset,
         session.request.riskTolerance,
@@ -4126,8 +4130,6 @@ export class AiTradingSimulationService {
             modelScoreWeights: {
               ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.modelScoreWeights,
             },
-            allowDegradedMode: session.request.strategy?.mode === "pair"
-              && session.request.strategy.allowDegradedMode,
           } : resolvePaperPolicyProfile(
             session.request.preset,
             session.request.riskTolerance,

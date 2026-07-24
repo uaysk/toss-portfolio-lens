@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   comparePairStrategies,
   isNonOverlappingPairComparisonOrigin,
+  selectBestExecutablePairOutcome,
   type PairStrategyComparisonObservation,
 } from "./strategy-comparison.js";
 
@@ -23,14 +24,6 @@ function observation(
       bear: { executionSymbol: "TSLQ", grossReturn: index === 0 ? -0.025 : 0.025 },
     },
     lanes: {
-      chronos2: {
-        status: "available",
-        direction: index === 0 ? "bull" : "bear",
-        executionSymbol: index === 0 ? "TSLL" : "TSLQ",
-        directionProbability: 0.7,
-        calibrationStatus: "good",
-        latencyMs: 120,
-      },
       kronos: {
         status: "available",
         direction: index === 0 ? "bull" : "bear",
@@ -74,6 +67,33 @@ const input = {
 } as const;
 
 describe("pair strategy comparison", () => {
+  it("labels the realized direction from the best positive execution-ETF net outcome", () => {
+    expect(selectBestExecutablePairOutcome({
+      bull: { executionSymbol: "TSLL", grossReturn: 0.004 },
+      bear: { executionSymbol: "TSLQ", grossReturn: 0.009 },
+    }, input.costs)).toMatchObject({
+      direction: "bear",
+      executionSymbol: "TSLQ",
+      netReturns: { bull: 0.0029, bear: 0.0079, cash: 0 },
+    });
+
+    expect(selectBestExecutablePairOutcome({
+      bull: { executionSymbol: "TSLL", grossReturn: 0.001 },
+      bear: { executionSymbol: "TSLQ", grossReturn: -0.002 },
+    }, input.costs)).toMatchObject({
+      direction: "cash",
+      executionSymbol: null,
+    });
+
+    expect(selectBestExecutablePairOutcome({
+      bull: { executionSymbol: "TSLL", grossReturn: 0.005 },
+      bear: { executionSymbol: "TSLQ", grossReturn: 0.005 },
+    }, input.costs)).toMatchObject({
+      direction: "cash",
+      executionSymbol: null,
+    });
+  });
+
   it("compares all lanes on one explicit origin, cost, price, and period condition", () => {
     const result = comparePairStrategies(input);
     expect(result).toMatchObject({
@@ -83,7 +103,7 @@ describe("pair strategy comparison", () => {
       sameExecutionPolicy: true,
       common: { originCount: 2, initialCapital: 100_000 },
     });
-    expect(Object.keys(result.lanes)).toEqual(["chronos2", "kronos", "rust", "ensemble"]);
+    expect(Object.keys(result.lanes)).toEqual(["kronos", "rust", "ensemble"]);
     expect(result.lanes.ensemble).toMatchObject({
       status: "available",
       analyticalOnly: true,
@@ -93,7 +113,7 @@ describe("pair strategy comparison", () => {
       executionSelectionAccuracy: 1,
       tradeCount: 2,
     });
-    expect(result.lanes.chronos2.analyticalOnly).toBe(true);
+    expect(result.lanes.kronos.analyticalOnly).toBe(true);
     expect(result.lanes.ensemble.netReturn).toBeLessThan(
       result.lanes.ensemble.cumulativeReturn,
     );

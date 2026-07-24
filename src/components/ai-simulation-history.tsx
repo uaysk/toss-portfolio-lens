@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
+import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -40,7 +41,7 @@ type AiSimulationHistoryProps = {
 
 const PRESET_LABELS: Record<AiSimulationPreset, string> = {
   trend: "추세 수익",
-  breakout: "돌파 가속",
+  breakout: "돌파 가속 · 최대 공격",
   mean_reversion: "반등 수익",
   risk_management: "방어 수익",
 };
@@ -105,6 +106,14 @@ function statusLabel(value: string): string {
 
 function presetLabel(value?: AiSimulationPreset): string {
   return value ? PRESET_LABELS[value] : "프리셋 unavailable";
+}
+
+function riskDispositionLabel(value?: number): string {
+  if (!Number.isFinite(value)) return "unavailable";
+  if ((value as number) >= 100) return `최대 공격 · ${value}`;
+  if ((value as number) >= 67) return `공격 · ${value}`;
+  if ((value as number) <= 33) return `방어 · ${value}`;
+  return `균형 · ${value}`;
 }
 
 function selectionLabel(value?: AiSimulationSelectionRequest): string {
@@ -246,7 +255,7 @@ function DecisionList({
   return (
     <section className="min-w-0 rounded-2xl bg-secondary p-4" data-simulation-report-decisions>
       <div className="flex items-center justify-between gap-2">
-        <h4 className="flex items-center gap-2 text-xs font-black"><ListChecks className="size-3.5" />AI 판단</h4>
+        <h4 className="flex items-center gap-2 text-xs font-black"><ListChecks className="size-3.5" />전략 판단</h4>
         <span className="text-[9px] font-black text-muted-foreground">{decisions.length}건</span>
       </div>
       <div className="mt-3 max-h-72 min-h-0 space-y-2 overflow-y-auto overscroll-contain pr-1" tabIndex={0}>
@@ -406,13 +415,13 @@ export function SimulationRunReportView({
         <dl className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2 xl:grid-cols-3">
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">시장</dt><dd className="mt-1 font-black">{marketLabel(configuration.marketCountry)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">프리셋</dt><dd className="mt-1 font-black">{presetLabel(configuration.preset)}</dd></div>
-          <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">공격·방어</dt><dd className="mt-1 font-black">{configuration.riskTolerance ?? "unavailable"}</dd></div>
+          <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">공격·방어</dt><dd className="mt-1 font-black">{riskDispositionLabel(configuration.riskTolerance)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">종목 선정</dt><dd className="mt-1 font-black">{selectionLabel(configuration.selection)}</dd></div>
           <div className="rounded-xl bg-card p-3">
             <dt className="text-muted-foreground">전략 실행</dt>
             <dd className="mt-1 break-words font-black">
               {configuration.strategy?.mode === "pair"
-                ? `페어 비교 · ${configuration.strategy.pairId}${configuration.strategy.allowDegradedMode ? " · degraded 허용" : ""}`
+                ? `페어 비교 · ${configuration.strategy.pairId} · fail-closed`
                 : "단일 전략"}
             </dd>
           </div>
@@ -450,7 +459,7 @@ export function SimulationRunReportView({
 
         <section className="rounded-2xl bg-secondary p-4" data-simulation-report-models>
           <div className="flex items-center justify-between gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-black"><Cpu className="size-4" />AI 모델·판단 주기</h3>
+            <h3 className="flex items-center gap-2 text-sm font-black"><Cpu className="size-4" />Kronos-base 모델·판단 주기</h3>
             <span className="text-[9px] font-black text-muted-foreground">
               확정봉 {report.decisionCadence?.triggeredEvents ?? "–"}회
             </span>
@@ -466,7 +475,7 @@ export function SimulationRunReportView({
               data-simulation-report-decision-provenance
             >
               <summary className="cursor-pointer text-[9px] font-black">
-                판단 provenance {report.decisionProvenance.length}건 · Chronos-2 / Kronos-small
+                판단 provenance {report.decisionProvenance.length}건 · Kronos-base / Rust
               </summary>
               <div className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1">
                 {[...report.decisionProvenance].reverse().map((decision, decisionIndex) => (
@@ -494,11 +503,9 @@ export function SimulationRunReportView({
                     <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
                       origin {timestamp(decision.origin)} · 판단 {timestamp(decision.decisionAt)}
                     </p>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <div className="mt-2 grid gap-2">
                       {decision.models.map((model) => {
-                        const componentLabel = model.component === "chronos2"
-                          ? "Chronos-2"
-                          : "Kronos-small";
+                        const componentLabel = "Kronos-base";
                         const device = [model.device, model.deviceName].filter(Boolean).join(" · ")
                           || "unavailable";
                         return (
@@ -530,12 +537,6 @@ export function SimulationRunReportView({
                                 ? `${(model.latencyMs as number).toFixed(0)}ms`
                                 : "unavailable"}
                             </p>
-                            {model.fallbackUsed ? (
-                              <p className="mt-2 break-words rounded-lg bg-amber-500/10 p-2 text-[8px] leading-4 text-amber-700 dark:text-amber-300">
-                                fallback{model.fallbackFrom ? ` from ${model.fallbackFrom}` : ""}
-                                {model.fallbackReason ? ` · ${model.fallbackReason}` : ""}
-                              </p>
-                            ) : null}
                           </section>
                         );
                       })}
@@ -609,6 +610,12 @@ export function SimulationRunReportView({
           </div>
         </section>
       ) : null}
+
+      <AiSimulationKronosForecastSection
+        forecasts={report.kronosForecasts}
+        charts={report.charts}
+        currency={performance.currency}
+      />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <DecisionList decisions={report.decisions} />

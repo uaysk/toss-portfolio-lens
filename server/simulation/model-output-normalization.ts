@@ -1,6 +1,6 @@
-export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v1" as const;
+export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v2" as const;
 
-export type PairModelComponent = "chronos2" | "kronos";
+export type PairModelComponent = "kronos";
 export type PairModelStatus = "available" | "degraded" | "unavailable";
 export type PairCalibrationStatus = "good" | "poor" | "unavailable";
 export type PairInputQualityStatus = "good" | "partial" | "unavailable";
@@ -73,7 +73,6 @@ export type NormalizedPairModelSet = {
   alignedOrigin?: string;
   alignmentStatus: "aligned" | "misaligned" | "unavailable";
   reasonCodes: string[];
-  chronos2: NormalizedPairModelOutput;
   kronos: NormalizedPairModelOutput;
   rawResponse: unknown;
 };
@@ -86,7 +85,6 @@ export type PairModelNormalizationOptions = {
   maximumOriginAgeMs?: number;
   requireCuda?: boolean;
   requiredDeviceName?: string;
-  allowChronosFallback?: boolean;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -147,18 +145,14 @@ function unique(values: readonly string[]): string[] {
 function componentFrom(value: unknown): PairModelComponent | undefined {
   const normalized = text(value)?.toLowerCase().replaceAll(/[\s_/-]+/g, "");
   if (!normalized) return undefined;
-  if (normalized.includes("chronos2") || normalized === "chronos") return "chronos2";
-  if (normalized.includes("kronossmall") || normalized === "kronos") return "kronos";
+  if (normalized.includes("kronosbase") || normalized === "kronos") return "kronos";
   return undefined;
 }
 
 function componentFromModelId(value: unknown): PairModelComponent | undefined {
   const normalized = text(value)?.toLowerCase();
   if (!normalized) return undefined;
-  if (normalized === "amazon/chronos-2"
-    || normalized === "amazon/chronos-bolt-small"
-    || normalized.includes("chronos")) return "chronos2";
-  if (normalized === "neoquasar/kronos-small" || normalized.includes("kronos")) return "kronos";
+  if (normalized === "neoquasar/kronos-base" || normalized.includes("kronos")) return "kronos";
   return undefined;
 }
 
@@ -373,7 +367,7 @@ function normalizeRun(
   component: PairModelComponent,
   options: Required<Pick<
     PairModelNormalizationOptions,
-    "signalSymbol" | "horizonMinutes" | "maximumOriginAgeMs" | "requireCuda" | "allowChronosFallback"
+    "signalSymbol" | "horizonMinutes" | "maximumOriginAgeMs" | "requireCuda"
   >> & Pick<PairModelNormalizationOptions, "expectedOrigin" | "now" | "requiredDeviceName">,
 ): NormalizedPairModelOutput {
   const rawOutput = cloneRaw(run.raw);
@@ -441,13 +435,8 @@ function normalizeRun(
   }
   if (!provenance.loaded) reasonCodes.push("model_not_loaded");
   const modelId = provenance.modelId?.toLowerCase();
-  const expectedId = component === "chronos2"
-    ? "amazon/chronos-2"
-    : "neoquasar/kronos-small";
-  const isChronosFallback = component === "chronos2"
-    && (modelId === "amazon/chronos-bolt-small" || provenance.fallbackFrom !== undefined);
-  if (modelId !== expectedId && !isChronosFallback) reasonCodes.push("unexpected_model_id");
-  if (isChronosFallback) reasonCodes.push("chronos_fallback_used");
+  const expectedId = "neoquasar/kronos-base";
+  if (modelId !== expectedId) reasonCodes.push("unexpected_model_id");
   const expectedModelId = provenance.expectedModelId?.toLowerCase();
   const runFallbackReason = text(first(run.wrapper, "fallback_reason", "fallbackReason"), 1_000);
   const runProvenancePresent = provenance.expectedModelId !== undefined
@@ -455,23 +444,13 @@ function normalizeRun(
     || provenance.degraded !== undefined
     || runFallbackReason !== undefined;
   if (runProvenancePresent) {
-    const fallbackConsistent = provenance.fallbackUsed === true
-      ? component === "chronos2"
-        && expectedModelId === "amazon/chronos-2"
-        && modelId === "amazon/chronos-bolt-small"
-        && provenance.fallbackFrom?.toLowerCase() === "amazon/chronos-2"
-        && provenance.degraded === true
-        && provenance.loaded
-        && Boolean(runFallbackReason)
-        && runFallbackReason === provenance.fallbackReason
-      : provenance.fallbackUsed === false
-        ? expectedModelId === expectedId
-          && modelId === expectedId
-          && provenance.fallbackFrom === undefined
-          && provenance.fallbackReason === undefined
-          && provenance.degraded === false
-          && runFallbackReason === undefined
-        : false;
+    const fallbackConsistent = provenance.fallbackUsed === false
+      && expectedModelId === expectedId
+      && modelId === expectedId
+      && provenance.fallbackFrom === undefined
+      && provenance.fallbackReason === undefined
+      && provenance.degraded === false
+      && runFallbackReason === undefined;
     if (!fallbackConsistent) reasonCodes.push("model_run_provenance_inconsistent");
   }
   const inputProvenancePresent = provenance.inputInstrumentKey !== undefined
@@ -553,11 +532,9 @@ function normalizeRun(
     "forecast_horizon_stale",
     "stale_origin",
   ]);
-  if (isChronosFallback && !options.allowChronosFallback) blocking.add("chronos_fallback_used");
   const status: PairModelStatus = reasonCodes.some((reason) => blocking.has(reason))
     ? "unavailable"
-    : reasonCodes.includes("chronos_fallback_used")
-        || reasonCodes.includes("input_quality_partial")
+    : reasonCodes.includes("input_quality_partial")
         || provenance.degraded === true
       ? "degraded"
       : "available";
@@ -619,7 +596,6 @@ export function normalizePairModelOutputs(
     horizonMinutes,
     maximumOriginAgeMs,
     requireCuda: optionsInput.requireCuda ?? true,
-    allowChronosFallback: optionsInput.allowChronosFallback ?? false,
     ...(expectedOrigin ? { expectedOrigin } : {}),
     ...(now ? { now } : {}),
     ...(requiredDeviceName ? { requiredDeviceName } : {}),
@@ -638,67 +614,34 @@ export function normalizePairModelOutputs(
     }
     return normalizeRun(matches[0]!, component, options);
   };
-  const chronos2 = normalizeComponent("chronos2");
-  const kronos = normalizeComponent("kronos");
-  const origins = [chronos2.inputEndAt, kronos.inputEndAt].filter(
-    (value): value is string => value !== undefined,
+  const kronos = runs.some((run) => run.component === undefined)
+    ? unavailableOutput(
+        "kronos",
+        signalSymbol,
+        horizonMinutes,
+        ["unexpected_model_run"],
+        input,
+      )
+    : normalizeComponent("kronos");
+  const origin = kronos.inputEndAt;
+  const expectedAligned = !expectedOrigin || (
+    origin !== undefined && Date.parse(origin) === Date.parse(expectedOrigin)
   );
-  const bothUsableOrigins = origins.length === 2;
-  const alignedByTimestamp = bothUsableOrigins
-    && Date.parse(origins[0]!) === Date.parse(origins[1]!);
-  const targets = [chronos2.targetTimestamp, kronos.targetTimestamp].filter(
-    (value): value is string => value !== undefined,
-  );
-  const alignedByTarget = targets.length === 2
-    && Date.parse(targets[0]!) === Date.parse(targets[1]!);
-  const contexts = [chronos2, kronos].map((model) => model.provenance);
-  const contextProvenancePresent = contexts.some((context) => (
-    context.inputInstrumentKey !== undefined
-    || context.inputOriginAt !== undefined
-    || context.contextStartAt !== undefined
-    || context.barCount !== undefined
-    || context.inputDigest !== undefined
-  ));
-  const alignedByContext = !contextProvenancePresent || (
-    contexts.every((context) => (
-      context.inputInstrumentKey !== undefined
-      && context.inputOriginAt !== undefined
-      && context.contextStartAt !== undefined
-      && context.barCount !== undefined
-      && context.inputDigest !== undefined
-    ))
-    && contexts[0]!.inputInstrumentKey?.toUpperCase()
-      === contexts[1]!.inputInstrumentKey?.toUpperCase()
-    && Date.parse(contexts[0]!.inputOriginAt!)
-      === Date.parse(contexts[1]!.inputOriginAt!)
-    && Date.parse(contexts[0]!.contextStartAt!)
-      === Date.parse(contexts[1]!.contextStartAt!)
-    && contexts[0]!.barCount === contexts[1]!.barCount
-    && contexts[0]!.inputDigest === contexts[1]!.inputDigest
-  );
-  const aligned = alignedByTimestamp && alignedByTarget && alignedByContext;
-  const expectedAligned = !expectedOrigin || origins.every((origin) => (
-    Date.parse(origin) === Date.parse(expectedOrigin)
-  ));
-  const alignmentStatus: NormalizedPairModelSet["alignmentStatus"] = !bothUsableOrigins
+  const alignmentStatus: NormalizedPairModelSet["alignmentStatus"] = !origin
     ? "unavailable"
-    : aligned && expectedAligned ? "aligned" : "misaligned";
+    : expectedAligned ? "aligned" : "misaligned";
   const reasonCodes = unique([
-    ...(!alignedByTimestamp || !expectedAligned ? ["model_origin_mismatch"] : []),
-    ...(!alignedByTarget ? ["model_target_timestamp_mismatch"] : []),
-    ...(!alignedByContext ? ["model_input_context_mismatch"] : []),
+    ...(!expectedAligned ? ["model_origin_mismatch"] : []),
     ...(alignmentStatus === "unavailable" ? ["model_origin_unavailable"] : []),
-    ...chronos2.reasonCodes.map((reason) => `chronos2:${reason}`),
     ...kronos.reasonCodes.map((reason) => `kronos:${reason}`),
   ]);
   return {
     normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
     signalSymbol,
     ...(expectedOrigin ? { expectedOrigin } : {}),
-    ...(alignmentStatus === "aligned" ? { alignedOrigin: origins[0] } : {}),
+    ...(alignmentStatus === "aligned" ? { alignedOrigin: origin } : {}),
     alignmentStatus,
     reasonCodes,
-    chronos2,
     kronos,
     rawResponse: cloneRaw(input),
   };

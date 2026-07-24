@@ -130,10 +130,6 @@ services:
       AI_WEBSOCKET_TLS_KEY_FILE: ${AI_WEBSOCKET_TLS_KEY_FILE:-}
       AI_MODEL_CACHE_DIR: /models
       AI_MODEL_MANIFEST: /app/model-manifest.json
-      AI_MODEL_PRIMARY: ${AI_MODEL_PRIMARY:-chronos-2}
-      AI_MODEL_COMPANION: ${AI_MODEL_COMPANION:-kronos-small}
-      # Empty by default. Set chronos-bolt-small explicitly to opt into degraded fallback.
-      AI_MODEL_FALLBACK: ${AI_MODEL_FALLBACK:-}
       AI_DEVICE: ${AI_DEVICE:-cuda}
       AI_ALLOW_CPU_FALLBACK: ${AI_ALLOW_CPU_FALLBACK:-false}
       AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}

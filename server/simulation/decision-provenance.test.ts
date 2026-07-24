@@ -13,18 +13,16 @@ import { getPairCatalogEntry } from "./pair-catalog.js";
 
 const ORIGIN = "2026-07-24T14:30:00.000Z";
 
-function model(component: "chronos2" | "kronos"): NormalizedPairModelOutput {
+function model(): NormalizedPairModelOutput {
   return {
-    normalizationVersion: "pair-model-normalization/v1",
-    component,
+    normalizationVersion: "pair-model-normalization/v2",
+    component: "kronos",
     status: "available",
     reasonCodes: [],
     signalSymbol: "TSLA",
     horizonMinutes: 5,
     inputEndAt: ORIGIN,
-    generatedAt: component === "chronos2"
-      ? "2026-07-24T14:30:01.000Z"
-      : "2026-07-24T14:30:02.000Z",
+    generatedAt: "2026-07-24T14:30:02.000Z",
     targetTimestamp: "2026-07-24T14:35:00.000Z",
     medianReturn: 0.015,
     q10Return: 0,
@@ -36,15 +34,13 @@ function model(component: "chronos2" | "kronos"): NormalizedPairModelOutput {
     calibration: { status: "good" },
     inputQuality: { status: "good", warnings: [] },
     provenance: {
-      modelId: component === "chronos2"
-        ? "amazon/chronos-2"
-        : "NeoQuasar/Kronos-small",
+      modelId: "NeoQuasar/Kronos-base",
       modelRevision: "revision-a",
       device: "cuda",
       loaded: true,
     },
     rawOutput: {
-      model: component,
+      model: "kronos",
       quantiles: [0, 0.015, 0.03],
     },
   };
@@ -54,14 +50,13 @@ function ensembleInput(): PairEnsembleInput {
   return {
     pair: getPairCatalogEntry("tsla-tsll-tslq"),
     models: {
-      normalizationVersion: "pair-model-normalization/v1",
+      normalizationVersion: "pair-model-normalization/v2",
       signalSymbol: "TSLA",
       expectedOrigin: ORIGIN,
       alignedOrigin: ORIGIN,
       alignmentStatus: "aligned",
       reasonCodes: [],
-      chronos2: model("chronos2"),
-      kronos: model("kronos"),
+      kronos: model(),
       rawResponse: { requestId: "request-a" },
     },
     rust: {
@@ -123,15 +118,15 @@ describe("pair decision provenance", () => {
       executionSymbol: "TSLL",
       direction: "bull",
       origin: ORIGIN,
-      weights: { chronos2: 0.35, kronos: 0.35, rust: 0.3 },
+      weights: { kronos: 0.72, rust: 0.28 },
       rawInputs: {
-        chronos2: { model: "chronos2" },
         kronos: { model: "kronos" },
         rust: { status: "entry_candidate" },
       },
     });
-    expect(first.components).toHaveProperty("chronos2Bull");
-    expect(first.reasons).toContain("ai_models_direction_agree");
+    expect(first.components).toHaveProperty("kronosBull");
+    expect(first.components).not.toHaveProperty("chronos2Bull");
+    expect(first.reasons).toContain("kronos_direction_actionable");
     expect(verifyPairDecisionReplay(first)).toMatchObject({
       valid: true,
       reasonCodes: [],
@@ -154,7 +149,7 @@ describe("pair decision provenance", () => {
       decision: evaluatePairEnsemble(input),
       sizing: { quantity: 10 },
     });
-    provenance.replayInput.models.chronos2.rawOutput = { mutated: true };
+    provenance.replayInput.models.kronos.rawOutput = { mutated: true };
     provenance.decision.reasonCodes.push("mutated");
     provenance.sizing = { quantity: 11 };
     const verified = verifyPairDecisionReplay(provenance);
