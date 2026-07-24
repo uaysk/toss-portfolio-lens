@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v1" as const;
+export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v2" as const;
 
 const PairSymbolSchema = z.string()
   .trim()
@@ -26,6 +26,14 @@ export const PairExecutionLegSchema = z.object({
 }).strict();
 export type PairExecutionLeg = z.infer<typeof PairExecutionLegSchema>;
 
+export const PairSelectionProvenanceSchema = z.object({
+  verifiedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  bullLiquidityBasis: z.string().trim().min(1).max(500),
+  bearLiquidityBasis: z.string().trim().min(1).max(500),
+  sources: z.array(z.string().url()).min(1).max(8),
+}).strict();
+export type PairSelectionProvenance = z.infer<typeof PairSelectionProvenanceSchema>;
+
 export const PairCatalogEntrySchema = z.object({
   catalogVersion: z.literal(PAIR_CATALOG_VERSION),
   pairId: z.string().trim().min(1).max(96).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -36,6 +44,7 @@ export const PairCatalogEntrySchema = z.object({
   bear: PairExecutionLegSchema,
   allowedSessions: z.array(PairSessionSchema).min(1).max(4),
   maxSpreadBps: z.number().finite().positive().max(5_000),
+  selectionProvenance: PairSelectionProvenanceSchema.optional(),
 }).strict().superRefine((entry, context) => {
   if (entry.bull.leverageMultiplier <= 0) {
     context.addIssue({
@@ -141,6 +150,27 @@ const DEFAULT_PAIR_ENTRIES = [
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
     maxSpreadBps: 35,
+  },
+  {
+    catalogVersion: PAIR_CATALOG_VERSION,
+    pairId: "sndk-snxx-sndq",
+    marketCountry: "US",
+    currency: "USD",
+    signalSymbol: "SNDK",
+    bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
+    bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
+    allowedSessions: ["regular"],
+    maxSpreadBps: 75,
+    selectionProvenance: {
+      verifiedAt: "2026-07-25",
+      bullLiquidityBasis: "SNXX is the active +2x daily SNDK ETF with the largest verified sponsor-reported AUM.",
+      bearLiquidityBasis: "SNDQ is the verified active -2x daily SNDK ETF and the available inverse execution leg.",
+      sources: [
+        "https://www.tradretfs.com/snxx",
+        "https://www.tradretfs.com/sndq",
+        "https://www.tradretfs.com/news-and-media/tradr-etfs-celebrates-2nd-anniversary-now-managing-7b-in-assets",
+      ],
+    },
   },
   {
     catalogVersion: PAIR_CATALOG_VERSION,

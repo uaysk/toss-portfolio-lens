@@ -40,12 +40,18 @@ export type PairTradingCosts = {
   spreadBpsRoundTrip: number;
   slippageBpsPerSide: number;
   switchCostBps: number;
+  commissionFreeGrossAmountMaximum?: number;
+  sellRegulatoryBps?: number;
+  sellRegulatoryFeePerShare?: number;
+  sellRegulatoryFeeMaximum?: number;
+  estimatedOrderGrossAmount?: number;
 };
 
 export type PairExecutionQuote = {
   status: "available" | "stale" | "unavailable";
   observedAt?: string;
   spreadBps?: number;
+  referencePrice?: number;
 };
 
 export type PairExecutionMarketInput = {
@@ -243,9 +249,29 @@ function roundTripRate(
   direction: "bull" | "bear",
 ): number {
   const switching = input.currentDirection !== "cash" && input.currentDirection !== direction;
+  const grossAmount = input.costs.estimatedOrderGrossAmount;
+  const commissionWaived = input.costs.commissionFreeGrossAmountMaximum !== undefined
+    && grossAmount !== undefined
+    && grossAmount <= input.costs.commissionFreeGrossAmountMaximum;
+  const referencePrice = input.market.quotes[direction]?.referencePrice;
+  let perShareRegulatoryBps = referencePrice !== undefined
+    && Number.isFinite(referencePrice)
+    && referencePrice > 0
+    ? (input.costs.sellRegulatoryFeePerShare ?? 0) / referencePrice * 10_000
+    : 0;
+  if (grossAmount !== undefined
+    && grossAmount > 0
+    && input.costs.sellRegulatoryFeeMaximum !== undefined) {
+    perShareRegulatoryBps = Math.min(
+      perShareRegulatoryBps,
+      input.costs.sellRegulatoryFeeMaximum / grossAmount * 10_000,
+    );
+  }
   return (
-    input.costs.commissionBpsPerSide * 2
+    (commissionWaived ? 0 : input.costs.commissionBpsPerSide * 2)
     + input.costs.taxBpsOnExit
+    + (input.costs.sellRegulatoryBps ?? 0)
+    + perShareRegulatoryBps
     + input.costs.slippageBpsPerSide * 2
     + quoteSpread(input, direction)
     + (switching ? input.costs.switchCostBps : 0)
@@ -415,8 +441,25 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     || input.riskTolerance < 0 || input.riskTolerance > 100) {
     throw new Error("Pair ensemble decision timestamp or risk tolerance is invalid.");
   }
-  for (const [name, value] of Object.entries(input.costs)) {
+  for (const [name, value] of Object.entries({
+    commissionBpsPerSide: input.costs.commissionBpsPerSide,
+    taxBpsOnExit: input.costs.taxBpsOnExit,
+    spreadBpsRoundTrip: input.costs.spreadBpsRoundTrip,
+    slippageBpsPerSide: input.costs.slippageBpsPerSide,
+    switchCostBps: input.costs.switchCostBps,
+    sellRegulatoryBps: input.costs.sellRegulatoryBps ?? 0,
+  })) {
     validateNonnegativeBps(value, name);
+  }
+  for (const [name, value] of Object.entries({
+    commissionFreeGrossAmountMaximum: input.costs.commissionFreeGrossAmountMaximum,
+    sellRegulatoryFeePerShare: input.costs.sellRegulatoryFeePerShare,
+    sellRegulatoryFeeMaximum: input.costs.sellRegulatoryFeeMaximum,
+    estimatedOrderGrossAmount: input.costs.estimatedOrderGrossAmount,
+  })) {
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      throw new RangeError(`${name} must be a finite non-negative number.`);
+    }
   }
   if (input.models.signalSymbol !== pair.signalSymbol) {
     throw new Error("Normalized model signal symbol does not match the pair catalog.");

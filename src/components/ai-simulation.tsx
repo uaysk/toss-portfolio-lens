@@ -28,8 +28,10 @@ import {
   aiSimulationErrorMessage,
   aiSimulationPairCatalog,
   aiSimulationPairStrategyEnabled,
+  defaultAiSimulationCosts,
   normalizeAiSimulationRun,
   normalizeAiSimulationStatus,
+  usesDefaultAiSimulationCosts,
   validateAiSimulationRequest,
   type AiSimulationCosts,
   type AiSimulationCriterion,
@@ -56,8 +58,8 @@ type AiSimulationProps = {
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "cancel_requested"]);
 const COST_FIELDS: Array<{ key: keyof AiSimulationCosts; label: string }> = [
-  { key: "commissionBpsPerSide", label: "편도 수수료" },
-  { key: "taxBpsOnExit", label: "청산 세금" },
+  { key: "commissionBpsPerSide", label: "토스 편도 수수료" },
+  { key: "taxBpsOnExit", label: "매도 거래세" },
   { key: "spreadBpsRoundTrip", label: "왕복 스프레드" },
   { key: "slippageBpsPerSide", label: "편도 슬리피지" },
 ];
@@ -145,7 +147,10 @@ export function aiSimulationRequestWithStrategy(
   if (strategy.mode === "single") return { ...current, strategy };
   const switchingToUsDefaults = current.marketCountry === "KR"
     && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
-  const usingDefaultTax = current.costs.taxBpsOnExit === (current.marketCountry === "KR" ? 18 : 0);
+  const usingDefaultCosts = usesDefaultAiSimulationCosts(
+    current.costs,
+    current.marketCountry,
+  );
   return {
     ...current,
     marketCountry: "US",
@@ -156,10 +161,7 @@ export function aiSimulationRequestWithStrategy(
       pairId: strategy.pairId,
       allowDegradedMode: false,
     },
-    costs: {
-      ...current.costs,
-      taxBpsOnExit: usingDefaultTax ? 0 : current.costs.taxBpsOnExit,
-    },
+    costs: usingDefaultCosts ? defaultAiSimulationCosts("US") : current.costs,
   };
 }
 
@@ -988,7 +990,10 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
       const switchingToKrDefaults = current.marketCountry === "US" && marketCountry === "KR"
         && current.initialCash === 100_000;
-      const usingDefaultTax = current.costs.taxBpsOnExit === (current.marketCountry === "KR" ? 18 : 0);
+      const usingDefaultCosts = usesDefaultAiSimulationCosts(
+        current.costs,
+        current.marketCountry,
+      );
       return {
         ...current,
         marketCountry,
@@ -996,10 +1001,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           ? { mode: "manual", symbols: [] }
           : current.selection,
         initialCash: switchingToUsDefaults ? 100_000 : switchingToKrDefaults ? DEFAULT_AI_SIMULATION_REQUEST.initialCash : current.initialCash,
-        costs: {
-          ...current.costs,
-          taxBpsOnExit: usingDefaultTax ? (marketCountry === "KR" ? 18 : 0) : current.costs.taxBpsOnExit,
-        },
+        costs: usingDefaultCosts
+          ? defaultAiSimulationCosts(marketCountry)
+          : current.costs,
       };
     });
   };
@@ -1015,12 +1019,15 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       const currentPairId = current.strategy.mode === "pair" ? current.strategy.pairId : undefined;
       const pairId = pairCatalog.some((item) => item.id === currentPairId)
         ? currentPairId!
-        : pairCatalog[0]?.id ?? "soxx-soxl-soxs";
+        : pairCatalog.some((item) => item.id === "sndk-snxx-sndq")
+          ? "sndk-snxx-sndq"
+          : pairCatalog[0]?.id ?? "soxx-soxl-soxs";
       return aiSimulationRequestWithStrategy(current, { mode, pairId });
     });
   };
 
   const currency = request.marketCountry === "US" ? "USD" : "KRW";
+  const costProfile = status?.costProfiles?.[request.marketCountry];
   const selectedPairId = request.strategy.mode === "pair" ? request.strategy.pairId : undefined;
   const selectedPair = selectedPairId
     ? pairCatalog.find((item) => item.id === selectedPairId)
@@ -1312,7 +1319,46 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
           <details className="rounded-2xl bg-secondary p-4">
             <summary className="cursor-pointer text-xs font-black">비용 가정 · bps</summary>
-            <p className="mt-2 text-[10px] leading-4 text-muted-foreground">수수료·세금·스프레드·슬리피지를 가상 체결 원장에서 차감합니다. 실제 계약과 시장에 맞게 직접 조정하세요.</p>
+            <div
+              className="mt-3 rounded-2xl bg-card p-3 text-[10px] leading-4 text-muted-foreground"
+              data-simulation-cost-profile={costProfile?.profileId ?? request.marketCountry}
+            >
+              <p className="font-black text-foreground">
+                토스증권 {request.marketCountry === "KR" ? "국내 KRX 일반주식" : "미국 주식·ETF"} 기준
+                {costProfile?.verifiedAt ? ` · ${costProfile.verifiedAt} 확인` : ""}
+              </p>
+              {request.marketCountry === "KR" ? (
+                <p className="mt-1">
+                  KRX 편도 0.015%, 일반 상장주식 매도세 0.20%를 기본 반영합니다.
+                  NXT 수수료는 0.014%이며, ETF·ETN·ELW는 상품별 과세가 달라 기본 매도세를 조정해야 합니다.
+                </p>
+              ) : (
+                <p className="mt-1">
+                  편도 0.1%를 적용하되 체결금액 USD 10 이하는 토스 수수료를 면제합니다.
+                  매도 시 SEC 0.206bps와 FINRA TAF USD 0.000195/주(건당 최대 USD 9.79)를 원장에서 별도 차감합니다.
+                  USD 원장이므로 환전 비용과 환율 스프레드는 포함하지 않습니다.
+                </p>
+              )}
+              <p className="mt-1">
+                왕복 스프레드와 편도 슬리피지는 토스 고시 수수료가 아닌 체결 현실성 가정입니다.
+                아래 수수료·거래세 값을 바꾸면 사용자 override로 보존됩니다.
+              </p>
+              {costProfile?.sources.length ? (
+                <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                  {costProfile.sources.map((source) => (
+                    <a
+                      key={source.url}
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-black text-foreground underline underline-offset-2"
+                    >
+                      {source.label}
+                    </a>
+                  ))}
+                </p>
+              ) : null}
+            </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               {COST_FIELDS.map(({ key, label }) => (
                 <label key={key} className="rounded-2xl bg-card p-3">

@@ -37,6 +37,10 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatMoney, formatQuantity } from "@/lib/format";
 import {
+  defaultAiSimulationCosts,
+  usesDefaultAiSimulationCosts,
+} from "@/lib/ai-simulation";
+import {
   SCALPING_CRITERIA,
   SCALPING_INTERVALS,
   SCALPING_MARKET_COUNTRIES,
@@ -689,11 +693,21 @@ function EvaluationPanel({
   disabled: boolean;
   onUnauthorized: () => void;
 }) {
-  const [costs, setCosts] = useState({ commissionBpsPerSide: 1.5, taxBpsOnExit: 18, spreadBpsRoundTrip: 5, slippageBpsPerSide: 2 });
+  const [costs, setCosts] = useState(() => defaultAiSimulationCosts(marketCountry));
+  const previousCostMarket = useRef(marketCountry);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [receipt, setReceipt] = useState<ScalpingEvaluationReceipt>();
   const [metrics, setMetrics] = useState<ScalpingEvaluationMetric[]>([]);
+
+  useEffect(() => {
+    const previous = previousCostMarket.current;
+    if (previous === marketCountry) return;
+    setCosts((current) => usesDefaultAiSimulationCosts(current, previous)
+      ? defaultAiSimulationCosts(marketCountry)
+      : current);
+    previousCostMarket.current = marketCountry;
+  }, [marketCountry]);
 
   const startEvaluation = async () => {
     setLoading(true);
@@ -777,12 +791,17 @@ function EvaluationPanel({
       </div>
       <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         {([
-          ["commissionBpsPerSide", "편도 수수료 bps"],
-          ["taxBpsOnExit", "청산 세금 bps"],
+          ["commissionBpsPerSide", "토스 편도 수수료 bps"],
+          ["taxBpsOnExit", "매도 거래세 bps"],
           ["spreadBpsRoundTrip", "왕복 스프레드 bps"],
           ["slippageBpsPerSide", "편도 슬리피지 bps"],
         ] as const).map(([key, label]) => <label key={key} className="rounded-2xl bg-card p-3"><span className="mb-2 block text-[9px] font-black text-muted-foreground">{label}</span><Input type="number" min={0} step={0.1} aria-label={label} value={costs[key]} onChange={(event) => setCosts((current) => ({ ...current, [key]: Math.max(0, Number(event.target.value) || 0) }))} className="h-10 bg-secondary text-xs" /></label>)}
       </div>
+      <p className="mt-2 text-[9px] leading-4 text-muted-foreground">
+        {marketCountry === "KR"
+          ? "토스증권 KRX 일반주식 기준 편도 0.015%, 매도세 0.20%입니다. NXT·ETF는 적용 요율과 과세가 달라 조정이 필요합니다."
+          : "토스증권 미국주식 기준 편도 0.1%입니다. USD 10 이하 수수료 면제와 SEC·FINRA 매도 부담금은 forward 가상 원장에서 별도 처리합니다."}
+      </p>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <p className="text-[9px] text-muted-foreground">방향·MAE·RMSE·분위수 coverage·calibration·목표/손절 선도달·시간대/종목/국면·비용 차감·MDD·거래 수를 run/artifact에 저장합니다.</p>
         <Button onClick={() => void startEvaluation()} disabled={disabled || loading || !candidates.length}>{loading ? <LoaderCircle className="animate-spin" /> : <FlaskConical />}Walk-forward 검증 시작</Button>

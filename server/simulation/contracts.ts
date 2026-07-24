@@ -3,8 +3,9 @@ import {
   MarketCountrySchema,
   ScannerCriterionSchema,
 } from "../scalping/contracts.js";
+import { defaultSimulationCostsForMarket } from "./cost-profile.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v5" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v6" as const;
 
 export const SimulationPresetSchema = z.enum([
   "trend",
@@ -14,12 +15,7 @@ export const SimulationPresetSchema = z.enum([
 ]);
 export type SimulationPreset = z.infer<typeof SimulationPresetSchema>;
 
-export const DEFAULT_SIMULATION_COSTS = {
-  commissionBpsPerSide: 1.5,
-  taxBpsOnExit: 18,
-  spreadBpsRoundTrip: 5,
-  slippageBpsPerSide: 2,
-} as const;
+export const DEFAULT_SIMULATION_COSTS = Object.freeze(defaultSimulationCostsForMarket("KR"));
 
 export const SimulationCostsSchema = z.object({
   commissionBpsPerSide: z.number().finite().min(0).max(1_000)
@@ -83,6 +79,7 @@ export type SimulationSelection = z.infer<typeof SimulationSelectionSchema>;
 export const SimulationPairIdSchema = z.enum([
   "soxx-soxl-soxs",
   "smh-soxl-soxs",
+  "sndk-snxx-sndq",
   "tsla-tsll-tsls",
   "tsla-tsll-tslq",
   "qqq-tqqq-sqqq",
@@ -96,7 +93,7 @@ export const SimulationStrategySchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("pair"),
     pairId: SimulationPairIdSchema,
-    // Keep the legacy field shape for v4 false-valued requests, while v5
+    // Keep the legacy field shape for v4 false-valued requests, while v6
     // cannot opt a degraded model into forward execution.
     allowDegradedMode: z.literal(false).default(false),
   }).strict(),
@@ -129,8 +126,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
   }).transform((input) => ({
     ...input,
     costs: {
-      ...DEFAULT_SIMULATION_COSTS,
-      taxBpsOnExit: input.marketCountry === "US" ? 0 : DEFAULT_SIMULATION_COSTS.taxBpsOnExit,
+      ...defaultSimulationCostsForMarket(input.marketCountry),
       ...input.costs,
     },
   }));

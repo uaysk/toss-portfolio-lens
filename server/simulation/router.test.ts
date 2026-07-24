@@ -135,7 +135,7 @@ describe("AI paper simulation session-only router", () => {
       riskTolerance: 50,
       costs: {
         commissionBpsPerSide: 1.5,
-        taxBpsOnExit: 18,
+        taxBpsOnExit: 20,
         spreadBpsRoundTrip: 5,
         slippageBpsPerSide: 2,
       },

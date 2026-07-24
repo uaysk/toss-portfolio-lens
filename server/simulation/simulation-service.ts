@@ -44,7 +44,13 @@ import {
   type PairEnsembleInput,
   type PairExecutionMarketInput,
   type PairRustTechnicalInput,
+  type PairTradingCosts,
 } from "./ensemble-policy.js";
+import {
+  TOSS_SIMULATION_COST_PROFILE_VERSION,
+  estimatedSellRegulatoryBps,
+  getTossSimulationCostProfile,
+} from "./cost-profile.js";
 import {
   normalizePairModelOutputs,
   type NormalizedPairModelOutput,
@@ -199,13 +205,41 @@ function canRetryStaleSelection(
     && values.every(isRetryableStaleness);
 }
 
-function roundTripCostRate(costs: SimulationCosts): number {
+function roundTripCostRate(costs: SimulationCosts, marketCountry: MarketCountry): number {
+  const profile = getTossSimulationCostProfile(marketCountry);
   return (
     costs.commissionBpsPerSide * 2
     + costs.taxBpsOnExit
+    + estimatedSellRegulatoryBps(profile)
     + costs.spreadBpsRoundTrip
     + costs.slippageBpsPerSide * 2
   ) / 10_000;
+}
+
+function pairTradingCosts(
+  costs: SimulationCosts,
+  marketCountry: MarketCountry,
+  estimatedOrderGrossAmount?: number,
+): PairTradingCosts {
+  const profile = getTossSimulationCostProfile(marketCountry);
+  return {
+    commissionBpsPerSide: costs.commissionBpsPerSide,
+    taxBpsOnExit: costs.taxBpsOnExit,
+    spreadBpsRoundTrip: costs.spreadBpsRoundTrip,
+    slippageBpsPerSide: costs.slippageBpsPerSide,
+    switchCostBps: Math.max(5, costs.spreadBpsRoundTrip),
+    ...(profile.commissionFreeGrossAmountMaximum !== null
+      ? { commissionFreeGrossAmountMaximum: profile.commissionFreeGrossAmountMaximum }
+      : {}),
+    sellRegulatoryBps: profile.sellRegulatoryBps,
+    sellRegulatoryFeePerShare: profile.sellRegulatoryFeePerShare,
+    ...(profile.sellRegulatoryFeeMaximum !== null
+      ? { sellRegulatoryFeeMaximum: profile.sellRegulatoryFeeMaximum }
+      : {}),
+    ...(estimatedOrderGrossAmount !== undefined
+      ? { estimatedOrderGrossAmount }
+      : {}),
+  };
 }
 
 type CandidateMetadata = {
@@ -643,6 +677,7 @@ function pairExecutionMarketInput(
       status: "available" as const,
       observedAt: quote.observedAt,
       spreadBps: quote.spreadBps,
+      referencePrice: quote.mid,
     }] as const] : [];
   }));
   const count = Object.keys(quotes).length;
@@ -1140,13 +1175,11 @@ function buildPairStrategyComparison(session: ActiveSession): unknown {
   const comparison = comparePairStrategies({
     conditionId: `${session.pair.catalog.pairId}:same-origin-cost-execution/v1`,
     initialCapital: session.request.initialCash,
-    costs: {
-      commissionBpsPerSide: session.request.costs.commissionBpsPerSide,
-      taxBpsOnExit: session.request.costs.taxBpsOnExit,
-      spreadBpsRoundTrip: session.request.costs.spreadBpsRoundTrip,
-      slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
-      switchCostBps: Math.max(5, session.request.costs.spreadBpsRoundTrip),
-    },
+    costs: pairTradingCosts(
+      session.request.costs,
+      session.request.marketCountry,
+      session.request.initialCash,
+    ),
     executionPolicyId: "strict-next-observed-after-common-eligibility/v1",
     observations,
   });
@@ -1667,7 +1700,16 @@ export class AiTradingSimulationService {
           bear: pair.bear,
           allowedSessions: pair.allowedSessions,
           maxSpreadBps: pair.maxSpreadBps,
+          ...(pair.selectionProvenance
+            ? { selectionProvenance: pair.selectionProvenance }
+            : {}),
         })),
+      },
+      costProfiles: {
+        version: TOSS_SIMULATION_COST_PROFILE_VERSION,
+        broker: "Toss Securities",
+        KR: getTossSimulationCostProfile("KR"),
+        US: getTossSimulationCostProfile("US"),
       },
       policy: {
         version: AI_PAPER_POLICY_VERSION,
@@ -2251,7 +2293,10 @@ export class AiTradingSimulationService {
       if (session.phase !== "selecting") return;
       selection = selectAiForecastSeries(forecastResult.forecast, {
         symbolCount,
-        roundTripCostRate: roundTripCostRate(session.request.costs),
+        roundTripCostRate: roundTripCostRate(
+          session.request.costs,
+          session.request.marketCountry,
+        ),
         riskPenalty: resolvePaperPolicyProfile(
           session.request.preset,
           session.request.riskTolerance,
@@ -2509,7 +2554,10 @@ export class AiTradingSimulationService {
     for (const chart of session.charts) mergeSimulationLatestTechnical(chart, technical);
     const displaySelection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: 1,
-      roundTripCostRate: roundTripCostRate(session.request.costs),
+      roundTripCostRate: roundTripCostRate(
+        session.request.costs,
+        session.request.marketCountry,
+      ),
       riskPenalty: resolvePaperPolicyProfile(
         session.request.preset,
         session.request.riskTolerance,
@@ -2880,19 +2928,24 @@ export class AiTradingSimulationService {
         bull: {
           executionSymbol: bullSymbol,
           grossReturn: bullExit.price / bullEntry.price - 1,
+          entryPrice: bullEntry.price,
+          exitPrice: bullExit.price,
         },
         bear: {
           executionSymbol: bearSymbol,
           grossReturn: bearExit.price / bearEntry.price - 1,
+          entryPrice: bearEntry.price,
+          exitPrice: bearExit.price,
         },
       };
-      const actual = selectBestExecutablePairOutcome(executableOutcomes, {
-        commissionBpsPerSide: session.request.costs.commissionBpsPerSide,
-        taxBpsOnExit: session.request.costs.taxBpsOnExit,
-        spreadBpsRoundTrip: session.request.costs.spreadBpsRoundTrip,
-        slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
-        switchCostBps: Math.max(5, session.request.costs.spreadBpsRoundTrip),
-      });
+      const actual = selectBestExecutablePairOutcome(
+        executableOutcomes,
+        pairTradingCosts(
+          session.request.costs,
+          session.request.marketCountry,
+          session.request.initialCash,
+        ),
+      );
       session.pair.comparisonObservations.push({
         observationId: pending.observationId,
         origin: pending.origin,
@@ -2989,13 +3042,11 @@ export class AiTradingSimulationService {
       currentDirection: session.pair.direction,
       decisionAt,
       riskTolerance: session.request.riskTolerance,
-      costs: {
-        commissionBpsPerSide: session.request.costs.commissionBpsPerSide,
-        taxBpsOnExit: session.request.costs.taxBpsOnExit,
-        spreadBpsRoundTrip: session.request.costs.spreadBpsRoundTrip,
-        slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
-        switchCostBps: Math.max(5, session.request.costs.spreadBpsRoundTrip),
-      },
+      costs: pairTradingCosts(
+        session.request.costs,
+        session.request.marketCountry,
+        Math.max(session.ledger.cash, session.request.initialCash * 0.1),
+      ),
       market: pairExecutionMarketInput(session, decisionAt),
       ...(session.pair.cooldownUntil ? { cooldownUntil: session.pair.cooldownUntil } : {}),
       profile,
@@ -3387,7 +3438,10 @@ export class AiTradingSimulationService {
     );
     const selection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: selectionSymbolCount(session.request),
-      roundTripCostRate: roundTripCostRate(session.request.costs),
+      roundTripCostRate: roundTripCostRate(
+        session.request.costs,
+        session.request.marketCountry,
+      ),
       riskPenalty: profile.riskPenalty,
       notBeforeMs: this.now(),
     });
@@ -3471,7 +3525,10 @@ export class AiTradingSimulationService {
     );
     const displaySelection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: 1,
-      roundTripCostRate: roundTripCostRate(session.request.costs),
+      roundTripCostRate: roundTripCostRate(
+        session.request.costs,
+        session.request.marketCountry,
+      ),
       riskPenalty: resolvePaperPolicyProfile(
         session.request.preset,
         session.request.riskTolerance,
@@ -3709,6 +3766,7 @@ export class AiTradingSimulationService {
             action.effectiveSpreadBpsRoundTrip ?? session.request.costs.spreadBpsRoundTrip
           ) + (action.switchCostBps ?? 0) * 2,
           slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
+          marketCostProfile: getTossSimulationCostProfile(session.request.marketCountry),
         },
         markPrices: session.marks,
         allocationEquity: valuation.equity,
@@ -3909,6 +3967,8 @@ export class AiTradingSimulationService {
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       marketCountry: session.request.marketCountry,
       currency: session.request.marketCountry === "US" ? "USD" : "KRW",
+      costs: session.request.costs,
+      costProfile: getTossSimulationCostProfile(session.request.marketCountry),
       selection: session.request.selection,
       strategy: simulationStrategy(session.request),
       ...(session.pair ? {
@@ -3920,6 +3980,9 @@ export class AiTradingSimulationService {
           bear: session.pair.catalog.bear,
           allowedSessions: session.pair.catalog.allowedSessions,
           maxSpreadBps: session.pair.catalog.maxSpreadBps,
+          ...(session.pair.catalog.selectionProvenance
+            ? { selectionProvenance: session.pair.catalog.selectionProvenance }
+            : {}),
           allowDegradedMode: false,
         },
         pairState: {

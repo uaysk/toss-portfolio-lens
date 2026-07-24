@@ -54,8 +54,9 @@
 
 ### AI 가상매매 시뮬레이션
 
-- `ai-paper-simulation/v5` 계약에서 예수금·실행 시간·국내/미국 시장·AI 선정 종목 수 1~2개를 지정하는 기존 단일 종목 forward paper-session과 `ai-paper-policy/v2`를 그대로 지원
-- 미국 페어 전략은 SOXX 또는 SMH→SOXL/SOXS, TSLA→TSLL/TSLS 또는 TSLQ, QQQ→TQQQ/SQQQ의 versioned strict catalog를 사용하고 기초자산 `signalSymbol`과 가상 체결 ETF `executionSymbol`을 분리
+- `ai-paper-simulation/v6` 계약에서 예수금·실행 시간·국내/미국 시장·AI 선정 종목 수 1~2개를 지정하는 기존 단일 종목 forward paper-session과 `ai-paper-policy/v2`를 그대로 지원
+- 미국 페어 전략은 `scalping-pair-catalog/v2`의 SOXX 또는 SMH→SOXL/SOXS, SNDK→SNXX/SNDQ, TSLA→TSLL/TSLS 또는 TSLQ, QQQ→TQQQ/SQQQ strict catalog를 사용하고 기초자산 `signalSymbol`과 가상 체결 ETF `executionSymbol`을 분리
+- 샌디스크 프리셋은 SNDK 신호에 대해 일간 +200% 목표 SNXX와 -200% 목표 SNDQ를 실행 상품으로 사용하고, 유동성 선택 근거·확인일·운용사 출처를 catalog provenance에 고정
 - 페어마다 bull·bear·cash 중 하나만 활성화하고, 레버리지 배수·예측 변동성·위험 성향으로 기초자산 노출 기준 정수 수량을 계산
 - AI 모델은 pinned `NeoQuasar/Kronos-base` 하나만 사용하며 기초자산의 동일한 확정봉 origin에서 금융 OHLCV 경로를 예측
 - Kronos-base의 비용 차감 기대수익·방향 확률·분위수 폭·calibration과 Rust `watch`/`entry_candidate`/`hold`/`exit_candidate`, 다중 시간대 일치·차트 패턴·데이터 품질을 `pair-ensemble-policy/v2`에서 정규화·결합
@@ -63,7 +64,10 @@
 - hysteresis, 최소 score margin, 전환 비용과 cooldown으로 횡보장의 반복 방향 전환을 제한
 - Kronos-base 단독·Rust 단독·Kronos-base+Rust 앙상블 비교 성과는 같은 origin·비용·실행 가능 가격·평가 기간에 노출을 정규화한 분석 lane으로 계산하고, 실제 forward 가상 원장은 앙상블 결정만 체결
 - Rust 신호에는 실제 계좌 holdings가 아니라 시각이 명시된 가상 원장 포지션만 격리 전달
-- 정수 수량 가상 원장에 편도 수수료, 청산 세금, 왕복 스프레드·슬리피지와 페어 전환 비용을 차감
+- `toss-securities-simulation-costs/v1`은 토스증권 고시 기준 국내 KRX 편도 0.015%(NXT 0.014%)와 KRX 일반주식 매도세 0.20%, 미국 편도 0.1%를 시장별 기본값으로 사용
+- 미국은 체결금액 USD 10 이하 토스 수수료 면제와 매도 시 SEC Section 31 0.206bps, FINRA TAF USD 0.000195/주·건당 최대 USD 9.79를 수량·체결금액 기준으로 별도 계산하며, USD 원장에는 환전 비용을 포함하지 않음
+- 국내 ETF·ETN·ELW는 일반 상장주식과 과세가 다를 수 있으므로 UI에서 적용 범위를 경고하고 사용자 override를 보존하며, 왕복 스프레드·편도 슬리피지는 증권사 고시 요율이 아닌 체결 현실성 가정으로 분리
+- 정수 수량 가상 원장에 토스 수수료, 매도 세금·미국 규제 부담금, 왕복 스프레드·슬리피지와 페어 전환 비용을 차감
 - 모델 입력 종료·Kronos-base 생성·Rust 계산·최종 판단·실행 ETF 호가 시각보다 엄격히 늦고 설정 기간 안에 있는 실행 상품 KIS 체결을 우선 사용하며, 없으면 그보다 늦게 시작한 실행 상품 확정 분봉 시가만 사용
 - 기간 종료 때 새 체결이 없으면 임의 청산하지 않고 마지막 관측가 평가와 open-position 경고를 보존
 - Kronos-base raw output·model/tokenizer/source revision·입력 종료·생성 시각·device·latency, Rust 원신호, 적용 가중치·최종 점수·결정 이유와 비교 성과를 재현 가능한 전용 run/artifact로 저장

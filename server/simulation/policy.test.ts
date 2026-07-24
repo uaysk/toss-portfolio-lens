@@ -11,6 +11,10 @@ import {
   type ResolvedPaperPolicyProfile,
 } from "./policy.js";
 import type { SimulationPreset } from "./contracts.js";
+import {
+  defaultSimulationCostsForMarket,
+  getTossSimulationCostProfile,
+} from "./cost-profile.js";
 
 const generatedAt = "2026-07-24T00:05:02.000Z";
 const inputEndAt = "2026-07-24T00:05:00.000Z";
@@ -535,6 +539,41 @@ describe("whole-share paper ledger", () => {
     expect(sold.ledger.totalCosts).toBeCloseTo(7.65);
     expect(sold.ledger.realizedPnl).toBeCloseTo(82.35);
     expect(sold.ledger.cash).toBeGreaterThanOrEqual(0);
+  });
+
+  it("applies the Toss US small-trade waiver and separate SEC/FINRA sell charges", () => {
+    const defaults = defaultSimulationCostsForMarket("US");
+    const usCosts = {
+      commissionBpsPerSide: defaults.commissionBpsPerSide,
+      exitTaxBps: defaults.taxBpsOnExit,
+      spreadBpsRoundTrip: 0,
+      slippageBpsPerSide: 0,
+      marketCostProfile: getTossSimulationCostProfile("US"),
+    };
+    const bought = fillPaperAction(createPaperLedger(10), action("buy"), {
+      timestamp: "2026-07-24T00:06:00.000Z",
+      price: 5,
+    }, { symbolCount: 1, targetAllocationRate: 1, costs: usCosts });
+    expect(bought.trade).toMatchObject({
+      side: "buy",
+      quantity: 2,
+      grossAmount: 10,
+      commission: 0,
+      regulatoryFee: 0,
+      totalCosts: 0,
+    });
+    const sold = fillPaperAction(bought.ledger, action("sell"), {
+      timestamp: "2026-07-24T00:07:00.000Z",
+      price: 5,
+    }, { symbolCount: 1, targetAllocationRate: 1, costs: usCosts });
+    expect(sold.trade).toMatchObject({
+      side: "sell",
+      quantity: 2,
+      commission: 0,
+      exitTax: 0,
+    });
+    expect(sold.trade?.regulatoryFee).toBeCloseTo(0.000596);
+    expect(sold.trade?.totalCosts).toBeCloseTo(0.000596);
   });
 
   it("applies total target allocation across symbols without shorting or negative cash", () => {

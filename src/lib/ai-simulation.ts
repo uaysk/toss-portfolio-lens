@@ -11,6 +11,7 @@ export const AI_SIMULATION_SELECTION_MODES = ["auto", "manual"] as const;
 export const AI_SIMULATION_PAIR_IDS = [
   "soxx-soxl-soxs",
   "smh-soxl-soxs",
+  "sndk-snxx-sndq",
   "tsla-tsll-tsls",
   "tsla-tsll-tslq",
   "qqq-tqqq-sqqq",
@@ -31,6 +32,11 @@ export type AiSimulationPairCatalogItem = {
 };
 
 export const AI_SIMULATION_PAIR_CATALOG: readonly AiSimulationPairCatalogItem[] = [
+  {
+    id: "sndk-snxx-sndq",
+    label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)",
+    symbols: ["SNDK", "SNXX", "SNDQ"],
+  },
   { id: "soxx-soxl-soxs", label: "SOXX · SOXL · SOXS", symbols: ["SOXX", "SOXL", "SOXS"] },
   { id: "smh-soxl-soxs", label: "SMH · SOXL · SOXS", symbols: ["SMH", "SOXL", "SOXS"] },
   { id: "tsla-tsll-tsls", label: "TSLA · TSLL · TSLS", symbols: ["TSLA", "TSLL", "TSLS"] },
@@ -64,6 +70,69 @@ export type AiSimulationCosts = {
   slippageBpsPerSide: number;
 };
 
+export type AiSimulationCostSource = {
+  label: string;
+  url: string;
+};
+
+export type AiSimulationCostProfile = {
+  profileVersion: string;
+  profileId: string;
+  broker: string;
+  marketCountry: AiSimulationMarketCountry;
+  currency: "KRW" | "USD";
+  venue: string;
+  effectiveFrom?: string;
+  verifiedAt?: string;
+  commissionBpsPerSide: number;
+  commissionFreeGrossAmountMaximum?: number;
+  sellTaxBps: number;
+  sellRegulatoryBps: number;
+  sellRegulatoryFeePerShare: number;
+  sellRegulatoryFeeMaximum?: number;
+  spreadBpsRoundTrip: number;
+  slippageBpsPerSide: number;
+  fxConversionIncluded: boolean;
+  alternativeVenues: Array<{
+    venue: string;
+    commissionBpsPerSide: number;
+  }>;
+  scopeNotes: string[];
+  sources: AiSimulationCostSource[];
+};
+
+export const AI_SIMULATION_MARKET_COST_DEFAULTS: Readonly<
+  Record<AiSimulationMarketCountry, Readonly<AiSimulationCosts>>
+> = Object.freeze({
+  KR: Object.freeze({
+    commissionBpsPerSide: 1.5,
+    taxBpsOnExit: 20,
+    spreadBpsRoundTrip: 5,
+    slippageBpsPerSide: 2,
+  }),
+  US: Object.freeze({
+    commissionBpsPerSide: 10,
+    taxBpsOnExit: 0,
+    spreadBpsRoundTrip: 5,
+    slippageBpsPerSide: 2,
+  }),
+});
+
+export function defaultAiSimulationCosts(
+  marketCountry: AiSimulationMarketCountry,
+): AiSimulationCosts {
+  return { ...AI_SIMULATION_MARKET_COST_DEFAULTS[marketCountry] };
+}
+
+export function usesDefaultAiSimulationCosts(
+  costs: AiSimulationCosts,
+  marketCountry: AiSimulationMarketCountry,
+): boolean {
+  const defaults = AI_SIMULATION_MARKET_COST_DEFAULTS[marketCountry];
+  return (Object.keys(defaults) as Array<keyof AiSimulationCosts>)
+    .every((key) => costs[key] === defaults[key]);
+}
+
 export type AiSimulationRequest = {
   marketCountry: AiSimulationMarketCountry;
   initialCash: number;
@@ -93,6 +162,7 @@ export type AiSimulationStatus = {
     message?: string;
     catalog: AiSimulationPairCatalogItem[];
   };
+  costProfiles?: Partial<Record<AiSimulationMarketCountry, AiSimulationCostProfile>>;
 };
 
 export type AiSimulationSelection = {
@@ -410,12 +480,7 @@ export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
     symbolCount: 1,
   },
   strategy: { mode: "single" },
-  costs: {
-    commissionBpsPerSide: 1.5,
-    taxBpsOnExit: 18,
-    spreadBpsRoundTrip: 5,
-    slippageBpsPerSide: 2,
-  },
+  costs: defaultAiSimulationCosts("KR"),
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -605,6 +670,104 @@ function kronosBaseModelLabel(value: unknown): string | undefined {
     : undefined;
 }
 
+function normalizeCostSource(value: unknown): AiSimulationCostSource | undefined {
+  const source = asRecord(value);
+  const label = textValue(source.label);
+  const url = textValue(source.url);
+  return label && url ? { label, url } : undefined;
+}
+
+function normalizeCostProfile(
+  value: unknown,
+  expectedMarket: AiSimulationMarketCountry,
+): AiSimulationCostProfile | undefined {
+  const profile = asRecord(value);
+  const marketCountry = textValue(first(profile, "marketCountry", "market_country"));
+  const currency = textValue(profile.currency);
+  const requiredNumbers = {
+    commissionBpsPerSide: finiteNumber(first(
+      profile,
+      "commissionBpsPerSide",
+      "commission_bps_per_side",
+    )),
+    sellTaxBps: finiteNumber(first(profile, "sellTaxBps", "sell_tax_bps")),
+    sellRegulatoryBps: finiteNumber(first(
+      profile,
+      "sellRegulatoryBps",
+      "sell_regulatory_bps",
+    )),
+    sellRegulatoryFeePerShare: finiteNumber(first(
+      profile,
+      "sellRegulatoryFeePerShare",
+      "sell_regulatory_fee_per_share",
+    )),
+    spreadBpsRoundTrip: finiteNumber(first(
+      profile,
+      "spreadBpsRoundTrip",
+      "spread_bps_round_trip",
+    )),
+    slippageBpsPerSide: finiteNumber(first(
+      profile,
+      "slippageBpsPerSide",
+      "slippage_bps_per_side",
+    )),
+  };
+  if (marketCountry !== expectedMarket
+    || (currency !== "KRW" && currency !== "USD")
+    || Object.values(requiredNumbers).some((number) => number === undefined)) {
+    return undefined;
+  }
+  const alternativeVenues = mapValid(
+    first(profile, "alternativeVenues", "alternative_venues"),
+    (entry): AiSimulationCostProfile["alternativeVenues"][number] | undefined => {
+      const item = asRecord(entry);
+      const venue = textValue(item.venue);
+      const commissionBpsPerSide = finiteNumber(first(
+        item,
+        "commissionBpsPerSide",
+        "commission_bps_per_side",
+      ));
+      return venue && commissionBpsPerSide !== undefined
+        ? { venue, commissionBpsPerSide }
+        : undefined;
+    },
+  );
+  return {
+    profileVersion: textValue(first(profile, "profileVersion", "profile_version")) ?? "unknown",
+    profileId: textValue(first(profile, "profileId", "profile_id")) ?? "unknown",
+    broker: textValue(profile.broker) ?? "Toss Securities",
+    marketCountry: expectedMarket,
+    currency,
+    venue: textValue(profile.venue) ?? expectedMarket,
+    effectiveFrom: textValue(first(profile, "effectiveFrom", "effective_from")),
+    verifiedAt: textValue(first(profile, "verifiedAt", "verified_at")),
+    commissionBpsPerSide: requiredNumbers.commissionBpsPerSide!,
+    commissionFreeGrossAmountMaximum: finiteNumber(first(
+      profile,
+      "commissionFreeGrossAmountMaximum",
+      "commission_free_gross_amount_maximum",
+    )),
+    sellTaxBps: requiredNumbers.sellTaxBps!,
+    sellRegulatoryBps: requiredNumbers.sellRegulatoryBps!,
+    sellRegulatoryFeePerShare: requiredNumbers.sellRegulatoryFeePerShare!,
+    sellRegulatoryFeeMaximum: finiteNumber(first(
+      profile,
+      "sellRegulatoryFeeMaximum",
+      "sell_regulatory_fee_maximum",
+    )),
+    spreadBpsRoundTrip: requiredNumbers.spreadBpsRoundTrip!,
+    slippageBpsPerSide: requiredNumbers.slippageBpsPerSide!,
+    fxConversionIncluded: booleanValue(first(
+      profile,
+      "fxConversionIncluded",
+      "fx_conversion_included",
+    )) ?? false,
+    alternativeVenues,
+    scopeNotes: stringList(first(profile, "scopeNotes", "scope_notes")),
+    sources: mapValid(profile.sources, normalizeCostSource),
+  };
+}
+
 export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatus {
   const root = asRecord(payload);
   const nested = asRecord(root.status);
@@ -634,6 +797,14 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const hasPairStrategy = pairEnabled !== undefined
     || Object.keys(pairStrategy).length > 0
     || pairCatalog.length > 0;
+  const rawCostProfiles = asRecord(first(source, "costProfiles", "cost_profiles"));
+  const costProfiles = Object.fromEntries((["KR", "US"] as const).flatMap((market) => {
+    const profile = normalizeCostProfile(
+      first(rawCostProfiles, market, market.toLowerCase()),
+      market,
+    );
+    return profile ? [[market, profile] as const] : [];
+  })) as Partial<Record<AiSimulationMarketCountry, AiSimulationCostProfile>>;
 
   return {
     enabled,
@@ -670,6 +841,7 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
     },
     capabilities,
     limitations: stringList(first(source, "limitations", "warnings")),
+    ...(Object.keys(costProfiles).length ? { costProfiles } : {}),
     ...(hasPairStrategy ? {
       pairStrategy: {
         enabled: pairEnabled ?? false,
@@ -1900,8 +2072,8 @@ export function validateAiSimulationRequest(
   }
 
   const costLabels: Array<[keyof AiSimulationCosts, string]> = [
-    ["commissionBpsPerSide", "편도 수수료"],
-    ["taxBpsOnExit", "청산 세금"],
+    ["commissionBpsPerSide", "토스 편도 수수료"],
+    ["taxBpsOnExit", "매도 거래세"],
     ["spreadBpsRoundTrip", "왕복 스프레드"],
     ["slippageBpsPerSide", "편도 슬리피지"],
   ];

@@ -29,6 +29,8 @@ export type PairStrategyLaneObservation =
 export type PairExecutableOutcome = {
   executionSymbol: string;
   grossReturn: number;
+  entryPrice?: number;
+  exitPrice?: number;
 };
 
 export type PairExecutableOutcomeSelection = {
@@ -127,14 +129,55 @@ function validateBps(value: number, name: string): void {
   }
 }
 
+function validatePairTradingCosts(costs: PairTradingCosts): void {
+  for (const [name, value] of Object.entries({
+    commissionBpsPerSide: costs.commissionBpsPerSide,
+    taxBpsOnExit: costs.taxBpsOnExit,
+    spreadBpsRoundTrip: costs.spreadBpsRoundTrip,
+    slippageBpsPerSide: costs.slippageBpsPerSide,
+    switchCostBps: costs.switchCostBps,
+    sellRegulatoryBps: costs.sellRegulatoryBps ?? 0,
+  })) validateBps(value, name);
+  for (const [name, value] of Object.entries({
+    commissionFreeGrossAmountMaximum: costs.commissionFreeGrossAmountMaximum,
+    sellRegulatoryFeePerShare: costs.sellRegulatoryFeePerShare,
+    sellRegulatoryFeeMaximum: costs.sellRegulatoryFeeMaximum,
+    estimatedOrderGrossAmount: costs.estimatedOrderGrossAmount,
+  })) {
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      throw new Error(`${name} must be finite and non-negative.`);
+    }
+  }
+}
+
 function rounded(value: number): number {
   return Math.round(value * 1_000_000_000) / 1_000_000_000;
 }
 
-function costRate(costs: PairTradingCosts): number {
+function costRate(
+  costs: PairTradingCosts,
+  outcome?: PairExecutableOutcome,
+  grossAmount = 100_000,
+): number {
+  const commissionWaived = costs.commissionFreeGrossAmountMaximum !== undefined
+    && grossAmount <= costs.commissionFreeGrossAmountMaximum;
+  const referencePrice = outcome?.entryPrice;
+  let perShareRegulatoryBps = referencePrice !== undefined
+    && Number.isFinite(referencePrice)
+    && referencePrice > 0
+    ? (costs.sellRegulatoryFeePerShare ?? 0) / referencePrice * 10_000
+    : 0;
+  if (costs.sellRegulatoryFeeMaximum !== undefined && grossAmount > 0) {
+    perShareRegulatoryBps = Math.min(
+      perShareRegulatoryBps,
+      costs.sellRegulatoryFeeMaximum / grossAmount * 10_000,
+    );
+  }
   return (
-    costs.commissionBpsPerSide * 2
+    (commissionWaived ? 0 : costs.commissionBpsPerSide * 2)
     + costs.taxBpsOnExit
+    + (costs.sellRegulatoryBps ?? 0)
+    + perShareRegulatoryBps
     + costs.spreadBpsRoundTrip
     + costs.slippageBpsPerSide * 2
   ) / 10_000;
@@ -144,19 +187,22 @@ export function selectBestExecutablePairOutcome(
   outcomes: PairStrategyComparisonObservation["executableOutcomes"],
   costs: PairTradingCosts,
 ): PairExecutableOutcomeSelection {
-  for (const [name, value] of Object.entries(costs)) validateBps(value, name);
+  validatePairTradingCosts(costs);
   for (const direction of ["bull", "bear"] as const) {
     const outcome = outcomes[direction];
     if (!outcome.executionSymbol.trim()
       || !Number.isFinite(outcome.grossReturn)
-      || outcome.grossReturn <= -1) {
+      || outcome.grossReturn <= -1
+      || (outcome.entryPrice !== undefined
+        && (!Number.isFinite(outcome.entryPrice) || outcome.entryPrice <= 0))
+      || (outcome.exitPrice !== undefined
+        && (!Number.isFinite(outcome.exitPrice) || outcome.exitPrice <= 0))) {
       throw new Error(`Executable ${direction} outcome is invalid.`);
     }
   }
-  const commonRoundTripRate = costRate(costs);
   const rawNetReturns = {
-    bull: outcomes.bull.grossReturn - commonRoundTripRate,
-    bear: outcomes.bear.grossReturn - commonRoundTripRate,
+    bull: outcomes.bull.grossReturn - costRate(costs, outcomes.bull),
+    bear: outcomes.bear.grossReturn - costRate(costs, outcomes.bear),
   };
   const direction: PairDirection = rawNetReturns.bull > 0
     && rawNetReturns.bull > rawNetReturns.bear
@@ -209,7 +255,6 @@ function metricsForLane(
   laneId: PairStrategyLaneId,
   input: PairStrategyComparisonInput,
 ): PairStrategyLaneMetrics {
-  const baseCostRate = costRate(input.costs);
   let netEquity = input.initialCapital;
   let grossEquity = input.initialCapital;
   let totalCosts = 0;
@@ -284,6 +329,7 @@ function metricsForLane(
     // when two adjacent decisions reverse direction; it is not a substitute
     // for the round-trip costs already included in baseCostRate.
     const switching = previousDirection !== "cash" && previousDirection !== direction;
+    const baseCostRate = costRate(input.costs, outcome, netEquity);
     const appliedCostRate = baseCostRate + (switching ? input.costs.switchCostBps / 10_000 : 0);
     const capitalBefore = netEquity;
     const monetaryCost = capitalBefore * appliedCostRate;
@@ -353,7 +399,11 @@ function validateObservation(
     const outcome = value.executableOutcomes[direction];
     if (!outcome.executionSymbol.trim()
       || !Number.isFinite(outcome.grossReturn)
-      || outcome.grossReturn <= -1) {
+      || outcome.grossReturn <= -1
+      || (outcome.entryPrice !== undefined
+        && (!Number.isFinite(outcome.entryPrice) || outcome.entryPrice <= 0))
+      || (outcome.exitPrice !== undefined
+        && (!Number.isFinite(outcome.exitPrice) || outcome.exitPrice <= 0))) {
       throw new Error(`Executable ${direction} outcome is invalid.`);
     }
   }
@@ -387,7 +437,7 @@ export function comparePairStrategies(
   if (!Number.isFinite(input.initialCapital) || input.initialCapital <= 0) {
     throw new Error("initialCapital must be positive and finite.");
   }
-  for (const [name, value] of Object.entries(input.costs)) validateBps(value, name);
+  validatePairTradingCosts(input.costs);
   const seen = new Set<string>();
   let previousOrigin: number | undefined;
   for (const observation of input.observations) {

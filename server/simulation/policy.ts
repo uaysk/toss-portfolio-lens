@@ -2,6 +2,10 @@ import {
   SimulationPresetSchema,
   type SimulationPreset,
 } from "./contracts.js";
+import {
+  calculateBrokerExecutionCharges,
+  type TossSimulationCostProfile,
+} from "./cost-profile.js";
 
 export const AI_PAPER_POLICY_VERSION = "ai-paper-policy/v2" as const;
 
@@ -218,6 +222,7 @@ export type PaperTradingCosts = {
   exitTaxBps: number;
   spreadBpsRoundTrip: number;
   slippageBpsPerSide: number;
+  marketCostProfile?: TossSimulationCostProfile;
 };
 
 export type PaperExecution = {
@@ -244,6 +249,7 @@ export type PaperTrade = {
   grossAmount: number;
   commission: number;
   exitTax: number;
+  regulatoryFee: number;
   spreadCost: number;
   slippageCost: number;
   totalCosts: number;
@@ -695,6 +701,35 @@ function validateCosts(costs: PaperTradingCosts): {
   return output;
 }
 
+function statutoryExecutionCharges(
+  costs: PaperTradingCosts,
+  side: "buy" | "sell",
+  grossAmount: number,
+  quantity: number,
+  rates: ReturnType<typeof validateCosts>,
+): {
+  commission: number;
+  exitTax: number;
+  regulatoryFee: number;
+} {
+  if (!costs.marketCostProfile) {
+    return {
+      commission: grossAmount * rates.commissionRate,
+      exitTax: side === "sell" ? grossAmount * rates.exitTaxRate : 0,
+      regulatoryFee: 0,
+    };
+  }
+  return calculateBrokerExecutionCharges(costs.marketCostProfile, {
+    side,
+    grossAmount,
+    quantity,
+    costs: {
+      commissionBpsPerSide: costs.commissionBpsPerSide,
+      taxBpsOnExit: costs.exitTaxBps,
+    },
+  });
+}
+
 function rejected(ledger: PaperLedger, reason: PaperFillResult["reason"]): PaperFillResult {
   return { status: "rejected", reason, ledger: cloneLedger(ledger) };
 }
@@ -766,11 +801,17 @@ export function fillPaperAction(
     if (!position) return skipped(ledger, "position_not_held");
     const quantity = position.quantity;
     const grossAmount = quantity * execution.price;
-    const commission = grossAmount * rates.commissionRate;
-    const exitTax = grossAmount * rates.exitTaxRate;
+    const statutory = statutoryExecutionCharges(
+      config.costs,
+      "sell",
+      grossAmount,
+      quantity,
+      rates,
+    );
+    const { commission, exitTax, regulatoryFee } = statutory;
     const spreadCost = grossAmount * rates.halfSpreadRate;
     const slippageCost = grossAmount * rates.slippageRate;
-    const totalCosts = commission + exitTax + spreadCost + slippageCost;
+    const totalCosts = commission + exitTax + regulatoryFee + spreadCost + slippageCost;
     const proceeds = grossAmount - totalCosts;
     if (!validMoney(proceeds)) return rejected(ledger, "invalid_execution");
     ledger.cash += proceeds;
@@ -788,6 +829,7 @@ export function fillPaperAction(
       grossAmount,
       commission,
       exitTax,
+      regulatoryFee,
       spreadCost,
       slippageCost,
       totalCosts,
@@ -808,17 +850,43 @@ export function fillPaperAction(
   const targetGross = equity * config.targetAllocationRate / config.symbolCount;
   const desiredQuantity = Math.floor(Math.max(0, targetGross - currentGross) / execution.price);
   if (desiredQuantity <= 0) return skipped(ledger, "target_already_met");
-  const unitDebit = execution.price * (
-    1 + rates.commissionRate + rates.halfSpreadRate + rates.slippageRate
+  const maximumQuantity = Math.min(
+    desiredQuantity,
+    Math.floor((ledger.cash + Number.EPSILON) / execution.price),
   );
-  const affordableQuantity = Math.floor((ledger.cash + Number.EPSILON) / unitDebit);
-  const quantity = Math.min(desiredQuantity, affordableQuantity);
+  let low = 0;
+  let high = maximumQuantity;
+  while (low < high) {
+    const candidate = Math.ceil((low + high) / 2);
+    const candidateGross = candidate * execution.price;
+    const statutory = statutoryExecutionCharges(
+      config.costs,
+      "buy",
+      candidateGross,
+      candidate,
+      rates,
+    );
+    const candidateDebit = candidateGross
+      + statutory.commission
+      + candidateGross * rates.halfSpreadRate
+      + candidateGross * rates.slippageRate;
+    if (candidateDebit <= ledger.cash + 1e-9) low = candidate;
+    else high = candidate - 1;
+  }
+  const quantity = low;
   if (quantity <= 0) return skipped(ledger, "insufficient_cash");
   const grossAmount = quantity * execution.price;
-  const commission = grossAmount * rates.commissionRate;
+  const statutory = statutoryExecutionCharges(
+    config.costs,
+    "buy",
+    grossAmount,
+    quantity,
+    rates,
+  );
+  const { commission, regulatoryFee } = statutory;
   const spreadCost = grossAmount * rates.halfSpreadRate;
   const slippageCost = grossAmount * rates.slippageRate;
-  const totalCosts = commission + spreadCost + slippageCost;
+  const totalCosts = commission + regulatoryFee + spreadCost + slippageCost;
   const debit = grossAmount + totalCosts;
   if (debit > ledger.cash + 1e-9) return skipped(ledger, "insufficient_cash");
   ledger.cash = Math.max(0, ledger.cash - debit);
@@ -843,6 +911,7 @@ export function fillPaperAction(
     grossAmount,
     commission,
     exitTax: 0,
+    regulatoryFee,
     spreadCost,
     slippageCost,
     totalCosts,

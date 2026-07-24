@@ -128,7 +128,7 @@ describe("AiSimulation", () => {
         pairId: "qqq-tqqq-sqqq",
         allowDegradedMode: false,
       },
-      costs: { taxBpsOnExit: 0 },
+      costs: { commissionBpsPerSide: 10, taxBpsOnExit: 0 },
     });
   });
 

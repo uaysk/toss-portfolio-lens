@@ -14,6 +14,7 @@ describe("pair catalog", () => {
     expect([...DEFAULT_PAIR_CATALOG.keys()]).toEqual([
       "qqq-tqqq-sqqq",
       "smh-soxl-soxs",
+      "sndk-snxx-sndq",
       "soxx-soxl-soxs",
       "tsla-tsll-tslq",
       "tsla-tsll-tsls",
@@ -25,6 +26,14 @@ describe("pair catalog", () => {
     });
     expect(getPairCatalogEntry("tsla-tsll-tsls").bear.leverageMultiplier).toBe(-1);
     expect(getPairCatalogEntry("tsla-tsll-tslq").bear.leverageMultiplier).toBe(-2);
+    expect(getPairCatalogEntry("sndk-snxx-sndq")).toMatchObject({
+      signalSymbol: "SNDK",
+      bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
+      bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
+      selectionProvenance: {
+        verifiedAt: "2026-07-25",
+      },
+    });
     expect([...SimulationPairIdSchema.options].sort()).toEqual(
       [...DEFAULT_PAIR_CATALOG.keys()].sort(),
     );

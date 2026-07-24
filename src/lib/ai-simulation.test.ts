@@ -16,12 +16,19 @@ describe("AI simulation request validation", () => {
   it("defaults to the backward-compatible single strategy", () => {
     expect(DEFAULT_AI_SIMULATION_REQUEST.strategy).toEqual({ mode: "single" });
     expect(AI_SIMULATION_PAIR_CATALOG.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: "sndk-snxx-sndq", label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)" },
       { id: "soxx-soxl-soxs", label: "SOXX · SOXL · SOXS" },
       { id: "smh-soxl-soxs", label: "SMH · SOXL · SOXS" },
       { id: "tsla-tsll-tsls", label: "TSLA · TSLL · TSLS" },
       { id: "tsla-tsll-tslq", label: "TSLA · TSLL · TSLQ" },
       { id: "qqq-tqqq-sqqq", label: "QQQ · TQQQ · SQQQ" },
     ]);
+    expect(DEFAULT_AI_SIMULATION_REQUEST.costs).toEqual({
+      commissionBpsPerSide: 1.5,
+      taxBpsOnExit: 20,
+      spreadBpsRoundTrip: 5,
+      slippageBpsPerSide: 2,
+    });
   });
 
   it("accepts both markets, all presets, and one or two AI-selected symbols", () => {
@@ -179,9 +186,49 @@ describe("AI simulation response normalization", () => {
       enabled: true,
       catalog: [{
         id: "smh-soxl-soxs",
-        label: AI_SIMULATION_PAIR_CATALOG[1].label,
+        label: AI_SIMULATION_PAIR_CATALOG.find(({ id }) => id === "smh-soxl-soxs")!.label,
         symbols: ["SMH", "SOXL", "SOXS"],
       }],
+    });
+  });
+
+  it("normalizes versioned Toss market cost provenance", () => {
+    const status = normalizeAiSimulationStatus({
+      enabled: true,
+      costProfiles: {
+        version: "toss-securities-simulation-costs/v1",
+        US: {
+          profileVersion: "toss-securities-simulation-costs/v1",
+          profileId: "toss-us-equity-2026",
+          broker: "Toss Securities",
+          marketCountry: "US",
+          currency: "USD",
+          venue: "US",
+          effectiveFrom: "2026-04-04",
+          verifiedAt: "2026-07-25",
+          commissionBpsPerSide: 10,
+          commissionFreeGrossAmountMaximum: 10,
+          sellTaxBps: 0,
+          sellRegulatoryBps: 0.206,
+          sellRegulatoryFeePerShare: 0.000195,
+          sellRegulatoryFeeMaximum: 9.79,
+          spreadBpsRoundTrip: 5,
+          slippageBpsPerSide: 2,
+          fxConversionIncluded: false,
+          alternativeVenues: [],
+          scopeNotes: ["USD 원장"],
+          sources: [{ label: "토스증권", url: "https://home.tossinvest.com/ko/open-api" }],
+        },
+      },
+    });
+    expect(status.costProfiles?.US).toMatchObject({
+      profileId: "toss-us-equity-2026",
+      commissionBpsPerSide: 10,
+      commissionFreeGrossAmountMaximum: 10,
+      sellRegulatoryBps: 0.206,
+      sellRegulatoryFeePerShare: 0.000195,
+      sellRegulatoryFeeMaximum: 9.79,
+      fxConversionIncluded: false,
     });
   });
 

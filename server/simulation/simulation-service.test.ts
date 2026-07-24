@@ -537,6 +537,24 @@ describe("AI trading simulation service", () => {
     const status = setup.service.status() as {
       capabilities: Record<string, unknown>;
       limitations: string[];
+      pairStrategy: {
+        pairs: Array<{
+          pairId: string;
+          signalSymbol: string;
+          bull: { executionSymbol: string; leverageMultiplier: number };
+          bear: { executionSymbol: string; leverageMultiplier: number };
+        }>;
+      };
+      costProfiles: {
+        version: string;
+        KR: { commissionBpsPerSide: number; sellTaxBps: number };
+        US: {
+          commissionBpsPerSide: number;
+          commissionFreeGrossAmountMaximum: number;
+          sellRegulatoryBps: number;
+          sellRegulatoryFeePerShare: number;
+        };
+      };
     };
     expect(status.capabilities).toMatchObject({
       realOrder: false,
@@ -545,6 +563,24 @@ describe("AI trading simulation service", () => {
       autonomousPaperTrading: true,
     });
     expect(status.limitations.join(" ")).toContain("실제 주문 API를 호출하지 않는");
+    expect(status.pairStrategy.pairs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        pairId: "sndk-snxx-sndq",
+        signalSymbol: "SNDK",
+        bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
+        bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
+      }),
+    ]));
+    expect(status.costProfiles).toMatchObject({
+      version: "toss-securities-simulation-costs/v1",
+      KR: { commissionBpsPerSide: 1.5, sellTaxBps: 20 },
+      US: {
+        commissionBpsPerSide: 10,
+        commissionFreeGrossAmountMaximum: 10,
+        sellRegulatoryBps: 0.206,
+        sellRegulatoryFeePerShare: 0.000195,
+      },
+    });
 
     const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(setup.service));
     expect(methods).toEqual(expect.arrayContaining([

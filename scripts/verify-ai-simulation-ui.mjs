@@ -352,11 +352,73 @@ export async function routeSimulationUiApi(page) {
           },
           capabilities: {
             realOrder: false,
+            orderApiDependency: false,
             mcp: false,
             autonomousPaperTrading: true,
             manualSymbolSelection: true,
             deterministicChartPatterns: true,
             eventDrivenDecisions: true,
+            pairStrategy: true,
+            kronosRustEnsemble: true,
+          },
+          pairStrategy: {
+            enabled: true,
+            catalogVersion: "scalping-pair-catalog/v2",
+            pairs: [{
+              pairId: "sndk-snxx-sndq",
+              signalSymbol: "SNDK",
+              bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
+              bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
+            }],
+          },
+          costProfiles: {
+            version: "toss-securities-simulation-costs/v1",
+            KR: {
+              profileVersion: "toss-securities-simulation-costs/v1",
+              profileId: "toss-kr-krx-equity-2026",
+              broker: "Toss Securities",
+              marketCountry: "KR",
+              currency: "KRW",
+              venue: "KRX",
+              verifiedAt: "2026-07-25",
+              commissionBpsPerSide: 1.5,
+              sellTaxBps: 20,
+              sellRegulatoryBps: 0,
+              sellRegulatoryFeePerShare: 0,
+              spreadBpsRoundTrip: 5,
+              slippageBpsPerSide: 2,
+              fxConversionIncluded: false,
+              alternativeVenues: [{ venue: "NXT", commissionBpsPerSide: 1.4 }],
+              scopeNotes: ["KRX 일반주식"],
+              sources: [{
+                label: "토스증권 Open API 거래 수수료",
+                url: "https://home.tossinvest.com/ko/open-api",
+              }],
+            },
+            US: {
+              profileVersion: "toss-securities-simulation-costs/v1",
+              profileId: "toss-us-equity-2026",
+              broker: "Toss Securities",
+              marketCountry: "US",
+              currency: "USD",
+              venue: "US",
+              verifiedAt: "2026-07-25",
+              commissionBpsPerSide: 10,
+              commissionFreeGrossAmountMaximum: 10,
+              sellTaxBps: 0,
+              sellRegulatoryBps: 0.206,
+              sellRegulatoryFeePerShare: 0.000195,
+              sellRegulatoryFeeMaximum: 9.79,
+              spreadBpsRoundTrip: 5,
+              slippageBpsPerSide: 2,
+              fxConversionIncluded: false,
+              alternativeVenues: [],
+              scopeNotes: ["USD 원장"],
+              sources: [{
+                label: "토스증권 Open API 거래 수수료",
+                url: "https://home.tossinvest.com/ko/open-api",
+              }],
+            },
           },
           policy: {
             initialPortfolio: "cash_only_zero_holdings",
@@ -671,6 +733,39 @@ async function verify(browser, baseUrl, viewport, theme) {
       document.documentElement.classList.contains("dark") ? "dark" : "light"
     ));
     check(actualTheme === theme, `${viewport.width}px 테마가 ${theme}가 아니라 ${actualTheme}입니다.`);
+
+    await page.locator("summary").filter({ hasText: "비용 가정 · bps" }).click();
+    const strategyGroup = page.getByRole("radiogroup", {
+      name: "시뮬레이션 전략 실행 방식",
+    });
+    await strategyGroup.getByRole("radio", { name: "페어 비교", exact: true }).click();
+    const pairSelect = page.getByRole("combobox", { name: "미국 페어 카탈로그" });
+    await pairSelect.waitFor();
+    check(
+      (await pairSelect.textContent())?.includes("샌디스크 SNDK"),
+      "페어 모드의 기본 프리셋이 SNDK·SNXX·SNDQ가 아닙니다.",
+    );
+    check(
+      await page.getByRole("spinbutton", { name: "토스 편도 수수료 bps" }).inputValue() === "10",
+      "페어 모드 전환 시 토스 미국 수수료 기본값 10bps가 적용되지 않았습니다.",
+    );
+    check(
+      await page.getByRole("spinbutton", { name: "매도 거래세 bps" }).inputValue() === "0",
+      "페어 모드 전환 시 미국 매도 거래세 기본값 0bps가 적용되지 않았습니다.",
+    );
+    await strategyGroup.getByRole("radio", { name: "단일", exact: true }).click();
+    await page.getByRole("combobox", { name: "시뮬레이션 대상 시장" }).click();
+    await page.getByRole("option", { name: "국내", exact: true }).click();
+    check(
+      await page.getByRole("spinbutton", { name: "토스 편도 수수료 bps" }).inputValue() === "1.5",
+      "국내 시장 복귀 시 토스 KRX 수수료 기본값 1.5bps가 적용되지 않았습니다.",
+    );
+    check(
+      await page.getByRole("spinbutton", { name: "매도 거래세 bps" }).inputValue() === "20",
+      "국내 시장 복귀 시 KRX 일반주식 매도세 기본값 20bps가 적용되지 않았습니다.",
+    );
+    await page.locator('[data-simulation-cost-profile="toss-kr-krx-equity-2026"]').waitFor();
+    await page.getByText("토스증권 국내 KRX 일반주식 기준", { exact: false }).waitFor();
 
     const startButton = page.getByRole("button", { name: "AI 시뮬레이션 시작", exact: true });
     await startButton.waitFor();

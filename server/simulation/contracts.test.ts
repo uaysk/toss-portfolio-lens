@@ -8,8 +8,8 @@ import {
 describe("AI paper simulation contracts", () => {
   const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
 
-  it("publishes the Kronos-base and Rust contract as v5", () => {
-    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v5");
+  it("publishes the Kronos-base, Rust, pair, and Toss cost contract as v6", () => {
+    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v6");
   });
 
   it("applies market, strategy, risk, scanner, and cost defaults", () => {
@@ -160,15 +160,17 @@ describe("AI paper simulation contracts", () => {
     })).toThrow();
   });
 
-  it("defaults omitted US exit tax to zero while preserving explicit overrides", () => {
+  it("applies Toss US commission and tax defaults while preserving explicit overrides", () => {
     expect(schema.parse({
       marketCountry: "US",
       initialCash: 100_000,
       durationMinutes: 60,
       selection: { mode: "manual", symbols: ["AAPL"] },
     }).costs).toEqual({
-      ...DEFAULT_SIMULATION_COSTS,
+      commissionBpsPerSide: 10,
       taxBpsOnExit: 0,
+      spreadBpsRoundTrip: 5,
+      slippageBpsPerSide: 2,
     });
     expect(schema.parse({
       marketCountry: "US",
