@@ -43,9 +43,9 @@ try {
   await page.getByText("최근 종가", { exact: true }).waitFor({ timeout: 120_000 });
   const analysisOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 
-  await page.getByRole("button", { name: "포트폴리오 백테스트", exact: true }).click();
+  await page.getByRole("button", { name: "백테스트", exact: true }).click();
   await page.getByRole("heading", { name: "포트폴리오 전략 백테스트" }).waitFor({ timeout: 30_000 });
-  await page.getByText(/총 \d+종목 · 비중 합계/).waitFor({ timeout: 120_000 });
+  await page.getByText(/총 \d+종목 · 주식 .+% \+ 현금 .+%/).waitFor({ timeout: 120_000 });
   const backtestOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 
   console.log(JSON.stringify({
