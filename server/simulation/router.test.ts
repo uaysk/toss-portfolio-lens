@@ -94,7 +94,11 @@ describe("AI paper simulation session-only router", () => {
     await routeHandler(created.value, "/status", "get")({}, statusResponse);
     expect(statusResponse.json).toHaveBeenCalledWith(expect.objectContaining({
       enabled: false,
-      capabilities: expect.objectContaining({ realOrder: false, mcp: false }),
+      capabilities: expect.objectContaining({
+        realOrder: false,
+        mcp: false,
+        orderApiDependency: false,
+      }),
     }));
     expect(statusResponse.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store, max-age=0");
 

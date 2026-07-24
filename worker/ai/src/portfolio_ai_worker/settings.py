@@ -37,6 +37,7 @@ class AISettings:
     device: str
     allow_cpu_fallback: bool
     expected_cuda_capability: str | None
+    expected_cuda_device_name: str
     microbatch_size: int
     max_series: int
     max_evaluation_origins: int
@@ -45,6 +46,7 @@ class AISettings:
     sample_count: int
     max_request_bytes: int
     max_response_bytes: int
+    companion_model: str = "kronos-small"
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 8765
     websocket_path: str = "/ws/scalping-ai/v1"
@@ -62,28 +64,41 @@ class AISettings:
     @classmethod
     def from_env(cls) -> "AISettings":
         package_root = Path(__file__).resolve().parents[2]
-        primary = os.getenv("AI_MODEL_PRIMARY", "kronos-small").strip()
-        fallback_raw = os.getenv("AI_MODEL_FALLBACK", "chronos-bolt-small").strip()
+        primary = os.getenv("AI_MODEL_PRIMARY", "chronos-2").strip()
+        companion = os.getenv("AI_MODEL_COMPANION", "kronos-small").strip()
+        fallback_raw = os.getenv("AI_MODEL_FALLBACK", "").strip()
         fallback = fallback_raw or None
-        supported = {"kronos-small", "chronos-bolt-small"}
+        supported = {"chronos-2", "kronos-small", "chronos-bolt-small"}
         if primary not in supported or (fallback is not None and fallback not in supported):
-            raise ValueError("AI model names must be kronos-small or chronos-bolt-small")
+            raise ValueError("AI model names must be kronos-small or chronos-bolt-small, or chronos-2")
+        if primary == "chronos-bolt-small":
+            raise ValueError(
+                "AI_MODEL_PRIMARY cannot be chronos-bolt-small; configure it only through AI_MODEL_FALLBACK"
+            )
+        if companion != "kronos-small":
+            raise ValueError("AI_MODEL_COMPANION must be kronos-small")
+        if fallback is not None and fallback != "chronos-bolt-small":
+            raise ValueError("AI_MODEL_FALLBACK may only be chronos-bolt-small")
         if primary == fallback:
             fallback = None
-        device = os.getenv("AI_DEVICE", "auto").strip().lower()
+        device = os.getenv("AI_DEVICE", "cuda").strip().lower()
         if device not in {"auto", "cuda", "cpu"}:
             raise ValueError("AI_DEVICE must be auto, cuda, or cpu")
         capability = os.getenv("AI_EXPECTED_CUDA_CAPABILITY", "6.1").strip()
         if capability.lower() == "any" or not capability:
             capability = None
+        expected_device_name = os.getenv("AI_EXPECTED_CUDA_DEVICE_NAME", "Tesla P40").strip()
+        if not expected_device_name:
+            raise ValueError("AI_EXPECTED_CUDA_DEVICE_NAME cannot be empty")
         return cls(
             model_cache_dir=Path(os.getenv("AI_MODEL_CACHE_DIR", "/models")),
             manifest_path=Path(os.getenv("AI_MODEL_MANIFEST", str(package_root / "model-manifest.json"))),
             primary_model=primary,
             fallback_model=fallback,
             device=device,
-            allow_cpu_fallback=_boolean("AI_ALLOW_CPU_FALLBACK", True),
+            allow_cpu_fallback=_boolean("AI_ALLOW_CPU_FALLBACK", False),
             expected_cuda_capability=capability,
+            expected_cuda_device_name=expected_device_name,
             microbatch_size=_bounded_int("AI_MICROBATCH_SIZE", 4, 1, 256),
             max_series=_bounded_int("AI_MAX_SERIES", 50, 1, 1_000),
             max_evaluation_origins=_bounded_int("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
@@ -92,6 +107,7 @@ class AISettings:
             sample_count=_bounded_int("AI_KRONOS_SAMPLE_COUNT", 20, 2, 256),
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+            companion_model=companion,
             websocket_host=os.getenv("AI_WEBSOCKET_HOST", "127.0.0.1").strip(),
             websocket_port=_bounded_int("AI_WEBSOCKET_PORT", 8765, 1, 65_535),
             websocket_path=os.getenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v1").strip(),
@@ -112,10 +128,22 @@ class AISettings:
         ).validate()
 
     def validate(self) -> "AISettings":
+        if self.primary_model not in {"chronos-2", "kronos-small"}:
+            if self.primary_model == "chronos-bolt-small":
+                raise ValueError(
+                    "AI primary model cannot be chronos-bolt-small; configure it only as the explicit fallback"
+                )
+            raise ValueError("AI primary model must be chronos-2 or kronos-small")
+        if self.fallback_model not in {None, "chronos-bolt-small"}:
+            raise ValueError("AI fallback model may only be chronos-bolt-small")
         if self.min_context_bars > self.max_context_bars:
             raise ValueError("AI_MIN_CONTEXT_BARS cannot exceed AI_MAX_CONTEXT_BARS")
         if not self.model_cache_dir.is_absolute():
             raise ValueError("AI model cache path must be absolute")
+        if self.companion_model != "kronos-small":
+            raise ValueError("AI model companion must be kronos-small")
+        if not self.expected_cuda_device_name.strip():
+            raise ValueError("AI expected CUDA device name cannot be empty")
         if not self.websocket_host:
             raise ValueError("AI_WEBSOCKET_HOST cannot be empty")
         if self.websocket_path != "/ws/scalping-ai/v1":

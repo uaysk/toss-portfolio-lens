@@ -3,6 +3,9 @@ import { z } from "zod";
 export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1" as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
+export const CHRONOS2_MODEL_ID = "amazon/chronos-2" as const;
+export const KRONOS_SMALL_MODEL_ID = "NeoQuasar/Kronos-small" as const;
+export const CHRONOS_BOLT_FALLBACK_MODEL_ID = "amazon/chronos-bolt-small" as const;
 
 const finite = z.number().finite();
 const positive = finite.positive();
@@ -220,6 +223,8 @@ const ModelProvenanceSchema = z.object({
   loader_version: z.string().min(1).max(128),
   license: z.string().min(1).max(64),
   device: z.enum(["cuda", "cpu", "unavailable"]),
+  device_name: z.string().min(1).max(256).nullable().optional(),
+  cuda_capability: z.string().regex(/^\d+\.\d+$/).max(16).nullable().optional(),
   dtype: z.literal("float32"),
   attention_backend: z.enum(["math", "unavailable"]),
   loaded: z.boolean(),
@@ -231,6 +236,18 @@ const ModelProvenanceSchema = z.object({
   }
   if (!model.loaded && (model.device !== "unavailable" || model.attention_backend !== "unavailable")) {
     context.addIssue({ code: "custom", message: "unloaded model runtime must be unavailable" });
+  }
+  const deviceName = model.device_name ?? null;
+  const cudaCapability = model.cuda_capability ?? null;
+  if (model.device !== "cuda" && (deviceName !== null || cudaCapability !== null)) {
+    context.addIssue({ code: "custom", path: ["device_name"], message: "CUDA metadata requires a CUDA model" });
+  }
+  if ((deviceName === null) !== (cudaCapability === null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["cuda_capability"],
+      message: "CUDA device name and capability must be recorded together",
+    });
   }
 });
 
@@ -294,6 +311,97 @@ const SeriesForecastResultSchema = z.object({
   }
   if (series.status === "unavailable" && (series.horizons.length || !series.unavailable)) {
     context.addIssue({ code: "custom", message: "unavailable series must have a reason only" });
+  }
+});
+
+const ModelRunInputOriginSchema = z.object({
+  instrument_key: z.string().min(1).max(128),
+  context_start_at: timestamp,
+  input_end_at: timestamp,
+  bar_count: z.number().int().min(1).max(20_000),
+  input_digest: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict().superRefine((origin, context) => {
+  if (timestampMillis(origin.context_start_at) > timestampMillis(origin.input_end_at)) {
+    context.addIssue({
+      code: "custom",
+      path: ["context_start_at"],
+      message: "context cannot start after input_end_at",
+    });
+  }
+});
+
+const ModelRunSchema = z.object({
+  role: z.enum(["chronos2", "kronos_small"]),
+  expected_model_id: z.enum([CHRONOS2_MODEL_ID, KRONOS_SMALL_MODEL_ID]),
+  status: z.enum(["available", "partial", "unavailable"]),
+  model: ModelProvenanceSchema,
+  generated_at: timestamp,
+  latency_ms: nonnegative,
+  degraded: z.boolean(),
+  fallback_used: z.boolean(),
+  fallback_reason: z.string().min(1).max(500).nullable().optional(),
+  input_origins: z.array(ModelRunInputOriginSchema).min(1).max(10_000),
+  input_end_aligned: z.literal(true),
+  raw_series: z.array(SeriesForecastResultSchema).min(1).max(10_000),
+}).strict().superRefine((run, context) => {
+  const expected = run.role === "chronos2" ? CHRONOS2_MODEL_ID : KRONOS_SMALL_MODEL_ID;
+  if (run.expected_model_id !== expected) {
+    context.addIssue({ code: "custom", path: ["expected_model_id"], message: "role and expected model ID do not match" });
+  }
+  if (run.fallback_used) {
+    if (run.role !== "chronos2"
+      || run.expected_model_id !== CHRONOS2_MODEL_ID
+      || run.model.model_id !== CHRONOS_BOLT_FALLBACK_MODEL_ID
+      || !run.model.loaded
+      || !run.degraded
+      || !run.fallback_reason
+      || run.model.fallback_from !== CHRONOS2_MODEL_ID) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback_used"],
+        message: "only loaded Chronos-Bolt may be a degraded Chronos-2 fallback",
+      });
+    }
+  } else if (run.model.model_id !== run.expected_model_id
+    || run.degraded
+    || (run.fallback_reason ?? null) !== null
+    || (run.model.fallback_from ?? null) !== null
+    || (run.model.fallback_reason ?? null) !== null) {
+    context.addIssue({
+      code: "custom",
+      path: ["model"],
+      message: "non-fallback run cannot contain fallback provenance",
+    });
+  }
+  if ((run.fallback_reason ?? null) !== (run.model.fallback_reason ?? null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["fallback_reason"],
+      message: "run fallback reason must match model provenance",
+    });
+  }
+  if (run.input_origins.length !== run.raw_series.length) {
+    context.addIssue({ code: "custom", path: ["raw_series"], message: "results must align with input origins" });
+  } else {
+    run.input_origins.forEach((origin, index) => {
+      const result = run.raw_series[index]!;
+      if (origin.instrument_key !== result.instrument_key
+        || timestampMillis(origin.input_end_at) !== timestampMillis(result.input_end_at)) {
+        context.addIssue({
+          code: "custom",
+          path: ["raw_series", index],
+          message: "result must align exactly with its input origin",
+        });
+      }
+    });
+  }
+  if (new Set(run.input_origins.map((item) => item.instrument_key)).size !== run.input_origins.length) {
+    context.addIssue({ code: "custom", path: ["input_origins"], message: "instrument keys must be unique" });
+  }
+  const available = run.raw_series.filter((item) => item.status === "available").length;
+  const expectedStatus = available === run.raw_series.length ? "available" : available > 0 ? "partial" : "unavailable";
+  if (run.status !== expectedStatus) {
+    context.addIssue({ code: "custom", path: ["status"], message: "run status must summarize raw series" });
   }
 });
 
@@ -468,6 +576,7 @@ export const AiResponseSchema = z.object({
   model: ModelProvenanceSchema,
   generated_at: timestamp,
   series: z.array(SeriesForecastResultSchema).max(10_000),
+  model_runs: z.array(ModelRunSchema).length(2).nullable().optional(),
   evaluation: EvaluationResultSchema.nullable().optional(),
   error: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((response, context) => {
@@ -501,6 +610,54 @@ export const AiResponseSchema = z.object({
       : available > 0 ? "partial" : "unavailable";
     if (response.status !== expected) {
       context.addIssue({ code: "custom", path: ["status"], message: "evaluate status must summarize records" });
+    }
+  }
+  if (response.model_runs) {
+    if (response.mode !== "forecast" || response.error) {
+      context.addIssue({ code: "custom", path: ["model_runs"], message: "model runs require a successful forecast" });
+      return;
+    }
+    if (response.model_runs[0]?.role !== "chronos2" || response.model_runs[1]?.role !== "kronos_small") {
+      context.addIssue({
+        code: "custom",
+        path: ["model_runs"],
+        message: "model runs must be ordered Chronos-2 then Kronos-small",
+      });
+      return;
+    }
+    const chronos = response.model_runs[0]!;
+    const kronos = response.model_runs[1]!;
+    const alignedOrigins = chronos.input_origins.length === kronos.input_origins.length
+      && chronos.input_origins.every((origin, index) => {
+        const other = kronos.input_origins[index]!;
+        return origin.instrument_key === other.instrument_key
+          && timestampMillis(origin.context_start_at) === timestampMillis(other.context_start_at)
+          && timestampMillis(origin.input_end_at) === timestampMillis(other.input_end_at)
+          && origin.bar_count === other.bar_count
+          && origin.input_digest === other.input_digest;
+      });
+    if (!alignedOrigins) {
+      context.addIssue({
+        code: "custom",
+        path: ["model_runs"],
+        message: "Chronos-2 and Kronos-small must share identical input origins",
+      });
+    }
+    if (JSON.stringify(response.model) !== JSON.stringify(chronos.model)
+      || JSON.stringify(response.series) !== JSON.stringify(chronos.raw_series)
+      || response.status !== chronos.status) {
+      context.addIssue({
+        code: "custom",
+        path: ["model_runs", 0],
+        message: "legacy response fields must mirror the Chronos-2 run",
+      });
+    }
+    if (response.model_runs.some((run) => timestampMillis(run.generated_at) > timestampMillis(response.generated_at))) {
+      context.addIssue({
+        code: "custom",
+        path: ["generated_at"],
+        message: "response generated_at cannot precede a model run",
+      });
     }
   }
 });

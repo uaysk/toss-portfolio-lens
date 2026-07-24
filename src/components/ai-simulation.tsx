@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
+import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import { AiSimulationHistory } from "@/components/ai-simulation-history";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,12 +25,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   DEFAULT_AI_SIMULATION_REQUEST,
   aiSimulationErrorMessage,
+  aiSimulationPairCatalog,
+  aiSimulationPairStrategyEnabled,
   normalizeAiSimulationRun,
   normalizeAiSimulationStatus,
   validateAiSimulationRequest,
   type AiSimulationCosts,
   type AiSimulationCriterion,
   type AiSimulationMarketCountry,
+  type AiSimulationPairCatalogItem,
+  type AiSimulationPairId,
   type AiSimulationPreset,
   type AiSimulationRequest,
   type AiSimulationRunResponse,
@@ -132,6 +137,31 @@ function selectionModeLabel(request: AiSimulationRequest): string {
   return request.selection.mode === "manual" ? "직접 선택" : "자동 선정";
 }
 
+export function aiSimulationRequestWithStrategy(
+  current: AiSimulationRequest,
+  strategy: { mode: "single" } | { mode: "pair"; pairId: AiSimulationPairId },
+): AiSimulationRequest {
+  if (strategy.mode === "single") return { ...current, strategy };
+  const switchingToUsDefaults = current.marketCountry === "KR"
+    && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
+  const usingDefaultTax = current.costs.taxBpsOnExit === (current.marketCountry === "KR" ? 18 : 0);
+  return {
+    ...current,
+    marketCountry: "US",
+    initialCash: switchingToUsDefaults ? 100_000 : current.initialCash,
+    selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
+    strategy: {
+      mode: "pair",
+      pairId: strategy.pairId,
+      allowDegradedMode: false,
+    },
+    costs: {
+      ...current.costs,
+      taxBpsOnExit: usingDefaultTax ? 0 : current.costs.taxBpsOnExit,
+    },
+  };
+}
+
 function riskDispositionLabel(value: number): string {
   if (value <= 33) return "방어";
   if (value >= 67) return "공격";
@@ -180,6 +210,109 @@ function actionLabel(value: string): string {
 
 function capabilityLabel(key: string, value: boolean | number | string): string {
   return `${key} · ${typeof value === "boolean" ? (value ? "지원" : "미지원") : value}`;
+}
+
+export function AiSimulationStrategySettings({
+  request,
+  catalog,
+  pairEnabled,
+  pairMessage,
+  disabled,
+  onModeChange,
+  onPairIdChange,
+  onAllowDegradedModeChange,
+}: {
+  request: AiSimulationRequest;
+  catalog: readonly AiSimulationPairCatalogItem[];
+  pairEnabled: boolean;
+  pairMessage?: string;
+  disabled: boolean;
+  onModeChange: (mode: "single" | "pair") => void;
+  onPairIdChange: (pairId: AiSimulationPairId) => void;
+  onAllowDegradedModeChange: (allowed: boolean) => void;
+}) {
+  return (
+    <div className="rounded-2xl bg-secondary p-4" data-simulation-strategy-settings>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-xs font-black">전략 실행 방식</p>
+          <p className="mt-1 text-[9px] leading-4 text-muted-foreground">
+            페어 비교는 네 전략에 같은 미국 시장 원천·비용·체결 정책을 적용합니다.
+          </p>
+        </div>
+        <div
+          className="grid grid-cols-2 gap-1 rounded-xl bg-card p-1"
+          role="radiogroup"
+          aria-label="시뮬레이션 전략 실행 방식"
+        >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={request.strategy.mode === "single"}
+            className={cn(
+              "rounded-lg px-3 py-2 text-[10px] font-black transition-colors",
+              request.strategy.mode === "single" ? "bg-primary text-primary-foreground" : "text-muted-foreground",
+            )}
+            disabled={disabled}
+            onClick={() => onModeChange("single")}
+          >
+            단일
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={request.strategy.mode === "pair"}
+            className={cn(
+              "rounded-lg px-3 py-2 text-[10px] font-black transition-colors",
+              request.strategy.mode === "pair" ? "bg-primary text-primary-foreground" : "text-muted-foreground",
+            )}
+            disabled={disabled || !pairEnabled}
+            aria-disabled={disabled || !pairEnabled}
+            onClick={() => onModeChange("pair")}
+          >
+            페어 비교
+          </button>
+        </div>
+      </div>
+      {!pairEnabled ? (
+        <p className="mt-3 rounded-xl bg-card p-3 text-[9px] leading-4 text-muted-foreground">
+          {pairMessage ?? "현재 서버가 페어 전략 capability를 제공하지 않습니다."}
+        </p>
+      ) : null}
+      {request.strategy.mode === "pair" ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]" data-simulation-pair-settings>
+          <label className="min-w-0">
+            <span className="mb-2 block text-[10px] font-black text-muted-foreground">미국 페어 카탈로그</span>
+            <Select
+              value={request.strategy.pairId}
+              onValueChange={(value) => onPairIdChange(value as AiSimulationPairId)}
+              disabled={disabled}
+            >
+              <SelectTrigger aria-label="미국 페어 카탈로그" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {catalog.map((item) => (
+                  <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="flex items-center gap-3 rounded-xl bg-card px-4 py-3 text-[10px] font-black sm:self-end">
+            <input
+              type="checkbox"
+              aria-label="일부 전략 unavailable 시 degraded 실행 허용"
+              checked={request.strategy.allowDegradedMode}
+              disabled={disabled}
+              onChange={(event) => onAllowDegradedModeChange(event.target.checked)}
+            />
+            degraded 실행 허용
+          </label>
+          <p className="text-[9px] leading-4 text-muted-foreground sm:col-span-2">
+            페어 비교를 선택하면 시장은 미국으로 고정됩니다. degraded 허용 시에도 unavailable 전략은 임의 결과로 대체하지 않고 미완료로 표시합니다.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function Metric({
@@ -402,7 +535,13 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
                   <p className="font-black">{decision.symbol} · {actionLabel(decision.action)}</p>
                   <p className="text-[9px] text-muted-foreground">{formatTimestamp(decision.decidedAt)}</p>
                 </div>
-                <p className="mt-2 break-words text-xs leading-5">{decision.reason}</p>
+                {decision.reasons && decision.reasons.length > 1 ? (
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5">
+                    {decision.reasons.map((reason, reasonIndex) => (
+                      <li key={`${reason}:${reasonIndex}`} className="break-words">{reason}</li>
+                    ))}
+                  </ul>
+                ) : <p className="mt-2 break-words text-xs leading-5">{decision.reason}</p>}
                 {decision.chartPatterns.length ? (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {decision.chartPatterns.map((pattern) => (
@@ -425,6 +564,34 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
                 <p className="mt-2 text-[9px] text-muted-foreground">
                   적용 가능 {formatTimestamp(decision.eligibleAfter)} · score {formatScore(decision.score)} · 상승 {formatRatio(decision.upProbability)}
                 </p>
+                {decision.q10Return !== undefined
+                  || decision.predictedMedianReturn !== undefined
+                  || decision.q90Return !== undefined ? (
+                    <p className="mt-1 break-words text-[9px] text-muted-foreground">
+                      q10 {formatRatio(decision.q10Return, true)} · 중앙 {formatRatio(decision.predictedMedianReturn, true)} · q90 {formatRatio(decision.q90Return, true)}
+                    </p>
+                  ) : null}
+                {decision.signalSymbol || decision.executionSymbol || decision.direction || decision.technicalState ? (
+                  <p className="mt-1 break-words text-[9px] text-muted-foreground">
+                    {decision.signalSymbol && decision.executionSymbol
+                      ? `${decision.signalSymbol} → ${decision.executionSymbol}`
+                      : decision.signalSymbol ?? decision.executionSymbol}
+                    {decision.direction ? ` · ${decision.direction}` : ""}
+                    {decision.technicalState ? ` · ${decision.technicalState}` : ""}
+                    {decision.degraded ? " · degraded" : ""}
+                  </p>
+                ) : null}
+                {decision.components || decision.weights || decision.finalScores || decision.provenance?.length ? (
+                  <details className="mt-2 rounded-xl bg-card p-3">
+                    <summary className="cursor-pointer text-[9px] font-black">판단 구성 상세</summary>
+                    <div className="mt-2 space-y-1 break-words text-[8px] leading-4 text-muted-foreground">
+                      {decision.components ? <p>components · {Object.entries(decision.components).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                      {decision.weights ? <p>weights · {Object.entries(decision.weights).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                      {decision.finalScores ? <p>final scores · {Object.entries(decision.finalScores).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                      {decision.provenance?.length ? <p>provenance · {decision.provenance.join(" · ")}</p> : null}
+                    </div>
+                  </details>
+                ) : null}
                 {decision.model ? <p className="mt-1 truncate text-[9px] text-muted-foreground" title={decision.model}>{decision.model}</p> : null}
               </article>
             ))}
@@ -518,6 +685,13 @@ function RunPanel({
         </div>
       </Card>
 
+      {snapshot.strategyComparison ? (
+        <AiSimulationComparisonPanel
+          comparison={snapshot.strategyComparison}
+          currency={snapshot.currency}
+        />
+      ) : null}
+
       <div className="grid gap-3 xl:grid-cols-2">
         <SelectedSymbols snapshot={snapshot} />
         <Positions snapshot={snapshot} />
@@ -583,6 +757,8 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     [request, status?.limits],
   );
   const runActive = Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
+  const pairEnabled = aiSimulationPairStrategyEnabled(status);
+  const pairCatalog = useMemo(() => aiSimulationPairCatalog(status), [status]);
 
   useEffect(() => {
     const query = instrumentQuery.trim();
@@ -833,7 +1009,27 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     });
   };
 
+  const changeStrategyMode = (mode: "single" | "pair") => {
+    if (mode === "pair" && !pairEnabled) return;
+    setInstrumentQuery("");
+    setInstrumentResults([]);
+    setInstrumentError("");
+    if (mode === "pair") setManualInstruments([]);
+    setRequest((current) => {
+      if (mode === "single") return aiSimulationRequestWithStrategy(current, { mode });
+      const currentPairId = current.strategy.mode === "pair" ? current.strategy.pairId : undefined;
+      const pairId = pairCatalog.some((item) => item.id === currentPairId)
+        ? currentPairId!
+        : pairCatalog[0]?.id ?? "soxx-soxl-soxs";
+      return aiSimulationRequestWithStrategy(current, { mode, pairId });
+    });
+  };
+
   const currency = request.marketCountry === "US" ? "USD" : "KRW";
+  const selectedPairId = request.strategy.mode === "pair" ? request.strategy.pairId : undefined;
+  const selectedPair = selectedPairId
+    ? pairCatalog.find((item) => item.id === selectedPairId)
+    : undefined;
 
   return (
     <section className="space-y-3" data-ai-simulation>
@@ -871,7 +1067,10 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             <p className="mt-2 text-xs leading-5 text-muted-foreground">시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.</p>
           </div>
           <span className="rounded-full bg-secondary px-3 py-1.5 text-[10px] font-black">
-            {selectionModeLabel(request)} · {requestedSymbolCount(request)}종목 · {request.durationMinutes}분 · {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance} · {currency}
+            {request.strategy.mode === "pair"
+              ? `페어 비교 · ${selectedPair?.label ?? request.strategy.pairId}`
+              : `${selectionModeLabel(request)} · ${requestedSymbolCount(request)}종목`}
+            {" · "}{request.durationMinutes}분 · {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance} · {currency}
           </span>
         </div>
 
@@ -879,7 +1078,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
-              <Select value={request.marketCountry} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive}>
+              <Select value={request.marketCountry} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive || request.strategy.mode === "pair"}>
                 <SelectTrigger aria-label="시뮬레이션 대상 시장" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="KR">국내</SelectItem>
@@ -887,16 +1086,23 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
                 </SelectContent>
               </Select>
             </label>
-            <label className="min-w-0 rounded-2xl bg-secondary p-3">
-              <span className="mb-2 block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
-              <Select value={request.selection.mode} onValueChange={(value) => changeSelectionMode(value as "auto" | "manual")} disabled={runActive}>
-                <SelectTrigger aria-label="시뮬레이션 종목 선택 방식" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">거래 지표로 자동 선정</SelectItem>
-                  <SelectItem value="manual">사용자가 직접 선택</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
+            {request.strategy.mode === "single" ? (
+              <label className="min-w-0 rounded-2xl bg-secondary p-3">
+                <span className="mb-2 block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
+                <Select value={request.selection.mode} onValueChange={(value) => changeSelectionMode(value as "auto" | "manual")} disabled={runActive}>
+                  <SelectTrigger aria-label="시뮬레이션 종목 선택 방식" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">거래 지표로 자동 선정</SelectItem>
+                    <SelectItem value="manual">사용자가 직접 선택</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+            ) : (
+              <div className="min-w-0 rounded-2xl bg-secondary p-3">
+                <span className="block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
+                <p className="mt-3 break-words text-xs font-black">미국 페어 카탈로그 고정</p>
+              </div>
+            )}
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">판단 프리셋</span>
               <Select
@@ -918,6 +1124,23 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               </Select>
             </label>
           </div>
+
+          <AiSimulationStrategySettings
+            request={request}
+            catalog={pairCatalog}
+            pairEnabled={pairEnabled}
+            pairMessage={statusLoading
+              ? "페어 전략 capability를 확인하고 있습니다."
+              : status?.pairStrategy?.message}
+            disabled={runActive}
+            onModeChange={changeStrategyMode}
+            onPairIdChange={(pairId) => setRequest((current) => current.strategy.mode === "pair"
+              ? { ...current, strategy: { ...current.strategy, pairId } }
+              : current)}
+            onAllowDegradedModeChange={(allowDegradedMode) => setRequest((current) => current.strategy.mode === "pair"
+              ? { ...current, strategy: { ...current.strategy, allowDegradedMode } }
+              : current)}
+          />
 
           <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
             <div className="rounded-2xl bg-secondary p-4">
@@ -957,7 +1180,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             </label>
           </div>
 
-          {request.selection.mode === "auto" ? (
+          {request.strategy.mode === "pair" ? null : request.selection.mode === "auto" ? (
             <div className="grid gap-3 rounded-2xl bg-secondary p-4 sm:grid-cols-2" data-simulation-auto-selection>
               <label className="min-w-0">
                 <span className="mb-2 block text-[10px] font-black text-muted-foreground">자동 선정 기준</span>

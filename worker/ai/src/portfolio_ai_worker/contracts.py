@@ -13,6 +13,9 @@ FIXED_HORIZONS = (5, 15, 30, 60)
 FIXED_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 FORECAST_STEPS = max(FIXED_HORIZONS)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+CHRONOS2_MODEL_ID = "amazon/chronos-2"
+KRONOS_SMALL_MODEL_ID = "NeoQuasar/Kronos-small"
+CHRONOS_BOLT_FALLBACK_MODEL_ID = "amazon/chronos-bolt-small"
 
 
 class StrictModel(BaseModel):
@@ -283,6 +286,8 @@ class ModelProvenance(StrictModel):
     loader_version: str = Field(min_length=1, max_length=128)
     license: str = Field(min_length=1, max_length=64)
     device: Literal["cuda", "cpu", "unavailable"]
+    device_name: str | None = Field(default=None, min_length=1, max_length=256)
+    cuda_capability: str | None = Field(default=None, pattern=r"^\d+\.\d+$", max_length=16)
     dtype: Literal["float32"]
     attention_backend: Literal["math", "unavailable"]
     loaded: bool
@@ -295,6 +300,11 @@ class ModelProvenance(StrictModel):
             raise ValueError("loaded model provenance requires an execution device and attention backend")
         if not self.loaded and (self.device != "unavailable" or self.attention_backend != "unavailable"):
             raise ValueError("unloaded model provenance must use unavailable runtime fields")
+        cuda_metadata = (self.device_name, self.cuda_capability)
+        if self.device != "cuda" and any(value is not None for value in cuda_metadata):
+            raise ValueError("CUDA device provenance is valid only for a loaded CUDA model")
+        if (self.device_name is None) != (self.cuda_capability is None):
+            raise ValueError("CUDA device name and capability must be recorded together")
         return self
 
 
@@ -394,6 +404,90 @@ class SeriesForecastResult(StrictModel):
             raise ValueError("available series horizons must be ordered as 5, 15, 30, 60")
         if self.status == "unavailable" and (self.unavailable is None or self.horizons):
             raise ValueError("unavailable series must contain a reason and no horizons")
+        return self
+
+
+class ModelRunInputOrigin(StrictModel):
+    instrument_key: str = Field(min_length=1, max_length=128)
+    context_start_at: datetime
+    input_end_at: datetime
+    bar_count: int = Field(ge=1, le=20_000)
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("context_start_at", "input_end_at")
+    @classmethod
+    def aware_input_timestamp(cls, value: datetime) -> datetime:
+        return _aware(value, "model run input timestamp")
+
+    @model_validator(mode="after")
+    def valid_context_range(self) -> "ModelRunInputOrigin":
+        if self.context_start_at > self.input_end_at:
+            raise ValueError("model run context cannot start after its input origin")
+        return self
+
+
+class ModelRun(StrictModel):
+    role: Literal["chronos2", "kronos_small"]
+    expected_model_id: Literal["amazon/chronos-2", "NeoQuasar/Kronos-small"]
+    status: Literal["available", "partial", "unavailable"]
+    model: ModelProvenance
+    generated_at: datetime
+    latency_ms: float = Field(ge=0)
+    degraded: bool
+    fallback_used: bool
+    fallback_reason: str | None = Field(default=None, min_length=1, max_length=500)
+    input_origins: tuple[ModelRunInputOrigin, ...] = Field(min_length=1)
+    input_end_aligned: Literal[True]
+    raw_series: tuple[SeriesForecastResult, ...] = Field(min_length=1)
+
+    @field_validator("generated_at")
+    @classmethod
+    def aware_generated_at(cls, value: datetime) -> datetime:
+        return _aware(value, "model run generated_at")
+
+    @model_validator(mode="after")
+    def validate_run(self) -> "ModelRun":
+        expected_by_role = {
+            "chronos2": CHRONOS2_MODEL_ID,
+            "kronos_small": KRONOS_SMALL_MODEL_ID,
+        }
+        if self.expected_model_id != expected_by_role[self.role]:
+            raise ValueError("model run role and expected model ID do not match")
+        if self.fallback_used:
+            if (
+                self.role != "chronos2"
+                or self.expected_model_id != CHRONOS2_MODEL_ID
+                or self.model.model_id != CHRONOS_BOLT_FALLBACK_MODEL_ID
+                or not self.model.loaded
+                or not self.degraded
+                or self.fallback_reason is None
+                or self.model.fallback_from != CHRONOS2_MODEL_ID
+            ):
+                raise ValueError("only a loaded Chronos-Bolt model can be a degraded Chronos-2 fallback")
+        elif (
+            self.model.model_id != self.expected_model_id
+            or self.degraded
+            or self.fallback_reason is not None
+            or self.model.fallback_from is not None
+            or self.model.fallback_reason is not None
+        ):
+            raise ValueError("a non-fallback model run cannot contain fallback provenance")
+        if self.fallback_reason != self.model.fallback_reason:
+            raise ValueError("model run fallback reason must match model provenance")
+
+        origins = tuple((item.instrument_key, item.input_end_at) for item in self.input_origins)
+        results = tuple((item.instrument_key, item.input_end_at) for item in self.raw_series)
+        if origins != results:
+            raise ValueError("model run results must align exactly with request input origins")
+        if len({item.instrument_key for item in self.input_origins}) != len(self.input_origins):
+            raise ValueError("model run input origin instrument keys must be unique")
+
+        available = sum(item.status == "available" for item in self.raw_series)
+        expected_status = (
+            "available" if available == len(self.raw_series) else "partial" if available else "unavailable"
+        )
+        if self.status != expected_status:
+            raise ValueError("model run status must summarize its raw series")
         return self
 
 
@@ -559,6 +653,7 @@ class AIResponse(StrictModel):
     model: ModelProvenance
     generated_at: datetime
     series: tuple[SeriesForecastResult, ...]
+    model_runs: tuple[ModelRun, ...] | None = None
     evaluation: EvaluationResult | None = None
     error: UnavailableDetail | None = None
 
@@ -602,6 +697,18 @@ class AIResponse(StrictModel):
             )
             if self.status != expected:
                 raise ValueError("evaluate response status must summarize its evaluation records")
+        if self.model_runs is not None:
+            if self.mode != "forecast" or self.error is not None:
+                raise ValueError("per-model runs are supported only on successful forecast responses")
+            if tuple(item.role for item in self.model_runs) != ("chronos2", "kronos_small"):
+                raise ValueError("model runs must contain ordered Chronos-2 and Kronos-small results")
+            if self.model_runs[0].input_origins != self.model_runs[1].input_origins:
+                raise ValueError("Chronos-2 and Kronos-small model runs must share identical input origins")
+            primary = self.model_runs[0]
+            if self.model != primary.model or self.series != primary.raw_series or self.status != primary.status:
+                raise ValueError("legacy response fields must mirror the Chronos-2 model run")
+            if any(item.generated_at > self.generated_at for item in self.model_runs):
+                raise ValueError("response generated_at cannot precede a model run")
         return self
 
 

@@ -9,7 +9,7 @@ import sys
 
 from pydantic import ValidationError
 
-from .adapters import load_production_adapter
+from .adapters import load_production_model_suite
 from .contracts import AI_REQUEST_ADAPTER, AI_RESPONSE_ADAPTER
 from .server import _envelope, serve
 from .service import AIService
@@ -29,8 +29,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def _runtime() -> tuple[AISettings, AIService]:
     settings = AISettings.from_env()
-    adapter = load_production_adapter(settings)
-    return settings, AIService(settings, adapter)
+    suite = load_production_model_suite(settings)
+    return settings, AIService(settings, suite.primary, suite.runs)
 
 
 def _healthcheck(settings: AISettings) -> int:
@@ -59,10 +59,32 @@ def _healthcheck(settings: AISettings) -> int:
 
 def _preflight(service: AIService) -> int:
     provenance = service.adapter.provenance
+    model_bindings = service.model_run_adapters
+    models = [
+        {
+            "role": binding.role,
+            "expected_model_id": binding.expected_model_id,
+            "degraded": (
+                binding.adapter.provenance.loaded and binding.adapter.provenance.model_id != binding.expected_model_id
+            ),
+            "model": binding.adapter.provenance.model_dump(mode="json"),
+        }
+        for binding in model_bindings
+    ]
+    all_loaded = bool(models) and all(binding.adapter.provenance.loaded for binding in model_bindings)
+    any_degraded = any(item["degraded"] for item in models)
+    status = (
+        "available"
+        if all_loaded and not any_degraded
+        else "degraded"
+        if any(binding.adapter.provenance.loaded for binding in model_bindings)
+        else "unavailable"
+    )
     output = {
         "schema_version": "scalping-ai-preflight/v1",
-        "status": "available" if provenance.loaded else "unavailable",
+        "status": status,
         "model": provenance.model_dump(mode="json"),
+        "models": models,
         "limits": {
             "microbatch_size": service.settings.microbatch_size,
             "max_series": service.settings.max_series,
@@ -74,7 +96,7 @@ def _preflight(service: AIService) -> int:
         },
     }
     sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
-    return 0 if provenance.loaded else 2
+    return 0 if status == "available" else 2
 
 
 def _json_request(service: AIService) -> int:

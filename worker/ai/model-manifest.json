@@ -6,6 +6,14 @@
     "license": "MIT"
   },
   "models": {
+    "chronos-2": {
+      "model_id": "amazon/chronos-2",
+      "revision": "254b5357164a84326913b0695216f690752ac55d",
+      "tokenizer_id": null,
+      "tokenizer_revision": null,
+      "license": "Apache-2.0",
+      "loader_version": "chronos-forecasting-2.1.0"
+    },
     "kronos-small": {
       "model_id": "NeoQuasar/Kronos-small",
       "revision": "901c26c1332695a2a8f243eb2f37243a37bea320",

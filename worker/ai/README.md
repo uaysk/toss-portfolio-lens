@@ -12,14 +12,26 @@ managed GPU host without changing the forecasting contract.
   are synthesized.
 - Runtime startup and requests never download weights. `scripts/prepare-ai-model-cache.py` is a separate, explicit
   operator action and currently prepares only the pinned Chronos-Bolt-small fallback.
-- The primary model is pinned Kronos-small with the pinned Kronos tokenizer and source loader. Chronos-Bolt-small is a
-  startup-only fallback. A running process never silently switches models between requests.
-- P40 execution uses float32 and the math scaled-dot-product-attention backend. CUDA compute capability `6.1` is checked
-  against the installed PyTorch wheel. `AI_ALLOW_CPU_FALLBACK` controls startup CPU fallback.
+- Production runs pinned `amazon/chronos-2` and pinned `NeoQuasar/Kronos-small` over the same immutable
+  `ForecastRequest`. The legacy top-level response mirrors the Chronos-2 run, while `model_runs` preserves both raw
+  model series, exact input origins, per-model generation time, device, latency, and availability. Each origin records
+  the effective context start, confirmed-bar count, and a deterministic SHA-256 digest of canonical
+  timestamp/OHLCV/amount/complete values; the two runs must match exactly. CUDA runs additionally record the observed
+  device name and compute capability.
+- Chronos-Bolt-small is used only when an operator explicitly sets
+  `AI_MODEL_FALLBACK=chronos-bolt-small`. Its actual model ID, the Chronos-2 load failure, and `degraded=true` remain
+  visible in the model run; it is never represented as a successful Chronos-2 run.
+- P40 execution uses float32 and the math scaled-dot-product-attention backend. The observed CUDA device name must
+  exactly match `AI_EXPECTED_CUDA_DEVICE_NAME` (default `Tesla P40`), and compute capability `6.1` is checked against
+  the installed PyTorch wheel. Production model runs fail closed if either identity check fails or preflight resolves
+  to CPU, even when the legacy single-adapter helper permits CPU fallback.
 - A deterministic adapter exists only in tests and is dependency-injected. It is not selectable by environment variable
   or through the wire contract.
 - Input bars must be complete, strictly ordered, timezone-aware OHLC bars. Forecasts always cover 5, 15, 30, and 60
   minutes with fixed 5/10/25/50/75/90/95 percentiles.
+- Chronos-2 uses `predict_df` with close as the target and causal OHLCV, one-bar return, candle range, rolling realized
+  volatility, and liquidity as past covariates. Kronos-small receives the exact same confirmed OHLCV range and future
+  timestamp origin through its finance-specific predictor.
 - Distribution-shift output remains explicitly unavailable until reproducible training-reference statistics are
   published by the selected model. First-passage probabilities are unavailable for Chronos marginal quantiles because
   marginal distributions do not identify target-versus-stop path ordering.
@@ -29,6 +41,9 @@ managed GPU host without changing the forecasting contract.
 The read-only `AI_MODEL_CACHE_DIR` mount must contain:
 
 ```text
+chronos-2/.revision
+chronos-2/config.json
+chronos-2/model.safetensors
 kronos-source/.source-revision
 kronos-source/model/kronos.py
 kronos-source/model/module.py
@@ -65,8 +80,10 @@ repository, command output, or log.
 Other important configuration is environment-backed: `AI_WEBSOCKET_MAX_CONNECTIONS`,
 `AI_WEBSOCKET_QUEUE_CAPACITY`, `AI_WEBSOCKET_MAX_IN_FLIGHT`, `AI_WEBSOCKET_PING_INTERVAL_SECONDS`,
 `AI_WEBSOCKET_PING_TIMEOUT_SECONDS`, `AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS`, `AI_WEBSOCKET_TLS_CERT_FILE`,
-`AI_WEBSOCKET_TLS_KEY_FILE`, `AI_MODEL_CACHE_DIR`, `AI_DEVICE`, `AI_ALLOW_CPU_FALLBACK`,
-`AI_EXPECTED_CUDA_CAPABILITY`, `AI_MICROBATCH_SIZE`, `AI_MAX_SERIES`, `AI_MAX_EVALUATION_ORIGINS`,
+`AI_WEBSOCKET_TLS_KEY_FILE`, `AI_MODEL_CACHE_DIR`, `AI_MODEL_PRIMARY`, `AI_MODEL_COMPANION`,
+`AI_MODEL_FALLBACK`, `AI_DEVICE`, `AI_ALLOW_CPU_FALLBACK`,
+`AI_EXPECTED_CUDA_CAPABILITY`, `AI_EXPECTED_CUDA_DEVICE_NAME`, `AI_MICROBATCH_SIZE`, `AI_MAX_SERIES`,
+`AI_MAX_EVALUATION_ORIGINS`,
 `AI_MIN_CONTEXT_BARS`, `AI_MAX_CONTEXT_BARS`, `AI_KRONOS_SAMPLE_COUNT`, `AI_MAX_REQUEST_BYTES`, and
 `AI_MAX_RESPONSE_BYTES`.
 
@@ -87,8 +104,8 @@ python3 scripts/prepare-ai-model-cache.py \
   --check-only
 ```
 
-This preparation path supports `chronos-bolt-small` only. Kronos-small still requires its pinned source, tokenizer, and
-model snapshot to be acquired and reviewed separately. Set `AI_MODEL_PRIMARY=chronos-bolt-small` when only the prepared
-fallback directory is present. The cache directory must be traversable by container UID 10001 (normally directory mode
-`0755`); the preparation script makes the public required artifacts read-only. The cache is mounted read-only into the
-runtime container.
+This preparation path supports `chronos-bolt-small` only. Chronos-2 and Kronos-small still require their pinned model
+snapshots—and Kronos also its pinned source and tokenizer—to be acquired and reviewed separately. Preparing Bolt does
+not enable it: `AI_MODEL_FALLBACK=chronos-bolt-small` is required explicitly, and the resulting run is degraded. The
+cache directory must be traversable by container UID 10001 (normally directory mode `0755`); the preparation script
+makes the public required artifacts read-only. The cache is mounted read-only into the runtime container.

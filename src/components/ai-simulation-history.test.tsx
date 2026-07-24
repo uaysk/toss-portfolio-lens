@@ -7,7 +7,42 @@ import {
 import type {
   AiSimulationHistoryItem,
   AiSimulationRunReport,
+  AiSimulationStrategyComparison,
 } from "@/lib/ai-simulation";
+
+const strategyComparison: AiSimulationStrategyComparison = {
+  conditionId: "history-ui-condition",
+  pairId: "qqq-tqqq-sqqq",
+  sameOrigin: true,
+  sameCosts: true,
+  sameExecutionPolicy: true,
+  incompleteCount: 1,
+  lanes: [
+    {
+      id: "chronos2",
+      status: "completed",
+      analyticalOnly: true,
+      cumulativeReturn: 0.01,
+      bullCount: 2,
+      bearCount: 1,
+      cashCount: 4,
+      decisionReasons: [{
+        reason: "forecast_up",
+        reasons: ["forecast_up", "costs_passed"],
+        signalSymbol: "QQQ",
+        executionSymbol: "TQQQ",
+      }],
+    },
+    {
+      id: "kronos",
+      status: "unavailable",
+      unavailableReason: "model unavailable",
+      decisionReasons: [],
+    },
+    { id: "rust", status: "completed", analyticalOnly: true, cumulativeReturn: 0.004, decisionReasons: [] },
+    { id: "ensemble", status: "completed", analyticalOnly: true, cumulativeReturn: 0.008, decisionReasons: [] },
+  ],
+};
 
 describe("AI simulation history", () => {
   it("keeps complete run summaries in a bounded, keyboard-scrollable archive", () => {
@@ -26,6 +61,7 @@ describe("AI simulation history", () => {
       tradeCount: index,
       decisionCount: index + 2,
       warnings: [],
+      ...(index === 23 ? { strategyComparison } : {}),
     }));
     const markup = renderToStaticMarkup(
       <SimulationRunHistoryList
@@ -42,6 +78,10 @@ describe("AI simulation history", () => {
     expect(markup).toContain('data-simulation-history-item="run-24"');
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain("변동성 자동 선정 · 2종목");
+    expect(markup).toContain("동일 조건 4전략 비교");
+    expect(markup).toContain("forward 실행 정책");
+    expect(markup).toContain("모든 lane의 비교 성과는 분석·검증용");
+    expect(markup).toContain("bull 2 · bear 1 · cash 4");
   });
 
   it("renders the selected run configuration, result, provenance, ledger, and evidence", () => {
@@ -108,9 +148,50 @@ describe("AI simulation history", () => {
       }],
       charts: [],
       modelProvenance: ["chronos · pinned · CUDA"],
+      decisionProvenance: [{
+        decisionId: "pair-decision-1",
+        pairId: "tsla-tsll-tslq",
+        signalSymbol: "TSLA",
+        executionSymbol: "TSLL",
+        direction: "bull",
+        origin: "2026-07-24T01:01:00.000Z",
+        decisionAt: "2026-07-24T01:01:01.000Z",
+        degraded: true,
+        models: [
+          {
+            component: "chronos2",
+            status: "degraded",
+            modelId: "amazon/chronos-bolt-small",
+            modelRevision: "bolt-revision",
+            origin: "2026-07-24T01:01:00.000Z",
+            generatedAt: "2026-07-24T01:01:00.300Z",
+            device: "cuda:0",
+            deviceName: "Tesla P40",
+            latencyMs: 321,
+            degraded: true,
+            fallbackUsed: true,
+            fallbackFrom: "amazon/chronos-2",
+            fallbackReason: "cache missing",
+          },
+          {
+            component: "kronos",
+            status: "available",
+            modelId: "NeoQuasar/Kronos-small",
+            modelRevision: "kronos-revision",
+            origin: "2026-07-24T01:01:00.000Z",
+            generatedAt: "2026-07-24T01:01:00.400Z",
+            device: "cuda:0",
+            deviceName: "Tesla P40",
+            latencyMs: 456,
+            degraded: false,
+            fallbackUsed: false,
+          },
+        ],
+      }],
       evidence: [{ label: "chart_pattern", value: "bullish_engulfing" }],
       warnings: ["가상 체결만 생성합니다."],
       limits: ["실주문 없음"],
+      strategyComparison,
     };
     const markup = renderToStaticMarkup(<SimulationRunReportView report={report} />);
 
@@ -120,10 +201,26 @@ describe("AI simulation history", () => {
     expect(markup).toContain("변동성 자동 선정 · 2종목");
     expect(markup).toContain("NVIDIA");
     expect(markup).toContain("chronos · pinned · CUDA");
+    expect(markup).toContain('data-simulation-report-decision-provenance="true"');
+    expect(markup).toContain('data-simulation-model-provenance="chronos2"');
+    expect(markup).toContain('data-simulation-model-provenance="kronos"');
+    expect(markup).toContain("판단 provenance 1건");
+    expect(markup).toContain("amazon/chronos-bolt-small");
+    expect(markup).toContain("bolt-revision");
+    expect(markup).toContain("NeoQuasar/Kronos-small");
+    expect(markup).toContain("kronos-revision");
+    expect(markup).toContain("Tesla P40");
+    expect(markup).toContain("321ms");
+    expect(markup).toContain("fallback from amazon/chronos-2");
+    expect(markup).toContain("cache missing");
     expect(markup).toContain("AI 판단");
     expect(markup).toContain("가상 체결");
     expect(markup).toContain("자산 추이");
     expect(markup).toContain("chart_pattern");
     expect(markup).toContain("실주문 없음");
+    expect(markup).toContain('data-simulation-strategy-comparison="history-ui-condition"');
+    expect(markup).toContain("동일 원천");
+    expect(markup).toContain("model unavailable");
+    expect(markup).toContain("costs_passed");
   });
 });

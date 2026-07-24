@@ -13,6 +13,7 @@ from portfolio_ai_worker.contracts import (
     EvaluationSeries,
     ForecastRequest,
     ForecastSeries,
+    ModelProvenance,
     PriceBar,
     TargetStopSpec,
 )
@@ -97,6 +98,38 @@ def test_unknown_wire_fields_are_rejected() -> None:
     payload = request.model_dump_json()[:-1] + ',"surprise":true}'
     with pytest.raises(ValidationError, match="Extra inputs"):
         AI_REQUEST_ADAPTER.validate_json(payload)
+
+
+def test_cuda_device_provenance_is_optional_for_legacy_but_atomic_when_present() -> None:
+    common = {
+        "model_id": "amazon/chronos-2",
+        "model_revision": "pinned",
+        "source_revision": "pinned-loader",
+        "loader_version": "chronos-forecasting-test",
+        "license": "Apache-2.0",
+        "device": "cuda",
+        "dtype": "float32",
+        "attention_backend": "math",
+        "loaded": True,
+    }
+    assert ModelProvenance(**common).device_name is None
+    observed = ModelProvenance(
+        **common,
+        device_name="Tesla P40",
+        cuda_capability="6.1",
+    )
+    assert (observed.device_name, observed.cuda_capability) == ("Tesla P40", "6.1")
+    with pytest.raises(ValidationError, match="recorded together"):
+        ModelProvenance(**common, device_name="Tesla P40")
+    with pytest.raises(ValidationError, match="valid only"):
+        ModelProvenance(
+            **{
+                **common,
+                "device": "cpu",
+                "device_name": "not-a-cuda-device",
+                "cuda_capability": "6.1",
+            }
+        )
 
 
 def test_naive_input_end_is_rejected() -> None:

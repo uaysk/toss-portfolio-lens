@@ -51,9 +51,9 @@ def provenance(*, loaded: bool = True) -> ModelProvenance:
 
 
 class DeterministicAdapter:
-    def __init__(self) -> None:
+    def __init__(self, model_provenance: ModelProvenance | None = None) -> None:
         self.calls: list[tuple[InferenceSeries, ...]] = []
-        self._provenance = provenance()
+        self._provenance = model_provenance or provenance()
 
     @property
     def provenance(self) -> ModelProvenance:
@@ -94,6 +94,7 @@ def settings(tmp_path: Path, **updates: object) -> AISettings:
         device="cpu",
         allow_cpu_fallback=True,
         expected_cuda_capability="6.1",
+        expected_cuda_device_name="Tesla P40",
         microbatch_size=2,
         max_series=50,
         max_evaluation_origins=1_000,

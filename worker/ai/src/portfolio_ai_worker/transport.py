@@ -298,10 +298,22 @@ class WebSocketRuntime:
 
     def status(self) -> dict[str, object]:
         model = self.service.adapter.provenance
+        bindings = self.service.model_run_adapters
+        all_models_ready = (
+            all(
+                binding.adapter.provenance.loaded and binding.adapter.provenance.model_id == binding.expected_model_id
+                for binding in bindings
+            )
+            if bindings
+            else model.loaded
+        )
+        any_model_loaded = any(binding.adapter.provenance.loaded for binding in bindings) if bindings else model.loaded
         status = (
             "available"
-            if model.loaded and self.scheduler.accepting
-            else ("degraded" if self.scheduler.accepting else "unavailable")
+            if all_models_ready and self.scheduler.accepting
+            else "degraded"
+            if any_model_loaded and self.scheduler.accepting
+            else "unavailable"
         )
         return {
             "status": status,

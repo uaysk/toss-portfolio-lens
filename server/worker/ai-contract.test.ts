@@ -21,6 +21,8 @@ const evaluatedResponse: AiResponse = {
     loader_version: "kronos-source-67b630e",
     license: "MIT",
     device: "cuda",
+    device_name: "Tesla P40",
+    cuda_capability: "6.1",
     dtype: "float32",
     attention_backend: "math",
     loaded: true,
@@ -96,6 +98,67 @@ const evaluatedResponse: AiResponse = {
     }],
   },
 };
+
+function dualForecastResponse(): unknown {
+  const rawSeries = structuredClone(evaluatedResponse.series);
+  const chronosModel = {
+    ...structuredClone(evaluatedResponse.model),
+    model_id: "amazon/chronos-2",
+    model_revision: "254b5357164a84326913b0695216f690752ac55d",
+    tokenizer_id: null,
+    tokenizer_revision: null,
+    source_revision: "chronos-forecasting-2.1.0",
+    loader_version: "chronos-forecasting-2.1.0",
+    license: "Apache-2.0",
+  };
+  const kronosModel = structuredClone(evaluatedResponse.model);
+  const inputOrigins = [{
+    instrument_key: rawSeries[0]!.instrument_key,
+    context_start_at: "2026-07-21T00:30:00.000Z",
+    input_end_at: rawSeries[0]!.input_end_at,
+    bar_count: 60,
+    input_digest: "a".repeat(64),
+  }];
+  return {
+    schema_version: "scalping-ai/v1",
+    request_id: "dual-model-forecast",
+    mode: "forecast",
+    status: "unavailable",
+    model: chronosModel,
+    generated_at: "2026-07-21T01:30:02.000Z",
+    series: rawSeries,
+    model_runs: [
+      {
+        role: "chronos2",
+        expected_model_id: "amazon/chronos-2",
+        status: "unavailable",
+        model: chronosModel,
+        generated_at: "2026-07-21T01:30:01.000Z",
+        latency_ms: 10.5,
+        degraded: false,
+        fallback_used: false,
+        fallback_reason: null,
+        input_origins: inputOrigins,
+        input_end_aligned: true,
+        raw_series: rawSeries,
+      },
+      {
+        role: "kronos_small",
+        expected_model_id: "NeoQuasar/Kronos-small",
+        status: "unavailable",
+        model: kronosModel,
+        generated_at: "2026-07-21T01:30:02.000Z",
+        latency_ms: 20.25,
+        degraded: false,
+        fallback_used: false,
+        fallback_reason: null,
+        input_origins: inputOrigins,
+        input_end_aligned: true,
+        raw_series: rawSeries,
+      },
+    ],
+  };
+}
 
 describe("AI worker response contract", () => {
   it("Python walk-forward target/stop first-hit metrics와 동일한 필드를 검증한다", () => {
@@ -239,6 +302,16 @@ describe("AI worker response contract", () => {
     const input = structuredClone(evaluatedResponse);
     input.model.loaded = false;
     expect(() => AiResponseSchema.parse(input)).toThrow(/runtime must be unavailable/);
+
+    const partialCuda = structuredClone(evaluatedResponse);
+    delete partialCuda.model.cuda_capability;
+    expect(() => AiResponseSchema.parse(partialCuda)).toThrow(/recorded together/);
+
+    const unavailableWithCuda = structuredClone(evaluatedResponse);
+    unavailableWithCuda.model.loaded = false;
+    unavailableWithCuda.model.device = "unavailable";
+    unavailableWithCuda.model.attention_backend = "unavailable";
+    expect(() => AiResponseSchema.parse(unavailableWithCuda)).toThrow(/CUDA metadata requires/);
   });
 
   it("protocol error에 series 또는 evaluation 결과가 섞이는 것을 거부한다", () => {
@@ -246,5 +319,82 @@ describe("AI worker response contract", () => {
     input.status = "unavailable";
     (input as { error?: unknown }).error = { code: "INVALID_REQUEST", message: "invalid" };
     expect(() => AiResponseSchema.parse(input)).toThrow(/without series or evaluation/);
+  });
+
+  it("Chronos-2와 Kronos-small의 동일 origin run과 latency provenance를 검증한다", () => {
+    const parsed = AiResponseSchema.parse(dualForecastResponse());
+    expect(parsed.model_runs?.map((run) => run.role)).toEqual(["chronos2", "kronos_small"]);
+    expect(parsed.model_runs?.map((run) => run.expected_model_id)).toEqual([
+      "amazon/chronos-2",
+      "NeoQuasar/Kronos-small",
+    ]);
+    expect(parsed.model_runs?.[0]?.input_origins).toEqual(parsed.model_runs?.[1]?.input_origins);
+    expect(parsed.model_runs?.every((run) => run.input_end_aligned && run.latency_ms >= 0)).toBe(true);
+    expect(parsed.model_runs?.[0]?.input_origins[0]).toMatchObject({
+      context_start_at: "2026-07-21T00:30:00.000Z",
+      bar_count: 60,
+      input_digest: "a".repeat(64),
+    });
+    expect(parsed.model_runs?.[0]?.model).toMatchObject({
+      device_name: "Tesla P40",
+      cuda_capability: "6.1",
+    });
+  });
+
+  it("모델 간 input 범위·digest drift와 legacy Chronos mirror 위변조를 거부한다", () => {
+    const originDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    originDrift.model_runs![1]!.input_origins[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
+    originDrift.model_runs![1]!.raw_series[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
+    expect(() => AiResponseSchema.parse(originDrift)).toThrow(/identical input origins/);
+
+    const digestDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    digestDrift.model_runs![1]!.input_origins[0]!.input_digest = "b".repeat(64);
+    expect(() => AiResponseSchema.parse(digestDrift)).toThrow(/identical input origins/);
+
+    const rangeDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    rangeDrift.model_runs![1]!.input_origins[0]!.bar_count -= 1;
+    expect(() => AiResponseSchema.parse(rangeDrift)).toThrow(/identical input origins/);
+
+    const legacyDrift = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    legacyDrift.series[0]!.unavailable!.code = "FORGED";
+    expect(() => AiResponseSchema.parse(legacyDrift)).toThrow(/legacy response fields/);
+  });
+
+  it("명시적 Bolt fallback은 실제 모델 ID와 degraded 원인을 요구한다", () => {
+    const fallback = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    const chronos = fallback.model_runs![0]!;
+    chronos.model.model_id = "amazon/chronos-bolt-small";
+    chronos.model.model_revision = "772f3d25d38aec6d914c8949dab4462e2d46f5d8";
+    chronos.model.fallback_from = "amazon/chronos-2";
+    chronos.model.fallback_reason = "Chronos-2 cache missing";
+    chronos.degraded = true;
+    chronos.fallback_used = true;
+    chronos.fallback_reason = "Chronos-2 cache missing";
+    fallback.model = structuredClone(chronos.model);
+    expect(AiResponseSchema.parse(fallback).model_runs?.[0]).toMatchObject({
+      expected_model_id: "amazon/chronos-2",
+      degraded: true,
+      fallback_used: true,
+      fallback_reason: "Chronos-2 cache missing",
+      model: { model_id: "amazon/chronos-bolt-small" },
+    });
+
+    const wrongSource = structuredClone(fallback);
+    wrongSource.model_runs![0]!.model.fallback_from = "unexpected/model";
+    wrongSource.model = structuredClone(wrongSource.model_runs![0]!.model);
+    expect(() => AiResponseSchema.parse(wrongSource)).toThrow(/degraded Chronos-2 fallback/);
+
+    chronos.degraded = false;
+    expect(() => AiResponseSchema.parse(fallback)).toThrow(/degraded Chronos-2 fallback/);
+  });
+
+  it("fallback_used=false run에 fallback provenance가 섞이는 것을 거부한다", () => {
+    const response = structuredClone(AiResponseSchema.parse(dualForecastResponse()));
+    const chronos = response.model_runs![0]!;
+    chronos.model.fallback_from = "amazon/chronos-2";
+    chronos.model.fallback_reason = "unexpected fallback marker";
+    chronos.fallback_reason = "unexpected fallback marker";
+    response.model = structuredClone(chronos.model);
+    expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain fallback provenance/);
   });
 });

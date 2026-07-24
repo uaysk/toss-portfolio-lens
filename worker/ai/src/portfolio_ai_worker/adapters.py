@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
 
@@ -82,6 +83,8 @@ class UnavailableAdapter:
 class RuntimeDevice:
     name: str
     torch: Any
+    device_name: str | None = None
+    cuda_capability: str | None = None
 
 
 def _import_torch() -> Any:
@@ -129,7 +132,27 @@ def preflight_device(settings: AISettings) -> RuntimeDevice:
             if settings.allow_cpu_fallback:
                 return RuntimeDevice(name="cpu", torch=torch)
             raise AdapterLoadError(message)
-        return RuntimeDevice(name="cuda", torch=torch)
+        try:
+            device_name = str(torch.cuda.get_device_name()).strip()
+        except Exception as error:
+            if settings.allow_cpu_fallback:
+                return RuntimeDevice(name="cpu", torch=torch)
+            raise AdapterLoadError("CUDA device name is unavailable") from error
+        if not device_name:
+            if settings.allow_cpu_fallback:
+                return RuntimeDevice(name="cpu", torch=torch)
+            raise AdapterLoadError("CUDA device name is unavailable")
+        if device_name != settings.expected_cuda_device_name:
+            message = f"CUDA device {device_name!r} does not match required {settings.expected_cuda_device_name!r}"
+            if settings.allow_cpu_fallback:
+                return RuntimeDevice(name="cpu", torch=torch)
+            raise AdapterLoadError(message)
+        return RuntimeDevice(
+            name="cuda",
+            torch=torch,
+            device_name=device_name[:256],
+            cuda_capability=capability,
+        )
     if requested == "cuda" and not settings.allow_cpu_fallback:
         raise AdapterLoadError("CUDA was required but is unavailable")
     if requested == "cuda" and settings.allow_cpu_fallback:
@@ -137,6 +160,23 @@ def preflight_device(settings: AISettings) -> RuntimeDevice:
     if requested == "auto" and not settings.allow_cpu_fallback:
         raise AdapterLoadError("CUDA is unavailable and CPU fallback is disabled")
     return RuntimeDevice(name="cpu", torch=torch)
+
+
+def _require_cuda_runtime(settings: AISettings, runtime: RuntimeDevice, *, fallback: bool = False) -> None:
+    if runtime.name != "cuda":
+        suffix = " fallback" if fallback else " execution"
+        raise AdapterLoadError(f"P40 CUDA{suffix} is required; CPU execution is not admitted")
+    if runtime.device_name is None:
+        raise AdapterLoadError("P40 CUDA execution is required; CUDA device name is unavailable")
+    if runtime.device_name != settings.expected_cuda_device_name:
+        raise AdapterLoadError(
+            f"CUDA device {runtime.device_name!r} does not match required {settings.expected_cuda_device_name!r}"
+        )
+    if settings.expected_cuda_capability is not None and runtime.cuda_capability != settings.expected_cuda_capability:
+        observed = runtime.cuda_capability or "unavailable"
+        raise AdapterLoadError(
+            f"CUDA capability {observed} does not match required {settings.expected_cuda_capability}"
+        )
 
 
 @contextmanager
@@ -202,6 +242,8 @@ def _provenance(
     *,
     source_revision: str,
     device: str,
+    device_name: str | None = None,
+    cuda_capability: str | None = None,
     loaded: bool,
     fallback_from: str | None = None,
     fallback_reason: str | None = None,
@@ -215,6 +257,8 @@ def _provenance(
         loader_version=str(manifest_model["loader_version"]),
         license=str(manifest_model["license"]),
         device=device if loaded else "unavailable",
+        device_name=device_name if loaded and device == "cuda" else None,
+        cuda_capability=cuda_capability if loaded and device == "cuda" else None,
         dtype="float32",
         attention_backend="math" if loaded else "unavailable",
         loaded=loaded,
@@ -292,6 +336,8 @@ class KronosAdapter:
             manifest_model,
             source_revision=source_revision,
             device=runtime.name,
+            device_name=runtime.device_name,
+            cuda_capability=runtime.cuda_capability,
             loaded=True,
             fallback_from=fallback_from,
             fallback_reason=fallback_reason,
@@ -365,6 +411,118 @@ class KronosAdapter:
         ]
 
 
+def _chronos_frame_rows(item: InferenceSeries) -> list[dict[str, object]]:
+    """Build a causal, regular-frequency Chronos-2 frame from confirmed bars only."""
+    rows: list[dict[str, object]] = []
+    log_returns: list[float] = []
+    regular_start = item.bars[-1].timestamp - timedelta(minutes=len(item.bars) - 1)
+    previous_close = item.bars[0].close
+    for index, bar in enumerate(item.bars):
+        one_bar_return = bar.close / previous_close - 1 if index else 0.0
+        log_return = math.log(bar.close / previous_close) if index else 0.0
+        log_returns.append(log_return)
+        window = log_returns[max(0, len(log_returns) - 20) :]
+        realized_volatility = math.sqrt(sum(value * value for value in window))
+        volume = bar.volume if bar.volume is not None else 0.0
+        amount = bar.amount if bar.amount is not None else volume * bar.close
+        rows.append(
+            {
+                "item_id": item.instrument_key,
+                # predict_df requires regular timestamps. Session-aware timestamps
+                # remain in the request/provenance while this ordinal minute axis
+                # prevents a closed-session gap from being interpreted as missing data.
+                "model_timestamp": regular_start + timedelta(minutes=index),
+                "target_close": bar.close,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "volume": volume,
+                "amount": amount,
+                "return_1": one_bar_return,
+                "range_return": (bar.high - bar.low) / previous_close,
+                "realized_volatility_20": realized_volatility,
+                "liquidity_log": math.log1p(max(0.0, amount)),
+            }
+        )
+        previous_close = bar.close
+    return rows
+
+
+class Chronos2Adapter:
+    def __init__(
+        self,
+        settings: AISettings,
+        manifest_model: dict[str, Any],
+        source_revision: str,
+        runtime: RuntimeDevice,
+        *,
+        fallback_from: str | None = None,
+        fallback_reason: str | None = None,
+    ) -> None:
+        model_path = _snapshot(settings.model_cache_dir, "chronos-2", str(manifest_model["revision"]))
+        try:
+            chronos = importlib.import_module("chronos")
+            self._pipeline = chronos.BaseChronosPipeline.from_pretrained(
+                str(model_path),
+                device_map=runtime.name,
+                torch_dtype=runtime.torch.float32,
+                local_files_only=True,
+                trust_remote_code=False,
+                # P40 cannot use FlashAttention/bf16. Eager attention is the
+                # explicit, reproducible Chronos-2 path on Pascal.
+                attn_implementation="eager",
+            )
+        except Exception as error:
+            raise AdapterLoadError(f"failed to load pinned Chronos-2 snapshot: {type(error).__name__}") from error
+        self._runtime = runtime
+        self._provenance = _provenance(
+            manifest_model,
+            source_revision=source_revision,
+            device=runtime.name,
+            device_name=runtime.device_name,
+            cuda_capability=runtime.cuda_capability,
+            loaded=True,
+            fallback_from=fallback_from,
+            fallback_reason=fallback_reason,
+        )
+
+    @property
+    def provenance(self) -> ModelProvenance:
+        return self._provenance
+
+    def predict_batch(self, series: Sequence[InferenceSeries], *, seed: int) -> list[RawPrediction]:
+        if not series:
+            return []
+        torch = self._runtime.torch
+        pandas = importlib.import_module("pandas")
+        torch.manual_seed(seed)
+        if self._runtime.name == "cuda":
+            torch.cuda.manual_seed_all(seed)
+        output: list[RawPrediction] = []
+        with math_sdpa(torch), torch.inference_mode():
+            for item in series:
+                frame = pandas.DataFrame(_chronos_frame_rows(item))
+                predicted = self._pipeline.predict_df(
+                    frame,
+                    prediction_length=len(item.future_timestamps),
+                    quantile_levels=list(FIXED_QUANTILES),
+                    id_column="item_id",
+                    timestamp_column="model_timestamp",
+                    target="target_close",
+                    batch_size=1,
+                )
+                if len(predicted) < len(item.future_timestamps):
+                    raise RuntimeError("Chronos-2 returned an incomplete prediction frame")
+                by_horizon = {
+                    horizon: {
+                        quantile: float(predicted.iloc[horizon - 1][str(quantile)]) for quantile in FIXED_QUANTILES
+                    }
+                    for horizon in (5, 15, 30, 60)
+                }
+                output.append(RawPrediction(instrument_key=item.instrument_key, close_quantiles=by_horizon))
+        return output
+
+
 class ChronosBoltAdapter:
     def __init__(
         self,
@@ -393,6 +551,8 @@ class ChronosBoltAdapter:
             manifest_model,
             source_revision=source_revision,
             device=runtime.name,
+            device_name=runtime.device_name,
+            cuda_capability=runtime.cuda_capability,
             loaded=True,
             fallback_from=fallback_from,
             fallback_reason=fallback_reason,
@@ -456,7 +616,8 @@ def _try_load(
             fallback_from=fallback_from,
             fallback_reason=fallback_reason,
         )
-    return ChronosBoltAdapter(
+    adapter_type = Chronos2Adapter if name == "chronos-2" else ChronosBoltAdapter
+    return adapter_type(
         settings,
         model,
         source_revision,
@@ -466,55 +627,144 @@ def _try_load(
     )
 
 
-def load_production_adapter(settings: AISettings) -> ModelAdapter:
-    """Select a model once at startup; request-time fallback is intentionally forbidden."""
+def _enable_offline_runtime() -> None:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    manifest: dict[str, Any] | None = None
-    primary_error = ""
-    try:
-        manifest = _load_manifest(settings.manifest_path)
-        runtime = preflight_device(settings)
-        return _try_load(settings.primary_model, settings, manifest, runtime)
-    except Exception as error:
-        primary_error = str(error)[:300]
-    if settings.fallback_model and manifest is not None:
-        try:
-            runtime = preflight_device(settings)
-            return _try_load(
-                settings.fallback_model,
-                settings,
-                manifest,
-                runtime,
-                fallback_from=settings.primary_model,
-                fallback_reason=primary_error,
-            )
-        except Exception as error:
-            primary_error = f"primary: {primary_error}; fallback: {str(error)[:200]}"
-    model_manifest = _safe_unavailable_manifest_model(None, settings.primary_model)
+
+
+def _manifest_model_id(manifest: dict[str, Any], name: str) -> str:
+    models = manifest.get("models")
+    if isinstance(models, dict) and isinstance(models.get(name), dict):
+        candidate = models[name].get("model_id")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return name
+
+
+def _expected_model_id(name: str) -> str:
+    return {
+        "chronos-2": "amazon/chronos-2",
+        "kronos-small": "NeoQuasar/Kronos-small",
+        "chronos-bolt-small": "amazon/chronos-bolt-small",
+    }.get(name, name)
+
+
+def _unavailable_adapter(
+    name: str,
+    manifest: dict[str, Any] | None,
+    reason: str,
+) -> ModelAdapter:
+    expected_model_id = _expected_model_id(name)
+    model_manifest = _safe_unavailable_manifest_model(None, expected_model_id)
     source_revision = "unavailable"
     if manifest is not None:
         models = manifest.get("models")
-        source = manifest.get("kronos_source")
         if isinstance(models, dict):
-            model_manifest = _safe_unavailable_manifest_model(
-                models.get(settings.primary_model), settings.primary_model
-            )
-        if isinstance(source, dict):
-            candidate_revision = source.get("revision")
-            if isinstance(candidate_revision, str) and 0 < len(candidate_revision) <= 256:
-                source_revision = candidate_revision
+            model_manifest = _safe_unavailable_manifest_model(models.get(name), expected_model_id)
+            # Keep fail-closed responses contract-valid even when the local
+            # manifest itself is malformed. A missing/corrupt snapshot must
+            # never erase the identity of the model the role expected.
+            model_manifest["model_id"] = expected_model_id
+        if name == "kronos-small":
+            source = manifest.get("kronos_source")
+            if isinstance(source, dict):
+                candidate_revision = source.get("revision")
+                if isinstance(candidate_revision, str) and 0 < len(candidate_revision) <= 256:
+                    source_revision = candidate_revision
+        else:
+            source_revision = str(model_manifest.get("loader_version", "unavailable"))
     provenance = _provenance(
         model_manifest,
         source_revision=source_revision,
         device="unavailable",
         loaded=False,
-        fallback_from=settings.primary_model if settings.fallback_model else None,
-        fallback_reason=(primary_error or "offline model snapshots are unavailable")[:500],
     )
+    detail = (reason or "offline model snapshots are unavailable").strip()[:300]
     return UnavailableAdapter(
         provenance,
         "MODEL_UNAVAILABLE",
-        "Pinned offline AI model snapshots could not be loaded; no forecast was fabricated.",
+        (
+            "Pinned offline AI model snapshots or the required P40 CUDA runtime are unavailable "
+            f"({detail}); no forecast was fabricated."
+        )[:500],
     )
+
+
+def _load_named_adapter(
+    settings: AISettings,
+    name: str,
+    *,
+    fallback_name: str | None = None,
+    require_cuda: bool = False,
+) -> ModelAdapter:
+    _enable_offline_runtime()
+    manifest: dict[str, Any] | None = None
+    primary_error = ""
+    try:
+        manifest = _load_manifest(settings.manifest_path)
+        runtime = preflight_device(settings)
+        if require_cuda:
+            _require_cuda_runtime(settings, runtime)
+        return _try_load(name, settings, manifest, runtime)
+    except Exception as error:
+        primary_error = str(error)[:300]
+    if fallback_name and manifest is not None:
+        try:
+            runtime = preflight_device(settings)
+            if require_cuda:
+                _require_cuda_runtime(settings, runtime, fallback=True)
+            return _try_load(
+                fallback_name,
+                settings,
+                manifest,
+                runtime,
+                fallback_from=_manifest_model_id(manifest, name),
+                fallback_reason=primary_error,
+            )
+        except Exception as error:
+            primary_error = f"primary: {primary_error}; fallback: {str(error)[:200]}"
+    return _unavailable_adapter(name, manifest, primary_error)
+
+
+def load_production_adapter(settings: AISettings) -> ModelAdapter:
+    """Load the legacy single-model selection used by dependency-injected callers."""
+    return _load_named_adapter(
+        settings,
+        settings.primary_model,
+        fallback_name=settings.fallback_model,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionModelBinding:
+    role: str
+    expected_model_id: str
+    adapter: ModelAdapter
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionModelSuite:
+    primary: ModelAdapter
+    runs: tuple[ProductionModelBinding, ProductionModelBinding]
+
+
+def load_production_model_suite(settings: AISettings) -> ProductionModelSuite:
+    """Load Chronos-2 and Kronos independently; neither substitutes for the other."""
+    chronos_fallback = "chronos-bolt-small" if settings.fallback_model == "chronos-bolt-small" else None
+    chronos = _load_named_adapter(
+        settings,
+        "chronos-2",
+        fallback_name=chronos_fallback,
+        require_cuda=True,
+    )
+    kronos = _load_named_adapter(
+        settings,
+        settings.companion_model,
+        require_cuda=True,
+    )
+    runs = (
+        ProductionModelBinding("chronos2", "amazon/chronos-2", chronos),
+        ProductionModelBinding("kronos_small", "NeoQuasar/Kronos-small", kronos),
+    )
+    return ProductionModelSuite(primary=chronos, runs=runs)

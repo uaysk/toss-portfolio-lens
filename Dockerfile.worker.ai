@@ -14,8 +14,8 @@ ENV PYTHONUNBUFFERED=1 \
     AI_WEBSOCKET_PORT=8765 \
     AI_WEBSOCKET_PATH=/ws/scalping-ai/v1 \
     AI_WEBSOCKET_AUTH_TOKEN_FILE=/app/ai-auth/token \
-    AI_DEVICE=auto \
-    AI_ALLOW_CPU_FALLBACK=true \
+    AI_DEVICE=cuda \
+    AI_ALLOW_CPU_FALLBACK=false \
     AI_EXPECTED_CUDA_CAPABILITY=6.1
 WORKDIR /app
 RUN groupadd --gid 10001 portfolio \

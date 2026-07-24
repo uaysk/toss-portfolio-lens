@@ -7,7 +7,7 @@ snapshots.
 - Kronos source, Kronos-small, and Kronos-Tokenizer-base: MIT License.
   Copyright remains with the upstream Kronos authors and contributors.
   Source: https://github.com/shiyu-coder/Kronos
-- Chronos forecasting code and Chronos-Bolt-small: Apache License 2.0.
+- Chronos forecasting code, Chronos-2, and Chronos-Bolt-small: Apache License 2.0.
   Copyright Amazon.com, Inc. or its affiliates.
   Source: https://github.com/amazon-science/chronos-forecasting
 

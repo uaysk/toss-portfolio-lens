@@ -2,11 +2,43 @@ export const AI_SIMULATION_MARKETS = ["KR", "US"] as const;
 export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
 export const AI_SIMULATION_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
 export const AI_SIMULATION_SELECTION_MODES = ["auto", "manual"] as const;
+export const AI_SIMULATION_PAIR_IDS = [
+  "soxx-soxl-soxs",
+  "smh-soxl-soxs",
+  "tsla-tsll-tsls",
+  "tsla-tsll-tslq",
+  "qqq-tqqq-sqqq",
+] as const;
+export const AI_SIMULATION_COMPARISON_LANES = ["chronos2", "kronos", "rust", "ensemble"] as const;
 
 export type AiSimulationMarketCountry = (typeof AI_SIMULATION_MARKETS)[number];
 export type AiSimulationCriterion = (typeof AI_SIMULATION_CRITERIA)[number];
 export type AiSimulationPreset = (typeof AI_SIMULATION_PRESETS)[number];
 export type AiSimulationSelectionMode = (typeof AI_SIMULATION_SELECTION_MODES)[number];
+export type AiSimulationPairId = (typeof AI_SIMULATION_PAIR_IDS)[number];
+export type AiSimulationComparisonLaneId = (typeof AI_SIMULATION_COMPARISON_LANES)[number];
+
+export type AiSimulationPairCatalogItem = {
+  id: AiSimulationPairId;
+  label: string;
+  symbols: string[];
+};
+
+export const AI_SIMULATION_PAIR_CATALOG: readonly AiSimulationPairCatalogItem[] = [
+  { id: "soxx-soxl-soxs", label: "SOXX · SOXL · SOXS", symbols: ["SOXX", "SOXL", "SOXS"] },
+  { id: "smh-soxl-soxs", label: "SMH · SOXL · SOXS", symbols: ["SMH", "SOXL", "SOXS"] },
+  { id: "tsla-tsll-tsls", label: "TSLA · TSLL · TSLS", symbols: ["TSLA", "TSLL", "TSLS"] },
+  { id: "tsla-tsll-tslq", label: "TSLA · TSLL · TSLQ", symbols: ["TSLA", "TSLL", "TSLQ"] },
+  { id: "qqq-tqqq-sqqq", label: "QQQ · TQQQ · SQQQ", symbols: ["QQQ", "TQQQ", "SQQQ"] },
+] as const;
+
+export type AiSimulationStrategyRequest =
+  | { mode: "single" }
+  | {
+      mode: "pair";
+      pairId: AiSimulationPairId;
+      allowDegradedMode: boolean;
+    };
 
 export type AiSimulationSelectionRequest =
   | {
@@ -33,6 +65,7 @@ export type AiSimulationRequest = {
   preset: AiSimulationPreset;
   riskTolerance: number;
   selection: AiSimulationSelectionRequest;
+  strategy: AiSimulationStrategyRequest;
   costs: AiSimulationCosts;
 };
 
@@ -49,6 +82,12 @@ export type AiSimulationStatus = {
   limits: AiSimulationLimits;
   capabilities: Record<string, boolean | number | string>;
   limitations: string[];
+  pairStrategy?: {
+    enabled: boolean;
+    message?: string;
+    allowDegradedMode?: boolean;
+    catalog: AiSimulationPairCatalogItem[];
+  };
 };
 
 export type AiSimulationSelection = {
@@ -87,11 +126,69 @@ export type AiSimulationDecision = {
   decidedAt: string;
   eligibleAfter?: string;
   reason: string;
+  reasons?: string[];
   score?: number;
   upProbability?: number;
+  q10Return?: number;
+  predictedMedianReturn?: number;
+  q90Return?: number;
+  technicalState?: string;
+  signalSymbol?: string;
+  executionSymbol?: string;
+  direction?: string;
+  degraded?: boolean;
+  components?: Record<string, number>;
+  weights?: Record<string, number>;
+  finalScores?: Record<string, number>;
+  provenance?: string[];
   chartPatternBias?: "bullish" | "bearish" | "neutral";
   chartPatterns: string[];
   model?: string;
+};
+
+export type AiSimulationComparisonDecisionReason = {
+  reason: string;
+  reasons: string[];
+  symbol?: string;
+  signalSymbol?: string;
+  executionSymbol?: string;
+  action?: string;
+  decidedAt?: string;
+};
+
+export type AiSimulationStrategyComparisonLane = {
+  id: AiSimulationComparisonLaneId;
+  status: string;
+  analyticalOnly?: boolean;
+  unavailableReason?: string;
+  cumulativeReturn?: number;
+  netReturn?: number;
+  netProfit?: number;
+  maxDrawdown?: number;
+  riskAdjustedReturn?: number;
+  trades?: number;
+  costs?: number;
+  switches?: number;
+  directionAccuracy?: number;
+  executionAccuracy?: number;
+  calibration?: number;
+  calibrationUnavailableRatio?: number;
+  unavailableRatio?: number;
+  latencyMs?: number;
+  bullCount?: number;
+  bearCount?: number;
+  cashCount?: number;
+  decisionReasons: AiSimulationComparisonDecisionReason[];
+};
+
+export type AiSimulationStrategyComparison = {
+  conditionId: string;
+  pairId?: AiSimulationPairId;
+  sameOrigin: boolean;
+  sameCosts: boolean;
+  sameExecutionPolicy: boolean;
+  incompleteCount: number;
+  lanes: AiSimulationStrategyComparisonLane[];
 };
 
 export type AiSimulationChartBar = {
@@ -150,6 +247,7 @@ export type AiSimulationSnapshot = {
   equity: number;
   progress: number;
   selection?: AiSimulationSelectionRequest;
+  strategy?: AiSimulationStrategyRequest;
   criterion?: AiSimulationCriterion;
   preset?: AiSimulationPreset;
   riskTolerance?: number;
@@ -171,6 +269,7 @@ export type AiSimulationSnapshot = {
   decisions: AiSimulationDecision[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
+  strategyComparison?: AiSimulationStrategyComparison;
 };
 
 export type AiSimulationRunResponse = {
@@ -190,6 +289,7 @@ export type AiSimulationHistoryItem = {
   preset?: AiSimulationPreset;
   riskTolerance?: number;
   selection?: AiSimulationSelectionRequest;
+  strategy?: AiSimulationStrategyRequest;
   selected: AiSimulationSelection[];
   initialCash?: number;
   finalEquity?: number;
@@ -200,6 +300,7 @@ export type AiSimulationHistoryItem = {
   decisionCount?: number;
   model?: string;
   warnings: string[];
+  strategyComparison?: AiSimulationStrategyComparison;
 };
 
 export type AiSimulationHistoryPage = {
@@ -214,6 +315,7 @@ export type AiSimulationReportConfiguration = {
   preset?: AiSimulationPreset;
   riskTolerance?: number;
   selection?: AiSimulationSelectionRequest;
+  strategy?: AiSimulationStrategyRequest;
   costs?: Partial<AiSimulationCosts>;
 };
 
@@ -242,6 +344,34 @@ export type AiSimulationReportEvidence = {
   value?: string;
 };
 
+export type AiSimulationDecisionModelProvenance = {
+  component: "chronos2" | "kronos";
+  status: string;
+  modelId?: string;
+  modelRevision?: string;
+  origin?: string;
+  generatedAt?: string;
+  device?: string;
+  deviceName?: string;
+  latencyMs?: number;
+  degraded: boolean;
+  fallbackUsed: boolean;
+  fallbackFrom?: string;
+  fallbackReason?: string;
+};
+
+export type AiSimulationDecisionProvenance = {
+  decisionId?: string;
+  pairId?: string;
+  signalSymbol?: string;
+  executionSymbol?: string;
+  direction?: string;
+  origin?: string;
+  decisionAt?: string;
+  degraded: boolean;
+  models: AiSimulationDecisionModelProvenance[];
+};
+
 export type AiSimulationRunReport = {
   runId: string;
   status: string;
@@ -257,9 +387,11 @@ export type AiSimulationRunReport = {
   equity: AiSimulationEquityPoint[];
   charts: AiSimulationChartView[];
   modelProvenance: string[];
+  decisionProvenance: AiSimulationDecisionProvenance[];
   evidence: AiSimulationReportEvidence[];
   warnings: string[];
   limits: string[];
+  strategyComparison?: AiSimulationStrategyComparison;
 };
 
 export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
@@ -273,6 +405,7 @@ export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
     criterion: "trading_amount",
     symbolCount: 1,
   },
+  strategy: { mode: "single" },
   costs: {
     commissionBpsPerSide: 1.5,
     taxBpsOnExit: 18,
@@ -309,6 +442,15 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.map(textValue).filter((item): item is string => Boolean(item))
     : [];
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const number = finiteNumber(value);
+  return number !== undefined && Number.isInteger(number) && number >= 0 ? number : undefined;
 }
 
 function capabilityRecord(value: unknown): Record<string, boolean | number | string> {
@@ -372,6 +514,63 @@ function normalizeSelectionRequest(value: unknown): AiSimulationSelectionRequest
   return undefined;
 }
 
+function pairIdValue(value: unknown): AiSimulationPairId | undefined {
+  const candidate = textValue(value);
+  return AI_SIMULATION_PAIR_IDS.includes(candidate as AiSimulationPairId)
+    ? candidate as AiSimulationPairId
+    : undefined;
+}
+
+function staticPairCatalogItem(id: AiSimulationPairId): AiSimulationPairCatalogItem {
+  return AI_SIMULATION_PAIR_CATALOG.find((item) => item.id === id)
+    ?? { id, label: id, symbols: id.split("-").map((symbol) => symbol.toUpperCase()) };
+}
+
+function normalizePairCatalogItem(value: unknown): AiSimulationPairCatalogItem | undefined {
+  const directId = pairIdValue(value);
+  if (directId) return staticPairCatalogItem(directId);
+  const item = asRecord(value);
+  const id = pairIdValue(first(item, "id", "pairId", "pair_id", "value"));
+  if (!id) return undefined;
+  const fallback = staticPairCatalogItem(id);
+  const bull = asRecord(item.bull);
+  const bear = asRecord(item.bear);
+  const symbols = [
+    ...stringList(first(item, "symbols", "instruments", "legs")),
+    textValue(first(item, "signalSymbol", "signal_symbol")),
+    textValue(first(bull, "executionSymbol", "execution_symbol", "symbol")),
+    textValue(first(bear, "executionSymbol", "execution_symbol", "symbol")),
+  ].filter((symbol): symbol is string => Boolean(symbol))
+    .map((symbol) => symbol.toUpperCase())
+    .filter((symbol, index, all) => all.indexOf(symbol) === index);
+  return {
+    id,
+    label: textValue(first(item, "label", "name", "title")) ?? fallback.label,
+    symbols: symbols.length ? symbols : fallback.symbols,
+  };
+}
+
+function normalizePairCatalog(value: unknown): AiSimulationPairCatalogItem[] {
+  const catalog = mapValid(value, normalizePairCatalogItem);
+  return catalog.filter((item, index, all) => all.findIndex(({ id }) => id === item.id) === index);
+}
+
+function normalizeStrategyRequest(value: unknown): AiSimulationStrategyRequest | undefined {
+  const strategy = asRecord(value);
+  const mode = textValue(strategy.mode);
+  if (mode === "single") return { mode };
+  if (mode !== "pair") return undefined;
+  const pairId = pairIdValue(first(strategy, "pairId", "pair_id"));
+  const allowDegradedMode = booleanValue(first(
+    strategy,
+    "allowDegradedMode",
+    "allow_degraded_mode",
+  ));
+  return pairId && allowDegradedMode !== undefined
+    ? { mode, pairId, allowDegradedMode }
+    : undefined;
+}
+
 function modelLabel(value: unknown): string | undefined {
   const direct = textValue(value);
   if (direct) return direct;
@@ -403,6 +602,27 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const initialCash = asRecord(first(limits, "initialCash", "initial_cash"));
   const duration = asRecord(first(limits, "durationMinutes", "duration_minutes", "duration"));
   const enabled = typeof source.enabled === "boolean" ? source.enabled : true;
+  const capabilities = capabilityRecord(source.capabilities);
+  const pairStrategyValue = first(source, "pairStrategy", "pair_strategy");
+  const pairStrategy = asRecord(pairStrategyValue);
+  const pairCatalog = normalizePairCatalog(
+    first(pairStrategy, "catalog", "pairs", "strategies")
+      ?? first(source, "pairCatalog", "pair_catalog", "pairStrategyCatalog", "pair_strategy_catalog"),
+  );
+  const capabilityGate = [
+    "pairStrategy",
+    "pair_strategy",
+    "pairMode",
+    "pair_mode",
+    "strategyPair",
+    "strategy_pair",
+  ].some((key) => capabilities[key] === true);
+  const pairEnabled = booleanValue(first(pairStrategy, "enabled", "available", "supported"))
+    ?? booleanValue(pairStrategyValue)
+    ?? (capabilityGate ? true : undefined);
+  const hasPairStrategy = pairEnabled !== undefined
+    || Object.keys(pairStrategy).length > 0
+    || pairCatalog.length > 0;
 
   return {
     enabled,
@@ -437,9 +657,44 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
         "max_duration_minutes",
       )) ?? finiteNumber(first(duration, "maximum", "max")),
     },
-    capabilities: capabilityRecord(source.capabilities),
+    capabilities,
     limitations: stringList(first(source, "limitations", "warnings")),
+    ...(hasPairStrategy ? {
+      pairStrategy: {
+        enabled: pairEnabled ?? false,
+        message: textValue(first(pairStrategy, "message", "reason", "limitation")),
+        allowDegradedMode: booleanValue(first(
+          pairStrategy,
+          "allowDegradedMode",
+          "allow_degraded_mode",
+          "degradedMode",
+          "degraded_mode",
+        )),
+        catalog: pairCatalog,
+      },
+    } : {}),
   };
+}
+
+export function aiSimulationPairStrategyEnabled(status?: AiSimulationStatus): boolean {
+  if (!status) return false;
+  if (status.pairStrategy) return status.pairStrategy.enabled;
+  return [
+    "pairStrategy",
+    "pair_strategy",
+    "pairMode",
+    "pair_mode",
+    "strategyPair",
+    "strategy_pair",
+  ].some((key) => status.capabilities[key] === true);
+}
+
+export function aiSimulationPairCatalog(
+  status?: AiSimulationStatus,
+): readonly AiSimulationPairCatalogItem[] {
+  return status?.pairStrategy?.catalog.length
+    ? status.pairStrategy.catalog
+    : AI_SIMULATION_PAIR_CATALOG;
 }
 
 function normalizeSelection(value: unknown): AiSimulationSelection | undefined {
@@ -520,7 +775,9 @@ function normalizeTrade(value: unknown): AiSimulationTrade | undefined {
 
 function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
   const item = asRecord(value);
-  const symbol = textValue(item.symbol);
+  const signalSymbol = textValue(first(item, "signalSymbol", "signal_symbol"));
+  const executionSymbol = textValue(first(item, "executionSymbol", "execution_symbol"));
+  const symbol = textValue(item.symbol) ?? executionSymbol ?? signalSymbol;
   const action = textValue(item.action);
   const decidedAt = textValue(first(
     item,
@@ -531,17 +788,58 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
     "inputEndAt",
     "input_end_at",
   ));
-  const listedReason = stringList(item.reasons).join(" · ");
+  const listedReasons = stringList(item.reasons);
+  const listedReason = listedReasons.join(" · ");
   const reason = textValue(item.reason) ?? (listedReason || undefined);
   if (!symbol || !action || !decidedAt || !reason) return undefined;
+  const components = finiteNumberRecord(item.components);
+  const weights = finiteNumberRecord(item.weights);
+  const finalScores = finiteNumberRecord(first(item, "finalScores", "final_scores"));
+  const provenance = normalizeModelProvenance(first(
+    item,
+    "provenance",
+    "modelProvenance",
+    "model_provenance",
+  ));
   return {
     symbol,
     action,
     decidedAt,
     eligibleAfter: textValue(first(item, "eligibleAfter", "eligible_after")),
     reason,
+    reasons: listedReasons.length ? listedReasons : [reason],
     score: finiteNumber(item.score),
     upProbability: finiteNumber(first(item, "upProbability", "up_probability")),
+    q10Return: finiteNumber(first(
+      item,
+      "q10Return",
+      "q10_return",
+      "predictedQ10Return",
+      "predicted_q10_return",
+    )),
+    predictedMedianReturn: finiteNumber(first(
+      item,
+      "predictedMedianReturn",
+      "predicted_median_return",
+      "medianReturn",
+      "median_return",
+    )),
+    q90Return: finiteNumber(first(
+      item,
+      "q90Return",
+      "q90_return",
+      "predictedQ90Return",
+      "predicted_q90_return",
+    )),
+    technicalState: textValue(first(item, "technicalState", "technical_state")),
+    signalSymbol,
+    executionSymbol,
+    direction: textValue(item.direction),
+    degraded: booleanValue(item.degraded),
+    ...(Object.keys(components).length ? { components } : {}),
+    ...(Object.keys(weights).length ? { weights } : {}),
+    ...(Object.keys(finalScores).length ? { finalScores } : {}),
+    ...(provenance.length ? { provenance } : {}),
     chartPatternBias: (
       ["bullish", "bearish", "neutral"] as const
     ).find((candidate) => candidate === first(item, "chartPatternBias", "chart_pattern_bias")),
@@ -629,6 +927,207 @@ function mapValid<T>(value: unknown, normalizer: (item: unknown) => T | undefine
   return values.map(normalizer).filter((item): item is T => item !== undefined);
 }
 
+function comparisonLaneId(value: unknown): AiSimulationComparisonLaneId | undefined {
+  const raw = textValue(value)?.toLowerCase().replaceAll("_", "-");
+  const candidate = raw === "chronos-2" || raw === "chronos2-base"
+    ? "chronos2"
+    : raw === "kronos-small" || raw === "kronossmall"
+      ? "kronos"
+      : raw;
+  return AI_SIMULATION_COMPARISON_LANES.includes(candidate as AiSimulationComparisonLaneId)
+    ? candidate as AiSimulationComparisonLaneId
+    : undefined;
+}
+
+function normalizeComparisonDecisionReason(
+  value: unknown,
+): AiSimulationComparisonDecisionReason | undefined {
+  const direct = textValue(value);
+  if (direct) return { reason: direct, reasons: [direct] };
+  const item = asRecord(value);
+  const reasons = stringList(item.reasons);
+  const reason = textValue(first(item, "reason", "summary", "detail"))
+    ?? (reasons.length ? reasons.join(" · ") : undefined);
+  if (!reason) return undefined;
+  return {
+    reason,
+    reasons: reasons.length ? reasons : [reason],
+    symbol: textValue(item.symbol),
+    signalSymbol: textValue(first(item, "signalSymbol", "signal_symbol")),
+    executionSymbol: textValue(first(item, "executionSymbol", "execution_symbol")),
+    action: textValue(item.action),
+    decidedAt: textValue(first(
+      item,
+      "decidedAt",
+      "decided_at",
+      "timestamp",
+      "at",
+    )),
+  };
+}
+
+function comparisonReasonList(value: unknown): AiSimulationComparisonDecisionReason[] {
+  if (Array.isArray(value)) return mapValid(value, normalizeComparisonDecisionReason);
+  const direct = normalizeComparisonDecisionReason(value);
+  return direct ? [direct] : [];
+}
+
+function normalizeStrategyComparisonLane(value: unknown): AiSimulationStrategyComparisonLane | undefined {
+  const lane = asRecord(value);
+  const id = comparisonLaneId(first(lane, "id", "strategy", "lane", "model", "name"));
+  const status = textValue(first(lane, "status", "state", "availability"));
+  if (!id || !status) return undefined;
+  return {
+    id,
+    status,
+    analyticalOnly: booleanValue(first(lane, "analyticalOnly", "analytical_only")),
+    unavailableReason: textValue(first(
+      lane,
+      "unavailableReason",
+      "unavailable_reason",
+      "error",
+    )),
+    cumulativeReturn: finiteNumber(first(lane, "cumulativeReturn", "cumulative_return")),
+    netReturn: finiteNumber(first(lane, "netReturn", "net_return")),
+    netProfit: finiteNumber(first(lane, "netProfit", "net_profit")),
+    maxDrawdown: finiteNumber(first(lane, "maxDrawdown", "max_drawdown")),
+    riskAdjustedReturn: finiteNumber(first(
+      lane,
+      "riskAdjustedReturn",
+      "risk_adjusted_return",
+    )),
+    trades: nonNegativeInteger(first(lane, "trades", "tradeCount", "trade_count")),
+    costs: finiteNumber(first(lane, "costs", "totalCosts", "total_costs")),
+    switches: nonNegativeInteger(first(
+      lane,
+      "switches",
+      "switchCount",
+      "switch_count",
+      "transitionCount",
+      "transition_count",
+    )),
+    directionAccuracy: finiteNumber(first(
+      lane,
+      "directionAccuracy",
+      "direction_accuracy",
+    )),
+    executionAccuracy: finiteNumber(first(
+      lane,
+      "executionAccuracy",
+      "execution_accuracy",
+      "executionSelectionAccuracy",
+      "execution_selection_accuracy",
+    )),
+    calibration: finiteNumber(first(
+      lane,
+      "calibration",
+      "calibrationScore",
+      "calibration_score",
+    )),
+    calibrationUnavailableRatio: finiteNumber(first(
+      lane,
+      "calibrationUnavailableRatio",
+      "calibration_unavailable_ratio",
+      "calibrationUnavailableRate",
+      "calibration_unavailable_rate",
+    )),
+    unavailableRatio: finiteNumber(first(
+      lane,
+      "unavailableRatio",
+      "unavailable_ratio",
+      "unavailableRate",
+      "unavailable_rate",
+    )),
+    latencyMs: finiteNumber(first(
+      lane,
+      "latencyMs",
+      "latency_ms",
+      "averageLatencyMs",
+      "average_latency_ms",
+      "latency",
+    )),
+    bullCount: nonNegativeInteger(first(lane, "bullCount", "bull_count")),
+    bearCount: nonNegativeInteger(first(lane, "bearCount", "bear_count")),
+    cashCount: nonNegativeInteger(first(lane, "cashCount", "cash_count")),
+    decisionReasons: comparisonReasonList(first(
+      lane,
+      "decisionReasons",
+      "decision_reasons",
+      "reasons",
+      "decisions",
+    )),
+  };
+}
+
+function normalizeStrategyComparison(value: unknown): AiSimulationStrategyComparison | undefined {
+  const comparison = asRecord(value);
+  if (!Object.keys(comparison).length) return undefined;
+  const common = asRecord(comparison.common);
+  const conditionId = textValue(first(comparison, "conditionId", "condition_id"))
+    ?? textValue(first(common, "conditionId", "condition_id"));
+  const originCount = nonNegativeInteger(first(common, "originCount", "origin_count"));
+  const commonCosts = first(common, "costs", "costModel", "cost_model");
+  const commonExecutionPolicy = first(common, "executionPolicy", "execution_policy");
+  const sameOrigin = booleanValue(first(comparison, "sameOrigin", "same_origin"))
+    ?? booleanValue(first(common, "sameOrigin", "same_origin"))
+    ?? (originCount !== undefined ? originCount === 1 : undefined);
+  const sameCosts = booleanValue(first(comparison, "sameCosts", "same_costs"))
+    ?? booleanValue(first(common, "sameCosts", "same_costs"))
+    ?? (commonCosts !== undefined ? true : undefined);
+  const sameExecutionPolicy = booleanValue(first(
+    comparison,
+    "sameExecutionPolicy",
+    "same_execution_policy",
+  )) ?? booleanValue(first(common, "sameExecutionPolicy", "same_execution_policy"))
+    ?? (commonExecutionPolicy !== undefined ? true : undefined);
+  const rawLanes = first(comparison, "lanes", "strategies", "variants");
+  const lanes = Array.isArray(rawLanes)
+    ? mapValid(rawLanes, normalizeStrategyComparisonLane)
+    : Object.entries(asRecord(rawLanes)).flatMap(([id, rawLane]) => {
+      const lane = asRecord(rawLane);
+      return normalizeStrategyComparisonLane({
+        ...lane,
+        id: first(lane, "id", "strategy", "lane", "model", "name") ?? id,
+      }) ?? [];
+    });
+  const uniqueLanes = lanes.filter(
+    (lane, index, all) => all.findIndex((candidate) => candidate.id === lane.id) === index,
+  );
+  if (!conditionId
+    || sameOrigin === undefined
+    || sameCosts === undefined
+    || sameExecutionPolicy === undefined
+    || uniqueLanes.length !== AI_SIMULATION_COMPARISON_LANES.length
+    || AI_SIMULATION_COMPARISON_LANES.some((id) => !uniqueLanes.some((lane) => lane.id === id))) {
+    return undefined;
+  }
+  const completedStatuses = new Set(["available", "complete", "completed", "ready", "running"]);
+  const calculatedIncomplete = uniqueLanes.filter(
+    ({ status }) => !completedStatuses.has(status.toLowerCase()),
+  ).length;
+  const reportedIncomplete = nonNegativeInteger(first(
+    comparison,
+    "incompleteCount",
+    "incomplete_count",
+    "incompleteLaneCount",
+    "incomplete_lane_count",
+  ));
+  const pairId = pairIdValue(first(comparison, "pairId", "pair_id"));
+  return {
+    conditionId,
+    ...(pairId ? { pairId } : {}),
+    sameOrigin,
+    sameCosts,
+    sameExecutionPolicy,
+    incompleteCount: reportedIncomplete !== undefined && reportedIncomplete <= uniqueLanes.length
+      ? reportedIncomplete
+      : calculatedIncomplete,
+    lanes: AI_SIMULATION_COMPARISON_LANES.map(
+      (id) => uniqueLanes.find((lane) => lane.id === id)!,
+    ),
+  };
+}
+
 function normalizedCadence(value: unknown): AiSimulationSnapshot["decisionCadence"] | undefined {
   const cadence = asRecord(value);
   if (!Object.keys(cadence).length) return undefined;
@@ -655,6 +1154,12 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
   const rawPreset = textValue(source.preset);
   const rawCriterion = textValue(source.criterion);
   const rawSelection = normalizeSelectionRequest(source.selection);
+  const strategy = normalizeStrategyRequest(source.strategy);
+  const strategyComparison = normalizeStrategyComparison(first(
+    source,
+    "strategyComparison",
+    "strategy_comparison",
+  ) ?? first(outer, "strategyComparison", "strategy_comparison"));
   const cadence = asRecord(first(source, "decisionCadence", "decision_cadence"));
   const profile = asRecord(first(source, "policyProfile", "policy_profile"));
 
@@ -669,6 +1174,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     equity: finiteNumber(source.equity) ?? 0,
     progress: Math.max(0, Math.min(1, rawProgress)),
     selection: rawSelection,
+    ...(strategy ? { strategy } : {}),
     criterion: AI_SIMULATION_CRITERIA.includes(rawCriterion as AiSimulationCriterion)
       ? rawCriterion as AiSimulationCriterion
       : rawSelection?.mode === "auto" ? rawSelection.criterion : undefined,
@@ -701,6 +1207,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     decisions: mapValid(source.decisions, normalizeDecision),
     warnings: stringList(source.warnings),
     capabilities: capabilityRecord(source.capabilities),
+    ...(strategyComparison ? { strategyComparison } : {}),
   };
 }
 
@@ -770,6 +1277,13 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
   const selection = normalizeSelectionRequest(configuration.selection)
     ?? normalizeSelectionRequest(first(selectionBlock, "request", "configuration"))
     ?? normalizeSelectionRequest(item.selection);
+  const strategy = normalizeStrategyRequest(configuration.strategy)
+    ?? normalizeStrategyRequest(item.strategy);
+  const strategyComparison = normalizeStrategyComparison(first(
+    item,
+    "strategyComparison",
+    "strategy_comparison",
+  ) ?? first(performance, "strategyComparison", "strategy_comparison"));
   const selected = mapValid(
     first(item, "selected", "symbols")
       ?? first(selectionBlock, "selected", "symbols", "instruments"),
@@ -837,6 +1351,7 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     riskTolerance: finiteNumber(first(configuration, "riskTolerance", "risk_tolerance"))
       ?? finiteNumber(first(item, "riskTolerance", "risk_tolerance")),
     selection,
+    ...(strategy ? { strategy } : {}),
     selected,
     initialCash,
     finalEquity,
@@ -854,6 +1369,7 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
       ?? finiteNumber(first(item, "decisionCount", "decision_count")),
     model,
     warnings: stringList(first(item, "warnings", "limitations")),
+    ...(strategyComparison ? { strategyComparison } : {}),
   };
 }
 
@@ -901,6 +1417,158 @@ function normalizeModelProvenance(value: unknown): string[] {
     .map(modelLabel)
     .filter((item): item is string => Boolean(item))
     .filter((item, index, all) => all.indexOf(item) === index);
+}
+
+function decisionModelValue(
+  modelsValue: unknown,
+  component: AiSimulationDecisionModelProvenance["component"],
+): unknown {
+  const aliases = component === "chronos2"
+    ? ["chronos2", "chronos_2", "chronos-2", "chronos"]
+    : ["kronos", "kronosSmall", "kronos_small", "kronos-small"];
+  if (Array.isArray(modelsValue)) {
+    return modelsValue.find((value) => {
+      const model = asRecord(value);
+      const candidate = textValue(first(model, "component", "id", "name"))
+        ?.toLowerCase()
+        .replaceAll("_", "-");
+      return aliases.some(
+        (alias) => alias.toLowerCase().replaceAll("_", "-") === candidate,
+      );
+    });
+  }
+  return first(asRecord(modelsValue), ...aliases);
+}
+
+function normalizeDecisionModelProvenance(
+  value: unknown,
+  component: AiSimulationDecisionModelProvenance["component"],
+  parentOrigin: string | undefined,
+): AiSimulationDecisionModelProvenance | undefined {
+  const model = asRecord(value);
+  if (!Object.keys(model).length) return undefined;
+  const provenance = asRecord(first(
+    model,
+    "provenance",
+    "modelProvenance",
+    "model_provenance",
+  ));
+  const status = textValue(first(model, "status", "state", "availability"));
+  const fallbackFrom = textValue(first(
+    provenance,
+    "fallbackFrom",
+    "fallback_from",
+  )) ?? textValue(first(model, "fallbackFrom", "fallback_from"));
+  const fallbackReason = textValue(first(
+    provenance,
+    "fallbackReason",
+    "fallback_reason",
+  )) ?? textValue(first(model, "fallbackReason", "fallback_reason"));
+  const explicitFallback = booleanValue(first(
+    provenance,
+    "fallbackUsed",
+    "fallback_used",
+  )) ?? booleanValue(first(model, "fallbackUsed", "fallback_used"));
+  const fallbackUsed = explicitFallback ?? Boolean(fallbackFrom || fallbackReason);
+  const explicitDegraded = booleanValue(provenance.degraded)
+    ?? booleanValue(model.degraded);
+  const degraded = explicitDegraded === true
+    || status?.toLowerCase() === "degraded"
+    || fallbackUsed;
+  return {
+    component,
+    status: status ?? (degraded ? "degraded" : "unknown"),
+    modelId: textValue(first(
+      provenance,
+      "modelId",
+      "model_id",
+    )) ?? textValue(first(model, "modelId", "model_id", "model")),
+    modelRevision: textValue(first(
+      provenance,
+      "modelRevision",
+      "model_revision",
+      "revision",
+    )) ?? textValue(first(model, "modelRevision", "model_revision", "revision")),
+    origin: textValue(first(
+      model,
+      "inputEndAt",
+      "input_end_at",
+      "origin",
+    )) ?? textValue(first(
+      provenance,
+      "inputOriginAt",
+      "input_origin_at",
+      "origin",
+    )) ?? parentOrigin,
+    generatedAt: textValue(first(
+      model,
+      "generatedAt",
+      "generated_at",
+    )) ?? textValue(first(provenance, "generatedAt", "generated_at")),
+    device: textValue(first(provenance, "device"))
+      ?? textValue(first(model, "device")),
+    deviceName: textValue(first(
+      provenance,
+      "deviceName",
+      "device_name",
+    )) ?? textValue(first(model, "deviceName", "device_name")),
+    latencyMs: finiteNumber(first(
+      provenance,
+      "latencyMs",
+      "latency_ms",
+    )) ?? finiteNumber(first(model, "latencyMs", "latency_ms", "latency")),
+    degraded,
+    fallbackUsed,
+    fallbackFrom,
+    fallbackReason,
+  };
+}
+
+function normalizeDecisionProvenance(
+  value: unknown,
+): AiSimulationDecisionProvenance | undefined {
+  const provenance = asRecord(value);
+  if (!Object.keys(provenance).length) return undefined;
+  const replayInput = asRecord(first(provenance, "replayInput", "replay_input"));
+  const modelsValue = first(
+    replayInput,
+    "models",
+    "modelOutputs",
+    "model_outputs",
+  ) ?? first(provenance, "models", "modelOutputs", "model_outputs");
+  const origin = textValue(first(
+    provenance,
+    "origin",
+    "inputEndAt",
+    "input_end_at",
+  )) ?? textValue(first(replayInput, "origin", "inputEndAt", "input_end_at"));
+  const parentDegraded = booleanValue(provenance.degraded) ?? false;
+  const models = (["chronos2", "kronos"] as const).flatMap((component) => {
+    const normalized = normalizeDecisionModelProvenance(
+      decisionModelValue(modelsValue, component),
+      component,
+      origin,
+    );
+    return normalized ? [normalized] : [];
+  });
+  if (!models.length) return undefined;
+  const decision = asRecord(provenance.decision);
+  return {
+    decisionId: textValue(first(provenance, "decisionId", "decision_id")),
+    pairId: textValue(first(provenance, "pairId", "pair_id")),
+    signalSymbol: textValue(first(provenance, "signalSymbol", "signal_symbol")),
+    executionSymbol: textValue(first(
+      provenance,
+      "executionSymbol",
+      "execution_symbol",
+    )),
+    direction: textValue(first(provenance, "direction"))
+      ?? textValue(first(decision, "direction", "action")),
+    origin,
+    decisionAt: textValue(first(provenance, "decisionAt", "decision_at")),
+    degraded: parentDegraded || models.some((model) => model.degraded),
+    models,
+  };
 }
 
 function normalizeLimit(value: unknown): string | undefined {
@@ -1059,10 +1727,22 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     "models",
     "model",
   ));
+  const decisionProvenance = mapValid(
+    first(report, "decisionProvenance", "decision_provenance")
+      ?? first(root, "decisionProvenance", "decision_provenance"),
+    normalizeDecisionProvenance,
+  );
   const inferredModels = [
     ...selected.map((item) => item.model),
     ...decisions.map((item) => item.model),
   ].filter((item): item is string => Boolean(item));
+  const strategy = normalizeStrategyRequest(configuration.strategy)
+    ?? snapshot?.strategy;
+  const strategyComparison = normalizeStrategyComparison(
+    first(report, "strategyComparison", "strategy_comparison")
+      ?? first(performance, "strategyComparison", "strategy_comparison")
+      ?? first(root, "strategyComparison", "strategy_comparison"),
+  ) ?? snapshot?.strategyComparison;
 
   return {
     runId,
@@ -1091,6 +1771,7 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       selection: normalizeSelectionRequest(configuration.selection)
         ?? normalizeSelectionRequest(first(selectionBlock, "request", "configuration"))
         ?? snapshot?.selection,
+      ...(strategy ? { strategy } : {}),
       costs: finiteCosts(configuration.costs),
     },
     selected,
@@ -1123,11 +1804,13 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     equity: mapValid(first(report, "equity", "equityCurve", "equity_curve"), normalizeEquityPoint),
     charts,
     modelProvenance: [...new Set([...reportModels, ...inferredModels])],
+    decisionProvenance,
     evidence: normalizeReportEvidence(report.evidence),
     warnings: stringList(first(report, "warnings", "limitations"))
       .concat(snapshot?.warnings ?? [])
       .filter((item, index, all) => all.indexOf(item) === index),
     limits: normalizeReportLimits(first(report, "limits", "limitations")),
+    ...(strategyComparison ? { strategyComparison } : {}),
   };
 }
 
@@ -1145,6 +1828,19 @@ export function validateAiSimulationRequest(
 ): string[] {
   const issues: string[] = [];
   if (!AI_SIMULATION_MARKETS.includes(request.marketCountry)) issues.push("시장 선택이 올바르지 않습니다.");
+  const strategy = asRecord(request.strategy);
+  const strategyMode = textValue(strategy.mode);
+  if (strategyMode === "pair") {
+    if (request.marketCountry !== "US") issues.push("페어 전략은 미국 시장에서만 실행할 수 있습니다.");
+    if (!pairIdValue(first(strategy, "pairId", "pair_id"))) {
+      issues.push("페어 전략 카탈로그를 확인해 주세요.");
+    }
+    if (booleanValue(first(strategy, "allowDegradedMode", "allow_degraded_mode")) === undefined) {
+      issues.push("페어 전략 degraded 실행 설정이 올바르지 않습니다.");
+    }
+  } else if (strategyMode !== "single") {
+    issues.push("전략 실행 방식이 올바르지 않습니다.");
+  }
   if (!AI_SIMULATION_PRESETS.includes(request.preset)) issues.push("AI 전략 프리셋이 올바르지 않습니다.");
   if (!Number.isInteger(request.riskTolerance)
     || request.riskTolerance < 0

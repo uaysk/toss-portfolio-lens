@@ -12,7 +12,8 @@
 - web은 `ws://ai-worker:8765/ws/scalping-ai/v1`에 연결한다.
 - `ai-worker`는 외부 port를 publish하지 않고 `internal: true`인 `ai_internal` network에만 연결된다.
 - web은 provider API 접근용 기본 network와 AI 전용 network에 함께 연결된다.
-- 기본 `AI_DEVICE=cpu`이며 GPU device reservation이 없다.
+- 기본 `AI_DEVICE=cuda`, `AI_ALLOW_CPU_FALLBACK=false`이며 GPU device reservation이 없으면 모델을
+  실행한 척하지 않고 unavailable로 남는다.
 - `ai_auth` named volume은 worker의 `/app/ai-auth`에 read-write, web의 `/run/ai-auth`에 read-only로 mount된다.
 - worker는 token이 없을 때만 `/app/ai-auth/token`을 원자 생성한다. web은 동일 파일을 지연 읽기하고 재연결한다.
 - image의 `/app/ai-auth`는 UID/GID 10001 소유로 준비되므로 새 named volume의 초기 권한도 이를 따른다.
@@ -28,14 +29,14 @@ docker compose up -d
 docker compose ps ai-worker web
 ```
 
-로컬 GPU를 사용할 때만 GPU override를 추가한다.
+로컬 GPU에서 실제 추론할 때 GPU override를 추가한다.
 
 ```bash
 docker compose -f compose.yaml -f compose.ai-gpu.yaml up --build -d ai-worker web
 ```
 
-`compose.ai-gpu.yaml`은 NVIDIA GPU 한 개를 예약하고 `AI_DEVICE=cuda`로 바꾼다. 기본 image와 web image는
-바뀌지 않는다.
+`compose.ai-gpu.yaml`은 NVIDIA GPU 한 개를 예약하고 CPU fallback을 계속 비활성화한다. 기본 image와 web
+image는 바뀌지 않는다.
 
 ## 고정 모델과 명시적 cache 준비
 
@@ -44,8 +45,13 @@ docker compose -f compose.yaml -f compose.ai-gpu.yaml up --build -d ai-worker we
 Transformers offline 모드로 실행하고 `/models`를 read-only로 mount한다. revision marker나 필수 파일이
 없으면 시작 중 다운로드하지 않고 unavailable 상태를 제공한다.
 
-현재 제공되는 준비 스크립트는 pinned Chronos-Bolt-small fallback만 지원한다. 이 명령은 runtime과 분리된
-운영자 작업이며 외부 다운로드가 허용된 시점과 호스트에서만 실행한다.
+기본 실행 집합은 pinned `amazon/chronos-2`와 `NeoQuasar/Kronos-small`이다. 두 모델은 같은 확정봉
+`input_end_at`을 사용하고 결과별 revision, 입력 종료 시각, 생성 시각, device와 latency를 응답에 남긴다.
+둘 중 하나라도 cache 또는 CUDA/P40 실행 조건을 충족하지 못하면 임의 출력이나 자동 다운로드 없이 해당
+run을 unavailable로 반환한다.
+
+현재 제공되는 준비 스크립트는 명시적 degraded fallback인 pinned Chronos-Bolt-small만 지원한다. 이 명령은
+runtime과 분리된 운영자 작업이며 외부 다운로드가 허용된 시점과 호스트에서만 실행한다.
 
 ```bash
 uv run --python 3.12 --with huggingface-hub==0.33.1 \
@@ -59,9 +65,11 @@ python3 scripts/prepare-ai-model-cache.py \
 
 스크립트는 manifest의 정확한 revision으로 임시 sibling directory에 내려받고 `config.json`과
 `model.safetensors`가 실제 regular file인지 확인한 다음 `.revision`을 원자 기록한다. 기존 invalid directory는
-덮어쓰지 않는다. Kronos-small은 source·tokenizer·model 3개 snapshot을 별도 검토 절차로 준비해야 한다.
-Chronos만 준비했다면 `AI_MODEL_PRIMARY=chronos-bolt-small`을 사용한다. public model cache directory는 container
-UID 10001이 탐색할 수 있도록 보통 `0755`, 필수 artifact는 read-only로 둔다.
+덮어쓰지 않는다. Chronos-2와 Kronos-small(source·tokenizer·model)은 별도 검토 절차로 정확한 pinned snapshot을
+준비해야 한다. Bolt fallback을 허용할 때만 `AI_MODEL_FALLBACK=chronos-bolt-small`을 명시한다. 이 경우에도
+응답의 실제 model ID와 fallback 원인, degraded 상태가 보존되며 Chronos-2 정상 실행으로 집계하지 않는다.
+public model cache directory는 container UID 10001이 탐색할 수 있도록 보통 `0755`, 필수 artifact는
+read-only로 둔다.
 
 호스트 cache를 mount할 때 `.env`에 절대 경로를 지정한다. 이 경로와 `data/`는 Git 대상이 아니다.
 
@@ -86,8 +94,12 @@ AI_REMOTE_BIND_ADDRESS=172.30.1.14
 AI_REMOTE_PORT=18765
 AI_MODEL_CACHE_SOURCE=/opt/toss-portfolio-lens/ai-model-cache
 AI_AUTH_SECRET_SOURCE=/opt/toss-portfolio-lens/ai-auth
-AI_MODEL_PRIMARY=chronos-bolt-small
+AI_MODEL_PRIMARY=chronos-2
+AI_MODEL_COMPANION=kronos-small
+AI_MODEL_FALLBACK=
+AI_DEVICE=cuda
 AI_ALLOW_CPU_FALLBACK=false
+AI_EXPECTED_CUDA_DEVICE_NAME=Tesla P40
 ```
 
 `AI_REMOTE_BIND_ADDRESS`는 `0.0.0.0`이나 public interface가 아닌 GPU 서버의 private LAN 주소로 고정한다.
@@ -142,7 +154,9 @@ main은 `wss://` URL을 사용한다. private CA라면 main의 `AI_TLS_SECRET_SO
 
 ## P40 정책과 검증 경계
 
-Tesla P40은 Pascal compute capability 6.1이다. PyTorch wheel에 같은 major의 하위 minor cubin인 `sm_60`이
+Tesla P40은 Pascal compute capability 6.1이다. worker는 관찰한 CUDA 장치명이
+`AI_EXPECTED_CUDA_DEVICE_NAME`(기본 `Tesla P40`)과 정확히 일치하는지도 검사한다. 장치명이 없거나 다르면
+production 모델 run은 unavailable로 fail-closed된다. PyTorch wheel에 같은 major의 하위 minor cubin인 `sm_60`이
 포함돼 있으면 NVIDIA binary compatibility에 따라 P40에서 허용한다. exact `sm_61` cubin만을 요구하지 않는다.
 float32와 math SDPA를 사용하고 FlashAttention·bf16에 의존하지 않는다. 실제 응답 provenance에는 선택된
 device와 attention backend가 기록된다.
@@ -151,7 +165,7 @@ device와 attention backend가 기록된다.
 
 - `docker compose config`: 구성 병합과 필수 환경변수 검증
 - `portfolio-ai-worker healthcheck`: 모델을 load하지 않는 local TCP listener liveness 확인
-- `preflight-json`: cache revision, 모델 load, CUDA 장치·capability 확인
+- `preflight-json`: cache revision, 모델 load, CUDA 장치명·capability 확인
 - batch forecast: 실제 VRAM peak, latency, 여러 종목 응답 확인
 - main→worker round-trip: 인증, WebSocket, firewall, timeout, reconnect 확인
 

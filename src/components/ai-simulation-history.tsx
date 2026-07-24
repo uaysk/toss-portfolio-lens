@@ -15,6 +15,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
+import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -197,6 +198,13 @@ export function SimulationRunHistoryList({
               </div>
             </div>
             {symbols ? <p className="mt-3 truncate text-[10px] font-black" title={symbols}>{symbols}</p> : null}
+            {item.strategyComparison ? (
+              <AiSimulationComparisonPanel
+                comparison={item.strategyComparison}
+                currency={item.currency}
+                compact
+              />
+            ) : null}
             <dl className="mt-3 grid grid-cols-3 gap-2">
               <div>
                 <dt className="text-[8px] font-black text-muted-foreground">최종 자산</dt>
@@ -250,10 +258,44 @@ function DecisionList({
               </p>
               <time className="text-[8px] text-muted-foreground">{timestamp(decision.decidedAt)}</time>
             </div>
-            <p className="mt-2 break-words text-[9px] leading-4">{decision.reason}</p>
+            {decision.reasons && decision.reasons.length > 1 ? (
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-[9px] leading-4">
+                {decision.reasons.map((reason, reasonIndex) => (
+                  <li key={`${reason}:${reasonIndex}`} className="break-words">{reason}</li>
+                ))}
+              </ul>
+            ) : <p className="mt-2 break-words text-[9px] leading-4">{decision.reason}</p>}
             <p className="mt-2 text-[8px] text-muted-foreground">
               상승 {ratio(decision.upProbability)} · score {Number.isFinite(decision.score) ? decision.score?.toFixed(3) : "unavailable"}
             </p>
+            {decision.q10Return !== undefined
+              || decision.predictedMedianReturn !== undefined
+              || decision.q90Return !== undefined ? (
+                <p className="mt-1 break-words text-[8px] text-muted-foreground">
+                  q10 {ratio(decision.q10Return, true)} · 중앙 {ratio(decision.predictedMedianReturn, true)} · q90 {ratio(decision.q90Return, true)}
+                </p>
+              ) : null}
+            {decision.signalSymbol || decision.executionSymbol || decision.direction || decision.technicalState ? (
+              <p className="mt-1 break-words text-[8px] text-muted-foreground">
+                {decision.signalSymbol && decision.executionSymbol
+                  ? `${decision.signalSymbol} → ${decision.executionSymbol}`
+                  : decision.signalSymbol ?? decision.executionSymbol}
+                {decision.direction ? ` · ${decision.direction}` : ""}
+                {decision.technicalState ? ` · ${decision.technicalState}` : ""}
+                {decision.degraded ? " · degraded" : ""}
+              </p>
+            ) : null}
+            {decision.components || decision.weights || decision.finalScores || decision.provenance?.length ? (
+              <details className="mt-2 rounded-xl bg-secondary p-2">
+                <summary className="cursor-pointer text-[8px] font-black">판단 구성 상세</summary>
+                <div className="mt-2 space-y-1 break-words text-[8px] leading-4 text-muted-foreground">
+                  {decision.components ? <p>components · {Object.entries(decision.components).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                  {decision.weights ? <p>weights · {Object.entries(decision.weights).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                  {decision.finalScores ? <p>final scores · {Object.entries(decision.finalScores).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
+                  {decision.provenance?.length ? <p>provenance · {decision.provenance.join(" · ")}</p> : null}
+                </div>
+              </details>
+            ) : null}
           </article>
         )) : <p className="text-[9px] text-muted-foreground">저장된 판단이 없습니다.</p>}
       </div>
@@ -339,6 +381,13 @@ export function SimulationRunReportView({
         </div>
       </section>
 
+      {report.strategyComparison ? (
+        <AiSimulationComparisonPanel
+          comparison={report.strategyComparison}
+          currency={performance.currency}
+        />
+      ) : null}
+
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <ReportMetric label="실현 손익" value={money(performance.realizedPnl, performance.currency)} />
         <ReportMetric label="미실현 손익" value={money(performance.unrealizedPnl, performance.currency)} />
@@ -359,6 +408,14 @@ export function SimulationRunReportView({
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">프리셋</dt><dd className="mt-1 font-black">{presetLabel(configuration.preset)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">공격·방어</dt><dd className="mt-1 font-black">{configuration.riskTolerance ?? "unavailable"}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">종목 선정</dt><dd className="mt-1 font-black">{selectionLabel(configuration.selection)}</dd></div>
+          <div className="rounded-xl bg-card p-3">
+            <dt className="text-muted-foreground">전략 실행</dt>
+            <dd className="mt-1 break-words font-black">
+              {configuration.strategy?.mode === "pair"
+                ? `페어 비교 · ${configuration.strategy.pairId}${configuration.strategy.allowDegradedMode ? " · degraded 허용" : ""}`
+                : "단일 전략"}
+            </dd>
+          </div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">시작 예수금</dt><dd className="mt-1 font-black">{money(configuration.initialCash, performance.currency)}</dd></div>
           <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">기간</dt><dd className="mt-1 font-black">{configuration.durationMinutes === undefined ? "unavailable" : `${configuration.durationMinutes}분`}</dd></div>
         </dl>
@@ -403,6 +460,91 @@ export function SimulationRunReportView({
               <p key={model} className="break-all rounded-xl bg-card p-3 text-[9px] font-black">{model}</p>
             )) : <p className="text-[9px] text-muted-foreground">모델 provenance가 저장되지 않았습니다.</p>}
           </div>
+          {report.decisionProvenance.length ? (
+            <details
+              className="mt-3 rounded-xl bg-card p-3"
+              data-simulation-report-decision-provenance
+            >
+              <summary className="cursor-pointer text-[9px] font-black">
+                판단 provenance {report.decisionProvenance.length}건 · Chronos-2 / Kronos-small
+              </summary>
+              <div className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1">
+                {[...report.decisionProvenance].reverse().map((decision, decisionIndex) => (
+                  <article
+                    key={decision.decisionId ?? `${decision.origin ?? "unknown"}:${decisionIndex}`}
+                    className="rounded-xl bg-secondary p-3"
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                      <p className="break-words text-[8px] font-black">
+                        {[decision.pairId, decision.signalSymbol && decision.executionSymbol
+                          ? `${decision.signalSymbol} → ${decision.executionSymbol}`
+                          : decision.signalSymbol ?? decision.executionSymbol, decision.direction]
+                          .filter(Boolean)
+                          .join(" · ") || "판단 식별자 unavailable"}
+                      </p>
+                      <span className={cn(
+                        "rounded-full px-2 py-1 text-[8px] font-black",
+                        decision.degraded
+                          ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                          : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                      )}>
+                        {decision.degraded ? "degraded" : "정상"}
+                      </span>
+                    </div>
+                    <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                      origin {timestamp(decision.origin)} · 판단 {timestamp(decision.decisionAt)}
+                    </p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {decision.models.map((model) => {
+                        const componentLabel = model.component === "chronos2"
+                          ? "Chronos-2"
+                          : "Kronos-small";
+                        const device = [model.device, model.deviceName].filter(Boolean).join(" · ")
+                          || "unavailable";
+                        return (
+                          <section
+                            key={model.component}
+                            className="min-w-0 rounded-xl bg-card p-3"
+                            data-simulation-model-provenance={model.component}
+                          >
+                            <div className="flex min-w-0 flex-wrap items-center justify-between gap-1">
+                              <p className="text-[8px] font-black">{componentLabel}</p>
+                              <span className={cn(
+                                "rounded-full px-2 py-1 text-[8px] font-black",
+                                model.degraded
+                                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                                  : statusClass(model.status),
+                              )}>
+                                {model.status}{model.degraded && model.status !== "degraded" ? " · degraded" : ""}
+                              </span>
+                            </div>
+                            <p className="mt-2 break-all text-[8px] font-black">
+                              {model.modelId ?? "model unavailable"}
+                              {model.modelRevision ? ` @ ${model.modelRevision}` : ""}
+                            </p>
+                            <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                              origin {timestamp(model.origin)} · 생성 {timestamp(model.generatedAt)}
+                            </p>
+                            <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                              device {device} · latency {Number.isFinite(model.latencyMs)
+                                ? `${(model.latencyMs as number).toFixed(0)}ms`
+                                : "unavailable"}
+                            </p>
+                            {model.fallbackUsed ? (
+                              <p className="mt-2 break-words rounded-lg bg-amber-500/10 p-2 text-[8px] leading-4 text-amber-700 dark:text-amber-300">
+                                fallback{model.fallbackFrom ? ` from ${model.fallbackFrom}` : ""}
+                                {model.fallbackReason ? ` · ${model.fallbackReason}` : ""}
+                              </p>
+                            ) : null}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </details>
+          ) : null}
           <dl className="mt-3 grid grid-cols-2 gap-2 text-[9px]">
             <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">트리거</dt><dd className="mt-1 break-words font-black">{report.decisionCadence?.trigger ?? "unavailable"}</dd></div>
             <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">마지막 완료</dt><dd className="mt-1 font-black">{timestamp(report.decisionCadence?.lastFinishedAt)}</dd></div>

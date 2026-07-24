@@ -163,12 +163,24 @@ export const ScalpingAnalysisSignalPointSchema = z.object({
   status: z.string().min(1).max(64).optional(),
   calculation_timestamp: z.string().datetime({ offset: true }).optional(),
   signal_timestamp: z.string().datetime({ offset: true }).optional(),
+  earliest_eligible_timestamp: z.string().datetime({ offset: true }).nullable().optional(),
   technical_signal: z.union([z.literal(-1), z.literal(0), z.literal(1)]).optional(),
   basis_price: z.number().finite().optional(),
   stop_candidate_price: z.number().finite().nullable().optional(),
   target_candidate_price: z.number().finite().nullable().optional(),
   target_price_range: analysisPriceRangeSchema.nullable().optional(),
   multi_timeframe_agreement: z.string().min(1).max(64).optional(),
+  multi_timeframe_trends: z.record(
+    z.string().min(1).max(32),
+    z.string().min(1).max(32).nullable(),
+  ).optional(),
+  confidence: z.number().finite().min(0).max(1).optional(),
+  confidence_semantics: z.string().min(1).max(500).optional(),
+  data_quality: z.object({
+    status: z.string().min(1).max(64),
+    reason: z.string().min(1).max(500).optional(),
+  }).passthrough().optional(),
+  rationale: z.array(z.string().min(1).max(500)).max(100).optional(),
 }).passthrough();
 export type ScalpingAnalysisSignalPoint = z.infer<typeof ScalpingAnalysisSignalPointSchema>;
 
@@ -189,6 +201,10 @@ export const ScalpingAnalysisInstrumentSchema = z.object({
   signals: analysisSignalSeriesSchema.optional(),
   signal_snapshots: z.array(ScalpingAnalysisSignalPointSchema).optional(),
   scanner_metrics: z.record(z.string(), analysisMetricSchema).optional(),
+  data_quality: z.object({
+    status: z.string().min(1).max(64),
+    reasons: z.array(z.string().min(1).max(500)).max(100).optional(),
+  }).passthrough().optional(),
   status: z.string().min(1).max(64).optional(),
   reason: z.string().min(1).max(240).optional(),
 }).passthrough();

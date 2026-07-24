@@ -121,7 +121,12 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
       response.json({
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         enabled: false,
-        capabilities: { realOrder: false, mcp: false, autonomousPaperTrading: false },
+        capabilities: {
+          realOrder: false,
+          mcp: false,
+          autonomousPaperTrading: false,
+          orderApiDependency: false,
+        },
       });
       return;
     }

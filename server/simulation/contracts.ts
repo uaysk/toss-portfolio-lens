@@ -4,7 +4,7 @@ import {
   ScannerCriterionSchema,
 } from "../scalping/contracts.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v3" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v4" as const;
 
 export const SimulationPresetSchema = z.enum([
   "trend",
@@ -80,6 +80,27 @@ export const SimulationSelectionSchema = z.discriminatedUnion("mode", [
 ]);
 export type SimulationSelection = z.infer<typeof SimulationSelectionSchema>;
 
+export const SimulationPairIdSchema = z.enum([
+  "soxx-soxl-soxs",
+  "smh-soxl-soxs",
+  "tsla-tsll-tsls",
+  "tsla-tsll-tslq",
+  "qqq-tqqq-sqqq",
+]);
+export type SimulationPairId = z.infer<typeof SimulationPairIdSchema>;
+
+export const SimulationStrategySchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("single"),
+  }).strict(),
+  z.object({
+    mode: z.literal("pair"),
+    pairId: SimulationPairIdSchema,
+    allowDegradedMode: z.boolean().default(false),
+  }).strict(),
+]);
+export type SimulationStrategy = z.infer<typeof SimulationStrategySchema>;
+
 export function createSimulationStartRequestSchema(limits: SimulationRequestLimits) {
   if (!Number.isSafeInteger(limits.maxDurationMinutes) || limits.maxDurationMinutes < 1) {
     throw new Error("Simulation maximum duration must be a positive safe integer.");
@@ -89,10 +110,21 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     initialCash: z.number().finite().min(100_000).max(10_000_000_000_000),
     durationMinutes: z.number().int().min(1).max(limits.maxDurationMinutes),
     selection: SimulationSelectionSchema,
+    // Optional on the wire so existing auto/manual requests remain valid.
+    // An omitted value has the exact semantics of `{ mode: "single" }`.
+    strategy: SimulationStrategySchema.optional(),
     preset: SimulationPresetSchema.default("risk_management"),
     riskTolerance: z.number().int().min(0).max(100).default(50),
     costs: SimulationCostOverridesSchema.optional(),
-  }).strict().transform((input) => ({
+  }).strict().superRefine((input, context) => {
+    if (input.strategy?.mode === "pair" && input.marketCountry !== "US") {
+      context.addIssue({
+        code: "custom",
+        path: ["marketCountry"],
+        message: "페어 전략은 미국 시장에서만 사용할 수 있습니다.",
+      });
+    }
+  }).transform((input) => ({
     ...input,
     costs: {
       ...DEFAULT_SIMULATION_COSTS,

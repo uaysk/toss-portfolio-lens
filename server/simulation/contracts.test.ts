@@ -59,6 +59,66 @@ describe("AI paper simulation contracts", () => {
     });
   });
 
+  it("accepts a strict US pair strategy while keeping omitted strategy backward compatible", () => {
+    expect(schema.parse({
+      marketCountry: "US",
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["TSLA"] },
+      strategy: {
+        mode: "pair",
+        pairId: "tsla-tsll-tslq",
+      },
+    })).toMatchObject({
+      marketCountry: "US",
+      strategy: {
+        mode: "pair",
+        pairId: "tsla-tsll-tslq",
+        allowDegradedMode: false,
+      },
+    });
+
+    expect(schema.parse({
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "auto", symbolCount: 1 },
+    })).not.toHaveProperty("strategy");
+  });
+
+  it("rejects pair strategies outside the US, unknown catalog ids, and mixed strategy fields", () => {
+    expect(() => schema.parse({
+      marketCountry: "KR",
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["005930"] },
+      strategy: {
+        mode: "pair",
+        pairId: "soxx-soxl-soxs",
+        allowDegradedMode: false,
+      },
+    })).toThrow();
+    expect(() => schema.parse({
+      marketCountry: "US",
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["SOXX"] },
+      strategy: {
+        mode: "pair",
+        pairId: "unknown-pair",
+      },
+    })).toThrow();
+    expect(() => schema.parse({
+      marketCountry: "US",
+      initialCash: 1_000_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["SOXX"] },
+      strategy: {
+        mode: "single",
+        pairId: "soxx-soxl-soxs",
+      },
+    })).toThrow();
+  });
+
   it("normalizes one or two manually selected symbols and rejects duplicates after normalization", () => {
     expect(schema.parse({
       marketCountry: "US",

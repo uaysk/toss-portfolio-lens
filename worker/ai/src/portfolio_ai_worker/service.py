@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import count
+from time import perf_counter
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from .adapters import InferenceSeries, ModelAdapter, RawPrediction
+from .adapters import InferenceSeries, ModelAdapter, ProductionModelBinding, RawPrediction
 from .contracts import (
     AIRequest,
     AIResponse,
@@ -20,6 +22,9 @@ from .contracts import (
     FIXED_HORIZONS,
     ForecastRequest,
     ForecastSeries,
+    ModelRun,
+    ModelRunInputOrigin,
+    PriceBar,
     REQUEST_ID_RE,
     SCHEMA_VERSION,
     SeriesForecastResult,
@@ -44,6 +49,65 @@ def _response_status(results: Sequence[SeriesForecastResult]) -> str:
     if available:
         return "partial"
     return "unavailable"
+
+
+def _effective_context_bars(bars: Sequence[PriceBar], maximum: int) -> tuple[PriceBar, ...]:
+    return tuple(bars[-maximum:])
+
+
+def _canonical_input_digest(bars: Sequence[PriceBar]) -> str:
+    """Hash the exact confirmed-bar values passed to a model.
+
+    IEEE-754 hexadecimal strings avoid locale and JSON number-rendering
+    differences while retaining every input float bit. Timestamps are pinned
+    to UTC microsecond RFC3339 and nullable liquidity fields remain explicit.
+    """
+
+    def number(value: float | None) -> str | None:
+        return None if value is None else float(value).hex()
+
+    payload = [
+        {
+            "amount": number(bar.amount),
+            "close": number(bar.close),
+            "complete": bar.complete,
+            "high": number(bar.high),
+            "low": number(bar.low),
+            "open": number(bar.open),
+            "timestamp": bar.timestamp.astimezone(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+            "volume": number(bar.volume),
+        }
+        for bar in bars
+    ]
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _model_run_input_origins(
+    series: Sequence[ForecastSeries],
+    maximum_context_bars: int,
+) -> tuple[ModelRunInputOrigin, ...]:
+    origins: list[ModelRunInputOrigin] = []
+    for item in series:
+        context = _effective_context_bars(item.bars, maximum_context_bars)
+        origins.append(
+            ModelRunInputOrigin(
+                instrument_key=item.instrument_key,
+                context_start_at=context[0].timestamp,
+                input_end_at=item.input_end_at,
+                bar_count=len(context),
+                input_digest=_canonical_input_digest(context),
+            )
+        )
+    return tuple(origins)
 
 
 def _evaluation_key(instrument_key: str, origin: datetime, ordinal: int) -> str:
@@ -93,9 +157,15 @@ class _RejectedEvaluationPoint:
 
 
 class AIService:
-    def __init__(self, settings: AISettings, adapter: ModelAdapter) -> None:
+    def __init__(
+        self,
+        settings: AISettings,
+        adapter: ModelAdapter,
+        model_run_adapters: Sequence[ProductionModelBinding] = (),
+    ) -> None:
         self.settings = settings
         self.adapter = adapter
+        self.model_run_adapters = tuple(model_run_adapters)
         self._model_lock = threading.Lock()
 
     def protocol_error(
@@ -142,7 +212,13 @@ class AIService:
             )
         return self._handle_evaluate(request)
 
-    def _run_forecasts(self, series: Sequence[ForecastSeries], seed: int) -> tuple[SeriesForecastResult, ...]:
+    def _run_forecasts(
+        self,
+        series: Sequence[ForecastSeries],
+        seed: int,
+        adapter: ModelAdapter | None = None,
+    ) -> tuple[SeriesForecastResult, ...]:
+        selected_adapter = adapter or self.adapter
         results: dict[str, SeriesForecastResult] = {}
         eligible: list[ForecastSeries] = []
         for item in series:
@@ -155,7 +231,9 @@ class AIService:
                     f"At least {self.settings.min_context_bars} complete bars are required.",
                 )
                 continue
-            eligible.append(item.model_copy(update={"bars": item.bars[-self.settings.max_context_bars :]}))
+            eligible.append(
+                item.model_copy(update={"bars": _effective_context_bars(item.bars, self.settings.max_context_bars)})
+            )
 
         groups: dict[int, list[ForecastSeries]] = {}
         for item in eligible:
@@ -176,7 +254,7 @@ class AIService:
                 ordinal = next(batch_ordinal)
                 try:
                     with self._model_lock:
-                        raw = self.adapter.predict_batch(inputs, seed=seed + ordinal)
+                        raw = selected_adapter.predict_batch(inputs, seed=seed + ordinal)
                     if len(raw) != len(chunk) or any(
                         prediction.instrument_key != expected.instrument_key
                         for prediction, expected in zip(raw, chunk, strict=False)
@@ -197,7 +275,48 @@ class AIService:
                     results[item.instrument_key] = postprocess_prediction(item, prediction)
         return tuple(results[item.instrument_key] for item in series)
 
+    def _model_run(
+        self,
+        request: ForecastRequest,
+        binding: ProductionModelBinding,
+        input_origins: tuple[ModelRunInputOrigin, ...],
+    ) -> ModelRun:
+        started = perf_counter()
+        results = self._run_forecasts(request.series, request.seed, binding.adapter)
+        latency_ms = (perf_counter() - started) * 1_000
+        generated_at = datetime.now(timezone.utc)
+        provenance = binding.adapter.provenance
+        fallback_used = provenance.loaded and provenance.model_id != binding.expected_model_id
+        return ModelRun(
+            role=binding.role,
+            expected_model_id=binding.expected_model_id,
+            status=_response_status(results),
+            model=provenance,
+            generated_at=generated_at,
+            latency_ms=latency_ms,
+            degraded=fallback_used,
+            fallback_used=fallback_used,
+            fallback_reason=provenance.fallback_reason if fallback_used else None,
+            input_origins=input_origins,
+            input_end_aligned=True,
+            raw_series=results,
+        )
+
     def _handle_forecast(self, request: ForecastRequest) -> AIResponse:
+        if self.model_run_adapters:
+            input_origins = _model_run_input_origins(request.series, self.settings.max_context_bars)
+            model_runs = tuple(self._model_run(request, binding, input_origins) for binding in self.model_run_adapters)
+            primary = model_runs[0]
+            return AIResponse(
+                schema_version=SCHEMA_VERSION,
+                request_id=request.request_id,
+                mode="forecast",
+                status=primary.status,
+                model=primary.model,
+                generated_at=datetime.now(timezone.utc),
+                series=primary.raw_series,
+                model_runs=model_runs,
+            )
         results = self._run_forecasts(request.series, request.seed)
         return AIResponse(
             schema_version=SCHEMA_VERSION,
