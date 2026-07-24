@@ -380,6 +380,7 @@ type SimulationMarketSource = {
     interval: "1m";
   }, options?: {
     signal?: AbortSignal;
+    maximumInputEndAt?: string;
   }): Promise<ScalpingForecastResult>;
   realtimeAnalysis(input: {
     marketCountry: MarketCountry;
@@ -398,6 +399,7 @@ type SimulationMarketSource = {
   }, options?: {
     signal?: AbortSignal;
     skipAutomaticRefresh?: boolean;
+    maximumInputEndAt?: string;
   }): Promise<ScalpingRealtimeAnalysisResult>;
 };
 
@@ -2469,23 +2471,29 @@ export class AiTradingSimulationService {
     }
     const signal = session.decisionAbort.signal;
     const signalSymbols = [pair.signalSymbol];
-    const [forecastResult, technical] = await Promise.all([
-      this.market.forecast({
-        marketCountry: "US",
-        symbols: signalSymbols,
-        interval: "1m",
-      }, { signal }),
-      this.market.realtimeAnalysis({
-        marketCountry: "US",
-        symbols: signalSymbols,
-        interval: "1m",
-        preset: session.request.preset,
-        positionContext: pairSignalPositionContext(session),
-      }, {
-        signal,
-        skipAutomaticRefresh: true,
-      }),
-    ]);
+    const maximumInputEndAt = latestFinalChartOrigin(session, pair.signalSymbol);
+    // Forecast refreshes and persists the captured final bar. Run retained Rust
+    // analysis afterward so both components consume that exact origin.
+    const forecastResult = await this.market.forecast({
+      marketCountry: "US",
+      symbols: signalSymbols,
+      interval: "1m",
+    }, {
+      signal,
+      ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
+    });
+    if (signal.aborted || session.phase !== "selecting") return;
+    const technical = await this.market.realtimeAnalysis({
+      marketCountry: "US",
+      symbols: signalSymbols,
+      interval: "1m",
+      preset: session.request.preset,
+      positionContext: pairSignalPositionContext(session),
+    }, {
+      signal,
+      skipAutomaticRefresh: true,
+      ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
+    });
     if (signal.aborted || session.phase !== "selecting") return;
     for (const chart of session.charts) mergeSimulationLatestTechnical(chart, technical);
     const displaySelection = selectAiForecastSeries(forecastResult.forecast, {
@@ -2516,7 +2524,7 @@ export class AiTradingSimulationService {
       session,
       forecastResult.forecast,
       states[pair.signalSymbol],
-      latestFinalChartOrigin(session, pair.signalSymbol),
+      maximumInputEndAt,
     );
     session.lastDecisionFinishedAt = decisionRecord.recordedAt;
     this.recordEquity(session, decisionRecord.recordedAt);
@@ -3419,25 +3427,31 @@ export class AiTradingSimulationService {
     const signalSymbol = session.pair.catalog.signalSymbol;
     await this.live.waitForIdle();
     if (signal.aborted || session.phase !== "running") return;
-    const [forecastResult, technical] = await Promise.all([
-      this.market.forecast({
-        marketCountry: "US",
-        symbols: [signalSymbol],
-        interval: "1m",
-      }, { signal }),
-      this.market.realtimeAnalysis({
-        marketCountry: "US",
-        symbols: [signalSymbol],
-        interval: "1m",
-        preset: session.request.preset,
-        // Execution ETF holdings are represented as one isolated synthetic
-        // underlying position instead of being mislabeled as the signal symbol.
-        positionContext: pairSignalPositionContext(session),
-      }, {
-        signal,
-        skipAutomaticRefresh: true,
-      }),
-    ]);
+    const maximumInputEndAt = latestFinalChartOrigin(session, signalSymbol);
+    // Keep this sequential: the forecast refresh makes the captured bar
+    // available to retained Rust analysis, while the cutoff prevents drift.
+    const forecastResult = await this.market.forecast({
+      marketCountry: "US",
+      symbols: [signalSymbol],
+      interval: "1m",
+    }, {
+      signal,
+      ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
+    });
+    if (signal.aborted || session.phase !== "running") return;
+    const technical = await this.market.realtimeAnalysis({
+      marketCountry: "US",
+      symbols: [signalSymbol],
+      interval: "1m",
+      preset: session.request.preset,
+      // Execution ETF holdings are represented as one isolated synthetic
+      // underlying position instead of being mislabeled as the signal symbol.
+      positionContext: pairSignalPositionContext(session),
+    }, {
+      signal,
+      skipAutomaticRefresh: true,
+      ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
+    });
     if (signal.aborted || session.phase !== "running") return;
     if (session.expiresAt && this.now() >= Date.parse(session.expiresAt)) return;
     if (session.ledgerRevision !== ledgerRevision) {
@@ -3450,7 +3464,7 @@ export class AiTradingSimulationService {
       session,
       forecastResult.forecast,
       states[signalSymbol],
-      latestFinalChartOrigin(session, signalSymbol),
+      maximumInputEndAt,
     );
     const displaySelection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: 1,

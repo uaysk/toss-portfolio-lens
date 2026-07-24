@@ -449,8 +449,18 @@ function harness(overrides: Partial<Scenario> = {}) {
         ? { workspace: { generatedAt: at(scenario.origin, 3_000), candidates: candidates(), instruments: [] } }
         : workspace(scenario, input.symbols ?? []),
     )),
-    forecast: vi.fn(() => Promise.resolve(dualModelForecast(scenario))),
-    realtimeAnalysis: vi.fn(() => Promise.resolve(technicalAnalysis(scenario))),
+    forecast: vi.fn((
+      _input: unknown,
+      _options?: { signal?: AbortSignal; maximumInputEndAt?: string },
+    ) => Promise.resolve(dualModelForecast(scenario))),
+    realtimeAnalysis: vi.fn((
+      _input: unknown,
+      _options?: {
+        signal?: AbortSignal;
+        skipAutomaticRefresh?: boolean;
+        maximumInputEndAt?: string;
+      },
+    ) => Promise.resolve(technicalAnalysis(scenario))),
   };
   const live = {
     retain: vi.fn().mockResolvedValue(release),
@@ -757,7 +767,10 @@ describe("AI trading simulation pair integration", () => {
       ]);
       expect(setup.market.forecast).toHaveBeenCalledWith(
         { marketCountry: "US", symbols: ["TSLA"], interval: "1m" },
-        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        expect.objectContaining({
+          signal: expect.any(AbortSignal),
+          maximumInputEndAt: INITIAL_ORIGIN,
+        }),
       );
       expect(snapshot.pairStrategy).toMatchObject({
         pairId: "tsla-tsll-tslq",
@@ -832,6 +845,82 @@ describe("AI trading simulation pair integration", () => {
       expect(setup.storedArtifacts.some(
         ({ type }) => type === "simulation-comparison",
       )).toBe(true);
+    } finally {
+      await setup.service.close("pair_test_complete");
+    }
+  });
+
+  it("waits for forecast refresh and pins pair model and Rust inputs to each captured origin", async () => {
+    const setup = harness();
+    let completedForecastOrigin: string | undefined;
+    setup.market.forecast.mockImplementation(async (
+      _input,
+      options,
+    ) => {
+      const origin = options?.maximumInputEndAt;
+      await Promise.resolve();
+      completedForecastOrigin = origin;
+      return dualModelForecast({
+        ...setup.scenario,
+        ...(origin ? { origin } : {}),
+      });
+    });
+    setup.market.realtimeAnalysis.mockImplementation((
+      _input,
+      options,
+    ) => {
+      const requestedOrigin = options?.maximumInputEndAt;
+      const origin = requestedOrigin && completedForecastOrigin === requestedOrigin
+        ? requestedOrigin
+        : at(requestedOrigin ?? setup.scenario.origin, -60_000);
+      return Promise.resolve(technicalAnalysis({
+        ...setup.scenario,
+        origin,
+      }));
+    });
+    try {
+      let snapshot = await startRunning(setup);
+      expect(snapshot.decisions.at(-1)).toMatchObject({
+        ensemble: { origin: INITIAL_ORIGIN },
+        modelOutputs: {
+          alignmentStatus: "aligned",
+          alignedOrigin: INITIAL_ORIGIN,
+        },
+        rustSignal: { signalOriginAt: INITIAL_ORIGIN },
+      });
+      expect(setup.market.forecast.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+        maximumInputEndAt: INITIAL_ORIGIN,
+      }));
+      expect(setup.market.realtimeAnalysis.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+        skipAutomaticRefresh: true,
+        maximumInputEndAt: INITIAL_ORIGIN,
+      }));
+
+      const nextOrigin = at(INITIAL_ORIGIN, 60_000);
+      setup.scenario.origin = nextOrigin;
+      setup.setNow(at(nextOrigin, 5_000));
+      setup.emit(finalSignalBar(nextOrigin));
+      snapshot = await waitForSnapshot(
+        setup,
+        (value) => value.decisions.length >= 2,
+        "origin-pinned pair refresh",
+      );
+
+      expect(snapshot.decisions.at(-1)).toMatchObject({
+        ensemble: { origin: nextOrigin },
+        modelOutputs: {
+          alignmentStatus: "aligned",
+          alignedOrigin: nextOrigin,
+        },
+        rustSignal: { signalOriginAt: nextOrigin },
+      });
+      expect(setup.market.forecast.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+        maximumInputEndAt: nextOrigin,
+      }));
+      expect(setup.market.realtimeAnalysis.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+        skipAutomaticRefresh: true,
+        maximumInputEndAt: nextOrigin,
+      }));
     } finally {
       await setup.service.close("pair_test_complete");
     }

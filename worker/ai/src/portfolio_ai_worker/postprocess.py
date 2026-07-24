@@ -89,15 +89,20 @@ def _quantile_values(values: Sequence[float]) -> tuple[QuantileValue, ...]:
     return tuple(QuantileValue(quantile=quantile, value=_quantile(values, quantile)) for quantile in FIXED_QUANTILES)
 
 
-def _valid_bar(bar: PredictedBar) -> bool:
+def _valid_return_bar(bar: PredictedBar) -> bool:
+    # Kronos predicts each OHLC field directly, so a finite path can contain
+    # small candle-envelope crossings. Return statistics consume the raw close
+    # path without rewriting it; first-passage analysis is gated separately.
     values = (bar.open, bar.high, bar.low, bar.close)
+    return all(math.isfinite(value) and value > 0 for value in values)
+
+
+def _valid_ohlc_envelope(bar: PredictedBar) -> bool:
     return (
-        all(math.isfinite(value) and value > 0 for value in values)
+        _valid_return_bar(bar)
         and bar.low <= min(bar.open, bar.close)
         and bar.high >= max(bar.open, bar.close)
         and bar.low <= bar.high
-        and (bar.volume is None or (math.isfinite(bar.volume) and bar.volume >= 0))
-        and (bar.amount is None or (math.isfinite(bar.amount) and bar.amount >= 0))
     )
 
 
@@ -114,6 +119,8 @@ def _path_volatility(path: Sequence[PredictedBar], base_price: float) -> float:
 def _target_stop_bounds(paths: Sequence[Sequence[PredictedBar]], spec: TargetStopSpec | None) -> TargetStopBounds:
     if spec is None:
         return TargetStopBounds(status="unavailable", reason="target_stop_not_requested")
+    if any(not all(_valid_ohlc_envelope(bar) for bar in path) for path in paths):
+        return TargetStopBounds(status="unavailable", reason="predicted_ohlc_path_inconsistent")
     target = stop = ambiguous = neither = 0
     for path in paths:
         outcome = "neither"
@@ -161,7 +168,7 @@ def _path_horizons(series: ForecastSeries, raw: RawPrediction) -> tuple[HorizonF
         valid = [
             path[:horizon]
             for path in raw.paths
-            if len(path) >= horizon and all(_valid_bar(bar) for bar in path[:horizon])
+            if len(path) >= horizon and all(_valid_return_bar(bar) for bar in path[:horizon])
         ]
         invalid_count = len(raw.paths) - len(valid)
         if not valid:

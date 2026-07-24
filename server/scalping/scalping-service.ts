@@ -614,6 +614,7 @@ type BarLoadOptions = {
 type ScalpingComputationOptions = {
   signal?: AbortSignal;
   skipAutomaticRefresh?: boolean;
+  maximumInputEndAt?: string;
 };
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -622,6 +623,15 @@ function throwIfAborted(signal?: AbortSignal): void {
   const error = new Error("Scalping computation was cancelled.");
   error.name = "AbortError";
   throw error;
+}
+
+function inputDataCutoff(nowMs: number, maximumInputEndAt?: string): number {
+  if (maximumInputEndAt === undefined) return nowMs;
+  const maximum = Date.parse(maximumInputEndAt);
+  if (!Number.isFinite(maximum)) {
+    throw new Error("maximumInputEndAt must be a valid timestamp.");
+  }
+  return Math.min(nowMs, maximum);
 }
 
 function calendarDateAfter(sessionDate: string, days: number): string | undefined {
@@ -1129,7 +1139,7 @@ export class ScalpingService {
     // A provider's "final" flag alone does not prove that a candle has closed.
     // Freeze one batch-wide cutoff and exclude future closes from both Rust
     // technical analysis and the AI request.
-    const dataCutoff = this.now();
+    const dataCutoff = inputDataCutoff(this.now(), options.maximumInputEndAt);
     barsBySymbol = new Map([...barsBySymbol].map(([symbol, values]) => [
       symbol,
       values.filter((bar) => Date.parse(bar.closeTime) <= dataCutoff),
@@ -1256,7 +1266,7 @@ export class ScalpingService {
     // Some providers mark the current candle as final before its close time.
     // Freeze one batch-wide wall-clock cutoff so the Rust analysis cannot see
     // a candle that has not actually closed yet.
-    const dataCutoff = this.now();
+    const dataCutoff = inputDataCutoff(this.now(), options.maximumInputEndAt);
     for (const [symbol, bars] of barsBySymbol) {
       barsBySymbol.set(
         symbol,

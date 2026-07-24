@@ -1522,6 +1522,39 @@ describe("ScalpingService", () => {
     );
   });
 
+  it("pins forecast and realtime Rust inputs to maximumInputEndAt", async () => {
+    const parts = dependencies();
+    const maximumInputEndAt = parts.series.at(-2)!.closeTime;
+    const subject = service(parts, {
+      now: () => Date.parse(maximumInputEndAt) + 30_000,
+    });
+
+    await subject.forecast(
+      { symbols: ["005930"], interval: "1m" },
+      { maximumInputEndAt },
+    );
+
+    const forecastRustRequest = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    const aiRequest = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(forecastRustRequest.scalping_analysis.instruments[0].bars.at(-1).timestamp)
+      .toBe(marketLocalTimestamp(maximumInputEndAt, "KR"));
+    expect(aiRequest.series[0].input_end_at).toBe(maximumInputEndAt);
+
+    parts.rust.compute.mockClear();
+    await subject.realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    }, {
+      skipAutomaticRefresh: true,
+      maximumInputEndAt,
+    });
+
+    const realtimeRustRequest = parts.rust.compute.mock.calls[0]![1] as Record<string, any>;
+    expect(realtimeRustRequest.scalping_analysis.instruments[0].bars.at(-1).timestamp)
+      .toBe(marketLocalTimestamp(maximumInputEndAt, "KR"));
+  });
+
   it("propagates cancellation into realtime Rust computation", async () => {
     const parts = dependencies();
     let rustSignal: AbortSignal | undefined;
