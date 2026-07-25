@@ -213,6 +213,86 @@ export type AiRequest = z.infer<typeof AiRequestSchema>;
 export type AiForecastRequest = z.infer<typeof AiForecastRequestSchema>;
 export type AiEvaluateRequest = z.infer<typeof AiEvaluateRequestSchema>;
 
+export const FINCAST_QUALIFICATION_QUANTILE_ROWS = 128 * 60;
+export const MAX_Q50_ADJUSTMENT_IQR_RATIO = 1_000_000_000;
+const FINCAST_PRECISION_FAILURE_REASONS = [
+  "non_finite_output",
+  "quantile_postprocessing_failed",
+  "signal_direction_agreement_below_99pct",
+  "q50_median_error_above_5pct_fp32_iqr",
+  "q50_p95_error_above_15pct_fp32_iqr",
+  "peak_vram_reduction_below_25pct",
+  "mixed_cuda_out_of_memory",
+  "mixed_unsupported_operation",
+  "mixed_setup_failure",
+  "mixed_model_load_failure",
+  "mixed_inference_failure",
+  "mixed_evaluation_failure",
+] as const;
+export const QuantileRearrangementObservationsSchema = z.object({
+  row_count: z.number().int().min(1).max(FINCAST_QUALIFICATION_QUANTILE_ROWS),
+  non_finite_value_count: z.number().int().nonnegative(),
+  crossing_row_count: z.number().int().nonnegative(),
+  crossing_adjacent_pair_count: z.number().int().nonnegative(),
+  adjusted_row_count: z.number().int().nonnegative(),
+  q50_adjustment_iqr_ratio_median: finite.min(0).max(MAX_Q50_ADJUSTMENT_IQR_RATIO),
+  q50_adjustment_iqr_ratio_p95: finite.min(0).max(MAX_Q50_ADJUSTMENT_IQR_RATIO),
+  q50_adjustment_iqr_ratio_max: finite.min(0).max(MAX_Q50_ADJUSTMENT_IQR_RATIO),
+  postprocessed_monotonic: z.boolean(),
+}).strict().superRefine((observations, context) => {
+  if (observations.non_finite_value_count > observations.row_count * 9) {
+    context.addIssue({
+      code: "custom",
+      path: ["non_finite_value_count"],
+      message: "non-finite quantile count exceeds the bounded native output shape",
+    });
+  }
+  if (observations.crossing_row_count > observations.row_count) {
+    context.addIssue({
+      code: "custom",
+      path: ["crossing_row_count"],
+      message: "crossing quantile row count exceeds observed rows",
+    });
+  }
+  if (observations.crossing_adjacent_pair_count > observations.row_count * 8) {
+    context.addIssue({
+      code: "custom",
+      path: ["crossing_adjacent_pair_count"],
+      message: "crossing adjacent-pair count exceeds the bounded native output shape",
+    });
+  }
+  if (observations.adjusted_row_count > observations.row_count) {
+    context.addIssue({
+      code: "custom",
+      path: ["adjusted_row_count"],
+      message: "adjusted quantile row count exceeds observed rows",
+    });
+  }
+  if (!(observations.q50_adjustment_iqr_ratio_median
+    <= observations.q50_adjustment_iqr_ratio_p95
+    && observations.q50_adjustment_iqr_ratio_p95
+    <= observations.q50_adjustment_iqr_ratio_max)) {
+    context.addIssue({
+      code: "custom",
+      path: ["q50_adjustment_iqr_ratio_p95"],
+      message: "q50 adjustment summaries must be ordered",
+    });
+  }
+  if (observations.adjusted_row_count === 0
+    && (observations.q50_adjustment_iqr_ratio_median !== 0
+      || observations.q50_adjustment_iqr_ratio_p95 !== 0
+      || observations.q50_adjustment_iqr_ratio_max !== 0)) {
+    context.addIssue({
+      code: "custom",
+      path: ["q50_adjustment_iqr_ratio_median"],
+      message: "zero adjusted rows require zero q50 adjustment summaries",
+    });
+  }
+});
+export type QuantileRearrangementObservations = z.infer<
+  typeof QuantileRearrangementObservationsSchema
+>;
+
 const ModelProvenanceSchema = z.object({
   model_id: z.string().min(1).max(256),
   model_revision: z.string().min(1).max(256),
@@ -231,6 +311,13 @@ const ModelProvenanceSchema = z.object({
   peak_vram_bytes: z.number().int().nonnegative().nullable().optional(),
   peak_vram_measurement: z.literal("cuda_allocated_or_reserved").nullable().optional(),
   memory_status: z.enum(["ok", "memory_pressure", "unavailable"]).optional(),
+  quantile_monotonicity_policy: z.enum([
+    "native",
+    "fp32_monotone_rearrangement_v1",
+    "unavailable",
+  ]).optional(),
+  fp32_quantile_observations: QuantileRearrangementObservationsSchema.nullable().optional(),
+  mixed_quantile_observations: QuantileRearrangementObservationsSchema.nullable().optional(),
   quantile_tail_policy: z.enum(["native", "tail_clamped_q10_q90", "unavailable"]).optional(),
   precision_failure_reasons: z.array(z.string().min(1).max(300)).optional(),
   fallback_from: z.string().min(1).max(256).nullable().optional(),
@@ -283,6 +370,12 @@ const ModelProvenanceSchema = z.object({
         && model.precision_validation !== (model.loaded ? "not_required" : "unavailable"))
       || (model.memory_status !== undefined
         && model.memory_status !== (model.loaded ? "ok" : "unavailable"))
+      || (model.quantile_monotonicity_policy !== undefined
+        && model.quantile_monotonicity_policy !== (model.loaded ? "native" : "unavailable"))
+      || (model.fp32_quantile_observations !== undefined
+        && model.fp32_quantile_observations !== null)
+      || (model.mixed_quantile_observations !== undefined
+        && model.mixed_quantile_observations !== null)
       || (model.quantile_tail_policy !== undefined
         && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable"))
       || (model.precision_failure_reasons?.length ?? 0) > 0;
@@ -295,6 +388,34 @@ const ModelProvenanceSchema = z.object({
   }
   if (model.model_id === FINCAST_MODEL_ID) {
     if (model.loaded) {
+      const precisionFailureReasons = model.precision_failure_reasons ?? [];
+      const validPrecisionFailureReasons = precisionFailureReasons.length
+        <= FINCAST_PRECISION_FAILURE_REASONS.length
+        && new Set(precisionFailureReasons).size === precisionFailureReasons.length
+        && precisionFailureReasons.every((reason) => (
+          (FINCAST_PRECISION_FAILURE_REASONS as readonly string[]).includes(reason)
+        ));
+      const fp32Observations = model.fp32_quantile_observations;
+      const mixedObservations = model.mixed_quantile_observations;
+      const mixedRuntimeFailed = precisionFailureReasons
+        .some((reason) => reason.startsWith("mixed_"));
+      const validFp32Observations = fp32Observations !== undefined
+        && fp32Observations !== null
+        && fp32Observations.row_count === FINCAST_QUALIFICATION_QUANTILE_ROWS
+        && fp32Observations.non_finite_value_count === 0
+        && fp32Observations.postprocessed_monotonic;
+      const validMixedObservations = mixedRuntimeFailed
+        ? mixedObservations === null
+        : mixedObservations !== undefined
+          && mixedObservations !== null
+          && mixedObservations.row_count === FINCAST_QUALIFICATION_QUANTILE_ROWS
+          && precisionFailureReasons.includes("non_finite_output")
+            === (mixedObservations.non_finite_value_count > 0)
+          && precisionFailureReasons.includes("quantile_postprocessing_failed")
+            === (
+              mixedObservations.non_finite_value_count === 0
+              && !mixedObservations.postprocessed_monotonic
+            );
       const validPrecision = (
         model.dtype === "mixed_float16"
         && model.precision_validation === "passed"
@@ -304,10 +425,14 @@ const ModelProvenanceSchema = z.object({
         && model.precision_validation === "fallback_fp32"
         && (model.precision_failure_reasons?.length ?? 0) > 0
       );
-      if (!validPrecision
+      if (!validPrecisionFailureReasons
+        || !validPrecision
+        || !validFp32Observations
+        || !validMixedObservations
         || peakVramBytes === null
         || peakVramBytes <= 0
         || model.memory_status !== "ok"
+        || model.quantile_monotonicity_policy !== "fp32_monotone_rearrangement_v1"
         || model.quantile_tail_policy !== "tail_clamped_q10_q90") {
         context.addIssue({
           code: "custom",
@@ -317,6 +442,11 @@ const ModelProvenanceSchema = z.object({
     } else if (model.dtype !== "float32"
       || model.precision_validation !== "unavailable"
       || (model.memory_status !== "unavailable" && model.memory_status !== "memory_pressure")
+      || model.quantile_monotonicity_policy !== "unavailable"
+      || (model.fp32_quantile_observations !== undefined
+        && model.fp32_quantile_observations !== null)
+      || (model.mixed_quantile_observations !== undefined
+        && model.mixed_quantile_observations !== null)
       || model.quantile_tail_policy !== "unavailable") {
       context.addIssue({
         code: "custom",

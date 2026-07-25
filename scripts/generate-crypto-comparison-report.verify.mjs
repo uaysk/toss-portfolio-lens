@@ -44,6 +44,21 @@ const PINNED_MODELS = {
   },
 };
 
+function quantileObservations(overrides = {}) {
+  return {
+    rowCount: 7_680,
+    nonFiniteValueCount: 0,
+    crossingRowCount: 65,
+    crossingAdjacentPairCount: 74,
+    adjustedRowCount: 65,
+    q50AdjustmentIqrRatioMedian: 0,
+    q50AdjustmentIqrRatioP95: 0.06324,
+    q50AdjustmentIqrRatioMax: 0.1502,
+    postprocessedMonotonic: true,
+    ...overrides,
+  };
+}
+
 function pinnedProvenance(id) {
   const fincast = id === "fincast";
   return {
@@ -60,6 +75,13 @@ function pinnedProvenance(id) {
     peakVramMeasurement: "cuda_allocated_or_reserved",
     peakVramMb: fincast ? 5_120 : 2_048,
     memoryStatus: "ok",
+    quantileMonotonicityPolicy: fincast ? "fp32_monotone_rearrangement_v1" : "native",
+    fp32QuantileObservations: fincast ? quantileObservations() : null,
+    mixedQuantileObservations: fincast ? quantileObservations({
+      crossingRowCount: 67,
+      crossingAdjacentPairCount: 79,
+      adjustedRowCount: 67,
+    }) : null,
     quantileTailPolicy: fincast ? "tail_clamped_q10_q90" : "native",
     precisionFailureReasons: [],
   };
@@ -452,6 +474,8 @@ test("deterministically renders a complete whitelist-only standalone report", ()
     "Median-return MAE",
     "방향 정확도",
     "Quantile coverage",
+    "POSTPROCESSED QUANTILES",
+    "POSTPROCESSED SIGNALS",
     "비용 후 PnL",
     "Profit factor",
     "Win rate",
@@ -460,6 +484,9 @@ test("deterministically renders a complete whitelist-only standalone report", ()
     "Peak VRAM",
     "Errors",
     "PROVENANCE",
+    "FP32 crossings / adjusted",
+    "mixed crossings / adjusted",
+    "adjusted rows only",
     "LIMITATIONS",
     "review_required",
   ]) {
@@ -536,6 +563,13 @@ test("preserves the exact replay window, context evidence, and pinned provenance
       cudaCapability: normalized.models.fincast.provenance.cudaCapability,
       precision: normalized.models.fincast.provenance.precision,
       precisionValidation: normalized.models.fincast.provenance.precisionValidation,
+      quantileMonotonicityPolicy:
+        normalized.models.fincast.provenance.quantileMonotonicityPolicy,
+      fp32CrossingRows:
+        normalized.models.fincast.provenance.fp32QuantileObservations.crossingRowCount,
+      mixedCrossingPairs:
+        normalized.models.fincast.provenance.mixedQuantileObservations
+          .crossingAdjacentPairCount,
     },
     {
       modelId: "Vincent05R/FinCast",
@@ -547,6 +581,9 @@ test("preserves the exact replay window, context evidence, and pinned provenance
       cudaCapability: "6.1",
       precision: "fp16",
       precisionValidation: "passed",
+      quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
+      fp32CrossingRows: 65,
+      mixedCrossingPairs: 79,
     },
   );
 });
@@ -590,9 +627,39 @@ test("rejects valid but divergent replay and shadow precision provenance", () =>
   fincast.provenance.precisionValidation = "fallback_fp32";
   fincast.provenance.precisionFallbackUsed = true;
   fincast.provenance.precisionFailureReasons = ["mixed_unsupported_operation"];
+  fincast.provenance.mixedQuantileObservations = null;
   assert.throws(
     () => normalizeReportInputs(replayFixture(), shadow),
     /Replay and shadow fincast precision provenance must match/,
+  );
+});
+
+test("rejects divergent or unbounded replay and shadow rearrangement observations", () => {
+  const divergent = shadowFixture();
+  const fincast = divergent.comparison.lanes.find((lane) => lane.id === "fincast");
+  fincast.provenance.mixedQuantileObservations = quantileObservations({
+    crossingRowCount: 68,
+    crossingAdjacentPairCount: 80,
+    adjustedRowCount: 68,
+  });
+  assert.throws(
+    () => normalizeReportInputs(replayFixture(), divergent),
+    /Replay and shadow fincast mixedQuantileObservations provenance must match/,
+  );
+
+  const unbounded = replayFixture();
+  unbounded.lanes.fincast.provenance.fp32QuantileObservations
+    .crossingAdjacentPairCount = 61_441;
+  assert.throws(
+    () => normalizeReportInputs(unbounded, shadowFixture()),
+    /crossingAdjacentPairCount is invalid/,
+  );
+
+  const hidden = shadowFixture();
+  hidden.comparison.lanes[1].provenance.mixedQuantileObservations = null;
+  assert.throws(
+    () => normalizeReportInputs(replayFixture(), hidden),
+    /completed mixed qualification observations are missing/,
   );
 });
 
@@ -603,6 +670,13 @@ test("rejects unknown or unsafe structured provenance instead of rendering it", 
   assert.throws(
     () => renderReportFromInputs(replayFixture(), unknownPrecision),
     /Shadow fincast precision is invalid/,
+  );
+
+  const hiddenRearrangement = shadowFixture();
+  hiddenRearrangement.comparison.lanes[1].provenance.quantileMonotonicityPolicy = "native";
+  assert.throws(
+    () => renderReportFromInputs(replayFixture(), hiddenRearrangement),
+    /quantile-monotonicity policy/,
   );
 
   const unsafeRevision = replayFixture();

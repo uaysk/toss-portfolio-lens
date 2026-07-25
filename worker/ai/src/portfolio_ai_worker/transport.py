@@ -326,6 +326,7 @@ class WebSocketRuntime:
                 "precision_validation": model.precision_validation,
                 "memory_status": model.memory_status,
                 "quantile_tail_policy": model.quantile_tail_policy,
+                "quantile_monotonicity_policy": model.quantile_monotonicity_policy,
             },
             "active_requests": self.scheduler.active_requests,
             "queued_requests": self.scheduler.queued_requests,

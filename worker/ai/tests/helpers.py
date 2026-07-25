@@ -47,6 +47,7 @@ def provenance(*, loaded: bool = True) -> ModelProvenance:
         dtype="float32",
         attention_backend="math" if loaded else "unavailable",
         loaded=loaded,
+        quantile_monotonicity_policy="native" if loaded else "unavailable",
     )
 
 

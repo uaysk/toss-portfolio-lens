@@ -35,6 +35,21 @@ const COSTS = {
   slippage_bps_per_side: 1,
 } as const;
 
+function qualificationObservations(overrides: Record<string, unknown> = {}) {
+  return {
+    row_count: 7_680,
+    non_finite_value_count: 0,
+    crossing_row_count: 65,
+    crossing_adjacent_pair_count: 74,
+    adjusted_row_count: 65,
+    q50_adjustment_iqr_ratio_median: 0,
+    q50_adjustment_iqr_ratio_p95: 0.06324,
+    q50_adjustment_iqr_ratio_max: 0.1502,
+    postprocessed_monotonic: true,
+    ...overrides,
+  };
+}
+
 type RawBar = [
   number, string, string, string, string, string,
   number, string, number, string, string, string,
@@ -106,6 +121,7 @@ function model(role: CryptoReplayLane) {
       loaded: true,
       precision_validation: "not_required" as const,
       memory_status: "ok" as const,
+      quantile_monotonicity_policy: "native" as const,
       quantile_tail_policy: "native" as const,
     };
   }
@@ -127,6 +143,13 @@ function model(role: CryptoReplayLane) {
     peak_vram_bytes: 1_000_000,
     peak_vram_measurement: "cuda_allocated_or_reserved" as const,
     memory_status: "ok" as const,
+    quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1" as const,
+    fp32_quantile_observations: qualificationObservations(),
+    mixed_quantile_observations: qualificationObservations({
+      crossing_row_count: 67,
+      crossing_adjacent_pair_count: 79,
+      adjusted_row_count: 67,
+    }),
     quantile_tail_policy: "tail_clamped_q10_q90" as const,
     precision_failure_reasons: [],
   };
@@ -359,6 +382,9 @@ describe("CryptoModelComparisonReplay", () => {
         precision: "fp32",
         precisionValidation: "not_required",
         precisionFallbackUsed: false,
+        quantileMonotonicityPolicy: "native",
+        fp32QuantileObservations: null,
+        mixedQuantileObservations: null,
       },
     });
     expect(result.lanes.fincast).toMatchObject({
@@ -376,6 +402,22 @@ describe("CryptoModelComparisonReplay", () => {
         precision: "fp16",
         precisionValidation: "passed",
         precisionFallbackUsed: false,
+        quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
+        fp32QuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 65,
+          crossingAdjacentPairCount: 74,
+          adjustedRowCount: 65,
+          q50AdjustmentIqrRatioP95: 0.06324,
+          postprocessedMonotonic: true,
+        },
+        mixedQuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 67,
+          crossingAdjacentPairCount: 79,
+          adjustedRowCount: 67,
+          postprocessedMonotonic: true,
+        },
         peakVramBytes: 1_000_000,
       },
     });
@@ -567,6 +609,107 @@ describe("CryptoModelComparisonReplay", () => {
       error: { code: "MODEL_RUNTIME_PROVENANCE_INVALID" },
     });
     expect(result.lanes.fincast).not.toHaveProperty("provenance");
+  });
+
+  it("requires FinCast to disclose FP32 monotone rearrangement provenance", async () => {
+    const fixture = restWith();
+    const result = await replay(fixture.rest, {
+      kronos_base: lane("kronos_base"),
+      fincast: {
+        async request(request) {
+          const raw = responseFor("fincast", request);
+          raw.model.quantile_monotonicity_policy = "native";
+          return raw;
+        },
+      },
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+    });
+
+    expect(result.lanes.fincast).toMatchObject({
+      availability: "unavailable",
+      identityVerified: false,
+      error: { code: "INVALID_RESPONSE_CONTRACT" },
+    });
+    expect(result.lanes.fincast).not.toHaveProperty("provenance");
+  });
+
+  it("fails closed when FinCast omits or overflows qualification observations", async () => {
+    const missingFixture = restWith();
+    const missing = await replay(missingFixture.rest, {
+      kronos_base: lane("kronos_base"),
+      fincast: {
+        async request(request) {
+          const raw = responseFor("fincast", request);
+          delete (raw.model as Record<string, unknown>).fp32_quantile_observations;
+          return raw;
+        },
+      },
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+    });
+    expect(missing.lanes.fincast).toMatchObject({
+      availability: "unavailable",
+      identityVerified: false,
+      error: { code: "INVALID_RESPONSE_CONTRACT" },
+    });
+    expect(missing.lanes.fincast).not.toHaveProperty("provenance");
+
+    const overflowFixture = restWith();
+    const overflow = await replay(overflowFixture.rest, {
+      kronos_base: lane("kronos_base"),
+      fincast: {
+        async request(request) {
+          const raw = responseFor("fincast", request);
+          raw.model.mixed_quantile_observations!.crossing_row_count = 7_681;
+          return raw;
+        },
+      },
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+    });
+    expect(overflow.lanes.fincast).toMatchObject({
+      availability: "unavailable",
+      identityVerified: false,
+      error: { code: "INVALID_RESPONSE_CONTRACT" },
+    });
+  });
+
+  it("persists null mixed observations only for a bounded mixed runtime failure", async () => {
+    const fixture = restWith();
+    const result = await replay(fixture.rest, {
+      kronos_base: lane("kronos_base"),
+      fincast: {
+        async request(request) {
+          const raw = responseFor("fincast", request);
+          raw.model.dtype = "float32";
+          raw.model.precision_validation = "fallback_fp32";
+          raw.model.precision_failure_reasons = ["mixed_inference_failure"];
+          raw.model.mixed_quantile_observations = null;
+          return raw;
+        },
+      },
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+    });
+    expect(result.lanes.fincast).toMatchObject({
+      availability: "available",
+      identityVerified: true,
+      provenance: {
+        precision: "fp32",
+        precisionValidation: "fallback_fp32",
+        fp32QuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 65,
+        },
+        mixedQuantileObservations: null,
+        precisionFailureReasons: ["mixed_inference_failure"],
+      },
+    });
   });
 
   it("deduplicates identical bars but fails closed on a missing minute", async () => {

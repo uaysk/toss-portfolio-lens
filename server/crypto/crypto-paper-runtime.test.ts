@@ -335,6 +335,21 @@ const kronosTokenizerRevision = "0e0117387f39004a9016484a186a908917e22426";
 const fincastModelRevision = "2d7d90b159db8961d27c2cf165d51195902ef92b";
 const fincastSourceRevision = "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4";
 
+function qualificationObservations(overrides: UnknownRecord = {}) {
+  return {
+    row_count: 7_680,
+    non_finite_value_count: 0,
+    crossing_row_count: 65,
+    crossing_adjacent_pair_count: 74,
+    adjusted_row_count: 65,
+    q50_adjustment_iqr_ratio_median: 0,
+    q50_adjustment_iqr_ratio_p95: 0.06324,
+    q50_adjustment_iqr_ratio_max: 0.1502,
+    postprocessed_monotonic: true,
+    ...overrides,
+  };
+}
+
 function response(
   lane: SimulationModelLane,
   request: AiForecastRequest,
@@ -365,6 +380,13 @@ function response(
         peak_vram_bytes: 4_000 * 1024 * 1024,
         peak_vram_measurement: "cuda_allocated_or_reserved",
         memory_status: "ok",
+        quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
+        fp32_quantile_observations: qualificationObservations(),
+        mixed_quantile_observations: qualificationObservations({
+          crossing_row_count: 67,
+          crossing_adjacent_pair_count: 79,
+          adjusted_row_count: 67,
+        }),
         quantile_tail_policy: "tail_clamped_q10_q90",
         precision_failure_reasons: [],
       }),
@@ -566,6 +588,7 @@ describe("CryptoPaperRuntime", () => {
       precision: "fp32",
       precisionValidation: "not_required",
       memoryStatus: "ok",
+      quantileMonotonicityPolicy: "native",
       quantileTailPolicy: "native",
       precisionFailureReasons: [],
       peakVramMb: 6_000,
@@ -605,6 +628,22 @@ describe("CryptoPaperRuntime", () => {
         precision: "fp16",
         precisionValidation: "passed",
         memoryStatus: "ok",
+        quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
+        fp32QuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 65,
+          crossingAdjacentPairCount: 74,
+          adjustedRowCount: 65,
+          q50AdjustmentIqrRatioP95: 0.06324,
+          postprocessedMonotonic: true,
+        },
+        mixedQuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 67,
+          crossingAdjacentPairCount: 79,
+          adjustedRowCount: 67,
+          postprocessedMonotonic: true,
+        },
         quantileTailPolicy: "tail_clamped_q10_q90",
         precisionFailureReasons: [],
         peakVramBytes: 4_000 * 1024 * 1024,
@@ -618,6 +657,17 @@ describe("CryptoPaperRuntime", () => {
     expect(storedLane).toMatchObject({
       precisionValidation: "passed",
       memoryStatus: "ok",
+      quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
+      fp32QuantileObservations: {
+        rowCount: 7_680,
+        crossingRowCount: 65,
+        adjustedRowCount: 65,
+      },
+      mixedQuantileObservations: {
+        rowCount: 7_680,
+        crossingRowCount: 67,
+        adjustedRowCount: 67,
+      },
       quantileTailPolicy: "tail_clamped_q10_q90",
       precisionFailureReasons: [],
       peakVramBytes: 4_000 * 1024 * 1024,
@@ -646,6 +696,7 @@ describe("CryptoPaperRuntime", () => {
         precision: "fp32",
         precisionValidation: "fallback_fp32",
         memoryStatus: "ok",
+        quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
         quantileTailPolicy: "tail_clamped_q10_q90",
         precisionFailureReasons: [
           "q50_p95_error_above_15pct_fp32_iqr",
@@ -672,6 +723,13 @@ describe("CryptoPaperRuntime", () => {
     }],
     ["validated peak VRAM", {
       peak_vram_bytes: 3_900 * 1024 * 1024,
+    }],
+    ["bounded mixed quantile observations", {
+      mixed_quantile_observations: qualificationObservations({
+        crossing_row_count: 68,
+        crossing_adjacent_pair_count: 80,
+        adjusted_row_count: 68,
+      }),
     }],
   ] as const)(
     "fails a successful lane closed when its %s drifts",
@@ -804,6 +862,9 @@ describe("CryptoPaperRuntime", () => {
   it.each([
     ["precision_validation", "model_precision_validation_invalid"],
     ["memory_status", "model_memory_status_invalid"],
+    ["quantile_monotonicity_policy", "model_quantile_monotonicity_policy_invalid"],
+    ["fp32_quantile_observations", "model_quantile_observations_invalid"],
+    ["mixed_quantile_observations", "model_quantile_observations_invalid"],
     ["quantile_tail_policy", "model_quantile_tail_policy_invalid"],
     ["precision_failure_reasons", "model_precision_failure_reasons_invalid"],
     ["peak_vram_bytes", "model_peak_vram_invalid"],
@@ -835,6 +896,33 @@ describe("CryptoPaperRuntime", () => {
       });
     },
   );
+
+  it("persists null mixed observations only for a bounded mixed runtime failure", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      modelOverrides: () => ({
+        dtype: "float32",
+        precision_validation: "fallback_fp32",
+        precision_failure_reasons: ["mixed_inference_failure"],
+        mixed_quantile_observations: null,
+      }),
+    });
+    const lane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    expect(lane).toMatchObject({
+      status: "completed",
+      provenance: {
+        precision: "fp32",
+        precisionFailureReasons: ["mixed_inference_failure"],
+        fp32QuantileObservations: {
+          rowCount: 7_680,
+          crossingRowCount: 65,
+        },
+        mixedQuantileObservations: null,
+      },
+    });
+  });
 
   it("rejects path-like FinCast precision failure details", async () => {
     const { result } = await runProvenanceSimulation({

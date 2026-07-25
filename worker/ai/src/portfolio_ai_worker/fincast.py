@@ -22,7 +22,6 @@ from .contracts import FIXED_HORIZONS, FIXED_QUANTILES, ModelProvenance
 from .precision_validation import (
     FinCastPrecisionValidation,
     load_precision_validation,
-    quantile_is_monotonic,
     sha256_file,
     validate_qualification_runtime,
 )
@@ -214,6 +213,12 @@ def _artifact_selection(
     )
     if validation.context_fixture_sha256 != model_manifest.get("validation_contexts_sha256"):
         raise AdapterLoadError("FinCast validation context SHA-256 does not match the reviewed manifest")
+    if (
+        validation.quantile_tail_policy != model_manifest.get("quantile_tail_policy")
+        or validation.quantile_monotonicity_policy
+        != model_manifest.get("quantile_monotonicity_policy")
+    ):
+        raise AdapterLoadError("FinCast quantile policies do not match the reviewed manifest")
     if validation.selected_precision == "mixed_float16":
         artifact = validation.mixed_fp16
     else:
@@ -550,12 +555,19 @@ def _load_model(source: Path, artifact: Path, precision: str, runtime: RuntimeDe
         raise AdapterLoadError(f"failed to load pinned FinCast artifacts: {type(error).__name__}") from error
 
 
-def project_native_quantiles(values: Sequence[float]) -> dict[float, float]:
+def rearrange_native_quantiles(values: Sequence[float]) -> tuple[float, ...]:
+    """Return finite q10..q90 values in deterministic ascending order."""
+
     if len(values) != len(NATIVE_QUANTILES):
         raise ValueError("FinCast must return q10 through q90")
-    native = [float(value) for value in values]
-    if not quantile_is_monotonic(native):
-        raise ValueError("FinCast returned non-finite or crossing native quantiles")
+    native = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in native):
+        raise ValueError("FinCast returned non-finite native quantiles")
+    return tuple(sorted(native))
+
+
+def project_native_quantiles(values: Sequence[float]) -> dict[float, float]:
+    native = rearrange_native_quantiles(values)
     projected = {
         0.05: native[0],
         0.1: native[0],
@@ -621,6 +633,9 @@ class FinCastAdapter:
             peak_vram_measurement="cuda_allocated_or_reserved",
             memory_status="ok",
             quantile_tail_policy="tail_clamped_q10_q90",
+            quantile_monotonicity_policy="fp32_monotone_rearrangement_v1",
+            fp32_quantile_observations=validation.fp32_quantile_observations,
+            mixed_quantile_observations=validation.mixed_quantile_observations,
             precision_failure_reasons=validation.mixed_failure_reasons,
         )
 

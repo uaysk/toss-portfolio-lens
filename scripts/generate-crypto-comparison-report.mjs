@@ -25,6 +25,8 @@ const REPLAY_WINDOW = Object.freeze({
   originStrideMinutes: 15,
   futureBarsPerOrigin: 60,
 });
+const FINCAST_QUALIFICATION_QUANTILE_ROWS = 128 * 60;
+const MAX_Q50_ADJUSTMENT_IQR_RATIO = 1_000_000_000;
 const MARKET = Object.freeze({
   kind: "crypto_futures",
   venue: "BINANCE_USDM",
@@ -34,7 +36,7 @@ const MARKET = Object.freeze({
 const OUTCOMES = new Set(["inconclusive", "review_required"]);
 const PRECISION_FAILURE_REASONS = Object.freeze([
   "non_finite_output",
-  "quantile_crossing",
+  "quantile_postprocessing_failed",
   "signal_direction_agreement_below_99pct",
   "q50_median_error_above_5pct_fp32_iqr",
   "q50_p95_error_above_15pct_fp32_iqr",
@@ -228,6 +230,91 @@ function normalizePrecisionFailureReasons(value, label) {
   return normalized;
 }
 
+function normalizeQuantileObservations(value, label) {
+  const source = object(value);
+  required(Object.keys(source).length > 0, `${label} are missing.`);
+  const exactNumber = (camelKey, snakeKey, options = {}) => {
+    const candidate = present([source], camelKey, snakeKey);
+    required(candidate.present && typeof candidate.value === "number", `${label} ${camelKey} is invalid.`);
+    const normalized = number(candidate.value, options);
+    required(normalized !== undefined, `${label} ${camelKey} is invalid.`);
+    return normalized;
+  };
+  const rowCount = exactNumber("rowCount", "row_count", {
+    integer: true,
+    min: 1,
+    max: FINCAST_QUALIFICATION_QUANTILE_ROWS,
+  });
+  const nonFiniteValueCount = exactNumber(
+    "nonFiniteValueCount",
+    "non_finite_value_count",
+    { integer: true, min: 0, max: rowCount * 9 },
+  );
+  const crossingRowCount = exactNumber("crossingRowCount", "crossing_row_count", {
+    integer: true,
+    min: 0,
+    max: rowCount,
+  });
+  const crossingAdjacentPairCount = exactNumber(
+    "crossingAdjacentPairCount",
+    "crossing_adjacent_pair_count",
+    { integer: true, min: 0, max: rowCount * 8 },
+  );
+  const adjustedRowCount = exactNumber("adjustedRowCount", "adjusted_row_count", {
+    integer: true,
+    min: 0,
+    max: rowCount,
+  });
+  const q50AdjustmentIqrRatioMedian = exactNumber(
+    "q50AdjustmentIqrRatioMedian",
+    "q50_adjustment_iqr_ratio_median",
+    { min: 0, max: MAX_Q50_ADJUSTMENT_IQR_RATIO },
+  );
+  const q50AdjustmentIqrRatioP95 = exactNumber(
+    "q50AdjustmentIqrRatioP95",
+    "q50_adjustment_iqr_ratio_p95",
+    { min: 0, max: MAX_Q50_ADJUSTMENT_IQR_RATIO },
+  );
+  const q50AdjustmentIqrRatioMax = exactNumber(
+    "q50AdjustmentIqrRatioMax",
+    "q50_adjustment_iqr_ratio_max",
+    { min: 0, max: MAX_Q50_ADJUSTMENT_IQR_RATIO },
+  );
+  required(
+    q50AdjustmentIqrRatioMedian <= q50AdjustmentIqrRatioP95
+      && q50AdjustmentIqrRatioP95 <= q50AdjustmentIqrRatioMax,
+    `${label} q50 adjustment summaries are not ordered.`,
+  );
+  required(
+    adjustedRowCount > 0
+      || (q50AdjustmentIqrRatioMedian === 0
+        && q50AdjustmentIqrRatioP95 === 0
+        && q50AdjustmentIqrRatioMax === 0),
+    `${label} zero adjusted rows require zero q50 adjustment summaries.`,
+  );
+  const monotonicValue = present(
+    [source],
+    "postprocessedMonotonic",
+    "postprocessed_monotonic",
+  );
+  const postprocessedMonotonic = boolean(monotonicValue.value);
+  required(
+    monotonicValue.present && postprocessedMonotonic !== undefined,
+    `${label} postprocessedMonotonic is invalid.`,
+  );
+  return {
+    rowCount,
+    nonFiniteValueCount,
+    crossingRowCount,
+    crossingAdjacentPairCount,
+    adjustedRowCount,
+    q50AdjustmentIqrRatioMedian,
+    q50AdjustmentIqrRatioP95,
+    q50AdjustmentIqrRatioMax,
+    postprocessedMonotonic,
+  };
+}
+
 function normalizeModelProvenance(value, id, label, options = {}) {
   const source = object(value);
   if (!Object.keys(source).length) {
@@ -331,6 +418,16 @@ function normalizeModelProvenance(value, id, label, options = {}) {
     "memoryStatus",
     "memory_status",
   );
+  const expectedMonotonicityPolicy = id === "kronos_base"
+    ? "native"
+    : "fp32_monotone_rearrangement_v1";
+  const quantileMonotonicityPolicy = exactProvenanceValue(
+    source,
+    expectedMonotonicityPolicy,
+    `${label} quantile-monotonicity policy`,
+    "quantileMonotonicityPolicy",
+    "quantile_monotonicity_policy",
+  );
   const expectedTailPolicy = id === "kronos_base" ? "native" : "tail_clamped_q10_q90";
   const quantileTailPolicy = exactProvenanceValue(
     source,
@@ -348,6 +445,70 @@ function normalizeModelProvenance(value, id, label, options = {}) {
     reasonsValue.value,
     label,
   );
+  const fp32ObservationsValue = present(
+    [source],
+    "fp32QuantileObservations",
+    "fp32_quantile_observations",
+  );
+  const mixedObservationsValue = present(
+    [source],
+    "mixedQuantileObservations",
+    "mixed_quantile_observations",
+  );
+  let fp32QuantileObservations = null;
+  let mixedQuantileObservations = null;
+  if (id === "kronos_base") {
+    required(
+      (!fp32ObservationsValue.present || fp32ObservationsValue.value === null)
+        && (!mixedObservationsValue.present || mixedObservationsValue.value === null),
+      `${label} native Kronos provenance cannot contain FinCast qualification observations.`,
+    );
+  } else {
+    required(
+      fp32ObservationsValue.present && fp32ObservationsValue.value !== null,
+      `${label} FP32 quantile observations are missing.`,
+    );
+    fp32QuantileObservations = normalizeQuantileObservations(
+      fp32ObservationsValue.value,
+      `${label} FP32 quantile observations`,
+    );
+    required(
+      fp32QuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
+        && fp32QuantileObservations.nonFiniteValueCount === 0
+        && fp32QuantileObservations.postprocessedMonotonic,
+      `${label} FP32 quantile observations do not prove finite monotonic postprocessing.`,
+    );
+    const mixedRuntimeFailed = precisionFailureReasons.some(
+      (reason) => reason.startsWith("mixed_"),
+    );
+    required(mixedObservationsValue.present, `${label} mixed quantile observations are missing.`);
+    if (mixedRuntimeFailed) {
+      required(
+        mixedObservationsValue.value === null,
+        `${label} mixed runtime failure must have null quantile observations.`,
+      );
+    } else {
+      required(
+        mixedObservationsValue.value !== null,
+        `${label} completed mixed qualification observations are missing.`,
+      );
+      mixedQuantileObservations = normalizeQuantileObservations(
+        mixedObservationsValue.value,
+        `${label} mixed quantile observations`,
+      );
+      required(
+        mixedQuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
+          && precisionFailureReasons.includes("non_finite_output")
+            === (mixedQuantileObservations.nonFiniteValueCount > 0)
+          && precisionFailureReasons.includes("quantile_postprocessing_failed")
+            === (
+              mixedQuantileObservations.nonFiniteValueCount === 0
+              && !mixedQuantileObservations.postprocessedMonotonic
+            ),
+        `${label} mixed quantile observations conflict with precision validation.`,
+      );
+    }
+  }
   const precisionValidation = precisionValidationValue.value;
   const precisionFallbackUsed = precisionValidation === "fallback_fp32";
   const fallbackValue = present(
@@ -441,6 +602,9 @@ function normalizeModelProvenance(value, id, label, options = {}) {
       : undefined,
     peakVramMb,
     memoryStatus,
+    quantileMonotonicityPolicy,
+    fp32QuantileObservations,
+    mixedQuantileObservations,
     quantileTailPolicy,
     precisionFailureReasons,
   };
@@ -1531,9 +1695,20 @@ export function normalizeReportInputs(replayPayload, shadowPayload) {
       "cudaCapability",
       "precision",
       "precisionValidation",
+      "quantileMonotonicityPolicy",
+      "quantileTailPolicy",
     ]) {
       required(
         replayProvenance[key] === shadowProvenance[key],
+        `Replay and shadow ${id} ${key} provenance must match.`,
+      );
+    }
+    for (const key of [
+      "fp32QuantileObservations",
+      "mixedQuantileObservations",
+    ]) {
+      required(
+        JSON.stringify(replayProvenance[key]) === JSON.stringify(shadowProvenance[key]),
         `Replay and shadow ${id} ${key} provenance must match.`,
       );
     }
@@ -1615,6 +1790,9 @@ export function normalizeReportInputs(replayPayload, shadowPayload) {
         peakVramBytes: structuredProvenance.peakVramBytes,
         peakVramMeasurement: structuredProvenance.peakVramMeasurement,
         memoryStatus: structuredProvenance.memoryStatus,
+        quantileMonotonicityPolicy: structuredProvenance.quantileMonotonicityPolicy,
+        fp32QuantileObservations: structuredProvenance.fp32QuantileObservations,
+        mixedQuantileObservations: structuredProvenance.mixedQuantileObservations,
         quantileTailPolicy: structuredProvenance.quantileTailPolicy,
         precisionFailureReasons: structuredProvenance.precisionFailureReasons,
         modelDigest: shadowLane.provenance.modelDigest,
@@ -1630,6 +1808,8 @@ export function normalizeReportInputs(replayPayload, shadowPayload) {
     "최근 완결 7일 replay와 단일 120분 안팎의 shadow 표본은 통계적 우월성을 증명하지 않습니다.",
     "paper fill은 실제 시장 충격, 주문장 우선순위와 네트워크 지연을 완전히 재현하지 못합니다.",
     "Kronos와 FinCast는 독립 lane이며 한 모델의 실패를 다른 모델 결과로 대체하지 않습니다.",
+    "FinCast native decile 교차는 FP32 최종 후처리에서 결정론적 monotone rearrangement로 보정하며, 이 과정은 개별 quantile 값을 재배치할 수 있습니다.",
+    "FinCast 예측·calibration·거래 지표는 모두 rearrangement 이후 값과 신호를 측정하므로 raw native quantile 성능으로 해석할 수 없습니다.",
     "모델 승격과 실행 lane 변경은 자동화하지 않으며 운영자가 provenance와 실패 원인을 검토해야 합니다.",
   ];
   if (outcome === "inconclusive") {
@@ -1749,6 +1929,8 @@ export function pendingReportData() {
     limitations: [
       "현재 파일은 실제 7일 replay와 120분 shadow 결과를 주입하기 전의 검증 대기 scaffold입니다.",
       "paper fill은 실제 시장 충격, 주문장 우선순위와 네트워크 지연을 완전히 재현하지 못합니다.",
+      "FinCast native decile 교차는 FP32 최종 후처리에서 결정론적 monotone rearrangement로 보정합니다.",
+      "FinCast 예측·calibration·거래 지표는 모두 rearrangement 이후 값과 신호를 측정합니다.",
       "모델 승격과 실행 lane 변경은 자동화하지 않으며 운영자가 비교 결과를 검토해야 합니다.",
     ],
   };
@@ -1866,6 +2048,7 @@ function errorList(model) {
 function modelPanel(model) {
   const replay = model.replay.aggregate;
   const shadow = model.shadow.metrics;
+  const fincastPostprocessed = model.id === "fincast";
   const profitFactor = shadow.profitFactorInfinite
     ? "∞"
     : formatNumber(shadow.profitFactor, 3);
@@ -1879,16 +2062,20 @@ function modelPanel(model) {
   return `<div class="lane${model.id === "kronos_base" ? " active" : ""}" data-lane="${model.id}">
     <article class="card">
       <div class="section-head">
-        <div><p class="eyebrow">${escapeHtml(model.label.toUpperCase())}</p><h2>${escapeHtml(model.label)} 독립 lane</h2><p>Replay 예측 지표와 shadow 거래·운영 지표를 분리해 표시합니다.</p></div>
+        <div><p class="eyebrow">${escapeHtml(model.label.toUpperCase())}</p><h2>${escapeHtml(model.label)} 독립 lane</h2><p>${
+          fincastPostprocessed
+            ? "표시된 FinCast 예측·calibration·거래 지표는 FP32 monotone rearrangement 이후 quantile과 신호를 기준으로 합니다."
+            : "Replay 예측 지표와 shadow 거래·운영 지표를 분리해 표시합니다."
+        }</p></div>
         <span class="pill ${model.shadow.status === "completed" || model.shadow.status === "available" ? "cyan" : "amber"}">${escapeHtml(model.shadow.status)}</span>
       </div>
-      <p class="metric-group">PREDICTION METRICS · 7-DAY REPLAY</p>
+      <p class="metric-group">PREDICTION METRICS · 7-DAY REPLAY${fincastPostprocessed ? " · POSTPROCESSED QUANTILES" : ""}</p>
       <div class="grid-5">
         ${metric("Pinball loss", formatNumber(replay.pinballLoss, 7))}
         ${metric("Median-return MAE", formatNumber(replay.medianReturnMae, 7))}
         ${metric("방향 정확도", formatPercent(replay.directionAccuracy, 2))}
-        ${metric("Quantile coverage", formatPercent(replay.quantileCoverage, 2))}
-        ${metric("Calibration error", formatPercent(replay.calibrationError, 2))}
+        ${metric(`Quantile coverage${fincastPostprocessed ? " · postprocessed" : ""}`, formatPercent(replay.quantileCoverage, 2))}
+        ${metric(`Calibration error${fincastPostprocessed ? " · postprocessed" : ""}`, formatPercent(replay.calibrationError, 2))}
       </div>
       <div class="table-wrap" role="region" aria-label="${escapeHtml(model.label)} replay horizon 지표 가로 스크롤" tabindex="0">
         <table aria-label="${escapeHtml(model.label)} replay horizon 지표">
@@ -1896,7 +2083,7 @@ function modelPanel(model) {
           <tbody>${horizonRows(model)}</tbody>
         </table>
       </div>
-      <p class="metric-group">TRADING METRICS · SHADOW</p>
+      <p class="metric-group">TRADING METRICS · SHADOW${fincastPostprocessed ? " · POSTPROCESSED SIGNALS" : ""}</p>
       <div class="grid-5">
         ${metric("비용 후 PnL", formatUsdt(shadow.netPnl))}
         ${metric("Profit factor", profitFactor)}
@@ -1920,6 +2107,24 @@ function modelPanel(model) {
   </div>`;
 }
 
+function quantileObservationCountSummary(observations) {
+  if (!observations) return "runtime_failed · 수치 관측 없음";
+  return `${formatNumber(observations.crossingRowCount, 0)} crossing rows · ${
+    formatNumber(observations.crossingAdjacentPairCount, 0)
+  } adjacent pairs · ${formatNumber(observations.adjustedRowCount, 0)} adjusted rows / ${
+    formatNumber(observations.rowCount, 0)
+  } · non-finite ${formatNumber(observations.nonFiniteValueCount, 0)} · postprocessed monotonic ${
+    formatBoolean(observations.postprocessedMonotonic)
+  }`;
+}
+
+function quantileObservationQ50Summary(observations) {
+  if (!observations) return "runtime_failed · adjusted-row q50 관측 없음";
+  return `median ${formatPercent(observations.q50AdjustmentIqrRatioMedian, 3)} · p95 ${
+    formatPercent(observations.q50AdjustmentIqrRatioP95, 3)
+  } · max ${formatPercent(observations.q50AdjustmentIqrRatioMax, 3)}`;
+}
+
 function provenanceFacts(data) {
   const base = [
     ["Report schema", data.schemaVersion],
@@ -1933,6 +2138,24 @@ function provenanceFacts(data) {
   ];
   const laneFacts = LANES.flatMap((id) => {
     const model = data.models[id];
+    const observationFacts = id === "fincast" ? [
+      [
+        `${model.label} FP32 crossings / adjusted`,
+        quantileObservationCountSummary(model.provenance.fp32QuantileObservations),
+      ],
+      [
+        `${model.label} FP32 q50 adjustment / FP32 IQR (adjusted rows only)`,
+        quantileObservationQ50Summary(model.provenance.fp32QuantileObservations),
+      ],
+      [
+        `${model.label} mixed crossings / adjusted`,
+        quantileObservationCountSummary(model.provenance.mixedQuantileObservations),
+      ],
+      [
+        `${model.label} mixed q50 adjustment / FP32 IQR (adjusted rows only)`,
+        quantileObservationQ50Summary(model.provenance.mixedQuantileObservations),
+      ],
+    ] : [];
     return [
       [`${model.label} model`, model.provenance.modelId ?? model.provenance.observedModelId ?? model.provenance.expectedModelId ?? "미기록"],
       [`${model.label} revision`, model.provenance.modelRevision ?? "미기록"],
@@ -1945,6 +2168,9 @@ function provenanceFacts(data) {
       [`${model.label} precision validation`, model.provenance.precision && model.provenance.precisionValidation
         ? `${model.provenance.precision} · ${model.provenance.precisionValidation}`
         : "미기록"],
+      [`${model.label} monotonicity policy`, model.provenance.quantileMonotonicityPolicy ?? "미기록"],
+      [`${model.label} tail policy`, model.provenance.quantileTailPolicy ?? "미기록"],
+      ...observationFacts,
       [`${model.label} model digest`, formatDigest(model.provenance.modelDigest)],
       [`${model.label} image digest`, formatDigest(model.provenance.imageDigest)],
       [`${model.label} record digest`, formatDigest(model.provenance.replayRecordDigest)],

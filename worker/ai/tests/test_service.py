@@ -4,7 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from portfolio_ai_worker.adapters import ProductionModelBinding, UnavailableAdapter
-from portfolio_ai_worker.contracts import ForecastRequest, ForecastSeries, ModelProvenance, ModelRun
+from portfolio_ai_worker.contracts import (
+    ForecastRequest,
+    ForecastSeries,
+    ModelProvenance,
+    ModelRun,
+    QuantileRearrangementObservations,
+)
 from portfolio_ai_worker.service import AIService, _canonical_input_digest
 
 from .helpers import DeterministicAdapter, bars, future, settings
@@ -34,6 +40,7 @@ def _model(*, loaded: bool = True) -> ModelProvenance:
         dtype="float32",
         attention_backend="math" if loaded else "unavailable",
         loaded=loaded,
+        quantile_monotonicity_policy="native" if loaded else "unavailable",
     )
 
 
@@ -184,6 +191,17 @@ def test_response_rejects_multiple_or_wrong_model_roles(tmp_path) -> None:
 
 
 def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
+    quantile_observations = QuantileRearrangementObservations(
+        row_count=7_680,
+        non_finite_value_count=0,
+        crossing_row_count=1,
+        crossing_adjacent_pair_count=1,
+        adjusted_row_count=1,
+        q50_adjustment_iqr_ratio_median=0.01,
+        q50_adjustment_iqr_ratio_p95=0.02,
+        q50_adjustment_iqr_ratio_max=0.03,
+        postprocessed_monotonic=True,
+    )
     fincast_model = ModelProvenance(
         model_id="Vincent05R/FinCast",
         model_revision="2d7d90b159db8961d27c2cf165d51195902ef92b",
@@ -201,6 +219,9 @@ def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
         peak_vram_measurement="cuda_allocated_or_reserved",
         memory_status="ok",
         quantile_tail_policy="tail_clamped_q10_q90",
+        quantile_monotonicity_policy="fp32_monotone_rearrangement_v1",
+        fp32_quantile_observations=quantile_observations,
+        mixed_quantile_observations=quantile_observations,
         precision_failure_reasons=("peak_vram_reduction_below_25pct",),
     )
     fincast = DeterministicAdapter(fincast_model)

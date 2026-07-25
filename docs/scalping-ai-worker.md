@@ -194,8 +194,13 @@ unavailable이다.
 
 mixed lane은 weights/일반 activation을 FP16으로 두되 공식 decoder의 attention softmax와 RMSNorm FP32 계산을
 유지하고, MoE RMSNorm/router logits는 reviewed hook으로 FP32 계산 후 activation dtype으로 복귀한다. 최종
-quantile 후처리도 FP32다. FinCast native q10~q90 밖의 q05/q95는 외삽하지 않고 q10/q90으로 clamp하며
-`tail_clamped_q10_q90` 한계를 provenance에 기록한다.
+quantile 후처리도 FP32다. 교차하는 FinCast native decile은 FP32 최종 후처리에서 결정론적 오름차순
+monotone rearrangement를 적용하고, q10~q90 밖의 q05/q95는 외삽하지 않고 q10/q90으로 clamp한다.
+교차 정책 `fp32_monotone_rearrangement_v1`과 tail 정책 `tail_clamped_q10_q90`을 provenance에
+서로 분리해 기록한다. forecast provenance에는 FP32와 mixed qualification 각각의 전체 row 수,
+non-finite 수, crossing row·인접 pair 수, adjusted row 수, adjusted row만을 분모로 계산한 q50
+adjustment/FP32 IQR median·p95·max와 후처리 단조성도 기록한다. public worker status에는 이 수치
+객체를 넣지 않고 precision·validation·memory·policy enum만 노출한다.
 
 페어 가상매매에서 Node control plane은 이 Kronos-base 출력과 같은 origin의 Rust 기술 신호만
 `pair-ensemble-policy/v2`로 결합한다. Kronos-base 또는 Rust가 unavailable/stale이거나 origin이 다르면
@@ -253,6 +258,11 @@ docker compose \
 
 FinCast qualification 뒤에는 별도 변수와 overlay를 추가한다. `compose.ai-remote-worker.yaml`만으로는
 FinCast cache·token을 요구하지 않으며 18766을 열지 않는다.
+
+이 forecast provenance 추가는 transport v1 안의 additive 필드이지만 새 control plane에서는 loaded FinCast에
+필수다. 따라서 새 이미지를 qualification·probe하고 FinCast worker service를 먼저 배포한 뒤 control plane을
+배포한다. 새 control plane에 이전 FinCast worker를 연결하면 안 되며, 순서를 되돌려야 할 때는 두 구성요소를
+함께 이전 digest로 rollback한다.
 
 ```text
 AI_FINCAST_WORKER_IMAGE=registry.example/toss-portfolio-lens-fincast-worker:<immutable-tag>
@@ -325,8 +335,9 @@ production 모델 run은 unavailable로 fail-closed된다. PyTorch wheel에 같�
 포함돼 있으면 NVIDIA binary compatibility에 따라 P40에서 허용한다. exact `sm_61` cubin만을 요구하지 않는다.
 Kronos는 float32/math SDPA를 사용한다. FinCast는 qualification이 통과한 mixed FP16 또는 lossless FP32
 fallback을 사용하며 NVML free memory가 검증 peak와 `AI_FINCAST_MIN_VRAM_HEADROOM_MIB` 합보다 작으면
-`memory_pressure`로 fail-closed한다. 실제 응답/status에는 precision, validation, memory 상태와 tail policy만
-기록하며 credential이나 세부 키 정보를 포함하지 않는다.
+`memory_pressure`로 fail-closed한다. forecast 응답은 bounded qualification 관측치를 포함하지만 public
+status는 precision, validation, memory 상태와 monotonicity/tail policy enum만 기록한다. 어느 쪽도
+credential이나 세부 키 정보를 포함하지 않는다.
 
 다음 항목은 서로 다른 검증이다.
 

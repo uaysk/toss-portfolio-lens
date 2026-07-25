@@ -15,6 +15,12 @@ FORECAST_STEPS = max(FIXED_HORIZONS)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 FINCAST_MODEL_ID = "Vincent05R/FinCast"
+FINCAST_QUALIFICATION_CONTEXT_COUNT = 128
+FINCAST_QUALIFICATION_ROWS_PER_CONTEXT = 60
+FINCAST_QUALIFICATION_ROW_COUNT = (
+    FINCAST_QUALIFICATION_CONTEXT_COUNT * FINCAST_QUALIFICATION_ROWS_PER_CONTEXT
+)
+MAX_QUANTILE_ADJUSTMENT_IQR_RATIO = 1_000_000_000.0
 
 
 class StrictModel(BaseModel):
@@ -276,6 +282,54 @@ AIRequest = Annotated[ForecastRequest | EvaluateRequest, Field(discriminator="mo
 AI_REQUEST_ADAPTER = TypeAdapter(AIRequest)
 
 
+class QuantileRearrangementObservations(StrictModel):
+    row_count: int = Field(ge=1, le=FINCAST_QUALIFICATION_ROW_COUNT)
+    non_finite_value_count: int = Field(ge=0)
+    crossing_row_count: int = Field(ge=0)
+    crossing_adjacent_pair_count: int = Field(ge=0)
+    adjusted_row_count: int = Field(ge=0)
+    q50_adjustment_iqr_ratio_median: float = Field(
+        ge=0,
+        le=MAX_QUANTILE_ADJUSTMENT_IQR_RATIO,
+    )
+    q50_adjustment_iqr_ratio_p95: float = Field(
+        ge=0,
+        le=MAX_QUANTILE_ADJUSTMENT_IQR_RATIO,
+    )
+    q50_adjustment_iqr_ratio_max: float = Field(
+        ge=0,
+        le=MAX_QUANTILE_ADJUSTMENT_IQR_RATIO,
+    )
+    postprocessed_monotonic: bool
+
+    @model_validator(mode="after")
+    def counts_fit_observed_rows(self) -> "QuantileRearrangementObservations":
+        if self.non_finite_value_count > self.row_count * 9:
+            raise ValueError("non-finite quantile count exceeds the bounded native output shape")
+        if self.crossing_row_count > self.row_count:
+            raise ValueError("crossing quantile row count exceeds observed rows")
+        if self.crossing_adjacent_pair_count > self.row_count * 8:
+            raise ValueError("crossing adjacent-pair count exceeds the bounded native output shape")
+        if self.adjusted_row_count > self.row_count:
+            raise ValueError("adjusted quantile row count exceeds observed rows")
+        if self.adjusted_row_count == 0 and any(
+            value != 0
+            for value in (
+                self.q50_adjustment_iqr_ratio_median,
+                self.q50_adjustment_iqr_ratio_p95,
+                self.q50_adjustment_iqr_ratio_max,
+            )
+        ):
+            raise ValueError("unadjusted quantile output requires zero q50 adjustment summaries")
+        if not (
+            self.q50_adjustment_iqr_ratio_median
+            <= self.q50_adjustment_iqr_ratio_p95
+            <= self.q50_adjustment_iqr_ratio_max
+        ):
+            raise ValueError("q50 adjustment summaries must be ordered")
+        return self
+
+
 class ModelProvenance(StrictModel):
     model_id: str = Field(min_length=1, max_length=256)
     model_revision: str = Field(min_length=1, max_length=256)
@@ -295,6 +349,13 @@ class ModelProvenance(StrictModel):
     peak_vram_measurement: Literal["cuda_allocated_or_reserved"] | None = None
     memory_status: Literal["ok", "memory_pressure", "unavailable"] = "unavailable"
     quantile_tail_policy: Literal["native", "tail_clamped_q10_q90", "unavailable"] = "native"
+    quantile_monotonicity_policy: Literal[
+        "native",
+        "fp32_monotone_rearrangement_v1",
+        "unavailable",
+    ] = "native"
+    fp32_quantile_observations: QuantileRearrangementObservations | None = None
+    mixed_quantile_observations: QuantileRearrangementObservations | None = None
     precision_failure_reasons: tuple[str, ...] = ()
     fallback_from: str | None = Field(default=None, min_length=1, max_length=256)
     fallback_reason: str | None = Field(default=None, min_length=1, max_length=500)
@@ -312,6 +373,39 @@ class ModelProvenance(StrictModel):
             raise ValueError("CUDA device name and capability must be recorded together")
         if self.dtype == "mixed_float16" and self.precision_validation != "passed":
             raise ValueError("mixed_float16 provenance requires a passed precision validation")
+        if self.loaded and self.quantile_monotonicity_policy == "unavailable":
+            raise ValueError("loaded provenance requires an available quantile monotonicity policy")
+        if not self.loaded and self.quantile_monotonicity_policy != "unavailable":
+            raise ValueError("unloaded provenance requires unavailable quantile monotonicity policy")
+        quantile_observations = (
+            self.fp32_quantile_observations,
+            self.mixed_quantile_observations,
+        )
+        if self.loaded and self.model_id == FINCAST_MODEL_ID:
+            if (
+                self.fp32_quantile_observations is None
+                or self.fp32_quantile_observations.row_count
+                != FINCAST_QUALIFICATION_ROW_COUNT
+                or self.fp32_quantile_observations.non_finite_value_count != 0
+                or not self.fp32_quantile_observations.postprocessed_monotonic
+            ):
+                raise ValueError(
+                    "loaded FinCast provenance requires complete finite FP32 quantile observations"
+                )
+            if (
+                self.mixed_quantile_observations is not None
+                and self.mixed_quantile_observations.row_count
+                != FINCAST_QUALIFICATION_ROW_COUNT
+            ):
+                raise ValueError(
+                    "loaded FinCast mixed quantile observations must cover the complete qualification"
+                )
+            if self.dtype == "mixed_float16" and self.mixed_quantile_observations is None:
+                raise ValueError(
+                    "mixed_float16 FinCast provenance requires mixed quantile observations"
+                )
+        elif any(value is not None for value in quantile_observations):
+            raise ValueError("quantile rearrangement observations are valid only for loaded FinCast")
         if self.peak_vram_bytes is not None and not self.loaded:
             raise ValueError("peak VRAM is valid only for a loaded model")
         if (self.peak_vram_bytes is None) != (self.peak_vram_measurement is None):

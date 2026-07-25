@@ -94,6 +94,7 @@ describe("scalping AI WebSocket transport contract", () => {
           precision: "mixed_float16",
           precision_validation: "passed",
           memory_status: "ok",
+          quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
           quantile_tail_policy: "tail_clamped_q10_q90",
         },
         active_requests: 0,
@@ -112,6 +113,7 @@ describe("scalping AI WebSocket transport contract", () => {
     pressure.status.model.precision = "float32";
     pressure.status.model.precision_validation = "unavailable";
     pressure.status.model.memory_status = "memory_pressure";
+    pressure.status.model.quantile_monotonicity_policy = "unavailable";
     pressure.status.model.quantile_tail_policy = "unavailable";
     expect(AiServerTransportEnvelopeSchema.parse(pressure)).toMatchObject({
       status: { status: "unavailable", model: { memory_status: "memory_pressure" } },
@@ -136,6 +138,7 @@ describe("scalping AI WebSocket transport contract", () => {
           precision: "mixed_float16",
           precision_validation: "fallback_fp32",
           memory_status: "ok",
+          quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
           quantile_tail_policy: "tail_clamped_q10_q90",
         },
         active_requests: 0,

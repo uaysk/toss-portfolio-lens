@@ -5,6 +5,7 @@ import {
   AiResponseSchema,
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
+  QuantileRearrangementObservationsSchema,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
   SCALPING_AI_SCHEMA_VERSION,
@@ -30,7 +31,7 @@ const MAXIMUM_DEADLINE_MS = 24 * 60 * 60_000;
 const NUMBER_TOLERANCE = 1e-12;
 const PRECISION_FAILURE_REASONS = [
   "non_finite_output",
-  "quantile_crossing",
+  "quantile_postprocessing_failed",
   "signal_direction_agreement_below_99pct",
   "q50_median_error_above_5pct_fp32_iqr",
   "q50_p95_error_above_15pct_fp32_iqr",
@@ -49,6 +50,17 @@ export type CryptoReplayLane = "kronos_base" | "fincast";
 type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
 type ReplayPrecision = "fp16" | "fp32";
 type ReplayPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
+export type CryptoReplayQuantileObservations = {
+  rowCount: number;
+  nonFiniteValueCount: number;
+  crossingRowCount: number;
+  crossingAdjacentPairCount: number;
+  adjustedRowCount: number;
+  q50AdjustmentIqrRatioMedian: number;
+  q50AdjustmentIqrRatioP95: number;
+  q50AdjustmentIqrRatioMax: number;
+  postprocessedMonotonic: boolean;
+};
 
 export type CryptoReplayModelProvenance = {
   modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
@@ -69,6 +81,9 @@ export type CryptoReplayModelProvenance = {
   peakVramBytes: number | null;
   peakVramMeasurement: "cuda_allocated_or_reserved" | null;
   memoryStatus: "ok";
+  quantileMonotonicityPolicy: "native" | "fp32_monotone_rearrangement_v1";
+  fp32QuantileObservations: CryptoReplayQuantileObservations | null;
+  mixedQuantileObservations: CryptoReplayQuantileObservations | null;
   quantileTailPolicy: "native" | "tail_clamped_q10_q90";
   precisionFailureReasons: PrecisionFailureReason[];
 };
@@ -285,6 +300,25 @@ function normalizedPrecisionFailureReasons(
   return normalized;
 }
 
+function replayQuantileObservations(
+  value: unknown,
+): CryptoReplayQuantileObservations | null | undefined {
+  if (value === undefined || value === null) return value;
+  const parsed = QuantileRearrangementObservationsSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  return {
+    rowCount: parsed.data.row_count,
+    nonFiniteValueCount: parsed.data.non_finite_value_count,
+    crossingRowCount: parsed.data.crossing_row_count,
+    crossingAdjacentPairCount: parsed.data.crossing_adjacent_pair_count,
+    adjustedRowCount: parsed.data.adjusted_row_count,
+    q50AdjustmentIqrRatioMedian: parsed.data.q50_adjustment_iqr_ratio_median,
+    q50AdjustmentIqrRatioP95: parsed.data.q50_adjustment_iqr_ratio_p95,
+    q50AdjustmentIqrRatioMax: parsed.data.q50_adjustment_iqr_ratio_max,
+    postprocessedMonotonic: parsed.data.postprocessed_monotonic,
+  };
+}
+
 function validatePinnedProvenance(
   role: CryptoReplayLane,
   model: AiResponse["model"],
@@ -329,6 +363,9 @@ function validatePinnedProvenance(
 
   const rawPrecisionValidation = model.precision_validation;
   const rawMemoryStatus = model.memory_status;
+  const rawQuantileMonotonicityPolicy = model.quantile_monotonicity_policy;
+  const rawFp32QuantileObservations = model.fp32_quantile_observations;
+  const rawMixedQuantileObservations = model.mixed_quantile_observations;
   const rawQuantileTailPolicy = model.quantile_tail_policy;
   const rawPrecisionFailureReasons = model.precision_failure_reasons;
   const precision: ReplayPrecision | undefined = model.dtype === "mixed_float16"
@@ -340,6 +377,11 @@ function validatePinnedProvenance(
   const memoryStatus = rawMemoryStatus === undefined && role === "kronos_base"
     ? "ok"
     : rawMemoryStatus;
+  const quantileMonotonicityPolicy = (
+    rawQuantileMonotonicityPolicy === undefined && role === "kronos_base"
+  )
+    ? "native"
+    : rawQuantileMonotonicityPolicy;
   const quantileTailPolicy = rawQuantileTailPolicy === undefined && role === "kronos_base"
     ? "native"
     : rawQuantileTailPolicy;
@@ -355,6 +397,12 @@ function validatePinnedProvenance(
       model.model_id,
     );
   }
+  const fp32QuantileObservations = replayQuantileObservations(
+    rawFp32QuantileObservations,
+  );
+  const mixedQuantileObservations = replayQuantileObservations(
+    rawMixedQuantileObservations,
+  );
 
   const peakVramBytes = model.peak_vram_bytes ?? null;
   const peakVramMeasurement = model.peak_vram_measurement ?? null;
@@ -374,6 +422,9 @@ function validatePinnedProvenance(
     if (precision !== "fp32"
       || precisionValidation !== "not_required"
       || memoryStatus !== "ok"
+      || quantileMonotonicityPolicy !== "native"
+      || (fp32QuantileObservations !== undefined && fp32QuantileObservations !== null)
+      || (mixedQuantileObservations !== undefined && mixedQuantileObservations !== null)
       || quantileTailPolicy !== "native"
       || precisionFailureReasons.length > 0) {
       throw new LaneReplayValidationError(
@@ -383,14 +434,41 @@ function validatePinnedProvenance(
       );
     }
   } else {
+    const mixedRuntimeFailed = precisionFailureReasons
+      .some((reason) => reason.startsWith("mixed_"));
+    const validFp32Observations = fp32QuantileObservations !== undefined
+      && fp32QuantileObservations !== null
+      && fp32QuantileObservations.rowCount === 128 * 60
+      && fp32QuantileObservations.nonFiniteValueCount === 0
+      && fp32QuantileObservations.postprocessedMonotonic;
+    const validMixedObservations = mixedRuntimeFailed
+      ? mixedQuantileObservations === null
+      : mixedQuantileObservations !== undefined
+        && mixedQuantileObservations !== null
+        && mixedQuantileObservations.rowCount === 128 * 60
+        && precisionFailureReasons.includes("non_finite_output")
+          === (mixedQuantileObservations.nonFiniteValueCount > 0)
+        && precisionFailureReasons.includes("quantile_postprocessing_failed")
+          === (
+            mixedQuantileObservations.nonFiniteValueCount === 0
+            && !mixedQuantileObservations.postprocessedMonotonic
+          );
     const mixedPrecisionValid = precision === "fp16"
       && precisionValidation === "passed"
       && precisionFailureReasons.length === 0;
     const fp32FallbackValid = precision === "fp32"
       && precisionValidation === "fallback_fp32"
       && precisionFailureReasons.length > 0;
+    if (!validFp32Observations || !validMixedObservations) {
+      throw new LaneReplayValidationError(
+        "MODEL_QUANTILE_OBSERVATIONS_INVALID",
+        "The FinCast lane did not report bounded precision-qualification observations.",
+        model.model_id,
+      );
+    }
     if ((!mixedPrecisionValid && !fp32FallbackValid)
       || memoryStatus !== "ok"
+      || quantileMonotonicityPolicy !== "fp32_monotone_rearrangement_v1"
       || quantileTailPolicy !== "tail_clamped_q10_q90"
       || peakVramBytes === null
       || peakVramBytes <= 0
@@ -422,6 +500,9 @@ function validatePinnedProvenance(
     peakVramBytes,
     peakVramMeasurement,
     memoryStatus,
+    quantileMonotonicityPolicy,
+    fp32QuantileObservations: fp32QuantileObservations ?? null,
+    mixedQuantileObservations: mixedQuantileObservations ?? null,
     quantileTailPolicy,
     precisionFailureReasons,
   };

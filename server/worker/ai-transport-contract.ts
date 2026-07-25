@@ -56,6 +56,11 @@ export const AiWorkerStatusSchema = z.object({
     precision: z.enum(["float32", "mixed_float16"]).optional(),
     precision_validation: z.enum(["not_required", "passed", "fallback_fp32", "unavailable"]).optional(),
     memory_status: z.enum(["ok", "memory_pressure", "unavailable"]).optional(),
+    quantile_monotonicity_policy: z.enum([
+      "native",
+      "fp32_monotone_rearrangement_v1",
+      "unavailable",
+    ]).optional(),
     quantile_tail_policy: z.enum(["native", "tail_clamped_q10_q90", "unavailable"]).optional(),
   }).strict(),
   active_requests: z.number().int().nonnegative(),
@@ -97,6 +102,9 @@ export const AiWorkerStatusSchema = z.object({
       worker.model.memory_status !== undefined
       && worker.model.memory_status !== (worker.model.loaded ? "ok" : "unavailable")
     ) || (
+      worker.model.quantile_monotonicity_policy !== undefined
+      && worker.model.quantile_monotonicity_policy !== (worker.model.loaded ? "native" : "unavailable")
+    ) || (
       worker.model.quantile_tail_policy !== undefined
       && worker.model.quantile_tail_policy !== (worker.model.loaded ? "native" : "unavailable")
     );
@@ -112,16 +120,19 @@ export const AiWorkerStatusSchema = z.object({
     const fieldsPresent = worker.model.precision !== undefined
       && worker.model.precision_validation !== undefined
       && worker.model.memory_status !== undefined
+      && worker.model.quantile_monotonicity_policy !== undefined
       && worker.model.quantile_tail_policy !== undefined;
     const validLoaded = worker.model.loaded && (
       (worker.model.precision === "mixed_float16" && worker.model.precision_validation === "passed")
       || (worker.model.precision === "float32" && worker.model.precision_validation === "fallback_fp32")
     ) && worker.model.memory_status === "ok"
+      && worker.model.quantile_monotonicity_policy === "fp32_monotone_rearrangement_v1"
       && worker.model.quantile_tail_policy === "tail_clamped_q10_q90";
     const validUnavailable = !worker.model.loaded
       && worker.model.precision === "float32"
       && worker.model.precision_validation === "unavailable"
       && (worker.model.memory_status === "unavailable" || worker.model.memory_status === "memory_pressure")
+      && worker.model.quantile_monotonicity_policy === "unavailable"
       && worker.model.quantile_tail_policy === "unavailable";
     if (!fieldsPresent || (!validLoaded && !validUnavailable)) {
       context.addIssue({

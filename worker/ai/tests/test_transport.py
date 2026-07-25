@@ -165,6 +165,7 @@ async def _round_trip(tmp_path) -> None:
                         "precision_validation": "not_required",
                         "memory_status": "unavailable",
                         "quantile_tail_policy": "native",
+                        "quantile_monotonicity_policy": "native",
                     },
                     "active_requests": 0,
                     "queued_requests": 0,

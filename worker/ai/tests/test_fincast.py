@@ -24,6 +24,7 @@ from portfolio_ai_worker.fincast import (
     is_fincast_fp32_island_key,
     observe_fincast_decode_output_dtypes,
     project_native_quantiles,
+    rearrange_native_quantiles,
     validate_fincast_mixed_inference_observations,
     validate_fincast_mixed_model_dtypes,
     verify_pinned_attention_softmax_structure,
@@ -33,6 +34,7 @@ from portfolio_ai_worker.precision_validation import (
     MixedPrecisionMetrics,
     PrecisionArtifact,
     QualificationEnvironment,
+    QuantileRearrangementObservations,
     cost_exceeding_direction,
     precision_failure_reasons,
     qualification_environment_from_torch,
@@ -51,10 +53,43 @@ def _artifact(file: str, peak: int, *, complete: bool = True) -> PrecisionArtifa
     )
 
 
+def _quantile_observations(
+    *,
+    non_finite_value_count: int = 0,
+    postprocessed_monotonic: bool = True,
+) -> QuantileRearrangementObservations:
+    return QuantileRearrangementObservations(
+        row_count=7_680,
+        non_finite_value_count=non_finite_value_count,
+        crossing_row_count=0,
+        crossing_adjacent_pair_count=0,
+        adjusted_row_count=0,
+        q50_adjustment_iqr_ratio_median=0,
+        q50_adjustment_iqr_ratio_p95=0,
+        q50_adjustment_iqr_ratio_max=0,
+        postprocessed_monotonic=postprocessed_monotonic,
+    )
+
+
+def _qualification_forecasts(
+    row: list[float] | None = None,
+) -> list[list[list[float]]]:
+    native = row or [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+    return [[list(native) for _ in range(60)] for _ in range(128)]
+
+
+def _qualification_contexts() -> list[dict[str, object]]:
+    return [
+        {"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}
+        for _ in range(128)
+    ]
+
+
 def _completed_validation(metrics: MixedPrecisionMetrics) -> FinCastPrecisionValidation:
     reasons = precision_failure_reasons(metrics)
+    observations = _quantile_observations()
     return FinCastPrecisionValidation(
-        schema_version="fincast-precision-validation/v2",
+        schema_version="fincast-precision-validation/v3",
         model_id="Vincent05R/FinCast",
         model_revision="2d7d90b159db8961d27c2cf165d51195902ef92b",
         source_revision="488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
@@ -68,6 +103,9 @@ def _completed_validation(metrics: MixedPrecisionMetrics) -> FinCastPrecisionVal
         context_fixture_sha256="b" * 64,
         context_count=128,
         quantile_tail_policy="tail_clamped_q10_q90",
+        quantile_monotonicity_policy="fp32_monotone_rearrangement_v1",
+        fp32_quantile_observations=observations,
+        mixed_quantile_observations=observations,
         fp32=_artifact("model.fp32.safetensors", 10_000),
         mixed_fp16=_artifact("model.mixed-fp16.safetensors", 6_000),
         mixed_run_status="completed",
@@ -112,7 +150,7 @@ def _qualification_torch(cuda: object | None = None) -> object:
     )
 
 
-def test_native_quantiles_use_documented_tail_clamp_without_extrapolation() -> None:
+def test_native_quantiles_use_deterministic_rearrangement_and_documented_tail_clamp() -> None:
     projected = project_native_quantiles((10, 20, 30, 40, 50, 60, 70, 80, 90))
 
     assert tuple(projected) == (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
@@ -125,8 +163,108 @@ def test_native_quantiles_use_documented_tail_clamp_without_extrapolation() -> N
         0.9: 90,
         0.95: 90,
     }
-    with pytest.raises(ValueError, match="crossing"):
-        project_native_quantiles((10, 20, 30, 40, 39, 60, 70, 80, 90))
+    crossing = (90, 20, 70, 40, 50, 60, 30, 80, 10)
+    assert rearrange_native_quantiles(crossing) == (10, 20, 30, 40, 50, 60, 70, 80, 90)
+    assert rearrange_native_quantiles(crossing) == rearrange_native_quantiles(crossing)
+    assert project_native_quantiles(crossing) == projected
+
+
+def test_native_quantile_rearrangement_leaves_monotonic_values_unchanged() -> None:
+    native = (10.0, 20.0, 20.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0)
+
+    assert rearrange_native_quantiles(native) == native
+
+
+@pytest.mark.parametrize("invalid", (float("nan"), float("inf"), float("-inf")))
+def test_native_quantile_rearrangement_rejects_non_finite_values(invalid: float) -> None:
+    native = (10.0, 20.0, 30.0, 40.0, invalid, 60.0, 70.0, 80.0, 90.0)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        rearrange_native_quantiles(native)
+    with pytest.raises(ValueError, match="non-finite"):
+        project_native_quantiles(native)
+
+
+def test_qualification_rearrangement_matches_runtime_projection() -> None:
+    module = _validation_script()
+    reference = [9.0, 2.0, 7.0, 4.0, 5.0, 6.0, 3.0, 8.0, 1.0]
+    candidate = [9.1, 2.1, 7.1, 4.1, 5.1, 6.1, 3.1, 8.1, 1.1]
+    reference_forecasts = [[reference] * 60 for _ in range(128)]
+    candidate_forecasts = [[candidate] * 60 for _ in range(128)]
+    contexts = [
+        {"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}
+        for _ in range(128)
+    ]
+
+    normalized_reference, reference_observations = (
+        module._postprocess_qualification_forecasts(reference_forecasts)
+    )
+    normalized_candidate, candidate_observations = (
+        module._postprocess_qualification_forecasts(candidate_forecasts)
+    )
+    runtime_reference = project_native_quantiles(reference)
+    runtime_candidate = project_native_quantiles(candidate)
+    metrics = module.qualification_metrics(
+        normalized_reference,
+        normalized_candidate,
+        contexts,
+        10_000,
+        6_000,
+    )
+
+    assert normalized_reference[0][0] == list(rearrange_native_quantiles(reference))
+    assert normalized_candidate[0][0] == list(rearrange_native_quantiles(candidate))
+    assert reference_observations.row_count == 7_680
+    assert reference_observations.crossing_row_count == 7_680
+    assert reference_observations.adjusted_row_count == 7_680
+    assert reference_observations.postprocessed_monotonic is True
+    assert candidate_observations.postprocessed_monotonic is True
+    assert metrics.quantile_monotonic is True
+    expected_scale = runtime_reference[0.75] - runtime_reference[0.25]
+    assert metrics.q50_median_iqr_ratio == pytest.approx(
+        abs(runtime_candidate[0.5] - runtime_reference[0.5]) / expected_scale
+    )
+
+
+def test_qualification_rejects_per_context_row_shape_even_when_total_is_7680() -> None:
+    module = _validation_script()
+    row = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+    malformed = [[row] * 60 for _ in range(128)]
+    malformed[0] = [row] * 59
+    malformed[1] = [row] * 61
+
+    with pytest.raises(ValueError, match="128 contexts with 60 output rows each"):
+        module._postprocess_qualification_forecasts(malformed)
+
+    with pytest.raises(ValueError, match="128 contexts with 60 output rows each"):
+        module._postprocess_qualification_forecasts(malformed[:-1])
+
+
+def test_rearrangement_adjustment_ratios_use_only_adjusted_rows_and_postprocessed_iqr() -> None:
+    module = _validation_script()
+    forecasts = _qualification_forecasts()
+    forecasts[0][0] = [9.0, 2.0, 7.0, 4.0, 1.0, 6.0, 3.0, 8.0, 5.0]
+
+    _normalized, observations = module._postprocess_qualification_forecasts(forecasts)
+
+    assert observations.adjusted_row_count == 1
+    assert observations.q50_adjustment_iqr_ratio_median == pytest.approx(0.8)
+    assert observations.q50_adjustment_iqr_ratio_p95 == pytest.approx(0.8)
+    assert observations.q50_adjustment_iqr_ratio_max == pytest.approx(0.8)
+
+    _unchanged, unchanged_observations = module._postprocess_qualification_forecasts(
+        _qualification_forecasts()
+    )
+    assert unchanged_observations.adjusted_row_count == 0
+    assert (
+        unchanged_observations.q50_adjustment_iqr_ratio_median,
+        unchanged_observations.q50_adjustment_iqr_ratio_p95,
+        unchanged_observations.q50_adjustment_iqr_ratio_max,
+    ) == (0, 0, 0)
+    invalid_summary = unchanged_observations.model_dump(mode="python")
+    invalid_summary["q50_adjustment_iqr_ratio_max"] = 0.1
+    with pytest.raises(ValidationError, match="unadjusted quantile output"):
+        QuantileRearrangementObservations.model_validate(invalid_summary)
 
 
 def test_precision_gate_requires_every_fixed_threshold() -> None:
@@ -151,11 +289,14 @@ def test_precision_gate_requires_every_fixed_threshold() -> None:
     )
     assert precision_failure_reasons(failing) == (
         "non_finite_output",
-        "quantile_crossing",
         "signal_direction_agreement_below_99pct",
         "q50_median_error_above_5pct_fp32_iqr",
         "q50_p95_error_above_15pct_fp32_iqr",
         "peak_vram_reduction_below_25pct",
+    )
+    postprocessing_failure = passing.model_copy(update={"quantile_monotonic": False})
+    assert precision_failure_reasons(postprocessing_failure) == (
+        "quantile_postprocessing_failed",
     )
 
 
@@ -184,11 +325,23 @@ def test_failed_mixed_validation_selects_lossless_fp32_artifact() -> None:
 
 def test_passing_mixed_qualification_selects_fp16(tmp_path: Path) -> None:
     module = _validation_script()
-    output = [[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]]]
+    output = _qualification_forecasts()
     runs = iter(
         (
-            module.PrecisionRunResult(output, 10_000, True, None),
-            module.PrecisionRunResult(output, 6_000, True, None),
+            module.PrecisionRunResult(
+                output,
+                10_000,
+                True,
+                None,
+                _quantile_observations(),
+            ),
+            module.PrecisionRunResult(
+                output,
+                6_000,
+                True,
+                None,
+                _quantile_observations(),
+            ),
         )
     )
     module.run_precision = lambda *_args: next(runs)
@@ -200,7 +353,7 @@ def test_passing_mixed_qualification_selects_fp16(tmp_path: Path) -> None:
         Path("/unused/source"),
         fp32_path,
         mixed_path,
-        [{"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}],
+        _qualification_contexts(),
         "b" * 64,
         _qualification_torch(),
     )
@@ -209,6 +362,11 @@ def test_passing_mixed_qualification_selects_fp16(tmp_path: Path) -> None:
     assert validation.mixed_runtime_failure is None
     assert validation.mixed_metrics is not None
     assert validation.mixed_metrics.peak_vram_reduction == pytest.approx(0.4)
+    assert validation.fp32_quantile_observations.crossing_row_count == 0
+    assert validation.fp32_quantile_observations.postprocessed_monotonic is True
+    assert validation.mixed_quantile_observations is not None
+    assert validation.mixed_quantile_observations.crossing_row_count == 0
+    assert validation.mixed_quantile_observations.postprocessed_monotonic is True
     assert validation.mixed_failure_reasons == ()
     assert validation.selected_precision == "mixed_float16"
 
@@ -247,7 +405,7 @@ def test_precision_validation_serializes_as_standard_finite_json() -> None:
         serialize_precision_validation(invalid_validation)
 
 
-def test_precision_validation_v2_binds_policy_and_exact_qualification_environment() -> None:
+def test_precision_validation_v3_binds_policies_and_exact_qualification_environment() -> None:
     validation = _completed_validation(
         MixedPrecisionMetrics(
             finite=True,
@@ -271,6 +429,26 @@ def test_precision_validation_v2_binds_policy_and_exact_qualification_environmen
     missing_environment.pop("qualification_environment")
     with pytest.raises(ValidationError, match="qualification_environment"):
         FinCastPrecisionValidation.model_validate(missing_environment)
+
+    missing_monotonicity_policy = validation.model_dump(mode="python")
+    missing_monotonicity_policy.pop("quantile_monotonicity_policy")
+    with pytest.raises(ValidationError, match="quantile_monotonicity_policy"):
+        FinCastPrecisionValidation.model_validate(missing_monotonicity_policy)
+
+    stale_schema = validation.model_dump(mode="python")
+    stale_schema["schema_version"] = "fincast-precision-validation/v2"
+    with pytest.raises(ValidationError, match="fincast-precision-validation/v3"):
+        FinCastPrecisionValidation.model_validate(stale_schema)
+
+    incomplete_fp32 = validation.model_dump(mode="python")
+    incomplete_fp32["fp32_quantile_observations"]["row_count"] = 7_679
+    with pytest.raises(ValidationError, match="128x60"):
+        FinCastPrecisionValidation.model_validate(incomplete_fp32)
+
+    incomplete_mixed = validation.model_dump(mode="python")
+    incomplete_mixed["mixed_quantile_observations"]["row_count"] = 7_679
+    with pytest.raises(ValidationError, match="128x60"):
+        FinCastPrecisionValidation.model_validate(incomplete_mixed)
 
 
 @pytest.mark.parametrize(
@@ -391,7 +569,7 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
     mixed_path = tmp_path / "model.mixed-fp16.safetensors"
     fp32_path.write_bytes(b"lossless-fp32")
     mixed_path.write_bytes(b"mixed-fp16")
-    reference = [[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]]]
+    reference = _qualification_forecasts()
 
     class FakeCuda:
         def __init__(self) -> None:
@@ -434,7 +612,11 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
         )
 
     monkeypatch.setattr(module, "_load_model", fake_load_model)
-    monkeypatch.setattr(module, "_forecast", lambda *_args: reference)
+    monkeypatch.setattr(
+        module,
+        "_forecast",
+        lambda *_args: (reference, _quantile_observations()),
+    )
     gc_calls: list[bool] = []
     monkeypatch.setattr(module.gc, "collect", lambda: gc_calls.append(True))
 
@@ -442,7 +624,7 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
         Path("/unused/source"),
         fp32_path,
         mixed_path,
-        [{"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}],
+        _qualification_contexts(),
         "b" * 64,
         fake_torch,
     )
@@ -450,6 +632,7 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
     assert validation.selected_precision == "float32"
     assert validation.mixed_run_status == "runtime_failed"
     assert validation.mixed_metrics is None
+    assert validation.mixed_quantile_observations is None
     assert validation.mixed_runtime_failure is not None
     assert validation.mixed_runtime_failure.code == "mixed_cuda_out_of_memory"
     assert validation.mixed_runtime_failure.stage == "load"
@@ -465,6 +648,7 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
     persisted = json.loads(output.read_text(encoding="utf-8"))
     assert persisted["selected_precision"] == "float32"
     assert persisted["mixed_run_status"] == "runtime_failed"
+    assert persisted["mixed_quantile_observations"] is None
     assert persisted["mixed_runtime_failure"] == {
         "code": "mixed_cuda_out_of_memory",
         "exception_class": "RuntimeError",
@@ -478,6 +662,11 @@ def test_mixed_runtime_exception_atomically_writes_sanitized_fp32_fallback(
     tampered = validation.model_copy(update={"selected_precision": "mixed_float16"})
     with pytest.raises(ValidationError, match="selected precision"):
         serialize_precision_validation(tampered)
+    tampered_observations = validation.model_copy(
+        update={"mixed_quantile_observations": _quantile_observations()}
+    )
+    with pytest.raises(ValidationError, match="failed mixed runtime"):
+        serialize_precision_validation(tampered_observations)
 
 
 def test_unsupported_mixed_operation_uses_only_bounded_failure_fields() -> None:
@@ -504,7 +693,7 @@ def test_mixed_observation_mismatch_falls_back_without_applying_invariant_to_fp3
     mixed_path = tmp_path / "model.mixed-fp16.safetensors"
     fp32_path.write_bytes(b"lossless-fp32")
     mixed_path.write_bytes(b"mixed-fp16")
-    reference = [[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]]]
+    reference = _qualification_forecasts()
 
     class FakeCuda:
         def __init__(self) -> None:
@@ -542,18 +731,23 @@ def test_mixed_observation_mismatch_falls_back_without_applying_invariant_to_fp3
         return model_without_observations
 
     monkeypatch.setattr(module, "_load_model", fake_load_model)
-    monkeypatch.setattr(module, "_forecast", lambda *_args: reference)
+    monkeypatch.setattr(
+        module,
+        "_forecast",
+        lambda *_args: (reference, _quantile_observations()),
+    )
     validation = module.qualify_precision(
         Path("/unused/source"),
         fp32_path,
         mixed_path,
-        [{"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}],
+        _qualification_contexts(),
         "b" * 64,
         fake_torch,
     )
 
     assert validation.selected_precision == "float32"
     assert validation.mixed_run_status == "runtime_failed"
+    assert validation.mixed_quantile_observations is None
     assert validation.mixed_runtime_failure is not None
     assert validation.mixed_runtime_failure.code == "mixed_evaluation_failure"
     assert validation.mixed_runtime_failure.stage == "evaluation"
@@ -945,6 +1139,64 @@ def test_fincast_adapter_rechecks_nvml_headroom_after_model_load(
     assert cuda.empty_cache_calls == 1
 
 
+def test_loaded_fincast_provenance_carries_full_validation_observations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        model_cache_dir=tmp_path,
+        fincast_nvml_device_index=0,
+        fincast_min_vram_headroom_bytes=1_000,
+        fincast_context_bars=512,
+    )
+    runtime = SimpleNamespace(
+        torch=_qualification_torch(),
+        name="cuda",
+        device_name="Tesla P40",
+        cuda_capability="6.1",
+    )
+    validation = _completed_validation(
+        MixedPrecisionMetrics(
+            finite=True,
+            quantile_monotonic=True,
+            signal_direction_agreement=1.0,
+            q50_median_iqr_ratio=0.01,
+            q50_p95_iqr_ratio=0.02,
+            peak_vram_reduction=0.4,
+        )
+    )
+    monkeypatch.setattr(fincast_module, "_source_snapshot", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        fincast_module,
+        "_artifact_selection",
+        lambda *_args: (
+            validation,
+            tmp_path / "model.mixed-fp16.safetensors",
+            "mixed_float16",
+            500,
+        ),
+    )
+    monkeypatch.setattr(fincast_module, "nvml_free_bytes", lambda _index: 1_600)
+    monkeypatch.setattr(fincast_module, "_load_model", lambda *_args: object())
+    model_manifest = {
+        "model_id": "Vincent05R/FinCast",
+        "revision": "2d7d90b159db8961d27c2cf165d51195902ef92b",
+        "loader_version": "fincast-source-488b19d",
+        "license": "Apache-2.0",
+    }
+
+    adapter = FinCastAdapter(settings, model_manifest, {}, runtime)
+
+    assert (
+        adapter.provenance.fp32_quantile_observations
+        == validation.fp32_quantile_observations
+    )
+    assert (
+        adapter.provenance.mixed_quantile_observations
+        == validation.mixed_quantile_observations
+    )
+
+
 def _write_minimal_decoder_source(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "fincast-source"
     package = source / "src" / "ffm"
@@ -1069,16 +1321,32 @@ def test_non_finite_mixed_output_records_failure_instead_of_blocking_fp32_fallba
     tmp_path: Path,
 ) -> None:
     module = _validation_script()
-    reference = [[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]]]
-    candidate = [[[1.0, 2.0, 3.0, 4.0, float("nan"), 6.0, 7.0, 8.0, 9.0]]]
+    reference = _qualification_forecasts()
+    candidate = _qualification_forecasts()
+    candidate[0][0][4] = float("nan")
     runs = iter(
         (
-            module.PrecisionRunResult(reference, 10_000, True, None),
-            module.PrecisionRunResult(candidate, 6_000, True, None),
+            module.PrecisionRunResult(
+                reference,
+                10_000,
+                True,
+                None,
+                _quantile_observations(),
+            ),
+            module.PrecisionRunResult(
+                candidate,
+                6_000,
+                True,
+                None,
+                _quantile_observations(
+                    non_finite_value_count=1,
+                    postprocessed_monotonic=False,
+                ),
+            ),
         )
     )
     module.run_precision = lambda *_args: next(runs)
-    contexts = [{"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}]
+    contexts = _qualification_contexts()
     fp32_path = tmp_path / "model.fp32.safetensors"
     mixed_path = tmp_path / "model.mixed-fp16.safetensors"
     fp32_path.write_bytes(b"fp32")
@@ -1097,5 +1365,8 @@ def test_non_finite_mixed_output_records_failure_instead_of_blocking_fp32_fallba
     assert validation.mixed_metrics is not None
     assert validation.mixed_metrics.finite is False
     assert validation.mixed_metrics.quantile_monotonic is False
+    assert validation.mixed_quantile_observations is not None
+    assert validation.mixed_quantile_observations.non_finite_value_count == 1
+    assert validation.mixed_quantile_observations.postprocessed_monotonic is False
     assert "non_finite_output" in validation.mixed_failure_reasons
     assert validation.selected_precision == "float32"

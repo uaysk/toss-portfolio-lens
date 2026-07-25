@@ -8,11 +8,17 @@ from typing import Literal, TypeAlias
 
 from pydantic import Field, model_validator
 
-from .contracts import StrictModel
+from .contracts import (
+    FINCAST_QUALIFICATION_CONTEXT_COUNT,
+    FINCAST_QUALIFICATION_ROW_COUNT,
+    MAX_QUANTILE_ADJUSTMENT_IQR_RATIO,
+    QuantileRearrangementObservations,
+    StrictModel,
+)
 
-SCHEMA_VERSION = "fincast-precision-validation/v2"
+SCHEMA_VERSION = "fincast-precision-validation/v3"
 MIXED_RUNTIME_POLICY_VERSION = "fincast-mixed-runtime-policy/v1"
-EXPECTED_CONTEXT_COUNT = 128
+EXPECTED_CONTEXT_COUNT = FINCAST_QUALIFICATION_CONTEXT_COUNT
 EXPECTED_TORCH_VERSION = "2.6.0"
 EXPECTED_CUDA_RUNTIME_VERSION = "12.4"
 EXPECTED_GPU_NAME = "Tesla P40"
@@ -21,6 +27,9 @@ MIN_DIRECTION_AGREEMENT = 0.99
 MAX_Q50_MEDIAN_IQR_RATIO = 0.05
 MAX_Q50_P95_IQR_RATIO = 0.15
 MIN_PEAK_VRAM_REDUCTION = 0.25
+QUANTILE_MONOTONICITY_POLICY = "fp32_monotone_rearrangement_v1"
+MAX_OBSERVED_QUANTILE_ROWS = FINCAST_QUALIFICATION_ROW_COUNT
+MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO = MAX_QUANTILE_ADJUSTMENT_IQR_RATIO
 
 MixedRuntimeFailureCode: TypeAlias = Literal[
     "mixed_cuda_out_of_memory",
@@ -42,7 +51,7 @@ SanitizedExceptionClass: TypeAlias = Literal[
 ]
 MixedPrecisionFailureReason: TypeAlias = Literal[
     "non_finite_output",
-    "quantile_crossing",
+    "quantile_postprocessing_failed",
     "signal_direction_agreement_below_99pct",
     "q50_median_error_above_5pct_fp32_iqr",
     "q50_p95_error_above_15pct_fp32_iqr",
@@ -104,7 +113,7 @@ class QualificationEnvironment(StrictModel):
 
 
 class FinCastPrecisionValidation(StrictModel):
-    schema_version: Literal["fincast-precision-validation/v2"]
+    schema_version: Literal["fincast-precision-validation/v3"]
     model_id: Literal["Vincent05R/FinCast"]
     model_revision: Literal["2d7d90b159db8961d27c2cf165d51195902ef92b"]
     source_revision: Literal["488b19d1d85fa2b3d4b93469530cefdcf1cc97a4"]
@@ -113,6 +122,9 @@ class FinCastPrecisionValidation(StrictModel):
     context_fixture_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     context_count: Literal[128]
     quantile_tail_policy: Literal["tail_clamped_q10_q90"]
+    quantile_monotonicity_policy: Literal["fp32_monotone_rearrangement_v1"]
+    fp32_quantile_observations: QuantileRearrangementObservations
+    mixed_quantile_observations: QuantileRearrangementObservations | None
     fp32: PrecisionArtifact
     mixed_fp16: PrecisionArtifact
     mixed_run_status: Literal["completed", "runtime_failed"]
@@ -123,6 +135,14 @@ class FinCastPrecisionValidation(StrictModel):
 
     @model_validator(mode="after")
     def gate_matches_metrics(self) -> "FinCastPrecisionValidation":
+        if (
+            self.fp32_quantile_observations.row_count != MAX_OBSERVED_QUANTILE_ROWS
+            or self.fp32_quantile_observations.non_finite_value_count != 0
+            or not self.fp32_quantile_observations.postprocessed_monotonic
+        ):
+            raise ValueError(
+                "FP32 baseline quantile postprocessing must cover 128x60 finite monotonic rows"
+            )
         if self.fp32.file != "model.fp32.safetensors":
             raise ValueError("FP32 fallback artifact name is not pinned")
         if self.fp32.peak_vram_bytes <= 0 or not self.fp32.peak_vram_measurement_complete:
@@ -131,12 +151,33 @@ class FinCastPrecisionValidation(StrictModel):
             raise ValueError("mixed FP16 artifact name is not pinned")
 
         if self.mixed_run_status == "completed":
-            if self.mixed_metrics is None or self.mixed_runtime_failure is not None:
-                raise ValueError("completed mixed qualification requires metrics and no runtime failure")
+            if (
+                self.mixed_metrics is None
+                or self.mixed_runtime_failure is not None
+                or self.mixed_quantile_observations is None
+                or self.mixed_quantile_observations.row_count
+                != MAX_OBSERVED_QUANTILE_ROWS
+            ):
+                raise ValueError(
+                    "completed mixed qualification requires metrics for all 128x60 rows"
+                )
             if self.mixed_fp16.peak_vram_bytes <= 0 or not self.mixed_fp16.peak_vram_measurement_complete:
                 raise ValueError("completed mixed qualification requires a completed positive peak measurement")
+            if self.mixed_metrics.finite != (
+                self.mixed_quantile_observations.non_finite_value_count == 0
+            ):
+                raise ValueError("mixed finite metric differs from its raw quantile observations")
+            if (
+                self.mixed_metrics.quantile_monotonic
+                != self.mixed_quantile_observations.postprocessed_monotonic
+            ):
+                raise ValueError("mixed monotonic metric differs from its quantile postprocessing")
         else:
-            if self.mixed_metrics is not None or self.mixed_runtime_failure is None:
+            if (
+                self.mixed_metrics is not None
+                or self.mixed_runtime_failure is None
+                or self.mixed_quantile_observations is not None
+            ):
                 raise ValueError("failed mixed runtime requires a bounded failure and no numeric metrics")
             if (
                 self.mixed_runtime_failure.stage != "evaluation"
@@ -216,8 +257,8 @@ def precision_failure_reasons(
     reasons: list[MixedPrecisionFailureReason] = []
     if not metrics.finite:
         reasons.append("non_finite_output")
-    if not metrics.quantile_monotonic:
-        reasons.append("quantile_crossing")
+    if metrics.finite and not metrics.quantile_monotonic:
+        reasons.append("quantile_postprocessing_failed")
     if metrics.signal_direction_agreement < MIN_DIRECTION_AGREEMENT:
         reasons.append("signal_direction_agreement_below_99pct")
     if metrics.q50_median_iqr_ratio > MAX_Q50_MEDIAN_IQR_RATIO:

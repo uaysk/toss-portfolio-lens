@@ -10,7 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
 
-from .contracts import FINCAST_MODEL_ID, KRONOS_BASE_MODEL_ID, ModelProvenance, PriceBar
+from .contracts import (
+    FINCAST_MODEL_ID,
+    KRONOS_BASE_MODEL_ID,
+    ModelProvenance,
+    PriceBar,
+    QuantileRearrangementObservations,
+)
 from .settings import AISettings
 
 
@@ -249,6 +255,9 @@ def _provenance(
     peak_vram_measurement: str | None = None,
     memory_status: str | None = None,
     quantile_tail_policy: str = "native",
+    quantile_monotonicity_policy: str = "native",
+    fp32_quantile_observations: QuantileRearrangementObservations | None = None,
+    mixed_quantile_observations: QuantileRearrangementObservations | None = None,
     precision_failure_reasons: tuple[str, ...] = (),
 ) -> ModelProvenance:
     return ModelProvenance(
@@ -270,6 +279,11 @@ def _provenance(
         peak_vram_measurement=peak_vram_measurement if loaded else None,
         memory_status=memory_status or ("ok" if loaded else "unavailable"),
         quantile_tail_policy=quantile_tail_policy if loaded else "unavailable",
+        quantile_monotonicity_policy=(
+            quantile_monotonicity_policy if loaded else "unavailable"
+        ),
+        fp32_quantile_observations=fp32_quantile_observations if loaded else None,
+        mixed_quantile_observations=mixed_quantile_observations if loaded else None,
         precision_failure_reasons=precision_failure_reasons,
     )
 

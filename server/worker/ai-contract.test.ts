@@ -136,6 +136,21 @@ function kronosForecastResponse(): unknown {
   };
 }
 
+function quantileObservations(overrides: Record<string, unknown> = {}) {
+  return {
+    row_count: 7_680,
+    non_finite_value_count: 0,
+    crossing_row_count: 65,
+    crossing_adjacent_pair_count: 74,
+    adjusted_row_count: 65,
+    q50_adjustment_iqr_ratio_median: 0,
+    q50_adjustment_iqr_ratio_p95: 0.06324,
+    q50_adjustment_iqr_ratio_max: 0.1502,
+    postprocessed_monotonic: true,
+    ...overrides,
+  };
+}
+
 function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed_float16"): unknown {
   const response = structuredClone(kronosForecastResponse()) as {
     model: Record<string, unknown>;
@@ -159,10 +174,17 @@ function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed
     peak_vram_bytes: 4_294_967_296,
     peak_vram_measurement: "cuda_allocated_or_reserved",
     memory_status: "ok",
+    quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
+    fp32_quantile_observations: quantileObservations(),
+    mixed_quantile_observations: quantileObservations({
+      crossing_row_count: 67,
+      crossing_adjacent_pair_count: 79,
+      adjusted_row_count: 67,
+    }),
     quantile_tail_policy: "tail_clamped_q10_q90",
     precision_failure_reasons: precision === "mixed_float16"
       ? []
-      : ["q50_p95_error_above_15pct"],
+      : ["q50_p95_error_above_15pct_fp32_iqr"],
   };
   response.model = model;
   response.model_runs[0]!.role = "fincast";
@@ -384,6 +406,7 @@ describe("AI worker response contract", () => {
         dtype: "mixed_float16",
         precision_validation: "passed",
         memory_status: "ok",
+        quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
         quantile_tail_policy: "tail_clamped_q10_q90",
       },
     });
@@ -393,7 +416,7 @@ describe("AI worker response contract", () => {
       model_id: "Vincent05R/FinCast",
       dtype: "float32",
       precision_validation: "fallback_fp32",
-      precision_failure_reasons: ["q50_p95_error_above_15pct"],
+      precision_failure_reasons: ["q50_p95_error_above_15pct_fp32_iqr"],
     });
   });
 
@@ -431,5 +454,86 @@ describe("AI worker response contract", () => {
     disguisedKronos.model_runs[0]!.model.dtype = "mixed_float16";
     disguisedKronos.model_runs[0]!.model.precision_validation = "passed";
     expect(() => AiResponseSchema.parse(disguisedKronos)).toThrow(/native float32 provenance/);
+  });
+
+  it("FinCast quantile monotonicity policy 누락이나 native 위장을 거부한다", () => {
+    const missing = structuredClone(fincastForecastResponse()) as {
+      model: { quantile_monotonicity_policy?: string };
+      model_runs: Array<{ model: { quantile_monotonicity_policy?: string } }>;
+    };
+    delete missing.model.quantile_monotonicity_policy;
+    delete missing.model_runs[0]!.model.quantile_monotonicity_policy;
+    expect(() => AiResponseSchema.parse(missing)).toThrow(/complete validated precision and VRAM provenance/);
+
+    const native = structuredClone(fincastForecastResponse()) as {
+      model: { quantile_monotonicity_policy: string };
+      model_runs: Array<{ model: { quantile_monotonicity_policy: string } }>;
+    };
+    native.model.quantile_monotonicity_policy = "native";
+    native.model_runs[0]!.model.quantile_monotonicity_policy = "native";
+    expect(() => AiResponseSchema.parse(native)).toThrow(/complete validated precision and VRAM provenance/);
+  });
+
+  it("FinCast qualification 관측치를 정확히 제한하고 FP32/mixed 모두 요구한다", () => {
+    const missing = structuredClone(fincastForecastResponse()) as {
+      model: { fp32_quantile_observations?: unknown };
+      model_runs: Array<{ model: { fp32_quantile_observations?: unknown } }>;
+    };
+    delete missing.model.fp32_quantile_observations;
+    delete missing.model_runs[0]!.model.fp32_quantile_observations;
+    expect(() => AiResponseSchema.parse(missing)).toThrow(
+      /complete validated precision and VRAM provenance/,
+    );
+
+    const unbounded = structuredClone(fincastForecastResponse()) as {
+      model: { mixed_quantile_observations: { crossing_adjacent_pair_count: number } };
+      model_runs: Array<{
+        model: { mixed_quantile_observations: { crossing_adjacent_pair_count: number } };
+      }>;
+    };
+    unbounded.model.mixed_quantile_observations.crossing_adjacent_pair_count = 61_441;
+    unbounded.model_runs[0]!.model.mixed_quantile_observations
+      .crossing_adjacent_pair_count = 61_441;
+    expect(() => AiResponseSchema.parse(unbounded)).toThrow(
+      /crossing adjacent-pair count exceeds/,
+    );
+
+    const invalidOrdering = structuredClone(fincastForecastResponse()) as {
+      model: { fp32_quantile_observations: { q50_adjustment_iqr_ratio_p95: number } };
+      model_runs: Array<{
+        model: { fp32_quantile_observations: { q50_adjustment_iqr_ratio_p95: number } };
+      }>;
+    };
+    invalidOrdering.model.fp32_quantile_observations.q50_adjustment_iqr_ratio_p95 = 0.2;
+    invalidOrdering.model_runs[0]!.model.fp32_quantile_observations
+      .q50_adjustment_iqr_ratio_p95 = 0.2;
+    expect(() => AiResponseSchema.parse(invalidOrdering)).toThrow(
+      /q50 adjustment summaries must be ordered/,
+    );
+  });
+
+  it("FinCast mixed runtime failure만 null mixed 관측치를 허용한다", () => {
+    const runtimeFailure = structuredClone(fincastForecastResponse("float32")) as {
+      model: Record<string, unknown>;
+      model_runs: Array<{ model: Record<string, unknown> }>;
+    };
+    for (const model of [runtimeFailure.model, runtimeFailure.model_runs[0]!.model]) {
+      model.precision_failure_reasons = ["mixed_inference_failure"];
+      model.mixed_quantile_observations = null;
+    }
+    expect(AiResponseSchema.parse(runtimeFailure).model).toMatchObject({
+      precision_validation: "fallback_fp32",
+      mixed_quantile_observations: null,
+    });
+
+    const hiddenCompleted = structuredClone(fincastForecastResponse()) as {
+      model: Record<string, unknown>;
+      model_runs: Array<{ model: Record<string, unknown> }>;
+    };
+    hiddenCompleted.model.mixed_quantile_observations = null;
+    hiddenCompleted.model_runs[0]!.model.mixed_quantile_observations = null;
+    expect(() => AiResponseSchema.parse(hiddenCompleted)).toThrow(
+      /complete validated precision and VRAM provenance/,
+    );
   });
 });

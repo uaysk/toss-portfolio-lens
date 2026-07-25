@@ -47,6 +47,7 @@
       "validation_context_bars": 512,
       "native_quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
       "quantile_tail_policy": "tail_clamped_q10_q90",
+      "quantile_monotonicity_policy": "fp32_monotone_rearrangement_v1",
       "license": "Apache-2.0",
       "loader_version": "fincast-source-488b19d"
     }

@@ -8,10 +8,12 @@ import {
 import {
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
+  QuantileRearrangementObservationsSchema,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
   SCALPING_AI_SCHEMA_VERSION,
   type AiForecastRequest,
+  type QuantileRearrangementObservations as WorkerQuantileRearrangementObservations,
 } from "../worker/ai-contract.js";
 import {
   CausalBinanceKlineStore,
@@ -73,7 +75,7 @@ const BOOK_TICKER_FRESHNESS_MS = 15_000;
 const MARK_PRICE_FRESHNESS_MS = 5_000;
 const PRECISION_FAILURE_REASONS = [
   "non_finite_output",
-  "quantile_crossing",
+  "quantile_postprocessing_failed",
   "signal_direction_agreement_below_99pct",
   "q50_median_error_above_5pct_fp32_iqr",
   "q50_p95_error_above_15pct_fp32_iqr",
@@ -104,6 +106,8 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_precision_validation_invalid",
   "model_provenance_invalid",
   "model_provenance_inconsistent",
+  "model_quantile_monotonicity_policy_invalid",
+  "model_quantile_observations_invalid",
   "model_quantile_tail_policy_invalid",
   "model_request_id_mismatch",
   "model_response_not_object",
@@ -125,9 +129,21 @@ type UnknownRecord = Record<string, unknown>;
 type ModelPrecision = "fp16" | "fp32";
 type ModelPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
 type ModelMemoryStatus = "ok";
+type ModelQuantileMonotonicityPolicy = "native" | "fp32_monotone_rearrangement_v1";
 type ModelQuantileTailPolicy = "native" | "tail_clamped_q10_q90";
 type ModelPeakVramMeasurement = "cuda_allocated_or_reserved";
 type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
+type ModelQuantileObservations = {
+  rowCount: number;
+  nonFiniteValueCount: number;
+  crossingRowCount: number;
+  crossingAdjacentPairCount: number;
+  adjustedRowCount: number;
+  q50AdjustmentIqrRatioMedian: number;
+  q50AdjustmentIqrRatioP95: number;
+  q50AdjustmentIqrRatioMax: number;
+  postprocessedMonotonic: boolean;
+};
 type PinnedModelRuntimeProvenance = {
   modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
   modelRevision: string;
@@ -260,6 +276,9 @@ type NormalizedLaneForecast = {
   precision: ModelPrecision;
   precisionValidation: ModelPrecisionValidation;
   memoryStatus: ModelMemoryStatus;
+  quantileMonotonicityPolicy: ModelQuantileMonotonicityPolicy;
+  fp32QuantileObservations?: ModelQuantileObservations;
+  mixedQuantileObservations?: ModelQuantileObservations | null;
   quantileTailPolicy: ModelQuantileTailPolicy;
   precisionFailureReasons: PrecisionFailureReason[];
   latencyMs?: number;
@@ -423,6 +442,9 @@ type LaneState = {
   attentionBackend?: "math";
   precisionValidation?: ModelPrecisionValidation;
   memoryStatus?: ModelMemoryStatus;
+  quantileMonotonicityPolicy?: ModelQuantileMonotonicityPolicy;
+  fp32QuantileObservations?: ModelQuantileObservations;
+  mixedQuantileObservations?: ModelQuantileObservations | null;
   quantileTailPolicy?: ModelQuantileTailPolicy;
   precisionFailureReasons?: PrecisionFailureReason[];
   errors: string[];
@@ -1100,6 +1122,26 @@ function normalizedPrecisionFailureReasons(value: unknown): PrecisionFailureReas
   return normalized;
 }
 
+function normalizedQuantileObservations(
+  value: unknown,
+): ModelQuantileObservations | null | undefined {
+  if (value === null) return null;
+  const parsed = QuantileRearrangementObservationsSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const observations: WorkerQuantileRearrangementObservations = parsed.data;
+  return {
+    rowCount: observations.row_count,
+    nonFiniteValueCount: observations.non_finite_value_count,
+    crossingRowCount: observations.crossing_row_count,
+    crossingAdjacentPairCount: observations.crossing_adjacent_pair_count,
+    adjustedRowCount: observations.adjusted_row_count,
+    q50AdjustmentIqrRatioMedian: observations.q50_adjustment_iqr_ratio_median,
+    q50AdjustmentIqrRatioP95: observations.q50_adjustment_iqr_ratio_p95,
+    q50AdjustmentIqrRatioMax: observations.q50_adjustment_iqr_ratio_max,
+    postprocessedMonotonic: observations.postprocessed_monotonic,
+  };
+}
+
 function safePeakVramBytes(value: unknown): number | undefined {
   return typeof value === "number"
     && Number.isSafeInteger(value)
@@ -1274,6 +1316,21 @@ function normalizeLaneForecast(
     "precisionValidation",
   );
   const rawMemoryStatus = first(model, "memory_status", "memoryStatus");
+  const rawQuantileMonotonicityPolicy = first(
+    model,
+    "quantile_monotonicity_policy",
+    "quantileMonotonicityPolicy",
+  );
+  const rawFp32QuantileObservations = first(
+    model,
+    "fp32_quantile_observations",
+    "fp32QuantileObservations",
+  );
+  const rawMixedQuantileObservations = (
+    model && Object.prototype.hasOwnProperty.call(model, "mixed_quantile_observations")
+      ? model.mixed_quantile_observations
+      : model?.mixedQuantileObservations
+  );
   const rawQuantileTailPolicy = first(
     model,
     "quantile_tail_policy",
@@ -1290,6 +1347,14 @@ function normalizeLaneForecast(
   const memoryStatus = rawMemoryStatus === undefined && lane === "kronos_base"
     ? "ok"
     : exactEnum(rawMemoryStatus, ["ok"] as const);
+  const quantileMonotonicityPolicy = (
+    rawQuantileMonotonicityPolicy === undefined && lane === "kronos_base"
+  )
+    ? "native"
+    : exactEnum(
+      rawQuantileMonotonicityPolicy,
+      ["native", "fp32_monotone_rearrangement_v1"] as const,
+    );
   const quantileTailPolicy = rawQuantileTailPolicy === undefined && lane === "kronos_base"
     ? "native"
     : exactEnum(rawQuantileTailPolicy, ["native", "tail_clamped_q10_q90"] as const);
@@ -1300,10 +1365,19 @@ function normalizeLaneForecast(
     : normalizedPrecisionFailureReasons(rawPrecisionFailureReasons);
   if (!precisionValidation) throw new Error("model_precision_validation_invalid");
   if (!memoryStatus) throw new Error("model_memory_status_invalid");
+  if (!quantileMonotonicityPolicy) {
+    throw new Error("model_quantile_monotonicity_policy_invalid");
+  }
   if (!quantileTailPolicy) throw new Error("model_quantile_tail_policy_invalid");
   if (!precisionFailureReasons) {
     throw new Error("model_precision_failure_reasons_invalid");
   }
+  const fp32QuantileObservations = rawFp32QuantileObservations === undefined
+    ? undefined
+    : normalizedQuantileObservations(rawFp32QuantileObservations);
+  const mixedQuantileObservations = rawMixedQuantileObservations === undefined
+    ? undefined
+    : normalizedQuantileObservations(rawMixedQuantileObservations);
 
   const rawPeakVramBytes = first(model, "peak_vram_bytes", "peakVramBytes");
   const rawPeakVramMeasurement = first(
@@ -1332,19 +1406,45 @@ function normalizeLaneForecast(
     if (precision !== "fp32"
       || precisionValidation !== "not_required"
       || memoryStatus !== "ok"
+      || quantileMonotonicityPolicy !== "native"
+      || fp32QuantileObservations !== undefined
+      || mixedQuantileObservations !== undefined
       || quantileTailPolicy !== "native"
       || precisionFailureReasons.length > 0) {
       throw new Error("model_precision_provenance_invalid");
     }
   } else {
+    const mixedRuntimeFailed = precisionFailureReasons
+      .some((reason) => reason.startsWith("mixed_"));
+    const validFp32Observations = fp32QuantileObservations !== undefined
+      && fp32QuantileObservations !== null
+      && fp32QuantileObservations.rowCount === 128 * 60
+      && fp32QuantileObservations.nonFiniteValueCount === 0
+      && fp32QuantileObservations.postprocessedMonotonic;
+    const validMixedObservations = mixedRuntimeFailed
+      ? mixedQuantileObservations === null
+      : mixedQuantileObservations !== undefined
+        && mixedQuantileObservations !== null
+        && mixedQuantileObservations.rowCount === 128 * 60
+        && precisionFailureReasons.includes("non_finite_output")
+          === (mixedQuantileObservations.nonFiniteValueCount > 0)
+        && precisionFailureReasons.includes("quantile_postprocessing_failed")
+          === (
+            mixedQuantileObservations.nonFiniteValueCount === 0
+            && !mixedQuantileObservations.postprocessedMonotonic
+          );
     const mixedPrecisionValid = precision === "fp16"
       && precisionValidation === "passed"
       && precisionFailureReasons.length === 0;
     const fp32FallbackValid = precision === "fp32"
       && precisionValidation === "fallback_fp32"
       && precisionFailureReasons.length > 0;
+    if (!validFp32Observations || !validMixedObservations) {
+      throw new Error("model_quantile_observations_invalid");
+    }
     if ((!mixedPrecisionValid && !fp32FallbackValid)
       || memoryStatus !== "ok"
+      || quantileMonotonicityPolicy !== "fp32_monotone_rearrangement_v1"
       || quantileTailPolicy !== "tail_clamped_q10_q90"
       || peakVramBytes === undefined
       || peakVramBytes <= 0
@@ -1373,6 +1473,9 @@ function normalizeLaneForecast(
     precision,
     precisionValidation,
     memoryStatus,
+    quantileMonotonicityPolicy,
+    fp32QuantileObservations,
+    mixedQuantileObservations,
     quantileTailPolicy,
     precisionFailureReasons,
     latencyMs: finite(first(laneRun, "latency_ms", "latencyMs"))
@@ -1576,6 +1679,11 @@ function laneModelProvenanceIsConsistent(
     && state.precision === forecast.precision
     && state.precisionValidation === forecast.precisionValidation
     && state.memoryStatus === forecast.memoryStatus
+    && state.quantileMonotonicityPolicy === forecast.quantileMonotonicityPolicy
+    && JSON.stringify(state.fp32QuantileObservations)
+      === JSON.stringify(forecast.fp32QuantileObservations)
+    && JSON.stringify(state.mixedQuantileObservations)
+      === JSON.stringify(forecast.mixedQuantileObservations)
     && state.quantileTailPolicy === forecast.quantileTailPolicy
     && state.peakVramBytes === forecast.peakVramBytes
     && state.peakVramMeasurement === forecast.peakVramMeasurement
@@ -1607,6 +1715,9 @@ function persistedLaneModelProvenance(state: LaneState) {
     precision: state.precision,
     precisionValidation: state.precisionValidation,
     memoryStatus: state.memoryStatus,
+    quantileMonotonicityPolicy: state.quantileMonotonicityPolicy,
+    fp32QuantileObservations: state.fp32QuantileObservations,
+    mixedQuantileObservations: state.mixedQuantileObservations,
     quantileTailPolicy: state.quantileTailPolicy,
     ...(state.precisionFailureReasons
       ? { precisionFailureReasons: [...state.precisionFailureReasons] }
@@ -3344,6 +3455,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           state.attentionBackend = forecast.attentionBackend;
           state.precisionValidation = forecast.precisionValidation;
           state.memoryStatus = forecast.memoryStatus;
+          state.quantileMonotonicityPolicy = forecast.quantileMonotonicityPolicy;
+          state.fp32QuantileObservations = forecast.fp32QuantileObservations;
+          state.mixedQuantileObservations = forecast.mixedQuantileObservations;
           state.quantileTailPolicy = forecast.quantileTailPolicy;
           state.precisionFailureReasons = [...forecast.precisionFailureReasons];
           state.peakVramBytes = maximumDefined(

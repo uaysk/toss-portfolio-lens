@@ -19,12 +19,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "worker" / "ai" / "src"))
 
 from portfolio_ai_worker.adapters import RuntimeDevice  # noqa: E402
+from portfolio_ai_worker.contracts import (  # noqa: E402
+    FINCAST_QUALIFICATION_CONTEXT_COUNT,
+    FINCAST_QUALIFICATION_ROWS_PER_CONTEXT,
+)
 from portfolio_ai_worker.fincast import (  # noqa: E402
     MODEL_REVISION,
     SOURCE_REVISION,
     _load_model,
     _source_snapshot,
     observe_fincast_decode_output_dtypes,
+    project_native_quantiles,
+    rearrange_native_quantiles,
     validate_fincast_mixed_inference_observations,
 )
 from portfolio_ai_worker.precision_validation import (  # noqa: E402
@@ -33,7 +39,10 @@ from portfolio_ai_worker.precision_validation import (  # noqa: E402
     MixedPrecisionMetrics,
     MixedPrecisionRuntimeFailure,
     PrecisionArtifact,
+    MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO,
     MIXED_RUNTIME_POLICY_VERSION,
+    QUANTILE_MONOTONICITY_POLICY,
+    QuantileRearrangementObservations,
     cost_exceeding_direction,
     precision_failure_reasons,
     qualification_environment_from_torch,
@@ -61,6 +70,7 @@ class PrecisionRunResult:
     peak_vram_bytes: int
     peak_vram_measurement_complete: bool
     failure: PrecisionRunFailureObservation | None
+    quantile_observations: QuantileRearrangementObservations | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -215,7 +225,7 @@ def _forecast(
     contexts: list[dict[str, object]],
     torch: object,
     precision: str,
-) -> ForecastOutput:
+) -> tuple[ForecastOutput, QuantileRearrangementObservations]:
     dtype = torch.float16 if precision == "mixed_float16" else torch.float32
     output: list[list[list[float]]] = []
     for index, context in enumerate(contexts):
@@ -239,7 +249,7 @@ def _forecast(
             observe_fincast_decode_output_dtypes(model, _mean, full)
         native = full[0, :, 1:].float().cpu().tolist()
         output.append(native)
-    return output
+    return _postprocess_qualification_forecasts(output)
 
 
 def _sanitized_failure(error: Exception, stage: str) -> PrecisionRunFailureObservation:
@@ -322,7 +332,7 @@ def run_precision(
         stage = "load"
         model = _load_model(source, artifact, precision, runtime)
         stage = "inference"
-        output = _forecast(model, contexts, torch, precision)
+        output, quantile_observations = _forecast(model, contexts, torch, precision)
         stage = "evaluation"
         peak_vram_bytes = max(
             0,
@@ -336,6 +346,7 @@ def run_precision(
             peak_vram_bytes=peak_vram_bytes,
             peak_vram_measurement_complete=True,
             failure=None,
+            quantile_observations=quantile_observations,
         )
     except Exception as error:
         return PrecisionRunResult(
@@ -371,6 +382,100 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
 
 
+def _require_qualification_forecast_shape(forecasts: ForecastOutput) -> None:
+    if len(forecasts) != FINCAST_QUALIFICATION_CONTEXT_COUNT or any(
+        len(context) != FINCAST_QUALIFICATION_ROWS_PER_CONTEXT
+        for context in forecasts
+    ):
+        raise ValueError(
+            "FinCast qualification requires exactly 128 contexts with 60 output rows each"
+        )
+
+
+def _postprocess_qualification_forecasts(
+    forecasts: ForecastOutput,
+) -> tuple[ForecastOutput, QuantileRearrangementObservations]:
+    """Rearrange native rows and summarize only rows whose order changed.
+
+    q50 adjustment ratios use the postprocessed q75-q25 IQR, floored by
+    max(abs(postprocessed q50) * 1e-9, 1e-12).
+    """
+
+    _require_qualification_forecast_shape(forecasts)
+    normalized: ForecastOutput = []
+    row_count = 0
+    non_finite_value_count = 0
+    crossing_row_count = 0
+    crossing_adjacent_pair_count = 0
+    adjusted_row_count = 0
+    q50_adjustment_iqr_ratios: list[float] = []
+    postprocessed_monotonic = True
+
+    for context in forecasts:
+        normalized_context: list[list[float]] = []
+        for values in context:
+            if len(values) != 9:
+                raise ValueError("FinCast qualification must return q10 through q90")
+            native = [float(value) for value in values]
+            row_count += 1
+            non_finite_value_count += sum(not math.isfinite(value) for value in native)
+            crossing_pairs = sum(
+                math.isfinite(left) and math.isfinite(right) and right < left
+                for left, right in zip(native, native[1:], strict=False)
+            )
+            crossing_adjacent_pair_count += crossing_pairs
+            crossing_row_count += crossing_pairs > 0
+
+            if all(math.isfinite(value) for value in native):
+                rearranged = list(rearrange_native_quantiles(native))
+                adjusted = rearranged != native
+                adjusted_row_count += adjusted
+                if adjusted:
+                    projected = project_native_quantiles(rearranged)
+                    iqr = max(
+                        projected[0.75] - projected[0.25],
+                        abs(projected[0.5]) * 1e-9,
+                        1e-12,
+                    )
+                    q50_ratio = abs(projected[0.5] - native[4]) / iqr
+                    q50_adjustment_iqr_ratios.append(
+                        min(
+                            q50_ratio
+                            if math.isfinite(q50_ratio)
+                            else MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO,
+                            MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO,
+                        )
+                    )
+            else:
+                rearranged = native
+            postprocessed_monotonic = (
+                postprocessed_monotonic and quantile_is_monotonic(rearranged)
+            )
+            normalized_context.append(rearranged)
+        normalized.append(normalized_context)
+
+    if row_count == 0:
+        raise ValueError("FinCast qualification returned no quantile rows")
+    if q50_adjustment_iqr_ratios:
+        q50_ratio_median = _percentile(q50_adjustment_iqr_ratios, 0.5)
+        q50_ratio_p95 = _percentile(q50_adjustment_iqr_ratios, 0.95)
+        q50_ratio_max = max(q50_adjustment_iqr_ratios)
+    else:
+        q50_ratio_median = q50_ratio_p95 = q50_ratio_max = 0.0
+    observations = QuantileRearrangementObservations(
+        row_count=row_count,
+        non_finite_value_count=non_finite_value_count,
+        crossing_row_count=crossing_row_count,
+        crossing_adjacent_pair_count=crossing_adjacent_pair_count,
+        adjusted_row_count=adjusted_row_count,
+        q50_adjustment_iqr_ratio_median=q50_ratio_median,
+        q50_adjustment_iqr_ratio_p95=q50_ratio_p95,
+        q50_adjustment_iqr_ratio_max=q50_ratio_max,
+        postprocessed_monotonic=postprocessed_monotonic,
+    )
+    return normalized, observations
+
+
 def qualification_metrics(
     fp32: ForecastOutput,
     mixed: ForecastOutput,
@@ -379,7 +484,16 @@ def qualification_metrics(
     mixed_peak: int,
 ) -> MixedPrecisionMetrics:
     finite = all(math.isfinite(value) for context in mixed for row in context for value in row)
-    monotonic = all(quantile_is_monotonic(row) for context in mixed for row in context)
+    monotonic = True
+    for context in mixed:
+        for row in context:
+            try:
+                rearrange_native_quantiles(row)
+            except (TypeError, ValueError):
+                monotonic = False
+                break
+        if not monotonic:
+            break
     agreements = 0
     comparisons = 0
     ratios: list[float] = []
@@ -388,40 +502,27 @@ def qualification_metrics(
         cost = float(contexts[context_index]["round_trip_cost_bps"]) / 10_000
         for reference, candidate in zip(reference_context, candidate_context, strict=True):
             comparisons += 1
-            if not quantile_is_monotonic(candidate):
+            try:
+                reference_native = rearrange_native_quantiles(reference)
+                candidate_native = rearrange_native_quantiles(candidate)
+            except (TypeError, ValueError):
                 ratios.append(1_000_000_000.0)
                 continue
-            reference_projected = (
-                (0.05, reference[0]),
-                (0.1, reference[0]),
-                (0.25, (reference[1] + reference[2]) / 2),
-                (0.5, reference[4]),
-                (0.75, (reference[6] + reference[7]) / 2),
-                (0.9, reference[8]),
-                (0.95, reference[8]),
-            )
-            candidate_projected = (
-                (0.05, candidate[0]),
-                (0.1, candidate[0]),
-                (0.25, (candidate[1] + candidate[2]) / 2),
-                (0.5, candidate[4]),
-                (0.75, (candidate[6] + candidate[7]) / 2),
-                (0.9, candidate[8]),
-                (0.95, candidate[8]),
-            )
+            reference_projected = project_native_quantiles(reference_native)
+            candidate_projected = project_native_quantiles(candidate_native)
             reference_direction = cost_exceeding_direction(
-                [(quantile, price / base - 1) for quantile, price in reference_projected],
+                [(quantile, price / base - 1) for quantile, price in reference_projected.items()],
                 cost,
             )
             candidate_direction = cost_exceeding_direction(
-                [(quantile, price / base - 1) for quantile, price in candidate_projected],
+                [(quantile, price / base - 1) for quantile, price in candidate_projected.items()],
                 cost,
             )
             agreements += reference_direction == candidate_direction
-            reference_q25 = (reference[1] + reference[2]) / 2
-            reference_q75 = (reference[6] + reference[7]) / 2
+            reference_q25 = reference_projected[0.25]
+            reference_q75 = reference_projected[0.75]
             scale = max(reference_q75 - reference_q25, abs(base) * 1e-9, 1e-12)
-            ratio = abs(candidate[4] - reference[4]) / scale
+            ratio = abs(candidate_projected[0.5] - reference_projected[0.5]) / scale
             ratios.append(ratio if math.isfinite(ratio) else 1_000_000_000.0)
     reduction = 1 - mixed_peak / fp32_peak if fp32_peak > 0 else float("-inf")
     return MixedPrecisionMetrics(
@@ -471,12 +572,21 @@ def qualify_precision(
         or fp32_run.peak_vram_bytes <= 0
     ):
         raise RuntimeError("FP32 FinCast baseline runtime failed")
-    if not all(quantile_is_monotonic(row) for context in fp32_run.forecasts for row in context):
-        raise RuntimeError("FP32 FinCast baseline is non-finite or has crossing quantiles")
+    _require_qualification_forecast_shape(fp32_run.forecasts)
+    if fp32_run.quantile_observations is None:
+        fp32_forecasts, fp32_observations = _postprocess_qualification_forecasts(
+            fp32_run.forecasts
+        )
+    else:
+        fp32_forecasts = fp32_run.forecasts
+        fp32_observations = fp32_run.quantile_observations
+    if not fp32_observations.postprocessed_monotonic:
+        raise RuntimeError("FP32 FinCast baseline is non-finite after quantile postprocessing")
 
     mixed_run = run_precision(source, mixed_path, "mixed_float16", contexts, torch)
     runtime_failure: MixedPrecisionRuntimeFailure | None = None
     metrics: MixedPrecisionMetrics | None = None
+    mixed_observations: QuantileRearrangementObservations | None = None
     if mixed_run.failure is not None:
         runtime_failure = _runtime_failure(mixed_run.failure)
     elif (
@@ -493,14 +603,23 @@ def qualify_precision(
         )
     else:
         try:
+            _require_qualification_forecast_shape(mixed_run.forecasts)
+            if mixed_run.quantile_observations is None:
+                mixed_forecasts, mixed_observations = _postprocess_qualification_forecasts(
+                    mixed_run.forecasts
+                )
+            else:
+                mixed_forecasts = mixed_run.forecasts
+                mixed_observations = mixed_run.quantile_observations
             metrics = qualification_metrics(
-                fp32_run.forecasts,
-                mixed_run.forecasts,
+                fp32_forecasts,
+                mixed_forecasts,
                 contexts,
                 fp32_run.peak_vram_bytes,
                 mixed_run.peak_vram_bytes,
             )
         except Exception as error:
+            mixed_observations = None
             runtime_failure = _runtime_failure(_sanitized_failure(error, "evaluation"))
 
     reasons = precision_failure_reasons(metrics, runtime_failure=runtime_failure)
@@ -515,6 +634,9 @@ def qualify_precision(
         context_fixture_sha256=fixture_hash,
         context_count=128,
         quantile_tail_policy="tail_clamped_q10_q90",
+        quantile_monotonicity_policy=QUANTILE_MONOTONICITY_POLICY,
+        fp32_quantile_observations=fp32_observations,
+        mixed_quantile_observations=mixed_observations,
         fp32=PrecisionArtifact(
             file=fp32_path.name,
             sha256=(

@@ -15,6 +15,7 @@ from portfolio_ai_worker.contracts import (
     ForecastSeries,
     ModelProvenance,
     PriceBar,
+    QuantileRearrangementObservations,
     TargetStopSpec,
 )
 
@@ -130,6 +131,82 @@ def test_cuda_device_provenance_is_optional_for_legacy_but_atomic_when_present()
                 "cuda_capability": "6.1",
             }
         )
+
+
+def test_fincast_provenance_carries_strict_bounded_rearrangement_observations() -> None:
+    observations = QuantileRearrangementObservations(
+        row_count=7_680,
+        non_finite_value_count=0,
+        crossing_row_count=11,
+        crossing_adjacent_pair_count=14,
+        adjusted_row_count=11,
+        q50_adjustment_iqr_ratio_median=0.01,
+        q50_adjustment_iqr_ratio_p95=0.04,
+        q50_adjustment_iqr_ratio_max=0.08,
+        postprocessed_monotonic=True,
+    )
+    common = {
+        "model_id": "Vincent05R/FinCast",
+        "model_revision": "pinned",
+        "source_revision": "pinned-source",
+        "loader_version": "fincast-source-test",
+        "license": "Apache-2.0",
+        "device": "cuda",
+        "device_name": "Tesla P40",
+        "cuda_capability": "6.1",
+        "dtype": "float32",
+        "attention_backend": "math",
+        "loaded": True,
+        "precision_validation": "fallback_fp32",
+        "quantile_tail_policy": "tail_clamped_q10_q90",
+        "quantile_monotonicity_policy": "fp32_monotone_rearrangement_v1",
+    }
+
+    with pytest.raises(ValidationError, match="FP32 quantile observations"):
+        ModelProvenance(**common)
+
+    provenance = ModelProvenance(
+        **common,
+        fp32_quantile_observations=observations,
+        mixed_quantile_observations=observations,
+    )
+    assert provenance.fp32_quantile_observations == observations
+    assert provenance.mixed_quantile_observations == observations
+    assert set(observations.model_dump()) == {
+        "row_count",
+        "non_finite_value_count",
+        "crossing_row_count",
+        "crossing_adjacent_pair_count",
+        "adjusted_row_count",
+        "q50_adjustment_iqr_ratio_median",
+        "q50_adjustment_iqr_ratio_p95",
+        "q50_adjustment_iqr_ratio_max",
+        "postprocessed_monotonic",
+    }
+
+    extra_nested_field = provenance.model_dump(mode="python")
+    extra_nested_field["fp32_quantile_observations"]["unexpected"] = True
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ModelProvenance.model_validate(extra_nested_field)
+
+    mixed_without_observations = {
+        **common,
+        "dtype": "mixed_float16",
+        "precision_validation": "passed",
+        "fp32_quantile_observations": observations,
+    }
+    with pytest.raises(ValidationError, match="mixed quantile observations"):
+        ModelProvenance(**mixed_without_observations)
+
+    kronos_with_observations = {
+        **common,
+        "model_id": "NeoQuasar/Kronos-base",
+        "quantile_tail_policy": "native",
+        "quantile_monotonicity_policy": "native",
+        "fp32_quantile_observations": observations,
+    }
+    with pytest.raises(ValidationError, match="only for loaded FinCast"):
+        ModelProvenance(**kronos_with_observations)
 
 
 def test_naive_input_end_is_rejected() -> None:
