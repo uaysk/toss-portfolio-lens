@@ -2,6 +2,7 @@ import {
   DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
   DerivativesTradingUsdsFutures,
   DerivativesTradingUsdsFuturesRestAPI,
+  DerivativesTradingUsdsFuturesWebsocketStreams,
 } from "@binance/derivatives-trading-usds-futures";
 import {
   BINANCE_MINIMUM_LISTING_AGE_MS,
@@ -549,6 +550,131 @@ function boundedInteger(
   return resolved;
 }
 
+type BinanceSdkStreamsConnection = Awaited<ReturnType<
+  DerivativesTradingUsdsFutures["websocketStreams"]["connect"]
+>>;
+
+type BinanceSdkMessageStream<T> = {
+  on(event: "message", listener: (data: T) => void | Promise<void>): void;
+};
+
+type BinanceTypedStreamKind = "agg_trade" | "book_ticker" | "kline" | "mark_price";
+
+const BINANCE_TYPED_STREAM_SUFFIXES: ReadonlyArray<{
+  kind: BinanceTypedStreamKind;
+  suffix: string;
+}> = [
+  { kind: "kline", suffix: "@kline_1m" },
+  { kind: "agg_trade", suffix: "@aggTrade" },
+  { kind: "book_ticker", suffix: "@bookTicker" },
+  { kind: "mark_price", suffix: "@markPrice@1s" },
+];
+
+function parseBinanceTypedStream(rawStream: string): {
+  kind: BinanceTypedStreamKind;
+  symbol: string;
+} {
+  for (const definition of BINANCE_TYPED_STREAM_SUFFIXES) {
+    if (!rawStream.endsWith(definition.suffix)) continue;
+    const symbol = rawStream.slice(0, -definition.suffix.length).trim().toLowerCase();
+    if (symbol) return { kind: definition.kind, symbol };
+  }
+  throw new Error(`Unsupported Binance USD-M public stream: ${rawStream}`);
+}
+
+/**
+ * The v36 generated SDK opens market, public, and private WebSocket paths from
+ * connect(). Passing raw stream names there puts every name on all three URLs.
+ * This logical connection instead subscribes through generated methods, which
+ * route each stream to its declared URL path, and exposes the small connection
+ * contract consumed by the bounded reconnect coordinator below.
+ */
+class BinanceTypedPublicStreamConnection implements BinancePublicStreamConnection {
+  private readonly messageListeners = new Set<(raw: unknown) => void>();
+  private readonly errorListeners = new Set<(error: unknown) => void>();
+  private readonly closeListeners = new Set<() => void>();
+  private disconnectPromise: Promise<void> | undefined;
+
+  constructor(
+    private readonly connection: BinanceSdkStreamsConnection,
+    rawStreams: readonly string[],
+  ) {
+    connection.on("error", (error: unknown) => {
+      for (const listener of this.errorListeners) listener(error);
+    });
+    connection.on("close", () => {
+      for (const listener of this.closeListeners) listener();
+    });
+
+    for (const rawStream of rawStreams) {
+      const stream = parseBinanceTypedStream(rawStream);
+      if (stream.kind === "agg_trade") {
+        this.attach(connection.aggregateTradeStreams({ symbol: stream.symbol }));
+      } else if (stream.kind === "kline") {
+        this.attach(connection.klineCandlestickStreams({
+          symbol: stream.symbol,
+          interval: DerivativesTradingUsdsFuturesWebsocketStreams
+            .KlineCandlestickStreamsIntervalEnum.INTERVAL_1m,
+        }));
+      } else if (stream.kind === "mark_price") {
+        this.attach(connection.markPriceStream({
+          symbol: stream.symbol,
+          updateSpeed: DerivativesTradingUsdsFuturesWebsocketStreams
+            .MarkPriceStreamUpdateSpeedEnum.UPDATE_SPEED_1s,
+        }));
+      } else {
+        this.attach(connection.individualSymbolBookTickerStreams({
+          symbol: stream.symbol,
+        }));
+      }
+    }
+  }
+
+  private attach<T>(stream: BinanceSdkMessageStream<T>): void {
+    stream.on("message", (data) => {
+      for (const listener of this.messageListeners) listener(data);
+    });
+  }
+
+  on(
+    event: "message" | "error" | "close",
+    listener: ((raw: unknown) => void) | ((error: unknown) => void) | (() => void),
+  ): unknown {
+    if (event === "message") {
+      this.messageListeners.add(listener as (raw: unknown) => void);
+    } else if (event === "error") {
+      this.errorListeners.add(listener as (error: unknown) => void);
+    } else {
+      this.closeListeners.add(listener as () => void);
+    }
+    return this;
+  }
+
+  disconnect(): Promise<void> {
+    this.disconnectPromise ??= Promise.resolve().then(() => this.connection.disconnect());
+    return this.disconnectPromise;
+  }
+}
+
+async function createOfficialBinanceTypedConnection(
+  streams: readonly string[],
+): Promise<BinancePublicStreamConnection> {
+  const client = new DerivativesTradingUsdsFutures({
+    configurationWebsocketStreams: {
+      wsURL: DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
+    },
+  });
+  // v36 hardcodes market/public/private endpoints. Raw stream names must not
+  // be supplied here because the SDK would append them to every endpoint.
+  const connection = await client.websocketStreams.connect();
+  try {
+    return new BinanceTypedPublicStreamConnection(connection, streams);
+  } catch (error) {
+    await connection.disconnect().catch(() => undefined);
+    throw error;
+  }
+}
+
 export class OfficialBinanceUsdmPublicStreams {
   private readonly connectionFactory: BinancePublicStreamConnectionFactory;
   private readonly clock: BinanceReconnectClock;
@@ -581,14 +707,7 @@ export class OfficialBinanceUsdmPublicStreams {
       "Binance maximum reconnect delay",
     );
     this.isRecoverableError = options.isRecoverableError ?? (() => true);
-    this.connectionFactory = options.connectionFactory ?? (async (streams) => {
-      const client = new DerivativesTradingUsdsFutures({
-        configurationWebsocketStreams: {
-          wsURL: DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
-        },
-      });
-      return client.websocketStreams.connect({ stream: [...streams] });
-    });
+    this.connectionFactory = options.connectionFactory ?? createOfficialBinanceTypedConnection;
   }
 
   async subscribe(

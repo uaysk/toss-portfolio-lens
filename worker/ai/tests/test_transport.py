@@ -161,6 +161,7 @@ async def _round_trip(tmp_path) -> None:
                         "device": "cpu",
                         "model_id": "test/deterministic",
                         "model_revision": "test-only",
+                        "precision": "float32",
                     },
                     "active_requests": 0,
                     "queued_requests": 0,

@@ -322,6 +322,7 @@ class WebSocketRuntime:
                 "device": model.device,
                 "model_id": model.model_id,
                 "model_revision": model.model_revision,
+                "precision": model.dtype,
             },
             "active_requests": self.scheduler.active_requests,
             "queued_requests": self.scheduler.queued_requests,
