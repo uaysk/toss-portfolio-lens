@@ -14,6 +14,8 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 FROM node:22-alpine AS runtime
+ARG APP_GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
 ENV NODE_ENV=production
 WORKDIR /app
 RUN addgroup -g 10001 -S portfolio && adduser -u 10001 -S portfolio -G portfolio

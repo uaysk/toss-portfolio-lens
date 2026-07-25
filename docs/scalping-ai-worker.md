@@ -225,7 +225,7 @@ AI 전용 변수만 GPU host에서 별도로 제공하면 된다.
 GPU 호스트의 Kronos 1차 `.env` 예시:
 
 ```text
-AI_WORKER_IMAGE=registry.example/toss-portfolio-lens-ai-worker:<immutable-tag>
+AI_WORKER_IMAGE=harbor.uaysk.com/toss-portfolio-lens/kronos-worker@sha256:<manifest-digest>
 AI_REMOTE_BIND_ADDRESS=172.30.1.14
 AI_KRONOS_REMOTE_PORT=18765
 AI_MODEL_CACHE_SOURCE=/opt/toss-portfolio-lens/ai-model-cache
@@ -265,7 +265,7 @@ FinCast cache·token을 요구하지 않으며 18766을 열지 않는다.
 함께 이전 digest로 rollback한다.
 
 ```text
-AI_FINCAST_WORKER_IMAGE=registry.example/toss-portfolio-lens-fincast-worker:<immutable-tag>
+AI_FINCAST_WORKER_IMAGE=harbor.uaysk.com/toss-portfolio-lens/fincast-worker@sha256:<manifest-digest>
 AI_FINCAST_REMOTE_PORT=18766
 AI_FINCAST_MODEL_CACHE_SOURCE=/opt/toss-portfolio-lens/fincast-model-cache
 AI_FINCAST_AUTH_SECRET_SOURCE=/opt/toss-portfolio-lens/fincast-auth

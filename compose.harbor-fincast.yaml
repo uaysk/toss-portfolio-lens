@@ -1,0 +1,4 @@
+services:
+  fincast-worker:
+    image: ${AI_FINCAST_WORKER_IMAGE:?set AI_FINCAST_WORKER_IMAGE to a Harbor repository digest}
+    build: !reset null

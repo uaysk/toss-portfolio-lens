@@ -1,0 +1,12 @@
+services:
+  web:
+    image: ${WEB_IMAGE:?set WEB_IMAGE to a Harbor repository digest}
+    build: !reset null
+
+  compute-worker:
+    image: ${RUST_WORKER_IMAGE:?set RUST_WORKER_IMAGE to a Harbor repository digest}
+    build: !reset null
+
+  compute-ipc:
+    image: ${RUST_WORKER_IMAGE:?set RUST_WORKER_IMAGE to a Harbor repository digest}
+    build: !reset null

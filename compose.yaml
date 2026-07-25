@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     env_file:
       - path: .env
         required: false
@@ -74,6 +76,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker.rust
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     environment:
       POSTGRES_URL: ${POSTGRES_URL:-}
       POSTGRES_HOST: ${POSTGRES_HOST:-}
@@ -104,6 +108,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker.rust
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     command: ["serve", "--socket", "/app/run/compute.sock"]
     environment:
       TZ: Asia/Seoul
@@ -123,6 +129,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker.ai
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     command: ["serve"]
     environment:
       AI_WEBSOCKET_HOST: 0.0.0.0
@@ -189,6 +197,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker.fincast
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     command: ["serve"]
     environment:
       AI_WEBSOCKET_HOST: 0.0.0.0

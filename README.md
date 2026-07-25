@@ -346,6 +346,12 @@ docker compose down
 
 기본 저장소는 SQLite이며 `portfolio_data` Docker volume에 저장됩니다. PostgreSQL과 MySQL/MariaDB 설정은 [.env.example](.env.example)에 있습니다. 외부 DB를 선택한 상태에서 연결이나 마이그레이션이 실패하면 다른 저장소로 자동 전환하지 않고 시작을 중단합니다.
 
+### Harbor 운영 배포
+
+운영에서는 `harbor.uaysk.com/toss-portfolio-lens`의 manifest digest를 source of truth로 사용하고,
+pull-only Compose override로 로컬 build를 차단합니다. release/rollback digest set, GPU worker 분리 배포와
+안전한 로컬 cache 정리 절차는 [Harbor 기반 이미지 배포](docs/harbor-deployment.md)를 참고하세요.
+
 ### 로컬 개발
 
 Docker 없이 개발하려면 Node.js 22와 Rust 1.97 toolchain이 필요합니다.

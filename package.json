@@ -37,7 +37,8 @@
     "docs:mcp:check": "tsx scripts/generate-mcp-docs.ts --check",
     "mcp:oauth:bootstrap": "node scripts/generate-mcp-oauth-secrets.mjs",
     "mcp:oauth:smoke": "node scripts/mcp-oauth-http-smoke.mjs",
-    "mcp:browser:smoke": "node scripts/mcp-browser-smoke.mjs"
+    "mcp:browser:smoke": "node scripts/mcp-browser-smoke.mjs",
+    "verify:harbor-release": "node scripts/verify-harbor-release.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1088.0",
