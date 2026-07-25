@@ -28,11 +28,18 @@ export type CryptoWorkerPublicState = {
   precision: "fp16" | "fp32" | "unknown";
 };
 
+export type CryptoSimulationRuntimeTerminalFailure = {
+  code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE";
+  message: string;
+  retryable: boolean;
+};
+
 export type CryptoSimulationRuntimeResult = {
   summary: unknown;
   result: unknown;
   warnings?: string[];
   artifacts?: Array<{ type: ArtifactType; content: unknown; rowCount?: number }>;
+  terminalFailure?: CryptoSimulationRuntimeTerminalFailure;
 };
 
 export interface CryptoSimulationRuntime {
@@ -501,6 +508,16 @@ export class CryptoSimulationCoordinator {
         });
       }
       await throwIfCancelled();
+      if (completed.terminalFailure) {
+        const failure = completed.terminalFailure;
+        await this.options.repository.fail(input.runId, {
+          code: failure.code,
+          message: failure.message.slice(0, 500),
+          retryable: failure.retryable,
+          realOrderApiUsed: false,
+        }, completed.warnings ?? []);
+        return;
+      }
       const stored = await this.options.repository.complete(
         input.runId,
         completed.summary,

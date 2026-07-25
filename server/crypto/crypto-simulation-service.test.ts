@@ -601,6 +601,69 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
     ]);
   });
 
+  it("persists terminal artifacts but fails instead of completing an unsettled run", async () => {
+    const terminalDiagnostics = {
+      settlementComplete: false,
+      terminalSettlement: {
+        status: "unsettled_fail_closed",
+        lanes: [{ lane: "kronos_base", status: "unsettled_fail_closed" }],
+      },
+    };
+    const runtime: CryptoSimulationRuntime = {
+      run: vi.fn().mockResolvedValue({
+        summary: { phase: "failed", settlementComplete: false },
+        result: { snapshot: { phase: "failed", settlementComplete: false } },
+        warnings: ["terminal_settlement_unavailable"],
+        terminalFailure: {
+          code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
+          message: "Terminal settlement failed closed.",
+          retryable: true,
+        },
+        artifacts: [
+          {
+            type: "simulation-trades",
+            content: { settlementComplete: false, positions: [{ symbol: "BTCUSDT" }] },
+            rowCount: 1,
+          },
+          {
+            type: "simulation-diagnostics",
+            content: terminalDiagnostics,
+            rowCount: 1,
+          },
+        ],
+      }),
+    };
+    const test = harness({ runtime });
+    const started = await test.coordinator.start(request(), "owner-a") as {
+      run: PortfolioRunRecord;
+    };
+
+    await eventually(() => test.repository.runs.get(started.run.id)?.status === "failed");
+    expect(test.repository.runs.get(started.run.id)).toMatchObject({
+      status: "failed",
+      error: {
+        code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
+        message: "Terminal settlement failed closed.",
+        retryable: true,
+        realOrderApiUsed: false,
+      },
+      warnings: ["terminal_settlement_unavailable"],
+    });
+    expect(test.repository.runs.get(started.run.id)?.summary).toBeUndefined();
+    expect(test.artifacts.values.get(started.run.id)?.get("simulation-trades")).toBeDefined();
+    expect(
+      test.artifacts.values.get(started.run.id)?.get("simulation-diagnostics")?.content,
+    ).toEqual(terminalDiagnostics);
+    const report = await test.coordinator.report(started.run.id, "owner-a") as {
+      artifacts: Array<{ type: ArtifactType }>;
+    };
+    expect(report.artifacts.map(({ type }) => type)).toEqual([
+      "simulation-selection",
+      "simulation-trades",
+      "simulation-diagnostics",
+    ]);
+  });
+
   it("enforces owner and global active limits, cancels causally, and frees slots", async () => {
     const runtime = abortingRuntime();
     const test = harness({ runtime, maximumActiveSessions: 2 });

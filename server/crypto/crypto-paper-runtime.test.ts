@@ -498,7 +498,11 @@ describe("CryptoPaperRuntime", () => {
       rawPayloadRetained: false,
     });
     expect(snapshots.length).toBeGreaterThan(1);
-    expect(taskContext.updates.at(-1)).toBe(1);
+    expect(taskContext.updates.at(-1)).toBe(0.999);
+    expect(terminal).toMatchObject({ phase: "failed", progress: 0.999 });
+    expect(result.terminalFailure?.code).toBe(
+      "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
+    );
   });
 
   it("drains risk streams during deferred inference and fills only after the completion watermark", async () => {
@@ -907,6 +911,19 @@ describe("CryptoPaperRuntime", () => {
       ...riskPrelude(),
       { at: START + 100, event: finalKline(START + 100, true) },
       { at: START + 200, event: aggTrade(START + 200) },
+      // An exchange-clock-ahead event must not end the local run early.
+      {
+        at: START + 300,
+        event: { ...aggTrade(START + 60_001), receivedAt: START + 300 },
+      },
+      {
+        at: START + 60_000,
+        event: {
+          ...aggTrade(START + 60_002, 102),
+          // Receipt time is telemetry only for terminal eligibility.
+          receivedAt: START + 500,
+        },
+      },
     ]);
     const runtime = new CryptoPaperRuntime({
       rest: rest(),
@@ -938,6 +955,8 @@ describe("CryptoPaperRuntime", () => {
       .fills as Array<UnknownRecord>;
     const fincastFills = ((lanes.fincast as UnknownRecord).ledger as UnknownRecord)
       .fills as Array<UnknownRecord>;
+    expect(kronosFills).toHaveLength(2);
+    expect(fincastFills).toHaveLength(2);
     expect(kronosFills[0]).toMatchObject({
       side: "long",
       decisionAt: START + 160,
@@ -948,6 +967,22 @@ describe("CryptoPaperRuntime", () => {
       decisionAt: START + 160,
       executedAt: START + 200,
     });
+    expect(kronosFills[1]).toMatchObject({
+      action: "reduce",
+      side: "long",
+      reduceOnly: true,
+      reason: "terminal_settlement",
+      decisionAt: START + 60_000,
+      executedAt: START + 60_002,
+    });
+    expect(fincastFills[1]).toMatchObject({
+      action: "reduce",
+      side: "short",
+      reduceOnly: true,
+      reason: "terminal_settlement",
+      decisionAt: START + 60_000,
+      executedAt: START + 60_002,
+    });
     const comparison = artifact(result, "simulation-comparison");
     expect(comparison).toMatchObject({
       sameOrigin: true,
@@ -956,6 +991,418 @@ describe("CryptoPaperRuntime", () => {
       sameFillBarrier: true,
       outcome: "inconclusive",
     });
+    const settlement = artifact(result, "simulation-trades").terminalSettlement as UnknownRecord;
+    expect(settlement).toMatchObject({
+      scheduling: "expiry_boundary_event",
+      decisionAt: new Date(START + 60_000).toISOString(),
+      settlementComplete: true,
+      status: "settled",
+      candidateEventsObserved: 1,
+      boundaryTrigger: {
+        kind: "agg_trade",
+        causalAt: new Date(START + 60_002).toISOString(),
+        receivedAt: new Date(START + 500).toISOString(),
+        observedPrice: 102,
+        aggregateTradeId: String(START + 60_002),
+      },
+      fillBarrierEvent: {
+        kind: "agg_trade",
+        causalAt: new Date(START + 60_002).toISOString(),
+        receivedAt: new Date(START + 500).toISOString(),
+        observedPrice: 102,
+        aggregateTradeId: String(START + 60_002),
+      },
+    });
+    expect(settlement.commonFillBarrierDigest).toEqual(expect.any(String));
+    expect(settlement.lanes).toEqual([
+      expect.objectContaining({
+        lane: "kronos_base",
+        status: "settled",
+        settledBy: "terminal_reduce",
+        remainingQuantity: 0,
+        fillEventKind: "agg_trade",
+      }),
+      expect.objectContaining({
+        lane: "fincast",
+        status: "settled",
+        settledBy: "terminal_reduce",
+        remainingQuantity: 0,
+        fillEventKind: "agg_trade",
+      }),
+    ]);
+  });
+
+  it("drains pre-expiry ingress before the ordered terminal boundary", async () => {
+    const clock = new ScheduledClock();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const streams: CryptoPublicStreams = {
+      subscribe: vi.fn(async (_symbols, onEvent) => {
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+          {
+            at: START + 59_970,
+            event: bookTicker(START + 59_970, 99.99, 100.01),
+          },
+          {
+            at: START + 59_980,
+            event: markPrice(START + 59_980, 100),
+          },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        clock.schedule(START + 59_999, () => {
+          // Both callbacks run before the reducer resumes. The first trade was
+          // actually ingressed inside the live window and must open the
+          // position before the ordered expiry control closes that window.
+          onEvent(aggTrade(START + 59_999, 100));
+          clock.advance(1);
+          onEvent(aggTrade(START + 60_002, 102));
+        });
+        return { close };
+      }),
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    expect(ledger.positions).toEqual([]);
+    expect(ledger.fills).toEqual([
+      expect.objectContaining({
+        action: "open",
+        executedAt: START + 59_999,
+      }),
+      expect.objectContaining({
+        action: "reduce",
+        reason: "terminal_settlement",
+        decisionAt: START + 60_000,
+        executedAt: START + 60_002,
+      }),
+    ]);
+    expect(result.summary).toMatchObject({
+      phase: "completed",
+      settlementComplete: true,
+    });
+    expect(trades.terminalSettlement).toMatchObject({
+      scheduling: "expiry_boundary_event",
+      barrier: {
+        eligibleAfterIngressSequence: expect.any(Number),
+        requiresStrictlyLaterIngress: true,
+      },
+      fillBarrierEvent: {
+        kind: "agg_trade",
+        causalAt: new Date(START + 60_002).toISOString(),
+      },
+    });
+  });
+
+  it("settles at the next finalized-kline open and rejects delayed pre-expiry trades", async () => {
+    const clock = new ScheduledClock();
+    const delayedPreExpiryTrade = {
+      ...aggTrade(START + 59_999, 150),
+      receivedAt: START + 70_000,
+    };
+    const settlementBar = nextFinalKline(
+      START + 120_000,
+      START + 120_100,
+    );
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      { at: START + 70_000, event: delayedPreExpiryTrade },
+      { at: START + 120_100, event: settlementBar },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    expect(ledger.positions).toEqual([]);
+    expect(ledger.fills).toEqual([
+      expect.objectContaining({
+        action: "open",
+        executedAt: START + 200,
+      }),
+      expect.objectContaining({
+        action: "reduce",
+        reduceOnly: true,
+        reason: "terminal_settlement",
+        decisionAt: START + 60_000,
+        executedAt: START + 120_000,
+      }),
+    ]);
+    const settlement = trades.terminalSettlement as UnknownRecord;
+    expect(settlement).toMatchObject({
+      scheduling: "expiry_timeout",
+      settlementComplete: true,
+      status: "settled",
+      graceDeadlineAt: new Date(START + 185_000).toISOString(),
+      candidateEventsObserved: 2,
+      rejectedAtOrBeforeExpiry: 1,
+      boundaryTrigger: {
+        kind: "kline",
+        causalAt: new Date(START + 120_000).toISOString(),
+        receivedAt: new Date(START + 120_100).toISOString(),
+        observedPrice: 101,
+        klineOpenTime: new Date(START + 120_000).toISOString(),
+      },
+      fillBarrierEvent: {
+        kind: "final_kline_open",
+        causalAt: new Date(START + 120_000).toISOString(),
+        receivedAt: new Date(START + 120_100).toISOString(),
+        observedPrice: 101,
+      },
+    });
+    expect(settlement.lanes).toEqual([
+      expect.objectContaining({
+        lane: "kronos_base",
+        status: "settled",
+        fillEventKind: "final_kline_open",
+        remainingQuantity: 0,
+      }),
+    ]);
+  });
+
+  it("preserves artifacts but fails closed when no causal terminal fill arrives", async () => {
+    const clock = new ScheduledClock();
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    expect((ledger.fills as unknown[])).toHaveLength(1);
+    expect((ledger.positions as unknown[])).toHaveLength(1);
+    expect(trades).toMatchObject({ settlementComplete: false });
+    expect(trades.terminalSettlement).toMatchObject({
+      scheduling: "expiry_timeout",
+      decisionAt: new Date(START + 60_000).toISOString(),
+      graceDeadlineAt: new Date(START + 185_000).toISOString(),
+      settlementComplete: false,
+      status: "unsettled_fail_closed",
+      lanes: [
+        expect.objectContaining({
+          lane: "kronos_base",
+          status: "unsettled_fail_closed",
+          unavailableReason: "terminal_settlement_unavailable",
+          remainingQuantity: expect.any(Number),
+        }),
+      ],
+    });
+    expect((trades.terminalSettlement as UnknownRecord).fillBarrierEvent).toBeUndefined();
+    expect(result.summary).toMatchObject({
+      phase: "failed",
+      settlementComplete: false,
+    });
+    expect((result.result as UnknownRecord).snapshot).toMatchObject({
+      phase: "failed",
+      progress: 0.999,
+    });
+    expect(result.terminalFailure).toEqual({
+      code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
+      message: "Terminal settlement failed closed: terminal_settlement_no_causal_fill.",
+      retryable: true,
+    });
+    expect(result.warnings).toContain("terminal_settlement_unavailable");
+    expect(artifact(result, "simulation-comparison")).toMatchObject({
+      outcome: "inconclusive",
+      sameFillBarrier: false,
+      lanes: [
+        expect.objectContaining({
+          id: "kronos_base",
+          status: "partial",
+          unavailableReason: "terminal_settlement_unavailable",
+        }),
+      ],
+    });
+    expect(artifact(result, "simulation-diagnostics")).toMatchObject({
+      settlementComplete: false,
+    });
+    expect(artifact(result, "simulation-decisions").decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "reduce",
+          reason: "terminal_settlement",
+          status: "blocked",
+          terminalSettlementFailureReason: "terminal_settlement_no_causal_fill",
+        }),
+      ]),
+    );
+  });
+
+  it("fails the run with truthful diagnostics when the stream disconnects during settlement", async () => {
+    const clock = new ScheduledClock();
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      { at: START + 60_010, disconnect: new Error("settlement socket closed") },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(result.summary).toMatchObject({
+      phase: "failed",
+      settlementComplete: false,
+    });
+    expect(result.terminalFailure).toMatchObject({
+      code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
+      retryable: true,
+    });
+    expect(artifact(result, "simulation-diagnostics")).toMatchObject({
+      settlementComplete: false,
+      streamDesync: true,
+      marketDataHealthy: false,
+      marketDataBlockReason: "stream_desync",
+    });
+    expect(artifact(result, "simulation-decisions").decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "reduce",
+          reason: "terminal_settlement",
+          status: "blocked",
+          terminalSettlementFailureReason: "terminal_settlement_stream_desync",
+        }),
+      ]),
+    );
+  });
+
+  it("reconciles an existing risk reduce superseded by post-expiry liquidation", async () => {
+    const clock = new ScheduledClock();
+    const wideSpreadCandidate = { ...candidate, spreadBps: 9 };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      { at: START + 59_900, event: markPrice(START + 59_900, 95) },
+      { at: START + 60_100, event: markPrice(START + 60_100, 0.1) },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: wideSpreadCandidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    const fills = ledger.fills as Array<UnknownRecord>;
+    expect(fills).toHaveLength(2);
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "liquidation",
+      executedAt: START + 60_100,
+    });
+    expect(ledger.positions).toEqual([]);
+    expect(artifact(result, "simulation-decisions").decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "reduce",
+          reason: "daily_loss_gate",
+          decisionAt: new Date(START + 59_900).toISOString(),
+          status: "skipped",
+          terminalSettlementOutcome: "superseded_by_liquidation",
+        }),
+      ]),
+    );
+    const settlement = trades.terminalSettlement as UnknownRecord;
+    expect(settlement).toMatchObject({
+      settlementComplete: true,
+      status: "settled",
+      lanes: [
+        expect.objectContaining({
+          lane: "kronos_base",
+          decisionSource: "existing_risk_reduce",
+          status: "settled",
+          settledBy: "liquidation",
+          fillEventKind: "mark_price_liquidation",
+          fillReceivedAt: new Date(START + 60_100).toISOString(),
+          fillBarrierDigest: expect.any(String),
+          remainingQuantity: 0,
+        }),
+      ],
+    });
+    const lane = (settlement.lanes as Array<UnknownRecord>)[0]!;
+    expect(settlement.commonFillBarrierDigest).toBe(lane.fillBarrierDigest);
   });
 
   it("records an unavailable lane without fabricating a forecast, trade, or fallback", async () => {

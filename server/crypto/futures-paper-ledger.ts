@@ -16,6 +16,7 @@ export type FuturesPosition = {
   liquidationBufferRate: number;
   protectiveStopPrice: number;
   unrealizedPnl: number;
+  accruedFunding: number;
   openedAt: number;
 };
 
@@ -34,7 +35,12 @@ export type FuturesPaperFill = {
   fee: number;
   slippageCost: number;
   funding: number;
-  reason?: "signal" | "liquidation" | "daily_loss_gate" | "protection";
+  reason?:
+    | "signal"
+    | "liquidation"
+    | "daily_loss_gate"
+    | "protection"
+    | "terminal_settlement";
   decisionAt: number;
   executedAt: number;
 };
@@ -253,6 +259,7 @@ export class FuturesPaperLedger {
           input.rules.tickSize,
         ),
       unrealizedPnl: 0,
+      accruedFunding: 0,
       openedAt: input.executedAt,
     };
     if (input.side === "long" && position.protectiveStopPrice >= price) {
@@ -314,6 +321,7 @@ export class FuturesPaperLedger {
     const notional = price * quantity;
     const sign = position.side === "long" ? 1 : -1;
     const realizedPnl = sign * (price - position.entryPrice) * quantity;
+    const funding = position.accruedFunding * (quantity / position.quantity);
     const fee = notional * this.feeRate;
     const slippageCost = Math.abs(price - observedPrice) * quantity;
     this.walletBalance += realizedPnl - fee;
@@ -330,6 +338,7 @@ export class FuturesPaperLedger {
       position.quantity = remaining;
       position.isolatedMargin *= ratio;
       position.maintenanceMargin *= ratio;
+      position.accruedFunding -= funding;
       position.unrealizedPnl = positionPnl(position, position.markPrice);
       this.positions.set(input.symbol, position);
     }
@@ -347,7 +356,7 @@ export class FuturesPaperLedger {
       realizedPnl,
       fee,
       slippageCost,
-      funding: 0,
+      funding,
       ...(input.reason ? { reason: input.reason } : {}),
       decisionAt: input.decisionAt,
       executedAt: input.executedAt,
@@ -418,6 +427,8 @@ export class FuturesPaperLedger {
     const cashFlow = sign * position.markPrice * position.quantity * input.rate;
     this.walletBalance += cashFlow;
     this.funding += cashFlow;
+    position.accruedFunding += cashFlow;
+    this.positions.set(input.symbol, position);
     return cashFlow;
   }
 

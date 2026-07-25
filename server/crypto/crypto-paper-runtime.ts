@@ -57,7 +57,11 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_INFERENCE_DEADLINE_MS = 240_000;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
 const DEFAULT_CIRCUIT_COOLDOWN_MS = 60_000;
-const COORDINATOR_SETUP_FINALIZATION_ALLOWANCE_MS = 30_000;
+const TERMINAL_SETTLEMENT_GRACE_MS = 125_000;
+const TERMINAL_SETTLEMENT_FINALIZATION_RESERVE_MS = 30_000;
+const COORDINATOR_SETUP_FINALIZATION_ALLOWANCE_MS = (
+  TERMINAL_SETTLEMENT_GRACE_MS + TERMINAL_SETTLEMENT_FINALIZATION_RESERVE_MS
+);
 const CANCELLATION_POLL_INTERVAL_MS = 1_000;
 const PROGRESS_UPDATE_INTERVAL_MS = 5_000;
 const EQUITY_SAMPLE_INTERVAL_MS = 5_000;
@@ -75,8 +79,11 @@ export const CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS = Object.freeze({
   cancellation: "RunTaskContext.signal + throwIfCancelled + isCancelled",
   requestedDurationDeadlineRequired: true,
   setupFinalizationAllowanceMs: COORDINATOR_SETUP_FINALIZATION_ALLOWANCE_MS,
+  terminalSettlementGraceMs: TERMINAL_SETTLEMENT_GRACE_MS,
+  terminalSettlementFinalizationReserveMs: TERMINAL_SETTLEMENT_FINALIZATION_RESERVE_MS,
+  terminalSettlementNoEventPolicy: "unsettled_fail_closed",
   maximumRestoredOneMinuteBars: MAXIMUM_RESTORED_BARS,
-  note: "The coordinator task deadline must cover the requested shadow duration plus setup/finalization. A short generic RunService deadline will abort a valid 120-minute run.",
+  note: "The coordinator task deadline must cover the requested shadow duration, bounded terminal settlement grace, and setup/finalization. A short generic RunService deadline will abort a valid run.",
 });
 
 export function cryptoPaperRuntimeMinimumTaskDeadlineMs(durationMinutes: number): number {
@@ -186,6 +193,12 @@ type RuntimeDecision = {
   requestDigest: string;
   fillId?: string;
   executedAt?: string;
+  fillEventKind?: "agg_trade" | "final_kline_open";
+  fillIngressSequence?: number;
+  fillReceivedAt?: string;
+  fillBarrierDigest?: string;
+  terminalSettlementFailureReason?: string;
+  terminalSettlementOutcome?: "superseded_by_liquidation";
 };
 
 type PendingAction = {
@@ -200,7 +213,82 @@ type PendingAction = {
   atr14?: number;
   adverseQuantileDistance?: number;
   spreadBps?: number;
-  reason?: "signal" | "daily_loss_gate" | "protection";
+  reason?: "signal" | "daily_loss_gate" | "protection" | "terminal_settlement";
+  terminalSettlement?: boolean;
+  eligibleStreamEpoch?: number;
+};
+
+type TerminalSettlementLaneEvidence = {
+  lane: SimulationModelLane;
+  required: boolean;
+  positionAtExpiry?: {
+    symbol: string;
+    side: FuturesSide;
+    quantity: number;
+  };
+  decisionSource: "not_required" | "runtime_expiry" | "existing_risk_reduce";
+  decisionId?: string;
+  decisionAt?: string;
+  eligibleAfterIngressSequence?: number;
+  status: "not_required" | "pending" | "settled" | "unsettled_fail_closed";
+  settledBy?: "terminal_reduce" | "liquidation" | "existing_risk_reduce" | "risk_reduce";
+  fillId?: string;
+  executedAt?: string;
+  fillEventKind?: "agg_trade" | "final_kline_open" | "mark_price_liquidation";
+  fillIngressSequence?: number;
+  fillReceivedAt?: string;
+  fillBarrierDigest?: string;
+  fillPrice?: number;
+  fee?: number;
+  slippage?: number;
+  funding?: number;
+  realizedPnl?: number;
+  remainingQuantity?: number;
+  fillCountAtExpiry?: number;
+  unavailableReason?: "terminal_settlement_unavailable";
+};
+
+type TerminalSettlementEvidence = {
+  policy: "causal_reduce_only";
+  scheduling: "expiry_boundary_event" | "expiry_timeout";
+  decisionAt: string;
+  graceDeadlineAt: string;
+  graceDurationMs: number;
+  decisionStreamEpoch: number;
+  settlementComplete: boolean;
+  status: "not_required" | "pending" | "settled" | "unsettled_fail_closed";
+  barrier: {
+    eligibleAfterIngressSequence: number;
+    requiresStrictlyLaterIngress: true;
+    requiresCausalAtStrictlyAfterExpiry: true;
+    receiptTimeTelemetryOnly: true;
+    eligibleEventKinds: ["agg_trade", "final_kline_open"];
+  };
+  boundaryTrigger?: {
+    kind: BinanceMarketEvent["kind"];
+    ingressSequence: number;
+    causalAt: string;
+    receivedAt: string;
+    observedPrice?: number;
+    aggregateTradeId?: string;
+    klineOpenTime?: string;
+    digest: string;
+  };
+  fillBarrierEvent?: {
+    kind: "agg_trade" | "final_kline_open";
+    ingressSequence: number;
+    causalAt: string;
+    receivedAt: string;
+    observedPrice: number;
+    aggregateTradeId?: string;
+    klineOpenTime?: string;
+    digest: string;
+  };
+  commonFillBarrierDigest?: string;
+  candidateEventsObserved: number;
+  rejectedAtOrBeforeIngressBarrier: number;
+  rejectedAtOrBeforeExpiry: number;
+  lanes: TerminalSettlementLaneEvidence[];
 };
 
 type LaneState = {
@@ -313,6 +401,7 @@ export type CryptoPaperRuntimeSnapshot = {
   executionMode: "paper";
   executionLane: SimulationModelLane;
   modelComparison: unknown;
+  terminalSettlement?: TerminalSettlementEvidence;
   decisionCadence: {
     trigger: "final_binance_1m_kline";
     triggeredEvents: number;
@@ -410,7 +499,16 @@ type QueuedMarketEvent =
   | BinanceMarketEvent
   | { kind: "disconnect"; error?: unknown }
   | { kind: "connection_state"; state: BinancePublicStreamConnectionState }
-  | { kind: "inference_complete" };
+  | { kind: "inference_complete" }
+  | {
+    kind: "expiry_boundary";
+    scheduling: TerminalSettlementEvidence["scheduling"];
+    eligibleAfterIngressSequence: number;
+    boundaryEvent?: {
+      event: BinanceMarketEvent;
+      ingressSequence: number;
+    };
+  };
 type CoalescedMarketEventKind = "book_ticker" | "mark_price";
 type CoalescedMarketEvent = Extract<
   BinanceMarketEvent,
@@ -765,6 +863,19 @@ function eventPrice(event: BinanceMarketEvent): number | undefined {
   return undefined;
 }
 
+function terminalCausalAt(event: BinanceMarketEvent): number | undefined {
+  if (event.kind === "agg_trade") return event.executedAt;
+  if (event.kind === "kline") return event.final ? event.openTime : undefined;
+  return event.eventTime;
+}
+
+function terminalObservedPrice(event: BinanceMarketEvent): number | undefined {
+  if (event.kind === "agg_trade") return event.price;
+  if (event.kind === "kline") return event.final ? event.open : undefined;
+  if (event.kind === "mark_price") return event.markPrice;
+  return (event.bidPrice + event.askPrice) / 2;
+}
+
 function normalizedPrecision(value: unknown): "fp16" | "fp32" | "unknown" {
   const normalized = text(value)?.toLowerCase();
   if (normalized === "fp16"
@@ -977,8 +1088,34 @@ function costRate(
 
 function modelMetrics(state: LaneState) {
   const snapshot = state.ledger.snapshot();
-  const closed = snapshot.fills.filter((fill) => fill.action === "reduce");
-  const netOutcomes = closed.map((fill) => fill.realizedPnl - fill.fee);
+  const openCosts = new Map<string, {
+    remainingQuantity: number;
+    remainingEntryFee: number;
+  }>();
+  const netOutcomes: number[] = [];
+  for (const fill of snapshot.fills) {
+    if (fill.action === "open") {
+      openCosts.set(fill.symbol, {
+        remainingQuantity: fill.quantity,
+        remainingEntryFee: fill.fee,
+      });
+      continue;
+    }
+    const entry = openCosts.get(fill.symbol);
+    let allocatedEntryFee = 0;
+    if (entry && entry.remainingQuantity > 0) {
+      const closingQuantity = Math.min(fill.quantity, entry.remainingQuantity);
+      allocatedEntryFee = closingQuantity >= entry.remainingQuantity
+        ? entry.remainingEntryFee
+        : entry.remainingEntryFee * closingQuantity / entry.remainingQuantity;
+      entry.remainingQuantity -= closingQuantity;
+      entry.remainingEntryFee -= allocatedEntryFee;
+      if (entry.remainingQuantity <= 0) openCosts.delete(fill.symbol);
+    }
+    netOutcomes.push(
+      fill.realizedPnl + fill.funding - fill.fee - allocatedEntryFee,
+    );
+  }
   const profits = netOutcomes.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
   const losses = Math.abs(
     netOutcomes.filter((value) => value < 0).reduce((sum, value) => sum + value, 0),
@@ -998,8 +1135,8 @@ function modelMetrics(state: LaneState) {
     })(),
     netPnl: snapshot.equity - snapshot.initialCash,
     profitFactor: losses > 0 ? profits / losses : profits > 0 ? null : undefined,
-    winRate: closed.length
-      ? netOutcomes.filter((value) => value > 0).length / closed.length
+    winRate: netOutcomes.length
+      ? netOutcomes.filter((value) => value > 0).length / netOutcomes.length
       : undefined,
     maxDrawdown: state.maximumDrawdown,
     turnover: snapshot.fills.reduce((sum, fill) => sum + fill.notional, 0)
@@ -1200,6 +1337,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const warnings: string[] = [];
     const decisions: RuntimeDecision[] = [];
     const states = new Map<SimulationModelLane, LaneState>();
+    let terminalSettlement: TerminalSettlementEvidence | undefined;
     let currentSpreadBps = selected.spreadBps;
     let ingressSpreadBps = selected.spreadBps;
     let currentMarkPrice = selected.price;
@@ -1230,6 +1368,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let readyInferenceCompletion: RuntimeInferenceCompletion | undefined;
     let activeInferenceController: AbortController | undefined;
     let acceptInferenceCompletions = true;
+    let liveWindowStarted = false;
+    let terminalBoundaryQueued = false;
     let streamEpoch = 0;
     let inferenceSequence = 0;
     const prospectivePendingOpenRisk = new Map<SimulationModelLane, {
@@ -1391,6 +1531,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       });
     };
     const ingressSequences = new WeakMap<object, number>();
+    const ingressObservedAts = new WeakMap<object, number>();
     let streamQualificationState:
       | "initializing"
       | "qualified"
@@ -1568,31 +1709,54 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       klineDataBlockReason = undefined;
     };
 
-    const modelComparison = () => ({
-      comparisonId: `${context.runId}:${symbol}`,
-      outcome: selectedLanes.length > 1 ? "inconclusive" : "pending",
-      sameOrigin: true,
-      sameContext: true,
-      sameCosts: true,
-      sameFillBarrier: true,
-      symbol,
-      lanes: selectedLanes.map((lane) => {
-        const state = states.get(lane)!;
-        return {
-          id: lane,
-          status: laneStatus(state),
-          precision: state.precision,
-          ...(state.errors.length
-            ? { unavailableReason: state.errors.at(-1) }
-            : {}),
-          metrics: modelMetrics(state),
-          provenance: {
-            modelId: state.modelId,
-            modelRevision: state.modelRevision,
-          },
-        };
-      }),
-    });
+    const modelComparison = () => {
+      const settlementIncomplete = terminalSettlement?.settlementComplete === false;
+      const requiredSettlementLanes = terminalSettlement?.lanes.filter(
+        (lane) => lane.required,
+      ) ?? [];
+      const firstSettlementDigest = requiredSettlementLanes[0]?.fillBarrierDigest;
+      const settlementSameFillBarrier = !terminalSettlement
+        || requiredSettlementLanes.length === 0
+        || (
+          terminalSettlement.settlementComplete
+          && firstSettlementDigest !== undefined
+          && requiredSettlementLanes.every((lane) => (
+            lane.status === "settled"
+            && lane.fillBarrierDigest === firstSettlementDigest
+          ))
+        );
+      return {
+        comparisonId: `${context.runId}:${symbol}`,
+        outcome: settlementIncomplete || selectedLanes.length > 1 ? "inconclusive" : "pending",
+        sameOrigin: true,
+        sameContext: true,
+        sameCosts: true,
+        sameFillBarrier: !settlementIncomplete && settlementSameFillBarrier,
+        symbol,
+        lanes: selectedLanes.map((lane) => {
+          const state = states.get(lane)!;
+          const laneSettlement = terminalSettlement?.lanes.find(
+            (candidateLane) => candidateLane.lane === lane,
+          );
+          const settlementUnavailable = laneSettlement?.status === "unsettled_fail_closed";
+          return {
+            id: lane,
+            status: settlementUnavailable ? "partial" : laneStatus(state),
+            precision: state.precision,
+            ...(settlementUnavailable
+              ? { unavailableReason: "terminal_settlement_unavailable" }
+              : state.errors.length
+                ? { unavailableReason: state.errors.at(-1) }
+                : {}),
+            metrics: modelMetrics(state),
+            provenance: {
+              modelId: state.modelId,
+              modelRevision: state.modelRevision,
+            },
+          };
+        }),
+      };
+    };
 
     const snapshotFor = (
       phase: CryptoPaperRuntimeSnapshot["phase"],
@@ -1602,9 +1766,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       const ledger = execution.ledger.snapshot();
       const streamFreshness = riskStreamFreshness(at);
       const positions = futuresPositions(ledger, streamFreshness.warnings);
-      const progress = phase === "running"
-        ? Math.max(0, Math.min(0.999, (at - startedAt) / Math.max(1, expiresAt - startedAt)))
-        : 1;
+      const progress = phase === "completed"
+        ? 1
+        : Math.max(0, Math.min(0.999, (at - startedAt) / Math.max(1, expiresAt - startedAt)));
       const dailyLossRatio = execution.dailyGate.drawdownRate;
       const bars = decisionStore.list(symbol).slice(-240);
       return {
@@ -1694,6 +1858,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         executionMode: "paper",
         executionLane,
         modelComparison: modelComparison(),
+        ...(terminalSettlement
+          ? { terminalSettlement: structuredClone(terminalSettlement) }
+          : {}),
         decisionCadence: {
           trigger: "final_binance_1m_kline",
           triggeredEvents,
@@ -1720,7 +1887,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       return snapshot;
     };
 
-    const recordEquity = (at: number): void => {
+    const recordEquity = (at: number, force = false): void => {
       for (const state of states.values()) {
         const equity = state.ledger.snapshot().equity;
         state.equityPeak = Math.max(state.equityPeak, equity);
@@ -1728,21 +1895,22 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           ? (state.equityPeak - equity) / state.equityPeak
           : 0;
         state.maximumDrawdown = Math.max(state.maximumDrawdown, drawdown);
-        if (at - state.lastEquitySampleAt < EQUITY_SAMPLE_INTERVAL_MS) continue;
+        if (!force && at - state.lastEquitySampleAt < EQUITY_SAMPLE_INTERVAL_MS) continue;
         state.lastEquitySampleAt = at;
-        if (state.equity.length >= MAX_EQUITY_SAMPLES_PER_LANE) {
-          state.equity[state.equity.length - 1] = {
-            timestamp: iso(at),
-            equity,
-            drawdown,
-          };
-          continue;
-        }
-        state.equity.push({
+        const terminalPoint = {
           timestamp: iso(at),
           equity,
           drawdown,
-        });
+        };
+        if (force && state.equity.at(-1)?.timestamp === terminalPoint.timestamp) {
+          state.equity[state.equity.length - 1] = terminalPoint;
+          continue;
+        }
+        if (state.equity.length >= MAX_EQUITY_SAMPLES_PER_LANE) {
+          state.equity[state.equity.length - 1] = terminalPoint;
+          continue;
+        }
+        state.equity.push(terminalPoint);
       }
     };
 
@@ -1801,7 +1969,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         const pending = state.pending;
         if (!pending
           || ingressSequence <= pending.eligibleAfterIngressSequence
-          || event.receivedAt <= pending.decisionAt
+          || (pending.eligibleStreamEpoch !== undefined
+            && pending.eligibleStreamEpoch !== streamEpoch)
+          || (!pending.terminalSettlement && event.receivedAt <= pending.decisionAt)
           || executedAt <= pending.decisionAt) continue;
         // A finalized kline may only contribute its open as a simulated fill
         // when that open occurred strictly after the decision. Checking the
@@ -1819,7 +1989,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             continue;
           }
         }
-        const lifecycleBlockReason = decisionLifecycleBlockReason();
+        const lifecycleBlockReason = decisionLifecycleBlockReason(
+          ingressObservedAts.get(event) ?? this.clock.now(),
+        );
         if (pending.action === "open"
           && (state.dailyGate.blocked || lifecycleBlockReason !== undefined)) {
           pending.decision.status = "blocked";
@@ -1948,6 +2120,17 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             pending.decision.status = "executed";
             pending.decision.fillId = fill.fillId;
             pending.decision.executedAt = iso(fill.executedAt);
+            pending.decision.fillEventKind = event.kind === "agg_trade"
+              ? "agg_trade"
+              : "final_kline_open";
+            pending.decision.fillIngressSequence = ingressSequence;
+            pending.decision.fillReceivedAt = iso(event.receivedAt);
+            pending.decision.fillBarrierDigest = digest({
+              runId: context.runId,
+              symbol,
+              ingressSequence,
+              event,
+            });
             filled = true;
           }
         } catch (error) {
@@ -2005,6 +2188,297 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         eligibleAfterIngressSequence: lastIngressSequence,
         reason,
       };
+    };
+
+    const scheduleTerminalSettlement = (
+      scheduling: TerminalSettlementEvidence["scheduling"],
+      eligibleAfterIngressSequence: number,
+      boundaryEvent?: {
+        event: BinanceMarketEvent;
+        ingressSequence: number;
+      },
+    ): TerminalSettlementEvidence => {
+      if (terminalSettlement) return terminalSettlement;
+      const decisionAt = expiresAt;
+      const decisionStreamEpoch = streamEpoch;
+      const lanes: TerminalSettlementLaneEvidence[] = [];
+
+      for (const state of states.values()) {
+        if (state.pending?.action === "open") {
+          state.pending.decision.status = "blocked";
+          state.pending.decision.reason = "runtime_expired";
+          prospectivePendingOpenRisk.delete(state.lane);
+          state.pending = undefined;
+        }
+        const position = state.ledger.snapshot().positions.find(
+          (candidatePosition) => candidatePosition.symbol === symbol,
+        );
+        if (!position) {
+          lanes.push({
+            lane: state.lane,
+            required: false,
+            decisionSource: "not_required",
+            status: "not_required",
+          });
+          continue;
+        }
+
+        let pending = state.pending;
+        let decisionSource: TerminalSettlementLaneEvidence["decisionSource"];
+        if (pending?.action === "reduce") {
+          // A protection or daily-loss reduce already has an earlier causal
+          // decision and fill watermark. Expiry must not weaken or rewrite it.
+          decisionSource = "existing_risk_reduce";
+        } else {
+          state.riskGeneration += 1;
+          const decision: RuntimeDecision = {
+            id: decisionId(state.lane, decisionAt),
+            lane: state.lane,
+            symbol,
+            originAt: iso(decisionAt),
+            decisionAt: iso(decisionAt),
+            fillEligibleAfter: iso(decisionAt),
+            action: "reduce",
+            direction: position.side,
+            status: "pending",
+            reason: "terminal_settlement",
+            requestDigest: digest({
+              reason: "terminal_settlement",
+              symbol,
+              decisionAt,
+              eligibleAfterIngressSequence,
+              decisionStreamEpoch,
+            }),
+          };
+          decisions.push(decision);
+          pending = {
+            action: "reduce",
+            decision,
+            decisionAt,
+            eligibleAfterIngressSequence,
+            reason: "terminal_settlement",
+            terminalSettlement: true,
+            eligibleStreamEpoch: decisionStreamEpoch,
+          };
+          state.pending = pending;
+          decisionSource = "runtime_expiry";
+        }
+        lanes.push({
+          lane: state.lane,
+          required: true,
+          positionAtExpiry: {
+            symbol: position.symbol,
+            side: position.side,
+            quantity: position.quantity,
+          },
+          decisionSource,
+          decisionId: pending.decision.id,
+          decisionAt: iso(pending.decisionAt),
+          eligibleAfterIngressSequence: pending.eligibleAfterIngressSequence,
+          status: "pending",
+          fillCountAtExpiry: state.ledger.snapshot().fills.length,
+        });
+      }
+
+      const required = lanes.some((lane) => lane.required);
+      terminalSettlement = {
+        policy: "causal_reduce_only",
+        scheduling,
+        decisionAt: iso(decisionAt),
+        graceDeadlineAt: iso(decisionAt + TERMINAL_SETTLEMENT_GRACE_MS),
+        graceDurationMs: TERMINAL_SETTLEMENT_GRACE_MS,
+        decisionStreamEpoch,
+        settlementComplete: !required,
+        status: required ? "pending" : "not_required",
+        barrier: {
+          eligibleAfterIngressSequence,
+          requiresStrictlyLaterIngress: true,
+          requiresCausalAtStrictlyAfterExpiry: true,
+          receiptTimeTelemetryOnly: true,
+          eligibleEventKinds: ["agg_trade", "final_kline_open"],
+        },
+        ...(boundaryEvent && terminalCausalAt(boundaryEvent.event) !== undefined
+          ? {
+            boundaryTrigger: {
+              kind: boundaryEvent.event.kind,
+              ingressSequence: boundaryEvent.ingressSequence,
+              causalAt: iso(terminalCausalAt(boundaryEvent.event)!),
+              receivedAt: iso(boundaryEvent.event.receivedAt),
+              ...(terminalObservedPrice(boundaryEvent.event) !== undefined
+                ? { observedPrice: terminalObservedPrice(boundaryEvent.event) }
+                : {}),
+              ...(boundaryEvent.event.kind === "agg_trade"
+                ? { aggregateTradeId: boundaryEvent.event.aggregateTradeId }
+                : {}),
+              ...(boundaryEvent.event.kind === "kline"
+                ? { klineOpenTime: iso(boundaryEvent.event.openTime) }
+                : {}),
+              digest: digest({
+                runId: context.runId,
+                symbol,
+                decisionAt,
+                ingressSequence: boundaryEvent.ingressSequence,
+                event: boundaryEvent.event,
+              }),
+            },
+          }
+          : {}),
+        candidateEventsObserved: 0,
+        rejectedAtOrBeforeIngressBarrier: 0,
+        rejectedAtOrBeforeExpiry: 0,
+        lanes,
+      };
+      return terminalSettlement;
+    };
+
+    const queueTerminalBoundary = (
+      scheduling: TerminalSettlementEvidence["scheduling"],
+      eligibleAfterIngressSequence: number,
+      boundaryEvent?: {
+        event: BinanceMarketEvent;
+        ingressSequence: number;
+      },
+    ): boolean => {
+      if (terminalSettlement || terminalBoundaryQueued) return true;
+      terminalBoundaryQueued = true;
+      const queued = queue.push({
+        kind: "expiry_boundary",
+        scheduling,
+        eligibleAfterIngressSequence,
+        ...(boundaryEvent ? { boundaryEvent } : {}),
+      });
+      if (!queued) terminalBoundaryQueued = false;
+      return queued;
+    };
+
+    const terminalFillCandidate = (
+      event: BinanceMarketEvent,
+    ): {
+      kind: "agg_trade" | "final_kline_open";
+      causalAt: number;
+    } | undefined => (
+      event.kind === "agg_trade"
+        ? { kind: "agg_trade", causalAt: event.executedAt }
+        : event.kind === "kline" && event.final
+          ? { kind: "final_kline_open", causalAt: event.openTime }
+          : undefined
+    );
+
+    const noteTerminalBoundary = (
+      event: BinanceMarketEvent,
+      ingressSequence: number,
+    ): void => {
+      const causalAt = terminalCausalAt(event);
+      if (!terminalSettlement
+        || terminalSettlement.boundaryTrigger
+        || causalAt === undefined
+        || causalAt <= expiresAt
+        || ingressSequence <= terminalSettlement.barrier.eligibleAfterIngressSequence) return;
+      terminalSettlement.boundaryTrigger = {
+        kind: event.kind,
+        ingressSequence,
+        causalAt: iso(causalAt),
+        receivedAt: iso(event.receivedAt),
+        ...(terminalObservedPrice(event) !== undefined
+          ? { observedPrice: terminalObservedPrice(event) }
+          : {}),
+        ...(event.kind === "agg_trade"
+          ? { aggregateTradeId: event.aggregateTradeId }
+          : {}),
+        ...(event.kind === "kline"
+          ? { klineOpenTime: iso(event.openTime) }
+          : {}),
+        digest: digest({
+          runId: context.runId,
+          symbol,
+          decisionAt: expiresAt,
+          ingressSequence,
+          event,
+        }),
+      };
+    };
+
+    const noteTerminalCandidate = (
+      event: BinanceMarketEvent,
+      ingressSequence: number,
+    ): void => {
+      const candidateEvent = terminalFillCandidate(event);
+      if (!terminalSettlement || !candidateEvent) return;
+      noteTerminalBoundary(event, ingressSequence);
+      terminalSettlement.candidateEventsObserved += 1;
+      if (ingressSequence <= terminalSettlement.barrier.eligibleAfterIngressSequence) {
+        terminalSettlement.rejectedAtOrBeforeIngressBarrier += 1;
+      }
+      if (candidateEvent.causalAt <= expiresAt) {
+        terminalSettlement.rejectedAtOrBeforeExpiry += 1;
+      }
+      if (!terminalSettlement.fillBarrierEvent
+        && ingressSequence > terminalSettlement.barrier.eligibleAfterIngressSequence
+        && candidateEvent.causalAt > expiresAt) {
+        const observedPrice = terminalObservedPrice(event);
+        if (observedPrice === undefined) return;
+        const barrierEvent = {
+          kind: candidateEvent.kind,
+          ingressSequence,
+          causalAt: iso(candidateEvent.causalAt),
+          receivedAt: iso(event.receivedAt),
+          observedPrice,
+          ...(event.kind === "agg_trade"
+            ? { aggregateTradeId: event.aggregateTradeId }
+            : {}),
+          ...(event.kind === "kline"
+            ? { klineOpenTime: iso(event.openTime) }
+            : {}),
+          digest: digest({
+            runId: context.runId,
+            symbol,
+            ingressSequence,
+            event,
+          }),
+        };
+        terminalSettlement.fillBarrierEvent = barrierEvent;
+        terminalSettlement.commonFillBarrierDigest = barrierEvent.digest;
+      }
+    };
+
+    const reconcileTerminalRiskClosures = (
+      event?: BinanceMarketEvent,
+      ingressSequence?: number,
+    ): void => {
+      if (!terminalSettlement) return;
+      for (const state of states.values()) {
+        const pending = state.pending;
+        if (pending?.action !== "reduce") continue;
+        if (state.ledger.snapshot().positions.some((position) => position.symbol === symbol)) {
+          continue;
+        }
+        const laneEvidence = terminalSettlement.lanes.find(
+          (candidateLane) => candidateLane.lane === state.lane,
+        );
+        const fills = state.ledger.snapshot().fills;
+        const postExpiryLiquidation = fills.slice(laneEvidence?.fillCountAtExpiry ?? 0)
+          .reverse()
+          .find((fill) => fill.action === "reduce" && fill.reason === "liquidation");
+        if (postExpiryLiquidation) {
+          pending.decision.status = "skipped";
+          pending.decision.terminalSettlementOutcome = "superseded_by_liquidation";
+          if (event?.kind === "mark_price"
+            && ingressSequence !== undefined
+            && postExpiryLiquidation.executedAt === event.eventTime
+            && laneEvidence) {
+            laneEvidence.fillEventKind = "mark_price_liquidation";
+            laneEvidence.fillIngressSequence = ingressSequence;
+            laneEvidence.fillReceivedAt = iso(event.receivedAt);
+            laneEvidence.fillBarrierDigest = digest({
+              runId: context.runId,
+              symbol,
+              ingressSequence,
+              event,
+            });
+          }
+        }
+        state.pending = undefined;
+      }
     };
 
     const enforceRisk = (
@@ -2662,6 +3136,30 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           }
           const ingressSequence = ++lastIngressSequence;
           ingressSequences.set(event, ingressSequence);
+          ingressObservedAts.set(event, this.clock.now());
+          if (liveWindowStarted
+            && !terminalSettlement
+            && !terminalBoundaryQueued
+            && this.clock.now() >= expiresAt) {
+            const causalAt = terminalCausalAt(event);
+            const isCausalBoundary = causalAt !== undefined && causalAt > expiresAt;
+            // Queue an ordered control token before the first post-expiry
+            // market event. Pre-expiry reducer backlog stays ahead of the
+            // decision, while this event can never fall behind the watermark.
+            if (!queueTerminalBoundary(
+              isCausalBoundary ? "expiry_boundary_event" : "expiry_timeout",
+              Math.max(0, ingressSequence - 1),
+              isCausalBoundary ? { event, ingressSequence } : undefined,
+            )) {
+              const error = new Error("market_event_queue_overflow");
+              streamDisconnected = { error };
+              streamEpoch += 1;
+              enterReconnectSafety();
+              activeInferenceController?.abort(error);
+              queue.fail(error);
+              return;
+            }
+          }
           ingressStore.applyWebsocket(event);
           let acceptedIngressMarkPrice = true;
           if (event.kind === "book_ticker") {
@@ -2705,7 +3203,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             ? Array.from(states.values()).filter((state) => (
               state.pending !== undefined
               && ingressSequence > state.pending.eligibleAfterIngressSequence
-              && event.receivedAt > state.pending.decisionAt
+              && (state.pending.terminalSettlement
+                || event.receivedAt > state.pending.decisionAt)
               && fillObservation.causalAt > state.pending.decisionAt
               && prospectivePendingOpenRisk.get(state.lane)?.pendingKey
                 !== `${state.pending.eligibleAfterIngressSequence}:${state.pending.side ?? ""}`
@@ -2931,12 +3430,23 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         state.lastEquitySampleAt = startedAt;
       }
       const liveDecisionStartAt = startedAt;
+      liveWindowStarted = true;
       await updateProgress(true);
       await publishSnapshot("running", true, liveDecisionStartAt);
 
-      while (this.clock.now() < expiresAt) {
+      while (!terminalSettlement) {
         await cancellationCheckpoint();
         await yieldToImmediateInferenceCompletion();
+        if (this.clock.now() >= expiresAt && !terminalBoundaryQueued) {
+          if (!queueTerminalBoundary("expiry_timeout", lastIngressSequence)) {
+            const error = new Error("market_event_queue_overflow");
+            streamDisconnected = { error };
+            streamEpoch += 1;
+            enterReconnectSafety();
+            activeInferenceController?.abort(error);
+            queue.fail(error);
+          }
+        }
         const waitMs = Math.min(this.pollIntervalMs, Math.max(0, expiresAt - this.clock.now()));
         const queued = await queue.next(waitMs, this.clock, context.signal);
         if (!queued) {
@@ -3041,10 +3551,21 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           await publishSnapshot("running", true, this.clock.now());
           continue;
         }
+        if (queued.kind === "expiry_boundary") {
+          scheduleTerminalSettlement(
+            queued.scheduling,
+            queued.eligibleAfterIngressSequence,
+            queued.boundaryEvent,
+          );
+          continue;
+        }
         const event = queued;
         let filled = false;
         let riskEventAccepted = true;
         const eventIngressSequence = ingressSequences.get(event);
+        if (eventIngressSequence !== undefined) {
+          noteTerminalCandidate(event, eventIngressSequence);
+        }
         if (eventIngressSequence !== undefined) {
           applyCanonicalFundingSettlementsThrough(eventIngressSequence);
         }
@@ -3140,6 +3661,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           replayFinalKlineOpenRiskEvidence(event, newlyOpenedLanes);
         }
         if (riskEventAccepted) enforceRisk(event);
+        reconcileTerminalRiskClosures(event, eventIngressSequence);
         if (event.kind === "kline" && event.final) {
           settleForecasts(event);
           if (event.receivedAt >= liveDecisionStartAt
@@ -3172,30 +3694,244 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         readyInferenceCompletion = undefined;
       }
       await cancellationCheckpoint();
-      await updateProgress(true, true);
-      const terminalSnapshot = await publishSnapshot("completed", true, expiresAt);
+
+      const settlement = scheduleTerminalSettlement(
+        "expiry_timeout",
+        lastIngressSequence,
+      );
+      const settlementDeadlineAt = expiresAt + TERMINAL_SETTLEMENT_GRACE_MS;
+      let settlementFailureDetail:
+        | "terminal_settlement_no_causal_fill"
+        | "terminal_settlement_stream_epoch_changed"
+        | "terminal_settlement_stream_desync"
+        | "terminal_settlement_fill_rejected" = "terminal_settlement_no_causal_fill";
+      const hasUnsettledPosition = (): boolean => settlement.lanes.some((lane) => (
+        lane.required
+        && states.get(lane.lane)!.ledger.snapshot().positions.some(
+          (position) => position.symbol === symbol,
+        )
+      ));
+
+      while (hasUnsettledPosition() && this.clock.now() < settlementDeadlineAt) {
+        await cancellationCheckpoint();
+        if (streamDisconnected) {
+          settlementFailureDetail = "terminal_settlement_stream_desync";
+          break;
+        }
+        if (streamEpoch !== settlement.decisionStreamEpoch) {
+          settlementFailureDetail = "terminal_settlement_stream_epoch_changed";
+          break;
+        }
+        const waitMs = Math.min(
+          this.pollIntervalMs,
+          Math.max(0, settlementDeadlineAt - this.clock.now()),
+        );
+        const queued = await queue.next(waitMs, this.clock, context.signal);
+        if (!queued) {
+          await updateProgress();
+          await publishSnapshot("running", false, this.clock.now());
+          continue;
+        }
+        if (queued.kind === "disconnect") {
+          settlementFailureDetail = "terminal_settlement_stream_desync";
+          break;
+        }
+        if (queued.kind === "connection_state") {
+          if (queued.state.status === "reconnecting" || queued.state.reconnectAttempt > 0) {
+            settlementFailureDetail = "terminal_settlement_stream_epoch_changed";
+            break;
+          }
+          continue;
+        }
+        if (queued.kind === "inference_complete") continue;
+        if (queued.kind === "expiry_boundary") continue;
+        if (streamEpoch !== settlement.decisionStreamEpoch) {
+          settlementFailureDetail = "terminal_settlement_stream_epoch_changed";
+          break;
+        }
+        const ingressSequence = ingressSequences.get(queued);
+        if (ingressSequence === undefined) continue;
+        noteTerminalBoundary(queued, ingressSequence);
+        applyCanonicalFundingSettlementsThrough(ingressSequence);
+        let riskEventAccepted = true;
+        if (queued.kind === "book_ticker") {
+          riskEventAccepted = lastBookTickerEventTime === undefined
+            || queued.eventTime >= lastBookTickerEventTime;
+          if (riskEventAccepted) {
+            lastBookTickerEventTime = queued.eventTime;
+            lastBookTickerObservedAt = queued.receivedAt;
+            const midpoint = (queued.bidPrice + queued.askPrice) / 2;
+            currentSpreadBps = midpoint > 0
+              ? (queued.askPrice - queued.bidPrice) / midpoint * 10_000
+              : currentSpreadBps;
+          }
+        }
+        if (queued.kind === "mark_price") {
+          riskEventAccepted = lastMarkPriceEventTime === undefined
+            || queued.eventTime >= lastMarkPriceEventTime;
+          if (riskEventAccepted) {
+            lastMarkPriceEventTime = queued.eventTime;
+            lastMarkPriceObservedAt = queued.receivedAt;
+          }
+        }
+        maybeCompleteStreamRequalification();
+        if (riskEventAccepted) {
+          applyMarkAndFunding(queued);
+          enforceRisk(queued);
+        }
+        reconcileTerminalRiskClosures(queued, ingressSequence);
+        const candidate = terminalFillCandidate(queued);
+        if (!candidate) {
+          recordEquity(this.clock.now());
+          await updateProgress();
+          await publishSnapshot("running", false, this.clock.now());
+          continue;
+        }
+        noteTerminalCandidate(queued, ingressSequence);
+        const filled = executePending(queued);
+        if (Array.from(states.values()).some((state) => (
+          state.ledger.snapshot().positions.some((position) => position.symbol === symbol)
+          && state.pending === undefined
+        ))) {
+          settlementFailureDetail = "terminal_settlement_fill_rejected";
+          break;
+        }
+        recordEquity(this.clock.now());
+        await updateProgress();
+        await publishSnapshot("running", filled, this.clock.now());
+      }
+
+      for (const laneEvidence of settlement.lanes) {
+        if (!laneEvidence.required) continue;
+        const state = states.get(laneEvidence.lane)!;
+        const decision = decisions.find(
+          (candidateDecision) => candidateDecision.id === laneEvidence.decisionId,
+        );
+        const positionStillOpen = state.ledger.snapshot().positions.some(
+          (position) => position.symbol === symbol,
+        );
+        if (!positionStillOpen) {
+          const ledger = state.ledger.snapshot();
+          const terminalFills = ledger.fills.slice(laneEvidence.fillCountAtExpiry ?? 0);
+          const closingFill = decision?.fillId
+            ? terminalFills.find((fill) => fill.fillId === decision.fillId)
+            : terminalFills.find((fill) => fill.action === "reduce");
+          laneEvidence.status = "settled";
+          laneEvidence.settledBy = closingFill?.reason === "liquidation"
+            ? "liquidation"
+            : laneEvidence.decisionSource === "existing_risk_reduce"
+              ? "existing_risk_reduce"
+              : closingFill?.reason === "daily_loss_gate"
+                  || closingFill?.reason === "protection"
+                ? "risk_reduce"
+                : "terminal_reduce";
+          if (closingFill) {
+            laneEvidence.fillId = closingFill.fillId;
+            laneEvidence.executedAt = iso(closingFill.executedAt);
+            laneEvidence.fillPrice = closingFill.price;
+            laneEvidence.fee = closingFill.fee;
+            laneEvidence.slippage = closingFill.slippageCost;
+            laneEvidence.funding = closingFill.funding;
+            laneEvidence.realizedPnl = closingFill.realizedPnl;
+          } else {
+            if (decision?.fillId) laneEvidence.fillId = decision.fillId;
+            if (decision?.executedAt) laneEvidence.executedAt = decision.executedAt;
+          }
+          laneEvidence.remainingQuantity = ledger.positions
+            .filter((position) => position.symbol === symbol)
+            .reduce((sum, position) => sum + position.quantity, 0);
+          if (decision?.fillEventKind) laneEvidence.fillEventKind = decision.fillEventKind;
+          if (decision?.fillIngressSequence !== undefined) {
+            laneEvidence.fillIngressSequence = decision.fillIngressSequence;
+          }
+          if (decision?.fillReceivedAt) laneEvidence.fillReceivedAt = decision.fillReceivedAt;
+          if (decision?.fillBarrierDigest) {
+            laneEvidence.fillBarrierDigest = decision.fillBarrierDigest;
+          }
+          continue;
+        }
+        laneEvidence.status = "unsettled_fail_closed";
+        laneEvidence.unavailableReason = "terminal_settlement_unavailable";
+        laneEvidence.remainingQuantity = state.ledger.snapshot().positions
+          .filter((position) => position.symbol === symbol)
+          .reduce((sum, position) => sum + position.quantity, 0);
+        if (decision) {
+          if (decision.status === "pending") decision.status = "blocked";
+          decision.terminalSettlementFailureReason = settlementFailureDetail;
+        }
+        if (state.pending?.decision.id === laneEvidence.decisionId) {
+          state.pending = undefined;
+        }
+      }
+      settlement.settlementComplete = settlement.lanes.every(
+        (lane) => !lane.required || lane.status === "settled",
+      );
+      const requiredSettlementDigests = settlement.lanes
+        .filter((lane) => lane.required)
+        .map((lane) => lane.fillBarrierDigest);
+      if (requiredSettlementDigests.length > 0
+        && requiredSettlementDigests[0] !== undefined
+        && requiredSettlementDigests.every(
+          (candidateDigest) => candidateDigest === requiredSettlementDigests[0],
+        )) {
+        settlement.commonFillBarrierDigest = requiredSettlementDigests[0];
+      } else {
+        delete settlement.commonFillBarrierDigest;
+      }
+      settlement.status = settlement.lanes.every((lane) => !lane.required)
+        ? "not_required"
+        : settlement.settlementComplete
+          ? "settled"
+          : "unsettled_fail_closed";
+      if (!settlement.settlementComplete) {
+        warnings.push("terminal_settlement_unavailable");
+        warnings.push(`terminal_settlement_failure:${settlementFailureDetail}`);
+      }
+      const settlementStreamDesync = settlementFailureDetail
+        === "terminal_settlement_stream_desync"
+        || settlementFailureDetail === "terminal_settlement_stream_epoch_changed";
+      const terminalObservedAt = this.clock.now();
+      for (const state of states.values()) {
+        state.dailyGate = updateDailyLossGate(
+          state.dailyGate,
+          state.ledger.snapshot().equity,
+          terminalObservedAt,
+        );
+      }
+      recordEquity(terminalObservedAt, true);
+      await cancellationCheckpoint();
+      const terminalPhase = settlement.settlementComplete ? "completed" : "failed";
+      await updateProgress(true, settlement.settlementComplete);
+      const terminalSnapshot = await publishSnapshot(terminalPhase, true, terminalObservedAt);
       const allTrades = selectedLanes.flatMap((lane) => (
         tradeRows(lane, states.get(lane)!.ledger.snapshot())
       ));
       const comparison = modelComparison();
       const provenance = selectedLanes.map((lane) => {
         const state = states.get(lane)!;
+        const laneSettlement = settlement.lanes.find(
+          (candidateLane) => candidateLane.lane === lane,
+        );
+        const settlementUnavailable = laneSettlement?.status === "unsettled_fail_closed";
         return {
           lane,
-          status: laneStatus(state),
+          status: settlementUnavailable ? "partial" : laneStatus(state),
           precision: state.precision,
           modelId: state.modelId,
           modelRevision: state.modelRevision,
           attempts: state.attempts,
           successes: state.successes,
           peakVramMb: state.peakVramMb,
-          errors: unique(state.errors),
+          errors: unique([
+            ...state.errors,
+            ...(settlementUnavailable ? ["terminal_settlement_unavailable"] : []),
+          ]),
         };
       });
       const executionLedger = states.get(executionLane)!.ledger.snapshot();
       const summary = {
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
-        phase: "completed",
+        phase: terminalPhase,
         market: request.market,
         currency: "USDT",
         initialCash: request.initialCash,
@@ -3205,6 +3941,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         tradeCount: executionLedger.fills.length,
         selectedSymbols: [symbol],
         executionLane,
+        settlementComplete: settlement.settlementComplete,
+        terminalSettlement: structuredClone(settlement),
         realOrderApiUsed: false,
         snapshot: terminalSnapshot,
       };
@@ -3233,18 +3971,31 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             futuresRisk: terminalSnapshot.futuresRisk,
             equity: states.get(executionLane)!.equity,
             modelComparison: comparison,
+            settlementComplete: settlement.settlementComplete,
+            terminalSettlement: structuredClone(settlement),
             warnings: terminalSnapshot.warnings,
             evidence: {
               scannerSnapshotId: input.snapshot.scannerSnapshotId,
               restoredFinalBars: Math.min(restored.length, MAXIMUM_RESTORED_BARS),
               onlyFinalKlinesTriggerInference: true,
               fillRequiresStrictlyLaterEvent: true,
+              settlementComplete: settlement.settlementComplete,
+              terminalSettlement: structuredClone(settlement),
               maintenanceMargin: maintenanceMarginEvidence,
               realOrder: false,
             },
           },
         },
         warnings: terminalSnapshot.warnings,
+        ...(!settlement.settlementComplete
+          ? {
+            terminalFailure: {
+              code: "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE" as const,
+              message: `Terminal settlement failed closed: ${settlementFailureDetail}.`,
+              retryable: true,
+            },
+          }
+          : {}),
         artifacts: [
           {
             type: "simulation-decisions",
@@ -3252,6 +4003,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
               symbol,
               decisions,
+              settlementComplete: settlement.settlementComplete,
+              terminalSettlement: structuredClone(settlement),
             },
             rowCount: decisions.length,
           },
@@ -3275,6 +4028,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
               marginMode: "isolated",
               positionMode: "one_way",
+              settlementComplete: settlement.settlementComplete,
+              terminalSettlement: structuredClone(settlement),
               lanes: Object.fromEntries(selectedLanes.map((lane) => [
                 lane,
                 {
@@ -3299,6 +4054,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               scannerSnapshotId: input.snapshot.scannerSnapshotId,
               executionLane,
               modelLanes: provenance,
+              settlementComplete: settlement.settlementComplete,
+              terminalSettlement: structuredClone(settlement),
               maintenanceMargin: maintenanceMarginEvidence,
               runtime: CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS,
             },
@@ -3309,13 +4066,21 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             content: {
               schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
               snapshot: terminalSnapshot,
+              settlementComplete: settlement.settlementComplete,
+              terminalSettlement: structuredClone(settlement),
+              terminalSettlementFailureDetail: settlement.settlementComplete
+                ? undefined
+                : settlementFailureDetail,
               restoredFinalBars: Math.min(restored.length, MAXIMUM_RESTORED_BARS),
-              marketDataHealthy: klineDataHealthy
-                && riskStreamFreshness(expiresAt).healthy,
-              marketDataBlockReason: entryBlockReason(expiresAt),
+              marketDataHealthy: !settlementStreamDesync
+                && klineDataHealthy
+                && riskStreamFreshness(terminalObservedAt).healthy,
+              marketDataBlockReason: settlementStreamDesync
+                ? "stream_desync"
+                : entryBlockReason(terminalObservedAt),
               klineDataHealthy,
               klineDataBlockReason,
-              riskStreams: riskStreamFreshness(expiresAt),
+              riskStreams: riskStreamFreshness(terminalObservedAt),
               marketEventQueue: queue.stats(),
               equitySampling: {
                 intervalMs: EQUITY_SAMPLE_INTERVAL_MS,
@@ -3329,7 +4094,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               cancellationPollIntervalMs: CANCELLATION_POLL_INTERVAL_MS,
               setupDurationMs: startedAt - setupStartedAt,
               maintenanceMargin: maintenanceMarginEvidence,
-              streamDesync: false,
+              streamDesync: settlementStreamDesync,
               workerFallbackUsed: false,
               modelFailureMasqueradedAsAnotherLane: false,
               onlyFinalKlinesTriggerInference: true,

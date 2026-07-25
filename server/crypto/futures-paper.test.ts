@@ -101,6 +101,7 @@ describe("futures paper execution and risk", () => {
       eventAt: 2_000,
     });
     expect(funding).toBeLessThan(0);
+    expect(ledger.snapshot().positions[0]?.accruedFunding).toBeCloseTo(funding, 12);
     expect(() => ledger.applyFunding({
       eventId: "funding-1",
       symbol: "BTCUSDT",
@@ -115,6 +116,7 @@ describe("futures paper execution and risk", () => {
       action: "reduce",
       reduceOnly: true,
       reason: "liquidation",
+      funding,
     });
   });
 
