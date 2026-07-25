@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from .contracts import (
     FINCAST_QUALIFICATION_CONTEXT_COUNT,
@@ -294,10 +294,9 @@ def sha256_file(path: Path) -> str:
 def load_precision_validation(path: Path) -> FinCastPrecisionValidation:
     try:
         raw = path.read_bytes()
-        value = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as error:
+        return FinCastPrecisionValidation.model_validate_json(raw)
+    except (OSError, ValidationError) as error:
         raise ValueError("FinCast precision validation is unavailable or invalid") from error
-    return FinCastPrecisionValidation.model_validate(value)
 
 
 def quantile_is_monotonic(values: list[float]) -> bool:

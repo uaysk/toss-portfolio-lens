@@ -36,6 +36,7 @@ from portfolio_ai_worker.precision_validation import (
     QualificationEnvironment,
     QuantileRearrangementObservations,
     cost_exceeding_direction,
+    load_precision_validation,
     precision_failure_reasons,
     qualification_environment_from_torch,
     serialize_precision_validation,
@@ -403,6 +404,30 @@ def test_precision_validation_serializes_as_standard_finite_json() -> None:
     invalid_validation = validation.model_copy(update={"mixed_metrics": invalid_metrics})
     with pytest.raises(ValidationError):
         serialize_precision_validation(invalid_validation)
+
+
+def test_precision_validation_round_trips_nonempty_failure_reasons_from_json(
+    tmp_path: Path,
+) -> None:
+    validation = _completed_validation(
+        MixedPrecisionMetrics(
+            finite=True,
+            quantile_monotonic=True,
+            signal_direction_agreement=0.98,
+            q50_median_iqr_ratio=0.01,
+            q50_p95_iqr_ratio=0.02,
+            peak_vram_reduction=0.4,
+        )
+    )
+    path = tmp_path / "precision-validation.json"
+    path.write_text(serialize_precision_validation(validation), encoding="utf-8")
+
+    loaded = load_precision_validation(path)
+
+    assert loaded == validation
+    assert loaded.mixed_failure_reasons == (
+        "signal_direction_agreement_below_99pct",
+    )
 
 
 def test_precision_validation_v3_binds_policies_and_exact_qualification_environment() -> None:
