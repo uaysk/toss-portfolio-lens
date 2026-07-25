@@ -1,5 +1,7 @@
 export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast"] as const;
 export const AI_SIMULATION_EXECUTION_MODES = ["paper", "testnet", "live"] as const;
+export const AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH = 100;
+export const AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH = 100_000_000;
 
 export type AiSimulationModelLane = (typeof AI_SIMULATION_MODEL_LANES)[number];
 export type AiSimulationExecutionMode = (typeof AI_SIMULATION_EXECUTION_MODES)[number];
@@ -23,17 +25,42 @@ export const AI_SIMULATION_CRYPTO_FUTURES_MARKET: Readonly<
   contractType: "PERPETUAL",
 });
 
+export type AiSimulationCryptoRiskLimits = {
+  riskPerTradeRate: number;
+  dailyLossLimitRate: number;
+  maximumLeverage: number;
+  grossExposureLimitRate: number;
+  marginUsageLimitRate: number;
+  liquidationBufferMultiple: number;
+};
+
+export const DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS: Readonly<
+  AiSimulationCryptoRiskLimits
+> = Object.freeze({
+  riskPerTradeRate: 0.005,
+  dailyLossLimitRate: 0.03,
+  maximumLeverage: 15,
+  grossExposureLimitRate: 1.5,
+  marginUsageLimitRate: 0.2,
+  liquidationBufferMultiple: 2,
+});
+
 export type AiSimulationCryptoRequest = {
   market: Extract<AiSimulationMarket, { kind: "crypto_futures" }>;
   initialCash: number;
   durationMinutes: number;
-  preset: "risk_management";
+  preset: "trend" | "breakout" | "mean_reversion" | "risk_management";
   riskTolerance: number;
-  selection: {
-    mode: "auto";
-    criterion: AiSimulationCriterion;
-    symbolCount: 1;
-  };
+  selection:
+    | {
+        mode: "auto";
+        criterion: AiSimulationCriterion;
+        symbolCount: 1 | 2;
+      }
+    | {
+        mode: "manual";
+        symbols: string[];
+      };
   strategy: { mode: "single" };
   costs: {
     commissionBpsPerSide: number;
@@ -41,6 +68,7 @@ export type AiSimulationCryptoRequest = {
     spreadBpsRoundTrip: number;
     slippageBpsPerSide: number;
   };
+  riskLimits: AiSimulationCryptoRiskLimits;
   modelLanes: [AiSimulationModelLane] | [AiSimulationModelLane, AiSimulationModelLane];
   execution: { mode: "paper" };
 };
@@ -63,6 +91,7 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
     spreadBpsRoundTrip: 2,
     slippageBpsPerSide: 1,
   },
+  riskLimits: { ...DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS },
   modelLanes: ["kronos_base"],
   execution: { mode: "paper" },
 };
@@ -158,8 +187,12 @@ export type AiSimulationFuturesRisk = {
   newEntriesBlocked: boolean;
   blockReason?: string;
   grossExposureRatio?: number;
+  grossExposureLimitRatio?: number;
   marginUsageRatio?: number;
+  marginUsageLimitRatio?: number;
   riskPerTradeRatio?: number;
+  maximumLeverage?: number;
+  liquidationBufferMultiple?: number;
 };
 
 export type AiSimulationModelMetrics = {
@@ -179,6 +212,26 @@ export type AiSimulationModelMetrics = {
   availabilityRatio?: number;
   timeoutCount?: number;
   peakVramMb?: number;
+  leverageDistribution?: number[];
+};
+
+export type AiSimulationModelLaneProvenance = {
+  modelId?: string;
+  modelRevision?: string;
+  sourceRevision?: string;
+  loaderVersion?: string;
+  license?: string;
+  tokenizerId?: string;
+  tokenizerRevision?: string;
+  loaded?: boolean;
+  device?: string;
+  deviceName?: string;
+  cudaCapability?: string;
+  attentionBackend?: string;
+  precisionValidation?: string;
+  memoryStatus?: string;
+  peakVramMb?: number;
+  precisionFailureReasons: string[];
 };
 
 export type AiSimulationModelComparisonLane = {
@@ -187,6 +240,7 @@ export type AiSimulationModelComparisonLane = {
   precision: "fp16" | "fp32" | "unknown";
   unavailableReason?: string;
   metrics: AiSimulationModelMetrics;
+  provenance?: AiSimulationModelLaneProvenance;
 };
 
 export type AiSimulationModelComparison = {
@@ -547,13 +601,43 @@ export function normalizeAiSimulationFuturesRisk(value: unknown): AiSimulationFu
     newEntriesBlocked: bool(first(risk, "newEntriesBlocked", "new_entries_blocked", "blocked")) ?? false,
     blockReason: text(first(risk, "blockReason", "block_reason", "reason")),
     grossExposureRatio: number(first(risk, "grossExposureRatio", "gross_exposure_ratio")),
+    grossExposureLimitRatio: number(first(
+      risk,
+      "grossExposureLimitRatio",
+      "gross_exposure_limit_ratio",
+    )),
     marginUsageRatio: number(first(risk, "marginUsageRatio", "margin_usage_ratio")),
+    marginUsageLimitRatio: number(first(
+      risk,
+      "marginUsageLimitRatio",
+      "margin_usage_limit_ratio",
+    )),
     riskPerTradeRatio: number(first(risk, "riskPerTradeRatio", "risk_per_trade_ratio")) ?? 0.005,
+    maximumLeverage: number(first(risk, "maximumLeverage", "maximum_leverage")),
+    liquidationBufferMultiple: number(first(
+      risk,
+      "liquidationBufferMultiple",
+      "liquidation_buffer_multiple",
+    )),
   };
 }
 
 function normalizeMetrics(value: unknown): AiSimulationModelMetrics {
   const metrics = record(value);
+  const leverageDistribution = Array.isArray(first(
+    metrics,
+    "leverageDistribution",
+    "leverage_distribution",
+  ))
+    ? (first(
+        metrics,
+        "leverageDistribution",
+        "leverage_distribution",
+      ) as unknown[]).flatMap((item) => {
+        const value = number(item);
+        return value !== undefined && value > 0 ? [value] : [];
+      })
+    : [];
   return {
     pinballLoss: number(first(metrics, "pinballLoss", "pinball_loss")),
     medianReturnMae: number(first(metrics, "medianReturnMae", "median_return_mae", "mae")),
@@ -571,7 +655,61 @@ function normalizeMetrics(value: unknown): AiSimulationModelMetrics {
     availabilityRatio: number(first(metrics, "availabilityRatio", "availability_ratio", "availability")),
     timeoutCount: number(first(metrics, "timeoutCount", "timeout_count")),
     peakVramMb: number(first(metrics, "peakVramMb", "peak_vram_mb")),
+    ...(leverageDistribution.length ? { leverageDistribution } : {}),
   };
+}
+
+function normalizeLaneProvenance(
+  value: unknown,
+): AiSimulationModelLaneProvenance | undefined {
+  const provenance = record(value);
+  if (!Object.keys(provenance).length) return undefined;
+  const normalized: AiSimulationModelLaneProvenance = {
+    modelId: text(first(provenance, "modelId", "model_id")),
+    modelRevision: text(first(provenance, "modelRevision", "model_revision", "revision")),
+    sourceRevision: text(first(provenance, "sourceRevision", "source_revision")),
+    loaderVersion: text(first(provenance, "loaderVersion", "loader_version")),
+    license: text(provenance.license),
+    tokenizerId: text(first(provenance, "tokenizerId", "tokenizer_id")),
+    tokenizerRevision: text(first(
+      provenance,
+      "tokenizerRevision",
+      "tokenizer_revision",
+    )),
+    loaded: bool(provenance.loaded),
+    device: text(provenance.device),
+    deviceName: text(first(provenance, "deviceName", "device_name")),
+    cudaCapability: text(first(provenance, "cudaCapability", "cuda_capability")),
+    attentionBackend: text(first(provenance, "attentionBackend", "attention_backend")),
+    precisionValidation: text(first(
+      provenance,
+      "precisionValidation",
+      "precision_validation",
+    )),
+    memoryStatus: text(first(provenance, "memoryStatus", "memory_status")),
+    peakVramMb: number(first(provenance, "peakVramMb", "peak_vram_mb")),
+    precisionFailureReasons: Array.isArray(first(
+      provenance,
+      "precisionFailureReasons",
+      "precision_failure_reasons",
+    ))
+      ? (first(
+          provenance,
+          "precisionFailureReasons",
+          "precision_failure_reasons",
+        ) as unknown[]).flatMap((reason) => {
+          const normalizedReason = text(reason);
+          return normalizedReason ? [normalizedReason] : [];
+        })
+      : [],
+  };
+  return Object.entries(normalized).some(([key, value]) => (
+    key === "precisionFailureReasons"
+      ? (value as string[]).length > 0
+      : value !== undefined
+  ))
+    ? normalized
+    : undefined;
 }
 
 export function normalizeAiSimulationModelComparison(
@@ -587,12 +725,19 @@ export function normalizeAiSimulationModelComparison(
     const source = record(item);
     const id = modelLane(first(source, "id", "lane", "modelLane", "model_lane") ?? key);
     if (!id) return [];
+    const provenance = normalizeLaneProvenance(first(
+      source,
+      "provenance",
+      "modelProvenance",
+      "model_provenance",
+    ));
     return [{
       id,
       status: text(first(source, "status", "state")) ?? "unavailable",
       precision: precision(first(source, "precision", "dtype")),
       unavailableReason: text(first(source, "unavailableReason", "unavailable_reason", "reason")),
       metrics: normalizeMetrics(first(source, "metrics", "performance") ?? source),
+      ...(provenance ? { provenance } : {}),
     }];
   }).filter((lane, index, all) => all.findIndex(({ id }) => id === lane.id) === index);
   if (!lanes.length) return undefined;
@@ -622,20 +767,28 @@ export function validateAiSimulationCryptoRequest(
   } = {},
 ): string[] {
   const issues: string[] = [];
+  const minimumInitialCash = Math.max(
+    AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+    limits.minimumInitialCash ?? AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+  );
+  const maximumInitialCash = Math.min(
+    AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+    limits.maximumInitialCash ?? AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+  );
   if (request.market.kind !== "crypto_futures"
     || request.market.venue !== "BINANCE_USDM"
     || request.market.quoteAsset !== "USDT"
     || request.market.contractType !== "PERPETUAL") {
     issues.push("Binance USDⓈ-M USDT 무기한 계약만 지원합니다.");
   }
-  if (!Number.isFinite(request.initialCash) || request.initialCash <= 0) {
-    issues.push("시작 USDT는 0보다 커야 합니다.");
+  if (!Number.isFinite(request.initialCash)) {
+    issues.push("시작 USDT는 유한한 숫자여야 합니다.");
   } else {
-    if (limits.minimumInitialCash !== undefined && request.initialCash < limits.minimumInitialCash) {
-      issues.push(`시작 USDT는 ${limits.minimumInitialCash} 이상이어야 합니다.`);
+    if (request.initialCash < minimumInitialCash) {
+      issues.push(`시작 USDT는 ${minimumInitialCash} 이상이어야 합니다.`);
     }
-    if (limits.maximumInitialCash !== undefined && request.initialCash > limits.maximumInitialCash) {
-      issues.push(`시작 USDT는 ${limits.maximumInitialCash} 이하여야 합니다.`);
+    if (request.initialCash > maximumInitialCash) {
+      issues.push(`시작 USDT는 ${maximumInitialCash} 이하여야 합니다.`);
     }
   }
   if (!Number.isSafeInteger(request.durationMinutes) || request.durationMinutes < 1) {
@@ -654,8 +807,54 @@ export function validateAiSimulationCryptoRequest(
     issues.push("모델 lane을 하나 이상 중복 없이 선택해 주세요.");
   }
   if (request.execution.mode !== "paper") issues.push("현재 운영에서는 paper 실행만 허용됩니다.");
-  if (request.selection.mode !== "auto" || request.selection.symbolCount !== 1) {
-    issues.push("암호화폐 선물은 scanner 자동 선정 1종목만 지원합니다.");
+  if (!["trend", "breakout", "mean_reversion", "risk_management"].includes(request.preset)) {
+    issues.push("지원하는 판단 프리셋을 선택해 주세요.");
+  }
+  if (!Number.isSafeInteger(request.riskTolerance)
+    || request.riskTolerance < 0
+    || request.riskTolerance > 100) {
+    issues.push("공격·방어 성향은 0부터 100 사이의 정수여야 합니다.");
+  }
+  if (request.strategy.mode !== "single") {
+    issues.push("암호화폐 선물 전략 실행 방식이 올바르지 않습니다.");
+  }
+  const riskLimitRules: Array<[
+    keyof AiSimulationCryptoRiskLimits,
+    number,
+    number,
+    string,
+  ]> = [
+    ["riskPerTradeRate", 0.001, 0.005, "거래당 위험"],
+    ["dailyLossLimitRate", 0.005, 0.03, "UTC 일손실 중단선"],
+    ["maximumLeverage", 1, 15, "최대 레버리지"],
+    ["grossExposureLimitRate", 0.1, 1.5, "gross exposure 상한"],
+    ["marginUsageLimitRate", 0.05, 0.2, "증거금 사용률 상한"],
+    ["liquidationBufferMultiple", 2, 5, "청산 buffer 배수"],
+  ];
+  for (const [key, minimum, maximum, label] of riskLimitRules) {
+    const value = request.riskLimits[key];
+    if (!Number.isFinite(value)
+      || value < minimum
+      || value > maximum
+      || (key === "maximumLeverage" && !Number.isSafeInteger(value))) {
+      issues.push(`${label} 값은 ${minimum}~${maximum} 범위여야 합니다.`);
+    }
+  }
+  if (request.selection.mode === "auto") {
+    if (request.selection.symbolCount !== 1 && request.selection.symbolCount !== 2) {
+      issues.push("암호화폐 자동 선정 종목 수는 1개 또는 2개여야 합니다.");
+    }
+  } else {
+    const symbols = request.selection.symbols
+      .map((symbol) => symbol.trim().toUpperCase())
+      .filter(Boolean);
+    if (symbols.length < 1 || symbols.length > 2) {
+      issues.push("암호화폐 수동 선택 종목은 1개 또는 2개여야 합니다.");
+    } else if (new Set(symbols).size !== symbols.length) {
+      issues.push("암호화폐 수동 선택 종목은 중복될 수 없습니다.");
+    } else if (symbols.some((symbol) => !/^[A-Z0-9][A-Z0-9._-]{0,31}$/.test(symbol))) {
+      issues.push("암호화폐 종목 코드 형식이 올바르지 않습니다.");
+    }
   }
   for (const [key, value] of Object.entries(request.costs)) {
     if (!Number.isFinite(value) || value < 0) issues.push(`${key} 비용은 0 이상의 숫자여야 합니다.`);

@@ -8,6 +8,7 @@ import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService, RunTaskContext } from "../services/run-service.js";
 import {
   AI_SIMULATION_CONTRACT_VERSION,
+  DEFAULT_CRYPTO_FUTURES_RISK_LIMITS,
   type SimulationStartRequest,
 } from "../simulation/contracts.js";
 import type {
@@ -21,7 +22,7 @@ import type { FuturesExecution } from "./execution.js";
 import type {
   BinanceMaintenanceMarginProviderStatus,
 } from "./binance-maintenance-margin.js";
-import { PAPER_MAINTENANCE_MARGIN_COVERAGE_RATE } from "./futures-risk.js";
+import { PAPER_MAINTENANCE_MARGIN_COVERAGE_MULTIPLIER } from "./futures-risk.js";
 
 export type CryptoWorkerPublicState = {
   status: "healthy" | "degraded" | "unavailable" | "memory_pressure";
@@ -46,7 +47,7 @@ export interface CryptoSimulationRuntime {
   run(input: {
     request: SimulationStartRequest;
     snapshot: BinanceScannerSnapshot;
-    selected: BinanceScannerCandidate;
+    selected: readonly BinanceScannerCandidate[];
     context: RunTaskContext;
   }): Promise<CryptoSimulationRuntimeResult>;
 }
@@ -269,27 +270,36 @@ export class CryptoSimulationCoordinator {
       const criterion: ScannerCriterion = input.selection.mode === "auto"
         ? input.selection.criterion
         : "volatility";
-      const { snapshot, selected: automatic } = await this.options.scanner
+      const { snapshot } = await this.options.scanner
         .selectionSnapshot(criterion);
       if (this.closed) {
         throw new Error("Crypto simulation coordinator is closed.");
       }
-      const manuallyRequestedSymbol = input.selection.mode === "manual"
-        ? input.selection.symbols[0]
-        : undefined;
-      const selected = input.selection.mode === "manual"
-        ? snapshot.candidates.find((candidate) => (
-          candidate.symbol === manuallyRequestedSymbol
-          && candidate.dataQuality.status === "available"
-        ))
-        : automatic;
-      if (!selected) {
-        throw new Error("The requested symbol does not satisfy the current liquidity snapshot.");
-      }
-      await this.options.prepareRiskData?.(
-        selected.symbol,
-        input.initialCash * PAPER_MAINTENANCE_MARGIN_COVERAGE_RATE,
+      const eligible = snapshot.candidates.filter(
+        (candidate) => candidate.dataQuality.status === "available",
       );
+      const selected = input.selection.mode === "manual"
+        ? input.selection.symbols.flatMap((symbol) => {
+          const candidate = eligible.find((item) => item.symbol === symbol);
+          return candidate ? [candidate] : [];
+        })
+        : eligible.slice(0, input.selection.symbolCount);
+      const requestedCount = input.selection.mode === "manual"
+        ? input.selection.symbols.length
+        : input.selection.symbolCount;
+      if (selected.length !== requestedCount) {
+        throw new Error("Every requested symbol must satisfy the current liquidity snapshot.");
+      }
+      const perSymbolInitialCash = input.initialCash / selected.length;
+      const riskLimits = input.riskLimits ?? DEFAULT_CRYPTO_FUTURES_RISK_LIMITS;
+      for (const candidate of selected) {
+        await this.options.prepareRiskData?.(
+          candidate.symbol,
+          perSymbolInitialCash
+            * riskLimits.grossExposureLimitRate
+            * PAPER_MAINTENANCE_MARGIN_COVERAGE_MULTIPLIER,
+        );
+      }
       if (this.closed) {
         throw new Error("Crypto simulation coordinator is closed.");
       }
@@ -300,7 +310,7 @@ export class CryptoSimulationCoordinator {
         market: input.market,
         scannerSnapshotId: snapshot.scannerSnapshotId,
         scannerGeneratedAt: snapshot.generatedAt,
-        selectedSymbol: selected.symbol,
+        selectedSymbols: selected.map((candidate) => candidate.symbol),
         sessionNonce,
         realOrder: false,
       };
@@ -310,7 +320,7 @@ export class CryptoSimulationCoordinator {
         kind: "ai_trading_simulation",
         config: normalizedInput,
         dataRevision,
-        totalCandidates: 1,
+        totalCandidates: selected.length,
       });
       if (this.closed) {
         await this.options.repository.fail(run.id, {
@@ -347,7 +357,7 @@ export class CryptoSimulationCoordinator {
         await this.options.repository.addEvent(run.id, "crypto_simulation_started", {
           market: input.market,
           scannerSnapshotId: snapshot.scannerSnapshotId,
-          selectedSymbol: selected.symbol,
+          selectedSymbols: selected.map((candidate) => candidate.symbol),
           modelLanes: input.modelLanes,
           execution: { mode: "paper", realOrder: false },
         });
@@ -411,8 +421,8 @@ export class CryptoSimulationCoordinator {
           equity: input.initialCash,
           progress: 0,
           scannerSnapshotId: snapshot.scannerSnapshotId,
-          selectedSymbol: selected.symbol,
-          selected: [selected],
+          selectedSymbols: selected.map((candidate) => candidate.symbol),
+          selected,
           modelLanes: input.modelLanes,
           executionMode: "paper",
           execution: { mode: "paper", realOrder: false },
@@ -428,7 +438,7 @@ export class CryptoSimulationCoordinator {
     ownerSubject: string;
     request: SimulationStartRequest;
     snapshot: BinanceScannerSnapshot;
-    selected: BinanceScannerCandidate;
+    selected: readonly BinanceScannerCandidate[];
     criterion: ScannerCriterion;
     dataRevision: string;
     controller: AbortController;
@@ -476,7 +486,7 @@ export class CryptoSimulationCoordinator {
         evidence: input.snapshot.evidence,
         realOrder: false,
       },
-      rowCount: input.snapshot.candidates.length,
+      rowCount: input.selected.length,
     };
     try {
       await throwIfCancelled();
@@ -539,7 +549,7 @@ export class CryptoSimulationCoordinator {
           {
             phase: "cancelled",
             market: input.request.market,
-            selectedSymbol: input.selected.symbol,
+            selectedSymbols: input.selected.map((candidate) => candidate.symbol),
             realOrderApiUsed: false,
           },
           ["사용자 요청으로 crypto paper session을 취소했습니다."],

@@ -1,7 +1,10 @@
 import {
+  mergeLatestModelForecasts,
   mergeLatestKronosForecasts,
+  normalizeAiSimulationModelForecasts,
   selectLatestKronosForecasts,
   type AiSimulationKronosForecast,
+  type AiSimulationModelForecast,
 } from "./ai-simulation-forecast";
 import {
   AI_SIMULATION_MODEL_LANES,
@@ -20,9 +23,12 @@ import {
 } from "./ai-simulation-crypto";
 
 export {
+  AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+  AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_FUTURES_MARKET,
   AI_SIMULATION_EXECUTION_MODES,
   AI_SIMULATION_MODEL_LANES,
+  DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS,
   DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   normalizeAiSimulationCandidates,
   normalizeAiSimulationCryptoStatus,
@@ -37,6 +43,7 @@ export type {
   AiSimulationCandidateSnapshot,
   AiSimulationCryptoCandidate,
   AiSimulationCryptoRequest,
+  AiSimulationCryptoRiskLimits,
   AiSimulationCryptoStatus,
   AiSimulationExecutionMode,
   AiSimulationFuturesPosition,
@@ -44,6 +51,7 @@ export type {
   AiSimulationMarket,
   AiSimulationModelComparison,
   AiSimulationModelComparisonLane,
+  AiSimulationModelLaneProvenance,
   AiSimulationModelLane,
   AiSimulationModelMetrics,
   AiSimulationWorkerStatus,
@@ -394,6 +402,7 @@ export type AiSimulationSnapshot = {
   charts: AiSimulationChartView[];
   trades: AiSimulationTrade[];
   decisions: AiSimulationDecision[];
+  modelForecasts?: AiSimulationModelForecast[];
   kronosForecasts: AiSimulationKronosForecast[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
@@ -483,7 +492,7 @@ export type AiSimulationReportEvidence = {
 };
 
 export type AiSimulationDecisionModelProvenance = {
-  component: "kronos";
+  component: "kronos" | AiSimulationModelLane;
   status: string;
   modelId?: string;
   modelRevision?: string;
@@ -523,6 +532,7 @@ export type AiSimulationRunReport = {
   charts: AiSimulationChartView[];
   modelProvenance: string[];
   decisionProvenance: AiSimulationDecisionProvenance[];
+  modelForecasts?: AiSimulationModelForecast[];
   kronosForecasts: AiSimulationKronosForecast[];
   evidence: AiSimulationReportEvidence[];
   warnings: string[];
@@ -728,11 +738,15 @@ function modelLabel(value: unknown): string | undefined {
   return parts.length ? parts.join(" · ") : undefined;
 }
 
-function kronosBaseModelLabel(value: unknown): string | undefined {
+function knownAiSimulationModelLabel(value: unknown): string | undefined {
   const label = modelLabel(value);
-  return label?.toLowerCase().includes("neoquasar/kronos-base")
-    ? label
-    : undefined;
+  if (!label) return undefined;
+  const normalized = label.toLowerCase();
+  const knownIds = [
+    "neoquasar/kronos-base",
+    "vincent05r/fincast",
+  ].filter((modelId) => normalized.includes(modelId));
+  return knownIds.length === 1 ? label : undefined;
 }
 
 function normalizeCostSource(value: unknown): AiSimulationCostSource | undefined {
@@ -993,7 +1007,7 @@ function normalizeSelection(value: unknown): AiSimulationSelection | undefined {
       "updatedAt",
       "updated_at",
     )),
-    model: kronosBaseModelLabel(item.model),
+    model: knownAiSimulationModelLabel(item.model),
   };
 }
 
@@ -1052,10 +1066,16 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
     item,
     "decidedAt",
     "decided_at",
+    "decisionAt",
+    "decision_at",
     "forecastGeneratedAt",
     "forecast_generated_at",
+    "generatedAt",
+    "generated_at",
     "inputEndAt",
     "input_end_at",
+    "originAt",
+    "origin_at",
   ));
   const listedReasons = stringList(item.reasons);
   const listedReason = listedReasons.join(" · ");
@@ -1074,11 +1094,23 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
     symbol,
     action,
     decidedAt,
-    eligibleAfter: textValue(first(item, "eligibleAfter", "eligible_after")),
+    eligibleAfter: textValue(first(
+      item,
+      "eligibleAfter",
+      "eligible_after",
+      "fillEligibleAfter",
+      "fill_eligible_after",
+    )),
     reason,
     reasons: listedReasons.length ? listedReasons : [reason],
-    score: finiteNumber(item.score),
-    upProbability: finiteNumber(first(item, "upProbability", "up_probability")),
+    score: finiteNumber(first(item, "score", "confidence")),
+    upProbability: finiteNumber(first(
+      item,
+      "upProbability",
+      "up_probability",
+      "probabilityAboveCost",
+      "probability_above_cost",
+    )),
     q10Return: finiteNumber(first(
       item,
       "q10Return",
@@ -1113,7 +1145,7 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
       ["bullish", "bearish", "neutral"] as const
     ).find((candidate) => candidate === first(item, "chartPatternBias", "chart_pattern_bias")),
     chartPatterns: stringList(first(item, "chartPatterns", "chart_patterns")),
-    model: kronosBaseModelLabel(item.model),
+    model: knownAiSimulationModelLabel(item.model),
   };
 }
 
@@ -1463,6 +1495,18 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     "modelComparison",
     "model_comparison",
   ) ?? first(outer, "modelComparison", "model_comparison"));
+  const legacyKronosForecasts = selectLatestKronosForecasts(source.decisions);
+  const modelForecasts = mergeLatestModelForecasts(
+    normalizeAiSimulationModelForecasts(first(
+      source,
+      "modelForecasts",
+      "model_forecasts",
+    )),
+    legacyKronosForecasts.map((forecast) => ({
+      ...forecast,
+      lane: "kronos_base" as const,
+    })),
+  );
 
   return {
     phase: textValue(source.phase) ?? "queued",
@@ -1511,7 +1555,10 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     charts: mapValid(source.charts, normalizeChartView),
     trades: mapValid(source.trades, normalizeTrade),
     decisions: mapValid(source.decisions, normalizeDecision),
-    kronosForecasts: selectLatestKronosForecasts(source.decisions),
+    modelForecasts,
+    kronosForecasts: modelForecasts
+      .filter((forecast) => forecast.lane === "kronos_base")
+      .map(({ lane: _lane, ...forecast }) => forecast),
     warnings: stringList(source.warnings),
     capabilities: capabilityRecord(source.capabilities),
     ...(strategyComparison ? { strategyComparison } : {}),
@@ -1637,7 +1684,12 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
     "returnRate",
     "return_rate",
   )) ?? finiteNumber(first(item, "returnRatio", "return_ratio", "returnRate", "return_rate"));
-  const model = kronosBaseModelLabel(first(item, "model", "modelProvenance", "model_provenance"))
+  const model = knownAiSimulationModelLabel(first(
+    item,
+    "model",
+    "modelProvenance",
+    "model_provenance",
+  ))
     ?? selected.map((entry) => entry.model).find((entry): entry is string => Boolean(entry));
 
   return {
@@ -1738,19 +1790,19 @@ function normalizeEvidence(value: unknown): AiSimulationReportEvidence | undefin
 }
 
 function normalizeModelProvenance(value: unknown): string[] {
-  const direct = kronosBaseModelLabel(value);
+  const direct = knownAiSimulationModelLabel(value);
   if (direct && (typeof value === "string" || !Array.isArray(value))) return [direct];
   const values = Array.isArray(value) ? value : Object.values(asRecord(value));
   return values
-    .map(kronosBaseModelLabel)
+    .map(knownAiSimulationModelLabel)
     .filter((item): item is string => Boolean(item))
     .filter((item, index, all) => all.indexOf(item) === index);
 }
 
 function decisionModelValue(
   modelsValue: unknown,
+  aliases: readonly string[],
 ): unknown {
-  const aliases = ["kronos", "kronosBase", "kronos_base", "kronos-base"];
   if (Array.isArray(modelsValue)) {
     return modelsValue.find((value) => {
       const model = asRecord(value);
@@ -1768,6 +1820,7 @@ function decisionModelValue(
 function normalizeDecisionModelProvenance(
   value: unknown,
   parentOrigin: string | undefined,
+  component: "kronos" | AiSimulationModelLane,
 ): AiSimulationDecisionModelProvenance | undefined {
   const model = asRecord(value);
   if (!Object.keys(model).length) return undefined;
@@ -1799,8 +1852,11 @@ function normalizeDecisionModelProvenance(
     "modelId",
     "model_id",
   )) ?? textValue(first(model, "modelId", "model_id", "model"));
-  if (fallbackUsed
-    || (modelId && modelId.toLowerCase() !== "neoquasar/kronos-base")) {
+  const normalizedModelId = modelId?.toLowerCase();
+  const expectedModel = component === "fincast"
+    ? normalizedModelId?.includes("fincast") !== false
+    : normalizedModelId === undefined || normalizedModelId === "neoquasar/kronos-base";
+  if (fallbackUsed || !expectedModel) {
     return undefined;
   }
   const explicitDegraded = booleanValue(provenance.degraded)
@@ -1808,7 +1864,7 @@ function normalizeDecisionModelProvenance(
   const degraded = explicitDegraded === true
     || status?.toLowerCase() === "degraded";
   return {
-    component: "kronos",
+    component,
     status: status ?? (degraded ? "degraded" : "unknown"),
     modelId,
     modelRevision: textValue(first(
@@ -1869,10 +1925,18 @@ function normalizeDecisionProvenance(
   )) ?? textValue(first(replayInput, "origin", "inputEndAt", "input_end_at"));
   const parentDegraded = booleanValue(provenance.degraded) ?? false;
   const kronos = normalizeDecisionModelProvenance(
-    decisionModelValue(modelsValue),
+    decisionModelValue(modelsValue, ["kronos", "kronosBase", "kronos_base", "kronos-base"]),
     origin,
+    "kronos",
   );
-  const models = kronos ? [kronos] : [];
+  const fincast = normalizeDecisionModelProvenance(
+    decisionModelValue(modelsValue, ["fincast", "finCast", "fin_cast", "fin-cast"]),
+    origin,
+    "fincast",
+  );
+  const models = [kronos, fincast].filter(
+    (model): model is AiSimulationDecisionModelProvenance => Boolean(model),
+  );
   if (!models.length) return undefined;
   const decision = asRecord(provenance.decision);
   return {
@@ -2065,13 +2129,28 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
   );
   const rawDecisionProvenance = first(report, "decisionProvenance", "decision_provenance")
     ?? first(root, "decisionProvenance", "decision_provenance");
-  const kronosForecasts = mergeLatestKronosForecasts(
+  const legacyKronosForecasts = mergeLatestKronosForecasts(
     snapshot?.kronosForecasts ?? [],
     selectLatestKronosForecasts([
       report.decisions,
       rawDecisionProvenance,
     ]),
   );
+  const modelForecasts = mergeLatestModelForecasts(
+    snapshot?.modelForecasts ?? [],
+    normalizeAiSimulationModelForecasts(first(
+      report,
+      "modelForecasts",
+      "model_forecasts",
+    ) ?? first(root, "modelForecasts", "model_forecasts")),
+    legacyKronosForecasts.map((forecast) => ({
+      ...forecast,
+      lane: "kronos_base" as const,
+    })),
+  );
+  const kronosForecasts = modelForecasts
+    .filter((forecast) => forecast.lane === "kronos_base")
+    .map(({ lane: _lane, ...forecast }) => forecast);
   const inferredModels = [
     ...selected.map((item) => item.model),
     ...decisions.map((item) => item.model),
@@ -2182,6 +2261,7 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     charts,
     modelProvenance: [...new Set([...reportModels, ...inferredModels])],
     decisionProvenance,
+    modelForecasts,
     kronosForecasts,
     evidence: normalizeReportEvidence(report.evidence),
     warnings: stringList(first(report, "warnings", "limitations"))

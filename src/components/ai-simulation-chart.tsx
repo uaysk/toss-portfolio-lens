@@ -1,10 +1,12 @@
 import { useMemo } from "react";
 import {
+  Area,
   Bar,
   CartesianGrid,
   ComposedChart,
   Line,
   ReferenceDot,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -13,6 +15,10 @@ import {
 import { Card } from "@/components/ui/card";
 import { formatMoney, formatQuantity } from "@/lib/format";
 import type { AiSimulationCurrency } from "@/lib/ai-simulation";
+import type {
+  AiSimulationForecastLane,
+  AiSimulationModelForecast,
+} from "@/lib/ai-simulation-forecast";
 import {
   scalpingTradeMarkerPoints,
   type ScalpingTradeMarker,
@@ -68,6 +74,7 @@ export type AiSimulationChartProps = {
   trades: readonly AiSimulationChartTrade[];
   patterns: readonly AiSimulationChartPattern[];
   updatedAt?: string;
+  forecasts?: readonly AiSimulationModelForecast[];
   className?: string;
 };
 
@@ -78,9 +85,25 @@ export type AiSimulationChartTradePoint = {
   trade: AiSimulationChartTrade;
 };
 
-type ChartRow = AiSimulationChartBar
-  & { candleRange: [number, number] }
-  & Record<string, unknown>;
+export type AiSimulationCombinedChartRow = {
+  timestamp: string;
+  time: number;
+  chartTime?: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  volume?: number;
+  status?: AiSimulationChartBarStatus;
+  indicatorValues: Record<string, number>;
+  candleRange?: [number, number];
+  forecastCoordinateHints?: Array<{
+    originTime: number;
+    horizonMinutes: number;
+  }>;
+} & Record<string, unknown>;
+
+type ChartRow = AiSimulationCombinedChartRow;
 
 type PriceOverlay = {
   key: string;
@@ -113,6 +136,23 @@ const PRICE_OVERLAY_COLORS = [
   "#ca8a04",
   "#475569",
 ] as const;
+
+const MODEL_FORECAST_STYLE: Readonly<Record<AiSimulationForecastLane, {
+  label: string;
+  stroke: string;
+  fill: string;
+}>> = {
+  kronos_base: {
+    label: "Kronos-base",
+    stroke: "#6d28d9",
+    fill: "#8b5cf6",
+  },
+  fincast: {
+    label: "FinCast",
+    stroke: "#0f766e",
+    fill: "#14b8a6",
+  },
+};
 
 const PATTERN_LABELS: Readonly<Record<string, string>> = {
   bullish_engulfing: "상승 장악형",
@@ -168,8 +208,167 @@ function chartRows(bars: readonly AiSimulationChartBar[]): ChartRow[] {
   return normalizedBars(bars).map((bar) => ({
     ...bar.indicatorValues,
     ...bar,
+    time: Date.parse(bar.timestamp),
     candleRange: [bar.low, bar.high],
   }));
+}
+
+function forecastKey(
+  lane: AiSimulationForecastLane,
+  field: "range" | "q10" | "median" | "q90",
+): string {
+  return `forecast:${lane}:${field}`;
+}
+
+/**
+ * Extends finalized/forming candle rows with exact model target timestamps.
+ * Only an exact finalized origin close may anchor a forecast path; missing
+ * targets are never interpolated and no return-to-price conversion occurs.
+ */
+export function aiSimulationCombinedChartRows(
+  bars: readonly AiSimulationChartBar[],
+  forecasts: readonly AiSimulationModelForecast[] = [],
+): AiSimulationCombinedChartRow[] {
+  const rows = chartRows(bars);
+  const byTime = new Map(rows.map((row) => [row.time, row]));
+  const exactFinalClose = new Map(
+    rows.flatMap((row) => (
+      row.status === "final" && finite(row.close) ? [[row.time, row.close] as const] : []
+    )),
+  );
+
+  for (const forecast of forecasts) {
+    if (forecast.status !== "available" || !forecast.origin) continue;
+    const originTime = Date.parse(forecast.origin);
+    if (!Number.isFinite(originTime)) continue;
+    const originClose = exactFinalClose.get(originTime);
+    if (originClose !== undefined) {
+      const originRow = byTime.get(originTime)!;
+      originRow[forecastKey(forecast.lane, "range")] = [originClose, originClose];
+      originRow[forecastKey(forecast.lane, "q10")] = originClose;
+      originRow[forecastKey(forecast.lane, "median")] = originClose;
+      originRow[forecastKey(forecast.lane, "q90")] = originClose;
+    }
+    for (const point of forecast.points) {
+      const time = Date.parse(point.targetTimestamp);
+      if (!Number.isFinite(time) || time <= originTime) continue;
+      const row = byTime.get(time) ?? {
+        timestamp: new Date(time).toISOString(),
+        time,
+        indicatorValues: {},
+      };
+      row[forecastKey(forecast.lane, "range")] = [point.q10Price, point.q90Price];
+      row[forecastKey(forecast.lane, "q10")] = point.q10Price;
+      row[forecastKey(forecast.lane, "median")] = point.medianPrice;
+      row[forecastKey(forecast.lane, "q90")] = point.q90Price;
+      row.forecastCoordinateHints = [
+        ...(row.forecastCoordinateHints ?? []),
+        { originTime, horizonMinutes: point.horizonMinutes },
+      ].filter((hint, index, values) => values.findIndex((candidate) => (
+        candidate.originTime === hint.originTime
+        && candidate.horizonMinutes === hint.horizonMinutes
+      )) === index);
+      byTime.set(time, row);
+    }
+  }
+  return [...byTime.values()].sort((left, right) => left.time - right.time);
+}
+
+/**
+ * A future path is current only when it was produced from the newest finalized
+ * candle and every advertised target is still ahead of that candle. This also
+ * protects archived/legacy payloads when a worker's last success was later
+ * followed by failures.
+ */
+export function aiSimulationCurrentModelForecasts(
+  bars: readonly AiSimulationChartBar[],
+  forecasts: readonly AiSimulationModelForecast[],
+): AiSimulationModelForecast[] {
+  const latestFinalTime = normalizedBars(bars).flatMap((bar) => (
+    bar.status === "final" ? [Date.parse(bar.timestamp)] : []
+  )).at(-1);
+  if (latestFinalTime === undefined) return [];
+  return forecasts.filter((forecast) => (
+    forecast.status === "available"
+    && forecast.origin !== undefined
+    && Date.parse(forecast.origin) === latestFinalTime
+    && forecast.points.length > 0
+    && forecast.points.every((point) => (
+      Date.parse(point.targetTimestamp) > latestFinalTime
+    ))
+  ));
+}
+
+/**
+ * Binance futures trade continuously, so their wall-clock distance is the
+ * correct chart distance. Stock minute bars have overnight/weekend holes;
+ * compress those holes to one observed-bar interval while keeping future
+ * forecast minutes proportional after the newest candle.
+ */
+export function aiSimulationChartCoordinateRows(
+  rows: readonly AiSimulationCombinedChartRow[],
+  continuousTimeline: boolean,
+): AiSimulationCombinedChartRow[] {
+  const ordered = [...rows].sort((left, right) => left.time - right.time);
+  if (continuousTimeline || ordered.length < 2) {
+    return ordered.map((row) => ({ ...row, chartTime: row.time }));
+  }
+  const actualRows = ordered.filter((row) => finite(row.close) && row.candleRange !== undefined);
+  if (actualRows.length < 2) {
+    return ordered.map((row) => ({ ...row, chartTime: row.time }));
+  }
+  const deltas = actualRows.slice(1).flatMap((row, index) => {
+    const delta = row.time - actualRows[index]!.time;
+    return delta > 0 ? [delta] : [];
+  }).sort((left, right) => left - right);
+  const observedInterval = Math.max(
+    1,
+    Math.min(
+      5 * 60_000,
+      deltas[Math.floor((deltas.length - 1) / 2)] ?? 60_000,
+    ),
+  );
+  const coordinates = new Map<number, number>();
+  let coordinate = actualRows[0]!.time;
+  coordinates.set(actualRows[0]!.time, coordinate);
+  for (let index = 1; index < actualRows.length; index += 1) {
+    const current = actualRows[index]!;
+    coordinate += Math.min(current.time - actualRows[index - 1]!.time, observedInterval);
+    coordinates.set(current.time, coordinate);
+  }
+  const firstActual = actualRows[0]!;
+  const lastActual = actualRows.at(-1)!;
+  const firstCoordinate = coordinates.get(firstActual.time)!;
+  const lastCoordinate = coordinates.get(lastActual.time)!;
+  return ordered.map((row) => {
+    const exact = coordinates.get(row.time);
+    if (exact !== undefined) return { ...row, chartTime: exact };
+    if (row.time < firstActual.time) {
+      return { ...row, chartTime: firstCoordinate - (firstActual.time - row.time) };
+    }
+    if (row.time > lastActual.time) {
+      const forecastCoordinate = row.forecastCoordinateHints?.flatMap((hint) => {
+        const originCoordinate = coordinates.get(hint.originTime);
+        return originCoordinate === undefined
+          ? []
+          : [originCoordinate + hint.horizonMinutes * 60_000];
+      })[0];
+      return {
+        ...row,
+        chartTime: forecastCoordinate ?? lastCoordinate + (row.time - lastActual.time),
+      };
+    }
+    const nextIndex = actualRows.findIndex((actual) => actual.time > row.time);
+    const next = actualRows[nextIndex]!;
+    const previous = actualRows[nextIndex - 1]!;
+    const previousCoordinate = coordinates.get(previous.time)!;
+    const nextCoordinate = coordinates.get(next.time)!;
+    const position = (row.time - previous.time) / (next.time - previous.time);
+    return {
+      ...row,
+      chartTime: previousCoordinate + (nextCoordinate - previousCoordinate) * position,
+    };
+  });
 }
 
 function vwapLabel(key: string): string | undefined {
@@ -319,7 +518,12 @@ function CandleShape(input: unknown) {
     height?: number;
     payload?: ChartRow;
   };
-  if (!payload) return <g />;
+  if (!payload
+    || !finite(payload.open)
+    || !finite(payload.high)
+    || !finite(payload.low)
+    || !finite(payload.close)
+    || !payload.candleRange) return <g />;
   const rising = payload.close >= payload.open;
   const color = rising ? "var(--candle-rise)" : "var(--candle-fall)";
   const spread = payload.high - payload.low;
@@ -356,6 +560,10 @@ function CandleShape(input: unknown) {
   );
 }
 
+export function aiSimulationTradeMarkerColor(side: "buy" | "sell"): string {
+  return side === "buy" ? "var(--candle-rise)" : "var(--candle-fall)";
+}
+
 function TradeMarkerShape({
   cx = 0,
   cy = 0,
@@ -369,16 +577,10 @@ function TradeMarkerShape({
 }) {
   const buy = point.trade.side === "buy";
   const markerY = cy + (buy ? 8 : -8);
-  const color = point.trade.positionSide === "long"
-    ? "#22d3ee"
-    : point.trade.positionSide === "short"
-      ? "#f59e0b"
-      : buy
-        ? "#2563eb"
-        : "#e11d48";
-  const direction = point.trade.positionSide
-    ? point.trade.positionSide.toUpperCase()
-    : buy ? "매수" : "매도";
+  const color = aiSimulationTradeMarkerColor(point.trade.side);
+  const direction = `${buy ? "매수" : "매도"}${
+    point.trade.positionSide ? ` · ${point.trade.positionSide.toUpperCase()}` : ""
+  }`;
   const unit = currency === "USDT" ? "계약" : "주";
   const label = `${direction} ${formatQuantity(point.trade.quantity)}${unit} · ${formatMoney(point.price, currency)}`;
   return (
@@ -387,6 +589,7 @@ function TradeMarkerShape({
       data-ai-simulation-trade-marker={point.trade.side}
       data-ai-simulation-position-side={point.trade.positionSide}
       data-ai-simulation-trade-at={point.trade.executedAt}
+      data-ai-simulation-trade-color={buy ? "red" : "blue"}
     >
       <title>{label}</title>
       <line x1={cx} y1={cy} x2={cx} y2={markerY} stroke={color} strokeWidth={1} />
@@ -412,15 +615,59 @@ export function AiSimulationChart({
   trades,
   patterns,
   updatedAt,
+  forecasts = [],
   className,
 }: AiSimulationChartProps) {
-  const rows = useMemo(() => chartRows(bars), [bars]);
-  const overlays = useMemo(() => priceOverlays(rows, indicators), [indicators, rows]);
+  const actualRows = useMemo(() => chartRows(bars), [bars]);
+  const currentForecasts = useMemo(
+    () => aiSimulationCurrentModelForecasts(bars, forecasts),
+    [bars, forecasts],
+  );
+  const rows = useMemo(
+    () => aiSimulationCombinedChartRows(bars, currentForecasts),
+    [bars, currentForecasts],
+  );
+  const coordinateRows = useMemo(
+    () => aiSimulationChartCoordinateRows(rows, currency === "USDT"),
+    [currency, rows],
+  );
+  const coordinateByTimestamp = useMemo(
+    () => new Map(coordinateRows.map((row) => [row.time, row.chartTime ?? row.time])),
+    [coordinateRows],
+  );
+  const timestampAtCoordinate = (coordinate: number): string => {
+    const nearest = coordinateRows.reduce<AiSimulationCombinedChartRow | undefined>(
+      (selected, row) => (
+        !selected
+        || Math.abs((row.chartTime ?? row.time) - coordinate)
+          < Math.abs((selected.chartTime ?? selected.time) - coordinate)
+          ? row
+          : selected
+      ),
+      undefined,
+    );
+    return nearest?.timestamp ?? new Date(coordinate).toISOString();
+  };
+  const overlays = useMemo(
+    () => priceOverlays(actualRows, indicators),
+    [actualRows, indicators],
+  );
   const tradePoints = useMemo(
     () => aiSimulationChartTradePoints(bars, trades),
     [bars, trades],
   );
-  const latestBar = rows.at(-1);
+  const latestBar = actualRows.at(-1);
+  const availableForecasts = currentForecasts;
+  const forecastOriginAvailability = new Map(availableForecasts.map((forecast) => [
+    forecast.lane,
+    Boolean(
+      forecast.origin
+      && actualRows.some((row) => (
+        row.status === "final"
+        && row.time === Date.parse(forecast.origin!)
+      )),
+    ),
+  ]));
   const recentPatterns = useMemo(
     () => [...patterns]
       .filter((pattern) => Number.isFinite(Date.parse(pattern.detectedAt)))
@@ -438,7 +685,8 @@ export function AiSimulationChart({
         <div className="min-w-0">
           <h3 className="truncate text-sm font-black">{name ? `${name} · ${symbol}` : symbol}</h3>
           <p className="mt-1 text-[9px] font-bold text-muted-foreground">
-            OHLC · 최근 {rows.length}/{AI_SIMULATION_CHART_MAX_BARS}개 봉
+            OHLC · 최근 {actualRows.length}/{AI_SIMULATION_CHART_MAX_BARS}개 봉
+            {availableForecasts.length ? ` · 예측 ${availableForecasts.length}개 lane 연속 표시` : ""}
           </p>
         </div>
         {latestBar ? (
@@ -447,7 +695,7 @@ export function AiSimulationChart({
               <dt className="inline text-muted-foreground">
                 {latestBar.status === "forming" ? "현재가 " : "종가 "}
               </dt>
-              <dd className="inline font-black">{formatMoney(latestBar.close, currency)}</dd>
+              <dd className="inline font-black">{formatMoney(latestBar.close!, currency)}</dd>
             </div>
             {finite(latestBar.volume) ? (
               <div>
@@ -477,7 +725,7 @@ export function AiSimulationChart({
         ) : null}
       </div>
 
-      {rows.length ? (
+      {actualRows.length ? (
         <div
           className="mt-3 h-[300px] min-w-0 max-w-full rounded-[20px] bg-secondary p-2"
           data-ai-simulation-price-chart
@@ -486,7 +734,7 @@ export function AiSimulationChart({
         >
           <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
             <ComposedChart
-              data={rows}
+              data={coordinateRows}
               syncId={AI_SIMULATION_CHART_SYNC_ID}
               syncMethod="value"
               margin={{ top: 12, right: 5, bottom: 0, left: 0 }}
@@ -497,8 +745,11 @@ export function AiSimulationChart({
                 strokeDasharray="3 5"
               />
               <XAxis
-                dataKey="timestamp"
-                tickFormatter={chartTime}
+                dataKey="chartTime"
+                type="number"
+                scale="linear"
+                domain={["dataMin", "dataMax"]}
+                tickFormatter={(value) => chartTime(timestampAtCoordinate(Number(value)))}
                 minTickGap={28}
                 tick={{ fontSize: 8 }}
                 axisLine={false}
@@ -514,7 +765,9 @@ export function AiSimulationChart({
                 domain={["auto", "auto"]}
               />
               <Tooltip
-                labelFormatter={(label) => formatTimestamp(String(label))}
+                labelFormatter={(label) => formatTimestamp(
+                  timestampAtCoordinate(Number(label)),
+                )}
                 formatter={(value, label) => [
                   Array.isArray(value)
                     ? value.map((entry) => formatMoney(Number(entry), currency)).join(" – ")
@@ -546,10 +799,85 @@ export function AiSimulationChart({
                   isAnimationActive={false}
                 />
               ))}
+              {availableForecasts.map((forecast) => {
+                const style = MODEL_FORECAST_STYLE[forecast.lane];
+                const anchored = forecastOriginAvailability.get(forecast.lane) === true;
+                return (
+                  <Area
+                    key={`${forecast.lane}:range`}
+                    dataKey={forecastKey(forecast.lane, "range")}
+                    name={`${style.label} Q10–Q90 예측 범위`}
+                    type="linear"
+                    fill={style.fill}
+                    fillOpacity={0.1}
+                    stroke="none"
+                    connectNulls={false}
+                    isAnimationActive={false}
+                    data-ai-simulation-forecast-band={forecast.lane}
+                    {...(!anchored ? { strokeDasharray: "3 3" } : {})}
+                  />
+                );
+              })}
+              {availableForecasts.flatMap((forecast) => {
+                const style = MODEL_FORECAST_STYLE[forecast.lane];
+                return [
+                  <Line
+                    key={`${forecast.lane}:q10`}
+                    dataKey={forecastKey(forecast.lane, "q10")}
+                    name={`${style.label} Q10`}
+                    type="linear"
+                    stroke={style.stroke}
+                    strokeDasharray="3 3"
+                    strokeWidth={1}
+                    dot={false}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                  />,
+                  <Line
+                    key={`${forecast.lane}:median`}
+                    dataKey={forecastKey(forecast.lane, "median")}
+                    name={`${style.label} 중앙값`}
+                    type="linear"
+                    stroke={style.stroke}
+                    strokeWidth={2}
+                    dot={{ r: 2 }}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                    data-ai-simulation-forecast-line={forecast.lane}
+                  />,
+                  <Line
+                    key={`${forecast.lane}:q90`}
+                    dataKey={forecastKey(forecast.lane, "q90")}
+                    name={`${style.label} Q90`}
+                    type="linear"
+                    stroke={style.stroke}
+                    strokeDasharray="3 3"
+                    strokeWidth={1}
+                    dot={false}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                  />,
+                ];
+              })}
+              {availableForecasts.flatMap((forecast) => {
+                const originTime = forecast.origin ? Date.parse(forecast.origin) : Number.NaN;
+                const originCoordinate = coordinateByTimestamp.get(originTime);
+                return originCoordinate !== undefined ? [(
+                  <ReferenceLine
+                    key={`${forecast.lane}:origin`}
+                    x={originCoordinate}
+                    stroke={MODEL_FORECAST_STYLE[forecast.lane].stroke}
+                    strokeDasharray="2 4"
+                    strokeOpacity={0.7}
+                    data-ai-simulation-forecast-origin={forecast.lane}
+                  />
+                )] : [];
+              })}
               {tradePoints.map((point) => (
                 <ReferenceDot
                   key={point.id}
-                  x={point.timestamp}
+                  x={coordinateByTimestamp.get(Date.parse(point.timestamp))
+                    ?? Date.parse(point.timestamp)}
                   y={point.price}
                   ifOverflow="extendDomain"
                   isFront
@@ -567,6 +895,88 @@ export function AiSimulationChart({
           시뮬레이션에 사용할 확정 또는 진행 중인 캔들 데이터가 없습니다.
         </div>
       )}
+
+      {forecasts.length ? (
+        <section
+          className="mt-2 min-w-0 rounded-[20px] bg-secondary p-3"
+          data-ai-simulation-model-forecast-overlay
+          aria-label={`${symbol} 모델 미래 가격 예측`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-[10px] font-black">분봉 뒤에 이어진 모델 예측</h4>
+            <span className="text-[8px] text-muted-foreground">원시 target timestamp · 보간 없음</span>
+          </div>
+          <div className="mt-2 flex max-w-full flex-wrap gap-1.5">
+            {forecasts.map((forecast) => {
+              const style = MODEL_FORECAST_STYLE[forecast.lane];
+              const anchored = forecastOriginAvailability.get(forecast.lane) === true;
+              const current = currentForecasts.includes(forecast);
+              return (
+                <span
+                  key={`${forecast.signalSymbol}:${forecast.lane}:${forecast.origin ?? "unavailable"}`}
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-card px-2 py-1 text-[8px] font-black"
+                  data-ai-simulation-model-forecast={forecast.lane}
+                  data-ai-simulation-model-forecast-status={current
+                    ? "available"
+                    : forecast.status === "available"
+                      ? "stale"
+                      : forecast.status}
+                  data-ai-simulation-model-forecast-origin={anchored ? "exact-final" : "unavailable"}
+                  title={forecast.modelId}
+                >
+                  <span className="h-0.5 w-3 shrink-0" style={{ backgroundColor: style.stroke }} />
+                  {style.label}
+                  {current
+                    ? ` · ${forecast.points.length}개 horizon`
+                    : forecast.status === "available"
+                      ? " · stale"
+                      : " · unavailable"}
+                </span>
+              );
+            })}
+          </div>
+          {forecasts.some((forecast) => (
+            forecast.status === "available" && !currentForecasts.includes(forecast)
+          )) ? (
+            <p className="mt-2 text-[8px] leading-4 text-muted-foreground" role="status">
+              최신 확정봉보다 오래된 예측은 미래 경로로 표시하지 않습니다.
+            </p>
+          ) : null}
+          {availableForecasts.flatMap((forecast) => (
+            forecastOriginAvailability.get(forecast.lane) === true ? [] : [(
+              <p
+                key={`${forecast.lane}:origin-warning`}
+                className="mt-2 text-[8px] leading-4 text-amber-800 dark:text-amber-200"
+                role="status"
+              >
+                {MODEL_FORECAST_STYLE[forecast.lane].label}: origin과 정확히 일치하는 확정봉이 없어
+                과거 가격으로 연결하지 않았습니다.
+              </p>
+            )]
+          ))}
+          {availableForecasts.length ? (
+            <div className="mt-2 flex max-w-full flex-wrap gap-1.5">
+              {availableForecasts.flatMap((forecast) => forecast.points.map((point) => (
+                <details
+                  key={`${forecast.lane}:${point.horizonMinutes}:${point.targetTimestamp}`}
+                  className="max-w-full rounded-2xl bg-card px-2 py-1 text-[8px] text-muted-foreground"
+                  data-ai-simulation-model-forecast-horizon={`${forecast.lane}:${point.horizonMinutes}`}
+                >
+                  <summary className="cursor-pointer font-black">
+                    {MODEL_FORECAST_STYLE[forecast.lane].label} +{point.horizonMinutes}분
+                    {" · 중앙 "}{formatMoney(point.medianPrice, currency)}
+                  </summary>
+                  <span className="mt-1 block break-words pr-1 leading-4">
+                    {formatTimestamp(point.targetTimestamp)}
+                    {" · Q10 "}{formatMoney(point.q10Price, currency)}
+                    {" · Q90 "}{formatMoney(point.q90Price, currency)}
+                  </span>
+                </details>
+              )))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {overlays.length ? (
         <div

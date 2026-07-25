@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
-import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
 import {
   AiSimulationFuturesLedger,
   AiSimulationModelComparisonPanel,
@@ -32,6 +31,7 @@ import {
   type AiSimulationHistoryItem,
   type AiSimulationMarketCountry,
   type AiSimulationMarket,
+  type AiSimulationModelLane,
   type AiSimulationPreset,
   type AiSimulationRunReport,
   type AiSimulationSelectionRequest,
@@ -71,7 +71,32 @@ const ACTION_LABELS: Record<string, string> = {
   watch: "관망",
   skip: "건너뜀",
   cash: "현금 유지",
+  open_long: "롱 진입",
+  open_short: "숏 진입",
+  reduce: "축소·청산",
+  none: "진입 없음",
 };
+
+const MODEL_LANE_LABELS: Record<AiSimulationModelLane, string> = {
+  kronos_base: "Kronos-base",
+  fincast: "FinCast",
+};
+
+function modelLaneFromIdentity(
+  component?: string,
+  modelId?: string,
+): AiSimulationModelLane | undefined {
+  const identity = [component, modelId].filter(Boolean).join(" ").toLowerCase()
+    .replaceAll("-", "_");
+  if (identity.includes("fincast")) return "fincast";
+  if (identity.includes("kronos_base") || identity.includes("kronos")) return "kronos_base";
+  return undefined;
+}
+
+function decisionModelLabel(component: string, modelId?: string): string {
+  const lane = modelLaneFromIdentity(component, modelId);
+  return lane ? MODEL_LANE_LABELS[lane] : modelId ?? component;
+}
 
 function readJson(response: Response): Promise<unknown> {
   return response.json().catch(() => ({}));
@@ -368,9 +393,32 @@ export function SimulationRunReportView({
   const { performance, configuration } = report;
   const quantityUnit = performance.currency === "USDT" ? "계약" : "주";
   const selectedSymbols = report.selected.map(({ name, symbol }) => name ? `${name} · ${symbol}` : symbol);
+  const modelForecasts = report.modelForecasts
+    ?? report.kronosForecasts.map((forecast) => ({
+      ...forecast,
+      lane: "kronos_base" as const,
+    }));
   const costs = configuration.costs
     ? Object.entries(configuration.costs).map(([key, value]) => `${key} ${value}bps`)
     : [];
+  const cryptoFutures = configuration.market?.kind === "crypto_futures";
+  const cryptoModelLanes = ([
+    ...(configuration.modelLanes ?? []),
+    ...(report.modelComparison?.lanes.map(({ id }) => id) ?? []),
+    ...modelForecasts.map(({ lane }) => lane),
+    ...report.decisionProvenance.flatMap(({ models }) => (
+      models.map(({ component, modelId }) => modelLaneFromIdentity(component, modelId))
+    )),
+    ...report.modelProvenance.map((model) => modelLaneFromIdentity(undefined, model)),
+  ] as Array<AiSimulationModelLane | undefined>)
+    .filter((lane): lane is AiSimulationModelLane => Boolean(lane))
+    .filter((lane, index, lanes) => lanes.indexOf(lane) === index);
+  const cryptoModelLabel = cryptoModelLanes.length
+    ? cryptoModelLanes.map((lane) => MODEL_LANE_LABELS[lane]).join(" · ")
+    : "모델";
+  const modelSectionTitle = cryptoFutures
+    ? `${cryptoModelLabel} lane·판단 주기`
+    : "Kronos-base 모델·판단 주기";
 
   return (
     <div className="min-w-0 space-y-3" data-simulation-report={report.runId}>
@@ -413,7 +461,7 @@ export function SimulationRunReportView({
       {report.modelComparison ? (
         <AiSimulationModelComparisonPanel comparison={report.modelComparison} />
       ) : null}
-      {configuration.market?.kind === "crypto_futures" ? (
+      {cryptoFutures ? (
         <AiSimulationFuturesLedger
           positions={report.futuresPositions ?? []}
           risk={report.futuresRisk}
@@ -482,7 +530,7 @@ export function SimulationRunReportView({
 
         <section className="rounded-2xl bg-secondary p-4" data-simulation-report-models>
           <div className="flex items-center justify-between gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-black"><Cpu className="size-4" />Kronos-base 모델·판단 주기</h3>
+            <h3 className="flex items-center gap-2 text-sm font-black"><Cpu className="size-4" />{modelSectionTitle}</h3>
             <span className="text-[9px] font-black text-muted-foreground">
               확정봉 {report.decisionCadence?.triggeredEvents ?? "–"}회
             </span>
@@ -498,7 +546,8 @@ export function SimulationRunReportView({
               data-simulation-report-decision-provenance
             >
               <summary className="cursor-pointer text-[9px] font-black">
-                판단 provenance {report.decisionProvenance.length}건 · Kronos-base / Rust
+                판단 provenance {report.decisionProvenance.length}건
+                {" · "}{cryptoFutures ? cryptoModelLabel : "Kronos-base / Rust"}
               </summary>
               <div className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1">
                 {[...report.decisionProvenance].reverse().map((decision, decisionIndex) => (
@@ -528,7 +577,7 @@ export function SimulationRunReportView({
                     </p>
                     <div className="mt-2 grid gap-2">
                       {decision.models.map((model) => {
-                        const componentLabel = "Kronos-base";
+                        const componentLabel = decisionModelLabel(model.component, model.modelId);
                         const device = [model.device, model.deviceName].filter(Boolean).join(" · ")
                           || "unavailable";
                         return (
@@ -618,6 +667,9 @@ export function SimulationRunReportView({
                 indicators={chart.indicators}
                 patterns={chart.patterns}
                 updatedAt={chart.updatedAt}
+                forecasts={modelForecasts.filter(
+                  (forecast) => forecast.signalSymbol === chart.symbol,
+                )}
                 trades={report.trades.flatMap((trade) => {
                   const side = trade.side.toLowerCase();
                   if (trade.symbol !== chart.symbol || (side !== "buy" && side !== "sell")) return [];
@@ -634,12 +686,6 @@ export function SimulationRunReportView({
           </div>
         </section>
       ) : null}
-
-      <AiSimulationKronosForecastSection
-        forecasts={report.kronosForecasts}
-        charts={report.charts}
-        currency={performance.currency}
-      />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <DecisionList decisions={report.decisions} />

@@ -33,6 +33,7 @@ export type FuturesPaperFill = {
   reduceOnly: boolean;
   realizedPnl: number;
   fee: number;
+  exitTax: number;
   slippageCost: number;
   funding: number;
   reason?:
@@ -58,6 +59,7 @@ export type FuturesPaperLedgerSnapshot = {
   realizedPnl: number;
   unrealizedPnl: number;
   fees: number;
+  exitTaxes: number;
   slippage: number;
   funding: number;
   positions: FuturesPosition[];
@@ -67,6 +69,7 @@ export type FuturesPaperLedgerSnapshot = {
 export type FuturesPaperLedgerOptions = {
   initialCash: number;
   feeBpsPerSide?: number;
+  exitTaxBps?: number;
   slippageBpsPerSide?: number;
 };
 
@@ -163,10 +166,12 @@ function liquidationBufferRate(position: FuturesPosition, markPrice: number): nu
 export class FuturesPaperLedger {
   private readonly initialCash: number;
   private readonly feeRate: number;
+  private readonly exitTaxRate: number;
   private readonly slippageRate: number;
   private walletBalance: number;
   private realizedPnl = 0;
   private fees = 0;
+  private exitTaxes = 0;
   private slippage = 0;
   private funding = 0;
   private readonly positions = new Map<string, FuturesPosition>();
@@ -182,10 +187,13 @@ export class FuturesPaperLedger {
     this.initialCash = assertFinite(options.initialCash, "initialCash");
     this.walletBalance = this.initialCash;
     const feeBps = options.feeBpsPerSide ?? 4;
+    const exitTaxBps = options.exitTaxBps ?? 0;
     const slippageBps = options.slippageBpsPerSide ?? 1;
     assertFinite(feeBps, "feeBpsPerSide", 0, true);
+    assertFinite(exitTaxBps, "exitTaxBps", 0, true);
     assertFinite(slippageBps, "slippageBpsPerSide", 0, true);
     this.feeRate = feeBps / 10_000;
+    this.exitTaxRate = exitTaxBps / 10_000;
     this.slippageRate = slippageBps / 10_000;
   }
 
@@ -290,6 +298,7 @@ export class FuturesPaperLedger {
       reduceOnly: false,
       realizedPnl: 0,
       fee,
+      exitTax: 0,
       slippageCost,
       funding: 0,
       decisionAt: input.decisionAt,
@@ -322,11 +331,13 @@ export class FuturesPaperLedger {
     const sign = position.side === "long" ? 1 : -1;
     const realizedPnl = sign * (price - position.entryPrice) * quantity;
     const funding = position.accruedFunding * (quantity / position.quantity);
-    const fee = notional * this.feeRate;
+    const exitTax = notional * this.exitTaxRate;
+    const fee = notional * this.feeRate + exitTax;
     const slippageCost = Math.abs(price - observedPrice) * quantity;
     this.walletBalance += realizedPnl - fee;
     this.realizedPnl += realizedPnl;
     this.fees += fee;
+    this.exitTaxes += exitTax;
     this.slippage += slippageCost;
     const remaining = floorToStep(position.quantity - quantity, this.quantityStep(position));
     if (remaining <= 0) {
@@ -355,6 +366,7 @@ export class FuturesPaperLedger {
       reduceOnly: true,
       realizedPnl,
       fee,
+      exitTax,
       slippageCost,
       funding,
       ...(input.reason ? { reason: input.reason } : {}),
@@ -458,6 +470,7 @@ export class FuturesPaperLedger {
       realizedPnl: this.realizedPnl,
       unrealizedPnl,
       fees: this.fees,
+      exitTaxes: this.exitTaxes,
       slippage: this.slippage,
       funding: this.funding,
       positions,

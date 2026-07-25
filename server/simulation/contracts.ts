@@ -66,6 +66,37 @@ export const DEFAULT_CRYPTO_FUTURES_COSTS = Object.freeze({
   slippageBpsPerSide: 1,
 });
 
+export const DEFAULT_CRYPTO_FUTURES_RISK_LIMITS = Object.freeze({
+  riskPerTradeRate: 0.005,
+  dailyLossLimitRate: 0.03,
+  maximumLeverage: 15,
+  grossExposureLimitRate: 1.5,
+  marginUsageLimitRate: 0.2,
+  liquidationBufferMultiple: 2,
+});
+
+export const CryptoFuturesRiskLimitsSchema = z.object({
+  riskPerTradeRate: z.number().finite().min(0.001)
+    .max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.riskPerTradeRate)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.riskPerTradeRate),
+  dailyLossLimitRate: z.number().finite().min(0.005)
+    .max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.dailyLossLimitRate)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.dailyLossLimitRate),
+  maximumLeverage: z.number().int().min(1).max(15)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.maximumLeverage),
+  grossExposureLimitRate: z.number().finite().min(0.1)
+    .max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.grossExposureLimitRate)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.grossExposureLimitRate),
+  marginUsageLimitRate: z.number().finite().min(0.05)
+    .max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.marginUsageLimitRate)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.marginUsageLimitRate),
+  liquidationBufferMultiple: z.number().finite()
+    .min(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.liquidationBufferMultiple)
+    .max(5)
+    .default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.liquidationBufferMultiple),
+}).strict();
+export type CryptoFuturesRiskLimits = z.infer<typeof CryptoFuturesRiskLimitsSchema>;
+
 export const SimulationCostsSchema = z.object({
   commissionBpsPerSide: z.number().finite().min(0).max(1_000)
     .default(DEFAULT_SIMULATION_COSTS.commissionBpsPerSide),
@@ -164,6 +195,7 @@ export type SimulationStartRequest = {
   preset: SimulationPreset;
   riskTolerance: number;
   costs: SimulationCosts;
+  riskLimits?: CryptoFuturesRiskLimits;
   modelLanes: SimulationModelLanes;
   execution: SimulationExecution;
 };
@@ -185,6 +217,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     preset: SimulationPresetSchema.default("risk_management"),
     riskTolerance: z.number().int().min(0).max(100).default(50),
     costs: SimulationCostOverridesSchema.optional(),
+    riskLimits: CryptoFuturesRiskLimitsSchema.optional(),
     modelLanes: SimulationModelLanesSchema,
     execution: SimulationExecutionSchema,
   }).strict().superRefine((input, context) => {
@@ -222,26 +255,21 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
           message: "암호화폐 선물은 단일 종목 전략만 지원합니다.",
         });
       }
-      if (input.selection.mode === "auto" && input.selection.symbolCount !== 1) {
+    } else {
+      if (input.initialCash < 100_000) {
         context.addIssue({
           code: "custom",
-          path: ["selection", "symbolCount"],
-          message: "암호화폐 선물 자동 선택은 한 종목만 지원합니다.",
+          path: ["initialCash"],
+          message: "주식 초기 자산은 100,000 이상이어야 합니다.",
         });
       }
-      if (input.selection.mode === "manual" && input.selection.symbols.length !== 1) {
+      if (input.riskLimits !== undefined) {
         context.addIssue({
           code: "custom",
-          path: ["selection", "symbols"],
-          message: "암호화폐 선물 수동 선택은 한 종목만 지원합니다.",
+          path: ["riskLimits"],
+          message: "선물 위험 한도는 암호화폐 선물 요청에서만 사용할 수 있습니다.",
         });
       }
-    } else if (input.initialCash < 100_000) {
-      context.addIssue({
-        code: "custom",
-        path: ["initialCash"],
-        message: "주식 초기 자산은 100,000 이상이어야 합니다.",
-      });
     }
   }).transform((input): SimulationStartRequest => {
     const market = input.market
@@ -255,6 +283,11 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
           : DEFAULT_CRYPTO_FUTURES_COSTS),
         ...input.costs,
       },
+      ...(market.kind === "crypto_futures"
+        ? {
+          riskLimits: CryptoFuturesRiskLimitsSchema.parse(input.riskLimits ?? {}),
+        }
+        : {}),
     } as Omit<SimulationStartRequest, "marketCountry">;
     if (market.kind === "stock") {
       return { ...normalized, marketCountry: market.country };

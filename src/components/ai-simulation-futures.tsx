@@ -37,6 +37,19 @@ function money(value?: number): string {
   return Number.isFinite(value) ? formatMoney(value as number, "USDT") : "unavailable";
 }
 
+function leverageDistribution(values?: readonly number[]): string {
+  if (!values?.length) return "unavailable";
+  const counts = new Map<number, number>();
+  for (const value of values) {
+    if (!Number.isFinite(value) || value <= 0) continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([leverage, count]) => `${leverage.toFixed(0)}× ${count}회`)
+    .join(" · ") || "unavailable";
+}
+
 function Metric({
   label,
   value,
@@ -140,15 +153,33 @@ export function AiSimulationFuturesLedger({
         </span>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         <Metric label="거래당 위험" value={ratio(risk?.riskPerTradeRatio ?? 0.005)} />
         <Metric
           label="UTC 일손실 / 한도"
           value={`${ratio(risk?.dailyLossRatio)} / ${ratio(risk?.dailyLossLimitRatio ?? 0.03)}`}
           className={risk?.newEntriesBlocked ? "text-destructive" : undefined}
         />
-        <Metric label="Gross exposure" value={ratio(risk?.grossExposureRatio)} />
-        <Metric label="증거금 사용" value={ratio(risk?.marginUsageRatio)} />
+        <Metric
+          label="Gross exposure / 한도"
+          value={`${ratio(risk?.grossExposureRatio)} / ${ratio(risk?.grossExposureLimitRatio)}`}
+        />
+        <Metric
+          label="증거금 사용 / 한도"
+          value={`${ratio(risk?.marginUsageRatio)} / ${ratio(risk?.marginUsageLimitRatio)}`}
+        />
+        <Metric
+          label="최대 레버리지"
+          value={risk?.maximumLeverage !== undefined
+            ? `${risk.maximumLeverage.toFixed(0)}×`
+            : "unavailable"}
+        />
+        <Metric
+          label="청산 buffer / 손절"
+          value={risk?.liquidationBufferMultiple !== undefined
+            ? `${risk.liquidationBufferMultiple.toFixed(2)}×`
+            : "unavailable"}
+        />
       </div>
       {risk?.blockReason ? (
         <p className="mt-3 flex items-start gap-2 rounded-2xl bg-destructive/10 p-3 text-[10px] leading-4 text-destructive" role="alert">
@@ -169,6 +200,7 @@ export function AiSimulationFuturesLedger({
 
 function LaneCard({ lane }: { lane: AiSimulationModelComparisonLane }) {
   const metrics = lane.metrics;
+  const provenance = lane.provenance;
   const ready = ["available", "complete", "completed", "running", "ready"].includes(lane.status.toLowerCase());
   return (
     <article
@@ -191,18 +223,52 @@ function LaneCard({ lane }: { lane: AiSimulationModelComparisonLane }) {
         </span>
       </div>
       {lane.unavailableReason ? <p className="mt-3 break-words text-[9px] leading-4 text-destructive">{lane.unavailableReason}</p> : null}
+      {provenance ? (
+        <div
+          className="mt-3 rounded-xl bg-card p-3 text-[8px] leading-4 text-muted-foreground"
+          data-model-lane-provenance={lane.id}
+        >
+          <p className="break-all font-black text-foreground">
+            {provenance.modelId ?? "model unavailable"}
+            {provenance.modelRevision ? ` @ ${provenance.modelRevision}` : ""}
+          </p>
+          <p className="mt-1 break-words">
+            device {[provenance.device, provenance.deviceName].filter(Boolean).join(" · ") || "unavailable"}
+            {provenance.cudaCapability ? ` · CUDA ${provenance.cudaCapability}` : ""}
+          </p>
+          <p className="mt-1 break-words">
+            source {provenance.sourceRevision ?? "unavailable"}
+            {provenance.loaderVersion ? ` · loader ${provenance.loaderVersion}` : ""}
+          </p>
+          <p className="mt-1 break-words">
+            precision validation {provenance.precisionValidation ?? "unavailable"}
+            {" · "}memory {provenance.memoryStatus ?? "unavailable"}
+            {provenance.peakVramMb !== undefined ? ` · peak ${provenance.peakVramMb.toFixed(0)}MB` : ""}
+          </p>
+          {provenance.precisionFailureReasons.length ? (
+            <p className="mt-1 break-words text-destructive">
+              {provenance.precisionFailureReasons.join(" · ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
         <Metric label="Pinball loss" value={decimal(metrics.pinballLoss)} />
         <Metric label="Median MAE" value={decimal(metrics.medianReturnMae)} />
         <Metric label="방향 정확도" value={ratio(metrics.directionAccuracy)} />
         <Metric label="Quantile coverage" value={ratio(metrics.quantileCoverage)} />
+        <Metric label="Calibration error" value={ratio(metrics.calibrationError)} />
         <Metric label="비용 후 PnL" value={money(metrics.netPnl)} />
         <Metric label="Profit factor" value={decimal(metrics.profitFactor, 2)} />
         <Metric label="Win rate" value={ratio(metrics.winRate)} />
         <Metric label="Max drawdown" value={ratio(metrics.maxDrawdown)} />
         <Metric label="Turnover" value={decimal(metrics.turnover, 2)} />
+        <Metric label="Funding" value={money(metrics.funding)} />
+        <Metric label="수수료" value={money(metrics.fees)} />
+        <Metric label="레버리지 분포" value={leverageDistribution(metrics.leverageDistribution)} />
         <Metric label="추론 latency" value={metrics.latencyMs !== undefined ? `${metrics.latencyMs.toFixed(0)}ms` : "unavailable"} />
         <Metric label="Availability" value={ratio(metrics.availabilityRatio)} />
+        <Metric label="Timeout" value={metrics.timeoutCount !== undefined ? `${metrics.timeoutCount.toFixed(0)}회` : "unavailable"} />
         <Metric label="Peak VRAM" value={metrics.peakVramMb !== undefined ? `${metrics.peakVramMb.toFixed(0)}MB` : "unavailable"} />
       </div>
     </article>

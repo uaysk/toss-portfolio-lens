@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { RunTaskContext } from "../services/run-service.js";
 import {
   AI_SIMULATION_CONTRACT_VERSION,
+  DEFAULT_CRYPTO_FUTURES_RISK_LIMITS,
   type SimulationModelLane,
   type SimulationStartRequest,
 } from "../simulation/contracts.js";
@@ -41,9 +42,7 @@ import {
   type FuturesSide,
 } from "./futures-paper-ledger.js";
 import {
-  FUTURES_DAILY_LOSS_LIMIT_RATE,
-  FUTURES_TRADE_RISK_RATE,
-  PAPER_MAINTENANCE_MARGIN_COVERAGE_RATE,
+  PAPER_MAINTENANCE_MARGIN_COVERAGE_MULTIPLIER,
   signalFromQuantileCdf,
   sizeFuturesPosition,
   updateDailyLossGate,
@@ -51,6 +50,11 @@ import {
   type QuantileDirectionSignal,
   type ReturnQuantile,
 } from "./futures-risk.js";
+import {
+  detectSimulationChartPatterns,
+  type SimulationChartBar,
+  type SimulationChartPatternBias,
+} from "../simulation/chart-data.js";
 
 const MINUTE_MS = 60_000;
 const MAXIMUM_RESTORED_BARS = 1_024;
@@ -100,6 +104,8 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_memory_status_invalid",
   "model_mode_mismatch",
   "model_peak_vram_invalid",
+  "model_price_quantiles_invalid",
+  "model_price_targets_non_monotone",
   "model_precision_failure_reasons_invalid",
   "model_precision_invalid",
   "model_precision_provenance_invalid",
@@ -255,12 +261,22 @@ export type CryptoPaperRuntimeOptions = {
   onSnapshot?: CryptoPaperRuntimeSnapshotObserver;
 };
 
+type RuntimeModelForecastPoint = {
+  horizonMinutes: number;
+  targetTimestamp: string;
+  q10Price: number;
+  medianPrice: number;
+  q90Price: number;
+  upProbability?: number;
+};
+
 type NormalizedLaneForecast = {
   lane: SimulationModelLane;
   generatedAt: number;
   generatedAtIso: string;
   inputEndAt: string;
   quantiles: ReturnQuantile[];
+  displayPoints: RuntimeModelForecastPoint[];
   modelId: string;
   modelRevision: string;
   sourceRevision: string;
@@ -311,6 +327,10 @@ type RuntimeDecision = {
   probabilityAboveCost?: number;
   probabilityBelowNegativeCost?: number;
   roundTripCostRate?: number;
+  technicalState?: string;
+  chartPatternBias?: SimulationChartPatternBias;
+  chartPatterns?: string[];
+  components?: Record<string, number>;
   status: "pending" | "executed" | "held" | "blocked" | "unavailable" | "skipped";
   reason: string;
   requestDigest: string;
@@ -363,6 +383,7 @@ type TerminalSettlementLaneEvidence = {
   fillBarrierDigest?: string;
   fillPrice?: number;
   fee?: number;
+  exitTax?: number;
   slippage?: number;
   funding?: number;
   realizedPnl?: number;
@@ -487,6 +508,458 @@ type RuntimeInferenceCompletion = {
   currentVolatility: number;
 };
 
+type PortfolioDailyLossObservation = DailyLossGateState & {
+  closeAllReduceOnly: boolean;
+};
+
+export class PortfolioDailyLossGate {
+  private readonly equities = new Map<
+    SimulationModelLane,
+    Map<string, number>
+  >();
+  private readonly states = new Map<SimulationModelLane, DailyLossGateState>();
+
+  constructor(input: {
+    lanes: readonly SimulationModelLane[];
+    symbols: readonly string[];
+    perSymbolInitialCash: number;
+    dailyLossLimitRate: number;
+    observedAt: number;
+  }) {
+    for (const lane of input.lanes) {
+      this.equities.set(lane, new Map(
+        input.symbols.map((symbol) => [symbol, input.perSymbolInitialCash]),
+      ));
+      this.states.set(lane, updateDailyLossGate(
+        undefined,
+        input.perSymbolInitialCash * input.symbols.length,
+        input.observedAt,
+        input.dailyLossLimitRate,
+      ));
+    }
+  }
+
+  state(lane: SimulationModelLane): DailyLossGateState {
+    const state = this.states.get(lane);
+    if (!state) throw new Error(`portfolio_daily_loss_lane_unavailable:${lane}`);
+    return state;
+  }
+
+  observe(input: {
+    lane: SimulationModelLane;
+    symbol: string;
+    equity: number;
+    observedAt: number;
+    dailyLossLimitRate: number;
+  }): PortfolioDailyLossObservation {
+    const laneEquities = this.equities.get(input.lane);
+    if (!laneEquities || !laneEquities.has(input.symbol)) {
+      throw new Error(`portfolio_daily_loss_symbol_unavailable:${input.symbol}`);
+    }
+    laneEquities.set(input.symbol, input.equity);
+    const portfolioEquity = [...laneEquities.values()]
+      .reduce((sum, equity) => sum + equity, 0);
+    const next = updateDailyLossGate(
+      this.states.get(input.lane),
+      portfolioEquity,
+      input.observedAt,
+      input.dailyLossLimitRate,
+    );
+    this.states.set(input.lane, next);
+    return next;
+  }
+}
+
+type RuntimeEquityPoint = {
+  timestamp: string;
+  equity: number;
+  drawdown: number;
+};
+
+const MODEL_METRIC_AGGREGATION_SCHEMA_VERSION = "crypto-model-metric-aggregation/v1";
+
+type ModelMetricAggregationBasis = {
+  schemaVersion: typeof MODEL_METRIC_AGGREGATION_SCHEMA_VERSION;
+  prediction: {
+    pinballLossSum: number;
+    pinballLossCount: number;
+    medianAbsoluteErrorSum: number;
+    medianAbsoluteErrorCount: number;
+    directionHitSum: number;
+    directionCount: number;
+    coverageHitSum: number;
+    coverageCount: number;
+    nominalCoverageSum: number;
+    nominalCoverageCount: number;
+  };
+  trading: {
+    netPnl: number;
+    grossProfit: number;
+    grossLoss: number;
+    winCount: number;
+    outcomeCount: number;
+    turnoverNotional: number;
+    initialCash: number;
+    funding: number;
+    fees: number;
+    leverageDistribution: number[];
+  };
+  operations: {
+    attempts: number;
+    successes: number;
+    latencySum: number;
+    latencyCount: number;
+    timeoutCount: number;
+    peakVramMb?: number;
+  };
+  equity: RuntimeEquityPoint[];
+};
+
+type PortfolioMetricAggregationResult = {
+  consistent: boolean;
+  metrics: Record<string, unknown>;
+};
+
+function aggregateEquityPartitions(
+  partitions: readonly {
+    series: readonly RuntimeEquityPoint[];
+    initialCash: number;
+  }[],
+): {
+  points: RuntimeEquityPoint[];
+  maximumDrawdown: number;
+} {
+  if (partitions.some(({ initialCash }) => (
+    !Number.isFinite(initialCash) || initialCash <= 0
+  ))) {
+    throw new Error("portfolio_equity_initial_cash_invalid");
+  }
+  const normalized = partitions.map(({ series, initialCash }) => ({
+    initialCash,
+    series: series
+      .filter((point) => (
+        Number.isFinite(Date.parse(point.timestamp))
+        && Number.isFinite(point.equity)
+      ))
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)),
+  }));
+  const timestamps = [...new Set(normalized.flatMap(({ series }) => (
+    series.map((point) => Date.parse(point.timestamp))
+  )))].sort((left, right) => left - right);
+  const indices = normalized.map(() => 0);
+  const latestEquities = normalized.map(({ initialCash }) => initialCash);
+  const output: RuntimeEquityPoint[] = [];
+  let peak = latestEquities.reduce((sum, value) => sum + value, 0);
+  let maximumDrawdown = 0;
+  for (const timestamp of timestamps) {
+    for (let index = 0; index < normalized.length; index += 1) {
+      const series = normalized[index]!.series;
+      while (indices[index]! < series.length
+        && Date.parse(series[indices[index]!]!.timestamp) <= timestamp) {
+        latestEquities[index] = series[indices[index]!]!.equity;
+        indices[index] += 1;
+      }
+    }
+    const equity = latestEquities.reduce((sum, value) => sum + value, 0);
+    peak = Math.max(peak, equity);
+    const drawdown = peak > 0 ? Math.max(0, (peak - equity) / peak) : 0;
+    maximumDrawdown = Math.max(maximumDrawdown, drawdown);
+    const point = {
+      timestamp: iso(timestamp),
+      equity,
+      drawdown,
+    };
+    if (output.length < MAX_EQUITY_SAMPLES_PER_LANE) output.push(point);
+    else output[output.length - 1] = point;
+  }
+  return {
+    points: output,
+    maximumDrawdown,
+  };
+}
+
+export function aggregatePortfolioEquitySeries(
+  seriesBySymbol: readonly (readonly RuntimeEquityPoint[])[],
+  perSymbolInitialCash: number,
+): RuntimeEquityPoint[] {
+  if (!Number.isFinite(perSymbolInitialCash) || perSymbolInitialCash <= 0) {
+    throw new Error("portfolio_equity_initial_cash_invalid");
+  }
+  return aggregateEquityPartitions(seriesBySymbol.map((series) => ({
+    series,
+    initialCash: perSymbolInitialCash,
+  }))).points;
+}
+
+export function groupPortfolioRuntimeArtifacts(
+  results: readonly CryptoSimulationRuntimeResult[],
+): Array<{
+  type: NonNullable<CryptoSimulationRuntimeResult["artifacts"]>[number]["type"];
+  contents: unknown[];
+  rowCount: number;
+}> {
+  const grouped = new Map<string, {
+    type: NonNullable<CryptoSimulationRuntimeResult["artifacts"]>[number]["type"];
+    contents: unknown[];
+    rowCount: number;
+  }>();
+  for (const result of results) {
+    for (const artifact of result.artifacts ?? []) {
+      const current = grouped.get(artifact.type) ?? {
+        type: artifact.type,
+        contents: [],
+        rowCount: 0,
+      };
+      current.contents.push(artifact.content);
+      current.rowCount += artifact.rowCount ?? 1;
+      grouped.set(artifact.type, current);
+    }
+  }
+  return [...grouped.values()];
+}
+
+export function aggregatePortfolioLaneProvenance(
+  laneValues: readonly Record<string, unknown>[],
+  expectedSymbolCount: number,
+): {
+  consistent: boolean;
+  provenance?: Record<string, unknown>;
+} {
+  const provenances = laneValues.flatMap((value) => {
+    const provenance = record(first(value, "provenance"));
+    return provenance ? [provenance] : [];
+  });
+  const representative = provenances[0];
+  const representativeDigest = representative ? digest(representative) : undefined;
+  const consistent = laneValues.length === expectedSymbolCount
+    && provenances.length === expectedSymbolCount
+    && representativeDigest !== undefined
+    && provenances.every((provenance) => digest(provenance) === representativeDigest);
+  return {
+    consistent,
+    ...(representative ? { provenance: structuredClone(representative) } : {}),
+  };
+}
+
+function requiredBasisNumber(
+  source: UnknownRecord | undefined,
+  key: string,
+): number | undefined {
+  const value = source?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function requiredBasisCount(
+  source: UnknownRecord | undefined,
+  key: string,
+): number | undefined {
+  const value = requiredBasisNumber(source, key);
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function parseModelMetricAggregationBasis(
+  value: unknown,
+): ModelMetricAggregationBasis | undefined {
+  const source = record(value);
+  if (source?.schemaVersion !== MODEL_METRIC_AGGREGATION_SCHEMA_VERSION) return undefined;
+  const prediction = record(source.prediction);
+  const trading = record(source.trading);
+  const operations = record(source.operations);
+  const predictionValues = {
+    pinballLossSum: requiredBasisNumber(prediction, "pinballLossSum"),
+    pinballLossCount: requiredBasisCount(prediction, "pinballLossCount"),
+    medianAbsoluteErrorSum: requiredBasisNumber(prediction, "medianAbsoluteErrorSum"),
+    medianAbsoluteErrorCount: requiredBasisCount(prediction, "medianAbsoluteErrorCount"),
+    directionHitSum: requiredBasisNumber(prediction, "directionHitSum"),
+    directionCount: requiredBasisCount(prediction, "directionCount"),
+    coverageHitSum: requiredBasisNumber(prediction, "coverageHitSum"),
+    coverageCount: requiredBasisCount(prediction, "coverageCount"),
+    nominalCoverageSum: requiredBasisNumber(prediction, "nominalCoverageSum"),
+    nominalCoverageCount: requiredBasisCount(prediction, "nominalCoverageCount"),
+  };
+  const tradingValues = {
+    netPnl: requiredBasisNumber(trading, "netPnl"),
+    grossProfit: requiredBasisNumber(trading, "grossProfit"),
+    grossLoss: requiredBasisNumber(trading, "grossLoss"),
+    winCount: requiredBasisCount(trading, "winCount"),
+    outcomeCount: requiredBasisCount(trading, "outcomeCount"),
+    turnoverNotional: requiredBasisNumber(trading, "turnoverNotional"),
+    initialCash: requiredBasisNumber(trading, "initialCash"),
+    funding: requiredBasisNumber(trading, "funding"),
+    fees: requiredBasisNumber(trading, "fees"),
+  };
+  const operationValues = {
+    attempts: requiredBasisCount(operations, "attempts"),
+    successes: requiredBasisCount(operations, "successes"),
+    latencySum: requiredBasisNumber(operations, "latencySum"),
+    latencyCount: requiredBasisCount(operations, "latencyCount"),
+    timeoutCount: requiredBasisCount(operations, "timeoutCount"),
+  };
+  if ([
+    ...Object.values(predictionValues),
+    ...Object.values(tradingValues),
+    ...Object.values(operationValues),
+  ].some((candidate) => candidate === undefined)) return undefined;
+  if (
+    tradingValues.initialCash! <= 0
+    || tradingValues.grossProfit! < 0
+    || tradingValues.grossLoss! < 0
+    || tradingValues.turnoverNotional! < 0
+    || tradingValues.winCount! > tradingValues.outcomeCount!
+    || operationValues.successes! > operationValues.attempts!
+  ) return undefined;
+  const rawLeverages = trading?.leverageDistribution;
+  if (!Array.isArray(rawLeverages) || rawLeverages.some((candidate) => (
+    typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0
+  ))) return undefined;
+  const rawEquity = source.equity;
+  if (!Array.isArray(rawEquity)) return undefined;
+  const equity = rawEquity.flatMap((candidate): RuntimeEquityPoint[] => {
+    const point = record(candidate);
+    const timestamp = exactText(point?.timestamp);
+    const equityValue = requiredBasisNumber(point, "equity");
+    const drawdown = requiredBasisNumber(point, "drawdown");
+    return timestamp !== undefined
+      && Number.isFinite(Date.parse(timestamp))
+      && equityValue !== undefined
+      && drawdown !== undefined
+      ? [{
+        timestamp,
+        equity: equityValue,
+        drawdown,
+      }]
+      : [];
+  });
+  if (equity.length !== rawEquity.length) return undefined;
+  const peakVramMb = operations?.peakVramMb === undefined
+    ? undefined
+    : requiredBasisNumber(operations, "peakVramMb");
+  if (operations?.peakVramMb !== undefined
+    && (peakVramMb === undefined || peakVramMb < 0)) return undefined;
+  return {
+    schemaVersion: MODEL_METRIC_AGGREGATION_SCHEMA_VERSION,
+    prediction: predictionValues as ModelMetricAggregationBasis["prediction"],
+    trading: {
+      ...tradingValues as Omit<
+        ModelMetricAggregationBasis["trading"],
+        "leverageDistribution"
+      >,
+      leverageDistribution: [...rawLeverages],
+    },
+    operations: {
+      ...operationValues as Omit<
+        ModelMetricAggregationBasis["operations"],
+        "peakVramMb"
+      >,
+      ...(peakVramMb !== undefined ? { peakVramMb } : {}),
+    },
+    equity,
+  };
+}
+
+export function aggregatePortfolioLaneMetrics(
+  laneValues: readonly Record<string, unknown>[],
+  expectedSymbolCount: number,
+): PortfolioMetricAggregationResult {
+  if (!Number.isSafeInteger(expectedSymbolCount) || expectedSymbolCount < 1) {
+    return { consistent: false, metrics: {} };
+  }
+  const bases = laneValues.flatMap((value) => {
+    const basis = parseModelMetricAggregationBasis(value.aggregationBasis);
+    return basis ? [basis] : [];
+  });
+  if (laneValues.length !== expectedSymbolCount || bases.length !== expectedSymbolCount) {
+    return { consistent: false, metrics: {} };
+  }
+  const sum = (select: (basis: ModelMetricAggregationBasis) => number): number => (
+    bases.reduce((total, basis) => total + select(basis), 0)
+  );
+  const ratio = (
+    numerator: (basis: ModelMetricAggregationBasis) => number,
+    denominator: (basis: ModelMetricAggregationBasis) => number,
+  ): number | undefined => {
+    const totalCount = sum(denominator);
+    return totalCount > 0 ? sum(numerator) / totalCount : undefined;
+  };
+  const grossProfit = sum((basis) => basis.trading.grossProfit);
+  const grossLoss = sum((basis) => basis.trading.grossLoss);
+  const totalInitialCash = sum((basis) => basis.trading.initialCash);
+  const actualCoverage = ratio(
+    (basis) => basis.prediction.coverageHitSum,
+    (basis) => basis.prediction.coverageCount,
+  );
+  const nominalCoverage = ratio(
+    (basis) => basis.prediction.nominalCoverageSum,
+    (basis) => basis.prediction.nominalCoverageCount,
+  );
+  const portfolioEquity = aggregateEquityPartitions(bases.map((basis) => ({
+    series: basis.equity,
+    initialCash: basis.trading.initialCash,
+  })));
+  const metrics: Record<string, unknown> = {
+    netPnl: sum((basis) => basis.trading.netPnl),
+    maxDrawdown: portfolioEquity.maximumDrawdown,
+    turnover: sum((basis) => basis.trading.turnoverNotional) / totalInitialCash,
+    funding: sum((basis) => basis.trading.funding),
+    fees: sum((basis) => basis.trading.fees),
+    availabilityRatio: ratio(
+      (basis) => basis.operations.successes,
+      (basis) => basis.operations.attempts,
+    ) ?? 0,
+    timeoutCount: sum((basis) => basis.operations.timeoutCount),
+    leverageDistribution: bases.flatMap(
+      (basis) => basis.trading.leverageDistribution,
+    ),
+  };
+  const optionalMetrics = {
+    pinballLoss: ratio(
+      (basis) => basis.prediction.pinballLossSum,
+      (basis) => basis.prediction.pinballLossCount,
+    ),
+    medianReturnMae: ratio(
+      (basis) => basis.prediction.medianAbsoluteErrorSum,
+      (basis) => basis.prediction.medianAbsoluteErrorCount,
+    ),
+    directionAccuracy: ratio(
+      (basis) => basis.prediction.directionHitSum,
+      (basis) => basis.prediction.directionCount,
+    ),
+    quantileCoverage: actualCoverage,
+    calibrationError: actualCoverage !== undefined && nominalCoverage !== undefined
+      ? Math.abs(actualCoverage - nominalCoverage)
+      : undefined,
+    profitFactor: grossLoss > 0
+      ? grossProfit / grossLoss
+      : grossProfit > 0
+        ? null
+        : undefined,
+    winRate: ratio(
+      (basis) => basis.trading.winCount,
+      (basis) => basis.trading.outcomeCount,
+    ),
+    latencyMs: ratio(
+      (basis) => basis.operations.latencySum,
+      (basis) => basis.operations.latencyCount,
+    ),
+    peakVramMb: bases.flatMap((basis) => (
+      basis.operations.peakVramMb === undefined
+        ? []
+        : [basis.operations.peakVramMb]
+    )).reduce<number | undefined>((maximum, value) => (
+      maximum === undefined ? value : Math.max(maximum, value)
+    ), undefined),
+  };
+  for (const [key, value] of Object.entries(optionalMetrics)) {
+    if (value !== undefined) metrics[key] = value;
+  }
+  return {
+    consistent: true,
+    metrics,
+  };
+}
+
 export type CryptoPaperRuntimeSnapshot = {
   schemaVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
   runId: string;
@@ -508,6 +981,7 @@ export type CryptoPaperRuntimeSnapshot = {
   criterion: string;
   preset: SimulationStartRequest["preset"];
   riskTolerance: number;
+  policyProfile: CryptoFuturesPolicyProfile;
   selected: unknown[];
   positions: unknown[];
   futuresPositions: unknown[];
@@ -517,8 +991,12 @@ export type CryptoPaperRuntimeSnapshot = {
     newEntriesBlocked: boolean;
     blockReason?: string;
     grossExposureRatio: number;
+    grossExposureLimitRatio: number;
     marginUsageRatio: number;
+    marginUsageLimitRatio: number;
     riskPerTradeRatio: number;
+    maximumLeverage: number;
+    liquidationBufferMultiple: number;
     riskStreams: {
       healthy: boolean;
       bookTicker: {
@@ -536,6 +1014,7 @@ export type CryptoPaperRuntimeSnapshot = {
   charts: unknown[];
   trades: unknown[];
   decisions: RuntimeDecision[];
+  modelForecasts: unknown[];
   kronosForecasts: unknown[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
@@ -612,6 +1091,106 @@ function iso(value: number): string {
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function cryptoRuntimeScope(runId: string, symbol: string): string {
+  return createHash("sha256")
+    .update(runId, "utf8")
+    .update("\0", "utf8")
+    .update(symbol, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+}
+
+type CryptoRuntimeIdentifierInput = {
+  runId: string;
+  symbol: string;
+  lane: SimulationModelLane;
+  at: number;
+  sequence: number;
+};
+
+function assertCryptoRuntimeIdentifierInput(
+  input: CryptoRuntimeIdentifierInput,
+): void {
+  if (
+    !input.runId
+    || !input.symbol
+    || !Number.isSafeInteger(input.at)
+    || input.at < 0
+    || !Number.isSafeInteger(input.sequence)
+    || input.sequence < 1
+  ) {
+    throw new Error("crypto_runtime_identifier_input_invalid");
+  }
+}
+
+export function cryptoRuntimeEntityId(
+  kind: "decision" | "fill",
+  input: CryptoRuntimeIdentifierInput,
+): string {
+  assertCryptoRuntimeIdentifierInput(input);
+  const lane = input.lane === "kronos_base" ? "k" : "f";
+  return [
+    kind,
+    cryptoRuntimeScope(input.runId, input.symbol),
+    lane,
+    input.at.toString(36),
+    input.sequence.toString(36),
+  ].join(":");
+}
+
+export function cryptoRuntimeClientOrderId(
+  input: CryptoRuntimeIdentifierInput & {
+    action: "open" | "reduce";
+  },
+): string {
+  assertCryptoRuntimeIdentifierInput(input);
+  const lane = input.lane === "kronos_base" ? "k" : "f";
+  const action = input.action === "open" ? "o" : "r";
+  const uniqueComponent = createHash("sha256")
+    .update([
+      input.runId,
+      input.symbol,
+      input.lane,
+      input.action,
+      String(input.at),
+      String(input.sequence),
+    ].join("\0"), "utf8")
+    .digest("hex")
+    .slice(0, 12);
+  const clientOrderId = [
+    "ps",
+    cryptoRuntimeScope(input.runId, input.symbol),
+    `${lane}${action}`,
+    uniqueComponent,
+  ].join("-");
+  if (
+    clientOrderId.length > 36
+    || !/^[.A-Z:/a-z0-9_-]+$/.test(clientOrderId)
+  ) {
+    throw new Error("crypto_runtime_client_order_id_invalid");
+  }
+  return clientOrderId;
+}
+
+export function cryptoModelForecastIsFresh(input: {
+  inputEndAt: string;
+  targetTimestamps: readonly string[];
+  latestFinalCandleCloseTime?: number;
+}): boolean {
+  const inputEndAt = Date.parse(input.inputEndAt);
+  const latestFinalCandleCloseTime = input.latestFinalCandleCloseTime;
+  if (
+    !Number.isFinite(inputEndAt)
+    || latestFinalCandleCloseTime === undefined
+    || !Number.isSafeInteger(latestFinalCandleCloseTime)
+    || inputEndAt !== latestFinalCandleCloseTime
+  ) return false;
+  return input.targetTimestamps.some((candidate) => {
+    const target = Date.parse(candidate);
+    return Number.isFinite(target) && target > latestFinalCandleCloseTime;
+  });
 }
 
 type CryptoModelInputBar = AiForecastRequest["series"][number]["bars"][number];
@@ -1158,6 +1737,85 @@ function safePeakVramMb(value: unknown): number | undefined {
     : undefined;
 }
 
+function displayQuantile(
+  values: readonly unknown[],
+  wanted: number,
+): number | undefined {
+  const matches = values.flatMap((value) => {
+    const source = record(value);
+    const quantile = finite(first(source, "quantile", "q"));
+    const price = finite(first(source, "value", "price"));
+    return quantile === wanted && price !== undefined && price > 0 ? [price] : [];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function normalizeDisplayForecastPoints(
+  horizons: readonly Record<string, unknown>[],
+  inputEndAt: string,
+  expectedTargets: AiForecastRequest["series"][number]["future_timestamps"],
+): RuntimeModelForecastPoint[] {
+  const hasDisplayProjection = horizons.some((horizon) => (
+    first(horizon, "target_timestamp", "targetTimestamp") !== undefined
+    || first(horizon, "price_quantiles", "priceQuantiles") !== undefined
+  ));
+  // Compatibility for old fixtures/artifacts that predate price-path output.
+  // Current workers always publish the complete projection below.
+  if (!hasDisplayProjection) return [];
+  const points = SCALPING_AI_HORIZONS.map((wantedHorizon) => {
+    const horizon = horizons.find((item) => (
+      finite(first(item, "horizon_minutes", "horizonMinutes")) === wantedHorizon
+    ));
+    const targetTimestamp = exactText(first(
+      horizon,
+      "target_timestamp",
+      "targetTimestamp",
+    ));
+    const rawPrices = first(horizon, "price_quantiles", "priceQuantiles");
+    const prices = Array.isArray(rawPrices) ? rawPrices : [];
+    const orderedPrices = SCALPING_AI_QUANTILES.map((quantile) => (
+      displayQuantile(prices, quantile)
+    ));
+    const q10Price = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.1)];
+    const medianPrice = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.5)];
+    const q90Price = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.9)];
+    const upProbability = finite(first(horizon, "up_probability", "upProbability"));
+    const expectedTargetTimestamp = expectedTargets[wantedHorizon - 1];
+    if (!horizon
+      || !targetTimestamp
+      || !Number.isFinite(Date.parse(targetTimestamp))
+      || Date.parse(targetTimestamp) <= Date.parse(inputEndAt)
+      || !expectedTargetTimestamp
+      || Date.parse(targetTimestamp) !== Date.parse(expectedTargetTimestamp)
+      || prices.length !== SCALPING_AI_QUANTILES.length
+      || orderedPrices.some((price) => price === undefined || price <= 0)
+      || orderedPrices.some((price, index) => (
+        index > 0 && price! < orderedPrices[index - 1]!
+      ))
+      || q10Price === undefined
+      || medianPrice === undefined
+      || q90Price === undefined
+      || (upProbability !== undefined && (upProbability < 0 || upProbability > 1))) {
+      throw new Error("model_price_quantiles_invalid");
+    }
+    return {
+      horizonMinutes: wantedHorizon,
+      targetTimestamp: iso(Date.parse(targetTimestamp)),
+      q10Price,
+      medianPrice,
+      q90Price,
+      ...(upProbability !== undefined ? { upProbability } : {}),
+    };
+  });
+  for (let index = 1; index < points.length; index += 1) {
+    if (Date.parse(points[index]!.targetTimestamp)
+      <= Date.parse(points[index - 1]!.targetTimestamp)) {
+      throw new Error("model_price_targets_non_monotone");
+    }
+  }
+  return points;
+}
+
 function normalizeLaneForecast(
   lane: SimulationModelLane,
   raw: unknown,
@@ -1196,7 +1854,14 @@ function normalizeLaneForecast(
   if (generatedAt < Date.parse(inputEndAt)) {
     throw new Error("model_generated_before_origin");
   }
-  const horizons = Array.isArray(series.horizons) ? series.horizons.map(record) : [];
+  const horizons = Array.isArray(series.horizons)
+    ? series.horizons.map(record).filter((item): item is UnknownRecord => item !== undefined)
+    : [];
+  const displayPoints = normalizeDisplayForecastPoints(
+    horizons,
+    inputEndAt,
+    expectedSeries.future_timestamps,
+  );
   const horizon = horizons.find((item) => finite(
     first(item, "horizon_minutes", "horizonMinutes"),
   ) === SCALPING_AI_HORIZONS[0]);
@@ -1458,6 +2123,7 @@ function normalizeLaneForecast(
     generatedAtIso: iso(generatedAt),
     inputEndAt,
     quantiles,
+    displayPoints,
     modelId,
     modelRevision,
     sourceRevision,
@@ -1515,6 +2181,219 @@ function realizedVolatility(bars: readonly BinanceKline[]): number {
   const variance = returns.reduce((sum, value) => sum + (value - mean) ** 2, 0)
     / (returns.length - 1);
   return Math.sqrt(Math.max(0, variance));
+}
+
+type CryptoFuturesPolicyProfile = {
+  preset: SimulationStartRequest["preset"];
+  riskTolerance: number;
+  minimumConfidence: number;
+  maximumLeverage: number;
+  targetAllocationRate: number;
+  cashReserveRate: number;
+  technicalConfirmationRequired: boolean;
+};
+
+function cryptoFuturesPolicyProfile(
+  request: Pick<SimulationStartRequest, "preset" | "riskTolerance">,
+): CryptoFuturesPolicyProfile {
+  const riskRatio = request.riskTolerance / 100;
+  const preset = {
+    trend: { confidence: 0.52, maximumLeverage: 10, recommendedRisk: 60, confirmationUntil: 65 },
+    breakout: { confidence: 0.49, maximumLeverage: 15, recommendedRisk: 100, confirmationUntil: 45 },
+    mean_reversion: { confidence: 0.56, maximumLeverage: 8, recommendedRisk: 50, confirmationUntil: 75 },
+    risk_management: { confidence: 0.62, maximumLeverage: 5, recommendedRisk: 25, confirmationUntil: -1 },
+  }[request.preset];
+  const targetAllocationRate = Math.max(
+    0.2,
+    Math.min(1, 0.5 + request.riskTolerance / preset.recommendedRisk * 0.5),
+  );
+  return {
+    preset: request.preset,
+    riskTolerance: request.riskTolerance,
+    minimumConfidence: Math.max(0.45, preset.confidence - riskRatio * 0.08),
+    maximumLeverage: Math.max(
+      1,
+      Math.min(preset.maximumLeverage, Math.round(1 + riskRatio * 14)),
+    ),
+    targetAllocationRate,
+    cashReserveRate: 1 - targetAllocationRate,
+    technicalConfirmationRequired: request.riskTolerance <= preset.confirmationUntil,
+  };
+}
+
+function exponentialMovingAverage(values: readonly number[], period: number): number[] {
+  const alpha = 2 / (period + 1);
+  const output: number[] = [];
+  for (const value of values) {
+    output.push(output.length ? output.at(-1)! + alpha * (value - output.at(-1)!) : value);
+  }
+  return output;
+}
+
+function rollingRsi(values: readonly number[], index: number, period = 14): number | undefined {
+  if (index < period) return undefined;
+  let gains = 0;
+  let losses = 0;
+  for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
+    const change = values[cursor]! - values[cursor - 1]!;
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  if (losses === 0) return gains > 0 ? 100 : 50;
+  const relativeStrength = gains / losses;
+  return 100 - 100 / (1 + relativeStrength);
+}
+
+type CryptoChartProjection = {
+  bars: SimulationChartBar[];
+  indicators: Array<{
+    id: string;
+    kind: string;
+    status: "available" | "unavailable";
+    values: Record<string, number>;
+  }>;
+  patterns: ReturnType<typeof detectSimulationChartPatterns>;
+};
+
+function cryptoChartProjection(bars: readonly BinanceKline[]): CryptoChartProjection {
+  const closes = bars.map((bar) => bar.close);
+  const ema9 = exponentialMovingAverage(closes, 9);
+  const ema21 = exponentialMovingAverage(closes, 21);
+  const projection = bars.map((bar, index): SimulationChartBar => {
+    const indicatorValues: Record<string, number> = {
+      "trend-ema-fast:value": ema9[index]!,
+      "trend-ema-slow:value": ema21[index]!,
+    };
+    const rsi = rollingRsi(closes, index);
+    if (rsi !== undefined) indicatorValues["momentum-rsi:value"] = rsi;
+    const window = bars.slice(Math.max(0, index - 19), index + 1);
+    if (window.length === 20) {
+      const mean = window.reduce((sum, item) => sum + item.close, 0) / window.length;
+      const variance = window.reduce((sum, item) => sum + (item.close - mean) ** 2, 0)
+        / window.length;
+      const deviation = Math.sqrt(variance);
+      indicatorValues["mean-bollinger:middle"] = mean;
+      indicatorValues["mean-bollinger:upper"] = mean + deviation * 2;
+      indicatorValues["mean-bollinger:lower"] = mean - deviation * 2;
+      indicatorValues["breakout-donchian:upper"] = Math.max(...window.map((item) => item.high));
+      indicatorValues["breakout-donchian:lower"] = Math.min(...window.map((item) => item.low));
+    }
+    const atr = atr14(bars.slice(0, index + 1));
+    if (atr > 0) indicatorValues["risk-atr:value"] = atr;
+    return {
+      timestamp: iso(bar.closeTime),
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume,
+      status: "final",
+      indicatorValues,
+    };
+  });
+  const latest = projection.at(-1)?.indicatorValues ?? {};
+  const indicator = (
+    id: string,
+    kind: string,
+    fields: readonly string[],
+  ) => {
+    const values = Object.fromEntries(fields.flatMap((field) => {
+      const value = latest[`${id}:${field}`];
+      return value === undefined ? [] : [[field, value]];
+    }));
+    return {
+      id,
+      kind,
+      status: Object.keys(values).length ? "available" as const : "unavailable" as const,
+      values,
+    };
+  };
+  return {
+    bars: projection,
+    indicators: [
+      indicator("trend-ema-fast", "ema", ["value"]),
+      indicator("trend-ema-slow", "ema", ["value"]),
+      indicator("momentum-rsi", "rsi", ["value"]),
+      indicator("mean-bollinger", "bollinger_bands", ["upper", "middle", "lower"]),
+      indicator("breakout-donchian", "donchian_channel", ["upper", "lower"]),
+      indicator("risk-atr", "atr", ["value"]),
+    ],
+    patterns: detectSimulationChartPatterns(projection),
+  };
+}
+
+function cryptoTechnicalObservation(
+  bars: readonly BinanceKline[],
+  preset: SimulationStartRequest["preset"],
+): {
+  state: string;
+  direction: FuturesSide | "flat";
+  chartPatternBias: SimulationChartPatternBias;
+  chartPatterns: string[];
+  components: Record<string, number>;
+} {
+  const chart = cryptoChartProjection(bars);
+  const latest = chart.bars.at(-1);
+  const values = latest?.indicatorValues ?? {};
+  const emaFast = values["trend-ema-fast:value"];
+  const emaSlow = values["trend-ema-slow:value"];
+  const rsi = values["momentum-rsi:value"];
+  const upper = values["breakout-donchian:upper"];
+  const lower = values["breakout-donchian:lower"];
+  const bollingerUpper = values["mean-bollinger:upper"];
+  const bollingerLower = values["mean-bollinger:lower"];
+  let direction: FuturesSide | "flat" = "flat";
+  if (preset === "trend" && emaFast !== undefined && emaSlow !== undefined) {
+    direction = emaFast > emaSlow ? "long" : emaFast < emaSlow ? "short" : "flat";
+  } else if (preset === "breakout" && latest) {
+    const previousWindow = bars.slice(-21, -1);
+    const previousHigh = previousWindow.length
+      ? Math.max(...previousWindow.map((bar) => bar.high))
+      : upper;
+    const previousLow = previousWindow.length
+      ? Math.min(...previousWindow.map((bar) => bar.low))
+      : lower;
+    direction = previousHigh !== undefined && latest.close >= previousHigh
+      ? "long"
+      : previousLow !== undefined && latest.close <= previousLow
+        ? "short"
+        : "flat";
+  } else if (preset === "mean_reversion" && latest) {
+    direction = rsi !== undefined && bollingerLower !== undefined
+      && rsi <= 35 && latest.close <= bollingerLower
+      ? "long"
+      : rsi !== undefined && bollingerUpper !== undefined
+        && rsi >= 65 && latest.close >= bollingerUpper
+        ? "short"
+        : "flat";
+  } else if (emaFast !== undefined && emaSlow !== undefined && rsi !== undefined) {
+    direction = emaFast > emaSlow && rsi >= 45 && rsi <= 70
+      ? "long"
+      : emaFast < emaSlow && rsi >= 30 && rsi <= 55
+        ? "short"
+        : "flat";
+  }
+  const latestAt = latest?.timestamp;
+  const latestPatterns = latestAt
+    ? chart.patterns.filter((pattern) => pattern.detectedAt === latestAt)
+    : [];
+  const bullish = latestPatterns
+    .filter((pattern) => pattern.bias === "bullish")
+    .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
+  const bearish = latestPatterns
+    .filter((pattern) => pattern.bias === "bearish")
+    .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
+  return {
+    state: `${preset}:${direction}`,
+    direction,
+    chartPatternBias: bullish === bearish ? "neutral" : bullish > bearish ? "bullish" : "bearish",
+    chartPatterns: latestPatterns.map((pattern) => pattern.name),
+    components: {
+      ...(emaFast !== undefined ? { emaFast } : {}),
+      ...(emaSlow !== undefined ? { emaSlow } : {}),
+      ...(rsi !== undefined ? { rsi } : {}),
+    },
+  };
 }
 
 function hasContinuousFinalContext(
@@ -1587,7 +2466,7 @@ function costRate(
   ) / 10_000;
 }
 
-function modelMetrics(state: LaneState) {
+function laneTradingMetricInputs(state: LaneState) {
   const snapshot = state.ledger.snapshot();
   const openCosts = new Map<string, {
     remainingQuantity: number;
@@ -1621,6 +2500,72 @@ function modelMetrics(state: LaneState) {
   const losses = Math.abs(
     netOutcomes.filter((value) => value < 0).reduce((sum, value) => sum + value, 0),
   );
+  return {
+    snapshot,
+    netOutcomes,
+    profits,
+    losses,
+  };
+}
+
+function sumNumbers(values: readonly number[]): number {
+  return values.reduce((sum, value) => sum + value, 0);
+}
+
+function modelMetricAggregationBasis(state: LaneState): ModelMetricAggregationBasis {
+  const {
+    snapshot,
+    netOutcomes,
+    profits,
+    losses,
+  } = laneTradingMetricInputs(state);
+  return {
+    schemaVersion: MODEL_METRIC_AGGREGATION_SCHEMA_VERSION,
+    prediction: {
+      pinballLossSum: sumNumbers(state.predictionMetrics.pinballLosses),
+      pinballLossCount: state.predictionMetrics.pinballLosses.length,
+      medianAbsoluteErrorSum: sumNumbers(state.predictionMetrics.medianAbsoluteErrors),
+      medianAbsoluteErrorCount: state.predictionMetrics.medianAbsoluteErrors.length,
+      directionHitSum: sumNumbers(state.predictionMetrics.directionHits),
+      directionCount: state.predictionMetrics.directionHits.length,
+      coverageHitSum: sumNumbers(state.predictionMetrics.coverageHits),
+      coverageCount: state.predictionMetrics.coverageHits.length,
+      nominalCoverageSum: sumNumbers(state.predictionMetrics.nominalCoverage),
+      nominalCoverageCount: state.predictionMetrics.nominalCoverage.length,
+    },
+    trading: {
+      netPnl: snapshot.equity - snapshot.initialCash,
+      grossProfit: profits,
+      grossLoss: losses,
+      winCount: netOutcomes.filter((value) => value > 0).length,
+      outcomeCount: netOutcomes.length,
+      turnoverNotional: snapshot.fills.reduce((sum, fill) => sum + fill.notional, 0),
+      initialCash: snapshot.initialCash,
+      funding: snapshot.funding,
+      fees: snapshot.fees,
+      leverageDistribution: snapshot.fills
+        .filter((fill) => fill.action === "open")
+        .map((fill) => fill.leverage),
+    },
+    operations: {
+      attempts: state.attempts,
+      successes: state.successes,
+      latencySum: sumNumbers(state.latencies),
+      latencyCount: state.latencies.length,
+      timeoutCount: state.timeoutCount,
+      ...(state.peakVramMb !== undefined ? { peakVramMb: state.peakVramMb } : {}),
+    },
+    equity: state.equity.map((point) => ({ ...point })),
+  };
+}
+
+function modelMetrics(state: LaneState) {
+  const {
+    snapshot,
+    netOutcomes,
+    profits,
+    losses,
+  } = laneTradingMetricInputs(state);
   const average = (values: readonly number[]): number | undefined => values.length
     ? values.reduce((sum, value) => sum + value, 0) / values.length
     : undefined;
@@ -1752,6 +2697,7 @@ function futuresPositions(
     unrealizedPnl: position.unrealizedPnl,
     funding: snapshot.funding,
     fees: snapshot.fees,
+    exitTaxes: snapshot.exitTaxes,
     slippage: snapshot.slippage,
     entryBlocked: riskStreamWarnings.length > 0,
     riskWarnings: [...riskStreamWarnings],
@@ -1775,6 +2721,8 @@ function tradeRows(lane: SimulationModelLane, snapshot: FuturesPaperLedgerSnapsh
     grossAmount: fill.notional,
     cost: fill.fee + fill.slippageCost - fill.funding,
     fee: fill.fee,
+    commission: fill.fee - fill.exitTax,
+    exitTax: fill.exitTax,
     slippage: fill.slippageCost,
     funding: fill.funding,
     realizedPnl: fill.realizedPnl,
@@ -1819,6 +2767,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
   private readonly inferenceDeadlineMs: number;
   private readonly circuitFailureThreshold: number;
   private readonly circuitCooldownMs: number;
+  private readonly laneRequestTails = new Map<SimulationModelLane, Promise<void>>();
 
   constructor(private readonly options: CryptoPaperRuntimeOptions) {
     this.clock = options.clock ?? systemClock;
@@ -1853,11 +2802,68 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     this.circuitCooldownMs = circuitBreaker.cooldownMs;
   }
 
+  private async requestLane(
+    lane: SimulationModelLane,
+    client: CryptoAiLaneClient,
+    request: AiForecastRequest,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    const predecessor = this.laneRequestTails.get(lane) ?? Promise.resolve();
+    let release = () => {};
+    const occupied = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = predecessor
+      .catch(() => {})
+      .then(() => occupied);
+    this.laneRequestTails.set(lane, tail);
+    try {
+      await raceWithAbort(predecessor.catch(() => {}), signal);
+      return await client.request(request, signal);
+    } finally {
+      release();
+      void tail.finally(() => {
+        if (this.laneRequestTails.get(lane) === tail) {
+          this.laneRequestTails.delete(lane);
+        }
+      });
+    }
+  }
+
   async run(input: {
+    request: SimulationStartRequest;
+    snapshot: BinanceScannerSnapshot;
+    selected: BinanceScannerCandidate | readonly BinanceScannerCandidate[];
+    context: RunTaskContext;
+  }): Promise<CryptoSimulationRuntimeResult> {
+    const selectedItems = Array.isArray(input.selected)
+      ? input.selected
+      : [input.selected as BinanceScannerCandidate];
+    if (selectedItems.length < 1 || selectedItems.length > 2) {
+      throw new CryptoPaperRuntimeError(
+        "invalid_runtime_input",
+        "CryptoPaperRuntime requires one or two selected contracts.",
+      );
+    }
+    if (selectedItems.length === 1) {
+      return this.runSingle({
+        ...input,
+        selected: selectedItems[0]!,
+      });
+    }
+    return this.runPortfolio({
+      ...input,
+      selected: selectedItems,
+    });
+  }
+
+  private async runSingle(input: {
     request: SimulationStartRequest;
     snapshot: BinanceScannerSnapshot;
     selected: BinanceScannerCandidate;
     context: RunTaskContext;
+    snapshotObserver?: CryptoPaperRuntimeSnapshotObserver;
+    portfolioDailyLossGate?: PortfolioDailyLossGate;
   }): Promise<CryptoSimulationRuntimeResult> {
     const { request, selected, context } = input;
     if (request.market.kind !== "crypto_futures" || request.execution.mode !== "paper") {
@@ -1872,8 +2878,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let startedAt = setupStartedAt;
     let expiresAt = startedAt + request.durationMinutes * MINUTE_MS;
     const symbol = selected.symbol;
+    const riskLimits = request.riskLimits ?? DEFAULT_CRYPTO_FUTURES_RISK_LIMITS;
     const requiredMaximumNotional = (
-      request.initialCash * PAPER_MAINTENANCE_MARGIN_COVERAGE_RATE
+      request.initialCash
+      * riskLimits.grossExposureLimitRate
+      * PAPER_MAINTENANCE_MARGIN_COVERAGE_MULTIPLIER
     );
     const rules = await this.resolveRules(symbol, requiredMaximumNotional);
     if (rules.maintenanceMarginSource !== "binance_user_data_brackets") {
@@ -1898,6 +2907,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       rawPayloadRetained: false,
     } as const;
     const selectedLanes = [...request.modelLanes];
+    const policyProfile = cryptoFuturesPolicyProfile(request);
     const executionLane = selectedLanes.includes(this.options.executionLane ?? "kronos_base")
       ? this.options.executionLane ?? "kronos_base"
       : selectedLanes[0]!;
@@ -1911,6 +2921,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let currentSpreadBps = selected.spreadBps;
     let ingressSpreadBps = selected.spreadBps;
     let currentMarkPrice = selected.price;
+    let currentMarkPriceObservedAt = Number.isFinite(
+      Date.parse(selected.dataQuality.observedAt),
+    )
+      ? Date.parse(selected.dataQuality.observedAt)
+      : Date.parse(input.snapshot.generatedAt);
     let lastTriggeredAt: string | undefined;
     let triggeredEvents = 0;
     let inferenceInFlight = false;
@@ -2114,13 +3129,20 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       const ledger = new FuturesPaperLedger({
         initialCash: request.initialCash,
         feeBpsPerSide: request.costs.commissionBpsPerSide,
+        exitTaxBps: request.costs.taxBpsOnExit,
         slippageBpsPerSide: request.costs.slippageBpsPerSide,
       });
       states.set(lane, {
         lane,
         ledger,
         riskGeneration: 0,
-        dailyGate: updateDailyLossGate(undefined, request.initialCash, startedAt),
+        dailyGate: input.portfolioDailyLossGate?.state(lane)
+          ?? updateDailyLossGate(
+            undefined,
+            request.initialCash,
+            startedAt,
+            riskLimits.dailyLossLimitRate,
+          ),
         attempts: 0,
         successes: 0,
         timeoutCount: 0,
@@ -2142,6 +3164,29 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         lastEquitySampleAt: startedAt,
       });
     }
+    const currentDailyGate = (state: LaneState): DailyLossGateState => (
+      input.portfolioDailyLossGate?.state(state.lane) ?? state.dailyGate
+    );
+    const observeDailyGate = (
+      state: LaneState,
+      equity: number,
+      observedAt: number,
+    ): PortfolioDailyLossObservation => {
+      const gate = input.portfolioDailyLossGate?.observe({
+        lane: state.lane,
+        symbol,
+        equity,
+        observedAt,
+        dailyLossLimitRate: riskLimits.dailyLossLimitRate,
+      }) ?? updateDailyLossGate(
+        state.dailyGate,
+        equity,
+        observedAt,
+        riskLimits.dailyLossLimitRate,
+      );
+      state.dailyGate = gate;
+      return gate;
+    };
 
     const cancellationCheckpoint = async (): Promise<void> => {
       if (context.signal.aborted) {
@@ -2279,6 +3324,51 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       klineDataBlockReason = undefined;
     };
 
+    const forecastIsFresh = (forecast: RuntimeForecastObservation): boolean => (
+      cryptoModelForecastIsFresh({
+        inputEndAt: forecast.inputEndAt,
+        targetTimestamps: forecast.displayPoints.map((point) => point.targetTimestamp),
+        latestFinalCandleCloseTime: decisionStore.list(symbol).at(-1)?.closeTime,
+      })
+    );
+
+    const modelForecasts = () => selectedLanes.map((lane) => {
+      const state = states.get(lane)!;
+      const latest = state.forecasts.at(-1);
+      const stale = latest && latest.displayPoints.length > 0
+        ? !forecastIsFresh(latest)
+        : false;
+      if (!latest || latest.displayPoints.length === 0 || stale) {
+        return {
+          lane,
+          signalSymbol: symbol,
+          status: "unavailable" as const,
+          ...(latest ? {
+            origin: latest.inputEndAt,
+            generatedAt: latest.generatedAtIso,
+            modelId: latest.modelId,
+            modelRevision: latest.modelRevision,
+          } : {}),
+          points: [],
+          unavailableReason: stale
+            ? "model_forecast_stale"
+            : latest
+            ? "model_price_path_unavailable"
+            : state.errors.at(-1) ?? "first_model_forecast_pending",
+        };
+      }
+      return {
+        lane,
+        signalSymbol: symbol,
+        status: "available" as const,
+        origin: latest.inputEndAt,
+        generatedAt: latest.generatedAtIso,
+        modelId: latest.modelId,
+        modelRevision: latest.modelRevision,
+        points: latest.displayPoints.map((point) => ({ ...point })),
+      };
+    });
+
     const modelComparison = () => {
       const settlementIncomplete = terminalSettlement?.settlementComplete === false;
       const requiredSettlementLanes = terminalSettlement?.lanes.filter(
@@ -2319,6 +3409,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 ? { unavailableReason: safeModelErrorCode(state.errors.at(-1)) }
                 : {}),
             metrics: modelMetrics(state),
+            aggregationBasis: modelMetricAggregationBasis(state),
             provenance: persistedLaneModelProvenance(state),
           };
         }),
@@ -2331,13 +3422,27 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     ): CryptoPaperRuntimeSnapshot => {
       const execution = states.get(executionLane)!;
       const ledger = execution.ledger.snapshot();
+      const executionDailyGate = currentDailyGate(execution);
+      const latestExecutionForecast = execution.forecasts.at(-1);
+      const executionForecast = latestExecutionForecast
+        && forecastIsFresh(latestExecutionForecast)
+        ? latestExecutionForecast
+        : undefined;
+      const executionMedianReturn = executionForecast?.quantiles.find(
+        (quantile) => quantile.quantile === 0.5,
+      )?.returnRate;
+      const executionUpProbability = executionForecast?.displayPoints.find(
+        (point) => point.horizonMinutes === SCALPING_AI_HORIZONS[0],
+      )?.upProbability;
       const streamFreshness = riskStreamFreshness(at);
       const positions = futuresPositions(ledger, streamFreshness.warnings);
       const progress = phase === "completed"
         ? 1
         : Math.max(0, Math.min(0.999, (at - startedAt) / Math.max(1, expiresAt - startedAt)));
-      const dailyLossRatio = execution.dailyGate.drawdownRate;
+      const dailyLossRatio = executionDailyGate.drawdownRate;
       const bars = decisionStore.list(symbol).slice(-240);
+      const chart = cryptoChartProjection(bars);
+      const forecasts = modelForecasts();
       return {
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         runId: context.runId,
@@ -2361,30 +3466,58 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           : input.snapshot.criterion,
         preset: request.preset,
         riskTolerance: request.riskTolerance,
+        policyProfile,
         selected: [{
           symbol,
           name: symbol,
           rank: selected.rank,
           score: selected.score,
           price: selected.price,
+          currentPrice: currentMarkPrice,
+          priceObservedAt: iso(currentMarkPriceObservedAt),
+          observedAt: iso(currentMarkPriceObservedAt),
+          ...(executionUpProbability !== undefined
+            ? { upProbability: executionUpProbability }
+            : {}),
+          ...(executionMedianReturn !== undefined
+            ? { predictedMedianReturn: executionMedianReturn }
+            : {}),
+          ...(executionForecast
+            ? {
+              inputEndAt: executionForecast.inputEndAt,
+              generatedAt: executionForecast.generatedAtIso,
+              model: {
+                modelId: executionForecast.modelId,
+                modelRevision: executionForecast.modelRevision,
+                device: executionForecast.device,
+              },
+            }
+            : {}),
           reason: `scanner ${input.snapshot.scannerSnapshotId}`,
         }],
         positions,
         futuresPositions: positions,
         futuresRisk: {
           dailyLossRatio,
-          dailyLossLimitRatio: FUTURES_DAILY_LOSS_LIMIT_RATE,
-          newEntriesBlocked: execution.dailyGate.blocked
+          dailyLossLimitRatio: riskLimits.dailyLossLimitRate,
+          newEntriesBlocked: executionDailyGate.blocked
             || !klineDataHealthy
             || !streamFreshness.healthy,
-          ...(execution.dailyGate.blocked
-            ? { blockReason: "UTC 일손실 3% gate" }
+          ...(executionDailyGate.blocked
+            ? {
+              blockReason: `UTC 일손실 ${(riskLimits.dailyLossLimitRate * 100)
+                .toFixed(2)}% gate`,
+            }
             : entryBlockReason(at) ? { blockReason: entryBlockReason(at) } : {}),
           grossExposureRatio: ledger.equity > 0 ? ledger.grossExposure / ledger.equity : 0,
+          grossExposureLimitRatio: riskLimits.grossExposureLimitRate,
           marginUsageRatio: ledger.equity > 0
             ? ledger.totalIsolatedMargin / ledger.equity
             : 0,
-          riskPerTradeRatio: FUTURES_TRADE_RISK_RATE,
+          marginUsageLimitRatio: riskLimits.marginUsageLimitRate,
+          riskPerTradeRatio: riskLimits.riskPerTradeRate,
+          maximumLeverage: riskLimits.maximumLeverage,
+          liquidationBufferMultiple: riskLimits.liquidationBufferMultiple,
           riskStreams: {
             healthy: streamFreshness.healthy,
             bookTicker: streamFreshness.bookTicker,
@@ -2395,21 +3528,15 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           symbol,
           name: symbol,
           currency: "USDT",
-          bars: bars.map((bar) => ({
-            timestamp: iso(bar.closeTime),
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            volume: bar.volume,
-          })),
-          indicators: [],
-          patterns: [],
+          bars: chart.bars,
+          indicators: chart.indicators,
+          patterns: chart.patterns,
           updatedAt: bars.length ? iso(bars.at(-1)!.closeTime) : undefined,
         }],
         trades: tradeRows(executionLane, ledger),
         decisions: decisions.filter((decision) => decision.lane === executionLane).slice(-300),
-        kronosForecasts: [],
+        modelForecasts: forecasts,
+        kronosForecasts: forecasts.filter((forecast) => forecast.lane === "kronos_base"),
         warnings: unique(warnings),
         capabilities: {
           paper: true,
@@ -2418,7 +3545,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           realOrder: false,
           isolatedMargin: true,
           oneWayPosition: true,
-          maximumPaperLeverage: 15,
+          maximumPaperLeverage: riskLimits.maximumLeverage,
           executionLane,
         },
         modelLanes: selectedLanes,
@@ -2444,9 +3571,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       at = this.clock.now(),
     ): Promise<CryptoPaperRuntimeSnapshot> => {
       const snapshot = snapshotFor(phase, at);
-      if (!this.options.onSnapshot || (!force && at - lastPublishedAt < 500)) return snapshot;
+      const observer = input.snapshotObserver ?? this.options.onSnapshot;
+      if (!observer || (!force && at - lastPublishedAt < 500)) return snapshot;
       try {
-        await this.options.onSnapshot(context.runId, structuredClone(snapshot));
+        await observer(context.runId, structuredClone(snapshot));
         lastPublishedAt = at;
       } catch (error) {
         warnings.push(`snapshot_observer_failed:${error instanceof Error ? error.message : "unknown"}`);
@@ -2505,17 +3633,35 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     };
 
     const decisionId = (lane: SimulationModelLane, at: number): string => (
-      `decision:${lane}:${at}:${decisions.length + 1}`
+      cryptoRuntimeEntityId("decision", {
+        runId: context.runId,
+        symbol,
+        lane,
+        at,
+        sequence: decisions.length + 1,
+      })
     );
     const fillId = (lane: SimulationModelLane, at: number): string => (
-      `fill:${lane}:${at}:${states.get(lane)!.ledger.snapshot().fills.length + 1}`
+      cryptoRuntimeEntityId("fill", {
+        runId: context.runId,
+        symbol,
+        lane,
+        at,
+        sequence: states.get(lane)!.ledger.snapshot().fills.length + 1,
+      })
     );
     const clientOrderId = (
       lane: SimulationModelLane,
       action: "open" | "reduce",
       at: number,
-    ): string => `${lane === "kronos_base" ? "k" : "f"}-${action === "open" ? "o" : "r"}-${at}`
-      .slice(0, 36);
+    ): string => cryptoRuntimeClientOrderId({
+      runId: context.runId,
+      symbol,
+      lane,
+      action,
+      at,
+      sequence: states.get(lane)!.ledger.snapshot().fills.length + 1,
+    });
 
     const executePending = (event: BinanceMarketEvent): boolean => {
       const fillPrice = event.kind === "agg_trade"
@@ -2559,10 +3705,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         const lifecycleBlockReason = decisionLifecycleBlockReason(
           ingressObservedAts.get(event) ?? this.clock.now(),
         );
+        const dailyGate = currentDailyGate(state);
         if (pending.action === "open"
-          && (state.dailyGate.blocked || lifecycleBlockReason !== undefined)) {
+          && (dailyGate.blocked || lifecycleBlockReason !== undefined)) {
           pending.decision.status = "blocked";
-          pending.decision.reason = state.dailyGate.blocked
+          pending.decision.reason = dailyGate.blocked
             ? "daily_loss_gate"
             : lifecycleBlockReason ?? "market_data_unhealthy";
           prospectivePendingOpenRisk.delete(state.lane);
@@ -2598,6 +3745,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 // Revalidation may lower leverage or quantity, but it never
                 // upgrades the decision after seeing a later market event.
                 requestedLeverage: pending.leverage!,
+                limits: riskLimits,
                 rules,
               });
               const feeRate = request.costs.commissionBpsPerSide / 10_000;
@@ -2617,12 +3765,12 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 return numerator / denominator;
               };
               const grossQuantityLimit = boundedQuantity(
-                1.5,
+                riskLimits.grossExposureLimitRate,
                 latest.grossExposure,
                 causalMarkPrice,
               );
               const marginQuantityLimit = boundedQuantity(
-                0.2,
+                riskLimits.marginUsageLimitRate,
                 latest.totalIsolatedMargin,
                 expectedEntryPrice / revalidated.leverage,
               );
@@ -2630,7 +3778,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 expectedEntryPrice - revalidated.protectiveStopPrice,
               );
               const riskQuantityLimit = boundedQuantity(
-                FUTURES_TRADE_RISK_RATE,
+                riskLimits.riskPerTradeRate,
                 0,
                 stopDistance,
               );
@@ -3081,9 +4229,15 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               : price !== undefined && price >= position.protectiveStopPrice;
           if (crossed) scheduleReduce(state, at, "protection");
         }
-        const gate = updateDailyLossGate(state.dailyGate, state.ledger.snapshot().equity, at);
-        state.dailyGate = gate;
-        if (gate.closeAllReduceOnly) scheduleReduce(state, at, "daily_loss_gate");
+        const gate = observeDailyGate(
+          state,
+          state.ledger.snapshot().equity,
+          at,
+        );
+        if (gate.closeAllReduceOnly
+          || (input.portfolioDailyLossGate !== undefined && gate.blocked)) {
+          scheduleReduce(state, at, "daily_loss_gate");
+        }
       }
     };
 
@@ -3202,6 +4356,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const applyMarkAndFunding = (event: BinanceMarketEvent): void => {
       if (event.kind !== "mark_price") return;
       currentMarkPrice = event.markPrice;
+      currentMarkPriceObservedAt = event.eventTime;
       for (const state of states.values()) {
         const beforeMark = state.ledger.snapshot();
         const position = beforeMark.positions.find((item) => item.symbol === symbol);
@@ -3324,10 +4479,12 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               );
             }
             const raw = await raceWithAbort(
-              Promise.resolve().then(() => client.request(
+              this.requestLane(
+                lane,
+                client,
                 structuredClone(canonicalRequest),
                 inferenceController.signal,
-              )),
+              ),
               inferenceController.signal,
             );
             await cancellationCheckpoint();
@@ -3497,6 +4654,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
 
       const observedCostRate = costRate(request, decisionSpreadBps);
+      const technical = cryptoTechnicalObservation(completion.bars, request.preset);
       for (const lane of selectedLanes) {
         const state = states.get(lane)!;
         const outcome = outcomes.get(lane);
@@ -3536,6 +4694,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           probabilityAboveCost: signal.probabilityAboveCost,
           probabilityBelowNegativeCost: signal.probabilityBelowNegativeCost,
           roundTripCostRate: observedCostRate,
+          technicalState: technical.state,
+          chartPatternBias: technical.chartPatternBias,
+          chartPatterns: [...technical.chartPatterns],
+          components: {
+            confidence: signal.confidence,
+            minimumConfidence: policyProfile.minimumConfidence,
+            ...technical.components,
+          },
           status: "held",
           reason: "flat_signal",
           requestDigest,
@@ -3591,9 +4757,24 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           };
           continue;
         }
-        if (state.dailyGate.blocked) {
+        if (currentDailyGate(state).blocked) {
           baseDecision.status = "blocked";
           baseDecision.reason = "daily_loss_gate";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (signal.confidence < policyProfile.minimumConfidence) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = "preset_confidence_gate";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (policyProfile.technicalConfirmationRequired
+          && technical.direction !== signal.direction) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = technical.direction === "flat"
+            ? "technical_confirmation_unavailable"
+            : "technical_direction_conflict";
           decisions.push(baseDecision);
           continue;
         }
@@ -3611,17 +4792,28 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           adverseQuantileDistance,
           spreadBps: decisionSpreadBps,
           slippageBpsPerSide: request.costs.slippageBpsPerSide,
-          requestedLeverage: signal.leverageTier,
+          requestedLeverage: Math.min(
+            signal.leverageTier,
+            policyProfile.maximumLeverage,
+            riskLimits.maximumLeverage,
+          ),
+          limits: riskLimits,
           rules,
         });
+        const policyQuantity = floorToStep(
+          sizing.quantity * policyProfile.targetAllocationRate,
+          rules.stepSize,
+        );
         baseDecision.action = signal.direction === "long" ? "open_long" : "open_short";
         baseDecision.leverage = sizing.leverage;
-        baseDecision.quantity = sizing.quantity;
-        baseDecision.notional = sizing.notional;
+        baseDecision.quantity = policyQuantity;
+        baseDecision.notional = policyQuantity * bar.close;
         baseDecision.protectiveStopPrice = sizing.protectiveStopPrice;
-        if (!sizing.accepted) {
+        if (!sizing.accepted
+          || policyQuantity < rules.minQuantity
+          || policyQuantity * bar.close < rules.minNotional) {
           baseDecision.status = "blocked";
-          baseDecision.reason = `risk_${sizing.reason ?? "rejected"}`;
+          baseDecision.reason = `risk_${sizing.reason ?? "policy_allocation_below_minimum"}`;
           decisions.push(baseDecision);
           continue;
         }
@@ -3634,7 +4826,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisionAt: commonDecisionAt,
           eligibleAfterIngressSequence: decisionIngressWatermark,
           side: signal.direction,
-          quantity: sizing.quantity,
+          quantity: policyQuantity,
           leverage: sizing.leverage,
           protectiveStopPrice: sizing.protectiveStopPrice,
           atr14: currentAtr,
@@ -3841,6 +5033,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                   : Math.max(pending.spreadBps, ingressSpreadBps),
                 slippageBpsPerSide: request.costs.slippageBpsPerSide,
                 requestedLeverage: pending.leverage,
+                limits: riskLimits,
                 rules,
               });
               const prospectiveProtectiveStop = prospectiveSizing.accepted
@@ -4016,7 +5209,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         streamQualificationState = "qualified";
       }
       for (const state of states.values()) {
-        state.dailyGate = updateDailyLossGate(undefined, request.initialCash, startedAt);
+        state.dailyGate = observeDailyGate(
+          state,
+          request.initialCash,
+          startedAt,
+        );
         state.equity = [{
           timestamp: iso(startedAt),
           equity: request.initialCash,
@@ -4427,6 +5624,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             laneEvidence.executedAt = iso(closingFill.executedAt);
             laneEvidence.fillPrice = closingFill.price;
             laneEvidence.fee = closingFill.fee;
+            laneEvidence.exitTax = closingFill.exitTax;
             laneEvidence.slippage = closingFill.slippageCost;
             laneEvidence.funding = closingFill.funding;
             laneEvidence.realizedPnl = closingFill.realizedPnl;
@@ -4489,8 +5687,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         || settlementFailureDetail === "terminal_settlement_stream_epoch_changed";
       const terminalObservedAt = this.clock.now();
       for (const state of states.values()) {
-        state.dailyGate = updateDailyLossGate(
-          state.dailyGate,
+        state.dailyGate = observeDailyGate(
+          state,
           state.ledger.snapshot().equity,
           terminalObservedAt,
         );
@@ -4553,6 +5751,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               preset: request.preset,
               riskTolerance: request.riskTolerance,
               costs: request.costs,
+              riskLimits,
               modelLanes: selectedLanes,
               execution: request.execution,
               executionLane,
@@ -4564,6 +5763,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             futuresPositions: terminalSnapshot.futuresPositions,
             futuresRisk: terminalSnapshot.futuresRisk,
             equity: states.get(executionLane)!.equity,
+            charts: terminalSnapshot.charts,
+            modelForecasts: terminalSnapshot.modelForecasts,
+            kronosForecasts: terminalSnapshot.kronosForecasts,
             modelComparison: comparison,
             settlementComplete: settlement.settlementComplete,
             terminalSettlement: structuredClone(settlement),
@@ -4723,6 +5925,405 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       readyInferenceCompletion = undefined;
       inferenceFailure = undefined;
     }
+  }
+
+  private aggregatePortfolioSnapshots(
+    runId: string,
+    request: SimulationStartRequest,
+    snapshots: readonly CryptoPaperRuntimeSnapshot[],
+    portfolioDailyLossGate?: PortfolioDailyLossGate,
+  ): CryptoPaperRuntimeSnapshot {
+    if (!snapshots.length) {
+      throw new Error("portfolio_snapshot_unavailable");
+    }
+    const initialCash = snapshots.reduce((sum, snapshot) => sum + snapshot.initialCash, 0);
+    const cash = snapshots.reduce((sum, snapshot) => sum + snapshot.cash, 0);
+    const equity = snapshots.reduce((sum, snapshot) => sum + snapshot.equity, 0);
+    const riskLimits = request.riskLimits ?? DEFAULT_CRYPTO_FUTURES_RISK_LIMITS;
+    const startedAt = new Date(Math.min(
+      ...snapshots.map((snapshot) => Date.parse(snapshot.startedAt)),
+    )).toISOString();
+    const expiresAt = new Date(Math.max(
+      ...snapshots.map((snapshot) => Date.parse(snapshot.expiresAt)),
+    )).toISOString();
+    const firstSnapshot = snapshots[0]!;
+    const portfolioDailyGate = portfolioDailyLossGate?.state(firstSnapshot.executionLane);
+    const nonDailyBlock = snapshots.find((snapshot) => (
+      snapshot.futuresRisk.newEntriesBlocked
+      && !snapshot.futuresRisk.blockReason?.startsWith("UTC 일손실")
+    ));
+    const weightedRatio = (select: (snapshot: CryptoPaperRuntimeSnapshot) => number) => (
+      snapshots.reduce((sum, snapshot) => sum + select(snapshot) * snapshot.equity, 0)
+      / Math.max(Number.EPSILON, equity)
+    );
+    const modelForecasts = snapshots.flatMap((snapshot) => (
+      Array.isArray(snapshot.modelForecasts) ? snapshot.modelForecasts : []
+    ));
+    const lanes = request.modelLanes.map((lane) => {
+      const laneValues = snapshots.flatMap((snapshot) => {
+        const comparison = record(snapshot.modelComparison);
+        const values = first(comparison, "lanes");
+        if (!Array.isArray(values)) return [];
+        const found = values.map(record).find((item) => first(item, "id", "lane") === lane);
+        return found ? [found] : [];
+      });
+      const aggregatedProvenance = aggregatePortfolioLaneProvenance(
+        laneValues,
+        snapshots.length,
+      );
+      const aggregatedMetrics = aggregatePortfolioLaneMetrics(
+        laneValues,
+        snapshots.length,
+      );
+      return {
+        id: lane,
+        status: !aggregatedProvenance.consistent || !aggregatedMetrics.consistent
+          ? "partial"
+          : laneValues.every((value) => (
+            ["healthy", "completed"].includes(text(value.status) ?? "")
+          ))
+            ? "healthy"
+            : laneValues.some((value) => text(value.status) === "unavailable")
+              ? "unavailable"
+              : "partial",
+        precision: text(laneValues.find((value) => text(value.precision))?.precision) ?? "unknown",
+        provenanceConsistent: aggregatedProvenance.consistent,
+        ...(aggregatedProvenance.provenance
+          ? { provenance: aggregatedProvenance.provenance }
+          : {}),
+        ...(!aggregatedProvenance.consistent
+          ? { unavailableReason: "portfolio_model_provenance_inconsistent" }
+          : !aggregatedMetrics.consistent
+            ? { unavailableReason: "portfolio_metric_aggregation_basis_incomplete" }
+          : {}),
+        metrics: aggregatedMetrics.metrics,
+      };
+    });
+    return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      runId,
+      phase: snapshots.every((snapshot) => snapshot.phase === "completed")
+        ? "completed"
+        : snapshots.some((snapshot) => snapshot.phase === "failed")
+          ? "failed"
+          : "running",
+      startedAt,
+      expiresAt,
+      market: firstSnapshot.market,
+      currency: "USDT",
+      initialCash,
+      cash,
+      equity,
+      progress: snapshots.reduce((sum, snapshot) => sum + snapshot.progress, 0)
+        / snapshots.length,
+      selection: request.selection,
+      criterion: request.selection.mode === "auto"
+        ? request.selection.criterion
+        : firstSnapshot.criterion,
+      preset: request.preset,
+      riskTolerance: request.riskTolerance,
+      policyProfile: cryptoFuturesPolicyProfile(request),
+      selected: snapshots.flatMap((snapshot) => snapshot.selected),
+      positions: snapshots.flatMap((snapshot) => snapshot.positions),
+      futuresPositions: snapshots.flatMap((snapshot) => snapshot.futuresPositions),
+      futuresRisk: {
+        dailyLossRatio: portfolioDailyGate?.drawdownRate
+          ?? (initialCash > 0 ? Math.max(0, (initialCash - equity) / initialCash) : 0),
+        dailyLossLimitRatio: riskLimits.dailyLossLimitRate,
+        newEntriesBlocked: portfolioDailyGate?.blocked === true || nonDailyBlock !== undefined,
+        ...(portfolioDailyGate?.blocked
+          ? {
+            blockReason: `UTC 일손실 ${(riskLimits.dailyLossLimitRate * 100)
+              .toFixed(2)}% gate`,
+          }
+          : nonDailyBlock?.futuresRisk.blockReason
+            ? { blockReason: nonDailyBlock.futuresRisk.blockReason }
+          : {}),
+        grossExposureRatio: weightedRatio(
+          (snapshot) => snapshot.futuresRisk.grossExposureRatio,
+        ),
+        grossExposureLimitRatio: riskLimits.grossExposureLimitRate,
+        marginUsageRatio: weightedRatio(
+          (snapshot) => snapshot.futuresRisk.marginUsageRatio,
+        ),
+        marginUsageLimitRatio: riskLimits.marginUsageLimitRate,
+        riskPerTradeRatio: riskLimits.riskPerTradeRate,
+        maximumLeverage: riskLimits.maximumLeverage,
+        liquidationBufferMultiple: riskLimits.liquidationBufferMultiple,
+        riskStreams: {
+          healthy: snapshots.every((snapshot) => snapshot.futuresRisk.riskStreams.healthy),
+          bookTicker: firstSnapshot.futuresRisk.riskStreams.bookTicker,
+          markPrice: firstSnapshot.futuresRisk.riskStreams.markPrice,
+        },
+      },
+      charts: snapshots.flatMap((snapshot) => snapshot.charts),
+      trades: snapshots.flatMap((snapshot) => snapshot.trades),
+      decisions: snapshots.flatMap((snapshot) => snapshot.decisions).slice(-600),
+      modelForecasts,
+      kronosForecasts: modelForecasts.flatMap((value) => (
+        first(record(value), "lane") === "kronos_base" ? [value] : []
+      )),
+      warnings: unique(snapshots.flatMap((snapshot) => snapshot.warnings)),
+      capabilities: {
+        ...firstSnapshot.capabilities,
+        multiSymbol: true,
+        selectedSymbolCount: snapshots.length,
+        paper: true,
+        testnet: false,
+        live: false,
+        realOrder: false,
+      },
+      modelLanes: [...request.modelLanes],
+      executionMode: "paper",
+      executionLane: firstSnapshot.executionLane,
+      modelComparison: {
+        comparisonId: `${runId}:portfolio`,
+        outcome: "inconclusive",
+        sameOrigin: true,
+        sameContext: true,
+        sameCosts: true,
+        sameFillBarrier: snapshots.every((snapshot) => (
+          first(record(snapshot.modelComparison), "sameFillBarrier") === true
+        )),
+        symbols: snapshots.flatMap((snapshot) => (
+          snapshot.selected.flatMap((value) => {
+            const symbol = text(first(record(value), "symbol"));
+            return symbol ? [symbol] : [];
+          })
+        )),
+        lanes,
+      },
+      decisionCadence: {
+        trigger: "final_binance_1m_kline",
+        triggeredEvents: snapshots.reduce(
+          (sum, snapshot) => sum + snapshot.decisionCadence.triggeredEvents,
+          0,
+        ),
+        coalescedFinalKlines: snapshots.reduce(
+          (sum, snapshot) => sum + snapshot.decisionCadence.coalescedFinalKlines,
+          0,
+        ),
+        ...(snapshots.map((snapshot) => snapshot.decisionCadence.lastTriggeredAt)
+          .filter((value): value is string => Boolean(value))
+          .sort()
+          .at(-1)
+          ? {
+            lastTriggeredAt: snapshots.map(
+              (snapshot) => snapshot.decisionCadence.lastTriggeredAt,
+            ).filter((value): value is string => Boolean(value)).sort().at(-1),
+          }
+          : {}),
+        inFlight: snapshots.some((snapshot) => snapshot.decisionCadence.inFlight),
+      },
+    };
+  }
+
+  private async runPortfolio(input: {
+    request: SimulationStartRequest;
+    snapshot: BinanceScannerSnapshot;
+    selected: readonly BinanceScannerCandidate[];
+    context: RunTaskContext;
+  }): Promise<CryptoSimulationRuntimeResult> {
+    const perSymbolInitialCash = input.request.initialCash / input.selected.length;
+    const riskLimits = input.request.riskLimits ?? DEFAULT_CRYPTO_FUTURES_RISK_LIMITS;
+    const portfolioDailyLossGate = new PortfolioDailyLossGate({
+      lanes: input.request.modelLanes,
+      symbols: input.selected.map((candidate) => candidate.symbol),
+      perSymbolInitialCash,
+      dailyLossLimitRate: riskLimits.dailyLossLimitRate,
+      observedAt: this.clock.now(),
+    });
+    const snapshots = new Map<string, CryptoPaperRuntimeSnapshot>();
+    const progress = new Map<string, number>();
+    const portfolioController = new AbortController();
+    const abortPortfolio = (reason: unknown) => {
+      if (!portfolioController.signal.aborted) {
+        portfolioController.abort(
+          reason instanceof Error ? reason : new Error("crypto_portfolio_aborted"),
+        );
+      }
+    };
+    const onParentAbort = () => abortPortfolio(input.context.signal.reason);
+    if (input.context.signal.aborted) onParentAbort();
+    else input.context.signal.addEventListener("abort", onParentAbort, { once: true });
+    const publishAggregate = async (): Promise<void> => {
+      if (snapshots.size !== input.selected.length || !this.options.onSnapshot) return;
+      await this.options.onSnapshot(
+        input.context.runId,
+        this.aggregatePortfolioSnapshots(
+          input.context.runId,
+          input.request,
+          [...snapshots.values()],
+          portfolioDailyLossGate,
+        ),
+      );
+    };
+    const tasks = input.selected.map(async (selected, index) => {
+      const childRequest: SimulationStartRequest = {
+        ...input.request,
+        initialCash: perSymbolInitialCash,
+        selection: { mode: "manual", symbols: [selected.symbol] },
+      };
+      const childContext: RunTaskContext = {
+        ...input.context,
+        runId: `${input.context.runId}:${index + 1}:${selected.symbol}`,
+        signal: portfolioController.signal,
+        isCancelled: async () => (
+          portfolioController.signal.aborted
+          || await input.context.isCancelled()
+        ),
+        throwIfCancelled: async () => {
+          if (portfolioController.signal.aborted) {
+            throw abortReason(
+              portfolioController.signal,
+              "Crypto portfolio runtime was aborted.",
+            );
+          }
+          await input.context.throwIfCancelled();
+        },
+        updateProgress: async (value, detail) => {
+          progress.set(selected.symbol, value);
+          await input.context.updateProgress(
+            [...progress.values()].reduce((sum, item) => sum + item, 0)
+              / input.selected.length,
+            {
+              ...detail,
+              completedCandidates: [...progress.values()].filter((item) => item >= 1).length,
+              totalCandidates: input.selected.length,
+              currentValidationWindow: `shadow:${selected.symbol}`,
+            },
+          );
+        },
+      };
+      try {
+        return await this.runSingle({
+          request: childRequest,
+          snapshot: input.snapshot,
+          selected,
+          context: childContext,
+          portfolioDailyLossGate,
+          snapshotObserver: async (_runId, snapshot) => {
+            snapshots.set(selected.symbol, snapshot);
+            await publishAggregate();
+          },
+        });
+      } catch (error) {
+        abortPortfolio(error);
+        throw error;
+      }
+    });
+    const settled = await Promise.allSettled(tasks);
+    input.context.signal.removeEventListener("abort", onParentAbort);
+    const rejected = settled.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (rejected) throw rejected.reason;
+    const results = settled.map((result) => (
+      (result as PromiseFulfilledResult<CryptoSimulationRuntimeResult>).value
+    ));
+    const portfolioEquity = aggregatePortfolioEquitySeries(
+      results.map((result) => {
+        const resultRecord = record(result.result);
+        const report = record(first(resultRecord, "report"));
+        const rawEquity = first(report, "equity");
+        if (!Array.isArray(rawEquity)) return [];
+        return rawEquity.flatMap((value): RuntimeEquityPoint[] => {
+          const point = record(value);
+          const timestamp = exactText(first(point, "timestamp"));
+          const equity = finite(first(point, "equity"));
+          const drawdown = finite(first(point, "drawdown"));
+          return timestamp && equity !== undefined
+            ? [{
+              timestamp,
+              equity,
+              drawdown: drawdown ?? 0,
+            }]
+            : [];
+        });
+      }),
+      perSymbolInitialCash,
+    );
+    const terminalSnapshots = results.flatMap((result) => {
+      const resultRecord = record(result.result);
+      const snapshot = first(resultRecord, "snapshot");
+      return snapshot && record(snapshot)
+        ? [snapshot as CryptoPaperRuntimeSnapshot]
+        : [];
+    });
+    if (terminalSnapshots.length !== input.selected.length) {
+      throw new Error("portfolio_terminal_snapshot_unavailable");
+    }
+    const terminalSnapshot = this.aggregatePortfolioSnapshots(
+      input.context.runId,
+      input.request,
+      terminalSnapshots,
+      portfolioDailyLossGate,
+    );
+    const warnings = unique(results.flatMap((result) => result.warnings ?? []));
+    const groupedArtifacts = groupPortfolioRuntimeArtifacts(results);
+    const terminalFailure = results.find((result) => result.terminalFailure)?.terminalFailure;
+    const summary = {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      phase: terminalFailure ? "failed" : "completed",
+      market: input.request.market,
+      currency: "USDT",
+      initialCash: input.request.initialCash,
+      finalEquity: terminalSnapshot.equity,
+      netProfitLoss: terminalSnapshot.equity - input.request.initialCash,
+      returnRatio: terminalSnapshot.equity / input.request.initialCash - 1,
+      tradeCount: terminalSnapshot.trades.length,
+      selectedSymbols: input.selected.map((candidate) => candidate.symbol),
+      executionLane: terminalSnapshot.executionLane,
+      settlementComplete: !terminalFailure,
+      realOrderApiUsed: false,
+      snapshot: terminalSnapshot,
+    };
+    return {
+      summary,
+      result: {
+        snapshot: terminalSnapshot,
+        report: {
+          configuration: {
+            market: input.request.market,
+            initialCash: input.request.initialCash,
+            durationMinutes: input.request.durationMinutes,
+            selection: input.request.selection,
+            preset: input.request.preset,
+            riskTolerance: input.request.riskTolerance,
+            costs: input.request.costs,
+            riskLimits,
+            modelLanes: input.request.modelLanes,
+            execution: input.request.execution,
+            executionLane: terminalSnapshot.executionLane,
+          },
+          selected: terminalSnapshot.selected,
+          performance: summary,
+          decisions: terminalSnapshot.decisions,
+          trades: terminalSnapshot.trades,
+          futuresPositions: terminalSnapshot.futuresPositions,
+          futuresRisk: terminalSnapshot.futuresRisk,
+          charts: terminalSnapshot.charts,
+          modelForecasts: terminalSnapshot.modelForecasts,
+          kronosForecasts: terminalSnapshot.kronosForecasts,
+          modelComparison: terminalSnapshot.modelComparison,
+          equity: portfolioEquity,
+          warnings,
+        },
+      },
+      warnings,
+      ...(terminalFailure ? { terminalFailure } : {}),
+      artifacts: groupedArtifacts.map((artifact) => ({
+        type: artifact.type,
+        content: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          portfolio: true,
+          selectedSymbols: input.selected.map((candidate) => candidate.symbol),
+          items: artifact.contents,
+          realOrder: false,
+        },
+        rowCount: artifact.rowCount,
+      })),
+    };
   }
 
   private async resolveRules(

@@ -84,20 +84,212 @@ function kronosBaseForecastOutput(symbol, origin, basePrice) {
 }
 
 function cryptoSnapshot({ phase, request, cancelled = false }) {
-  const active = phase !== "selecting" && !cancelled;
-  const bars = Array.from({ length: 24 }, (_, index) => {
-    const open = 67_000 + index * 18;
-    const close = open + (index % 3 === 0 ? -32 : 44);
+  const hasResults = phase !== "selecting";
+  const symbols = request.selection.mode === "manual"
+    ? request.selection.symbols
+    : ["BTCUSDT", "ETHUSDT"].slice(0, request.selection.symbolCount);
+  const modelIdentity = {
+    kronos_base: {
+      modelId: "NeoQuasar/Kronos-base",
+      modelRevision: "kronos-ui-revision",
+      sourceRevision: "kronos-source-revision",
+      loaderVersion: "kronos-loader-v1",
+      precision: "fp32",
+      latencyMs: 86,
+      peakVramMb: 3_860,
+    },
+    fincast: {
+      modelId: "Vincent05R/FinCast",
+      modelRevision: "fincast-ui-revision",
+      sourceRevision: "fincast-source-revision",
+      loaderVersion: "fincast-loader-v1",
+      precision: "fp16",
+      latencyMs: 112,
+      peakVramMb: 4_920,
+    },
+  };
+  const barsBySymbol = new Map(symbols.map((symbol, symbolIndex) => {
+    const basePrice = symbol === "ETHUSDT" ? 3_470 : 67_000;
+    const priceStep = symbol === "ETHUSDT" ? 1.8 : 18;
+    const movement = symbol === "ETHUSDT" ? 4.4 : 44;
+    const wick = symbol === "ETHUSDT" ? 2.5 : 25;
+    const bars = Array.from({ length: 24 }, (_, index) => {
+      const open = basePrice + index * priceStep * (symbolIndex ? -0.3 : 1);
+      const close = open + (index % 3 === 0 ? -movement * 0.72 : movement);
+      return {
+        timestamp: new Date(Date.parse("2026-07-24T00:00:00.000Z") + index * 60_000).toISOString(),
+        open,
+        high: Math.max(open, close) + wick,
+        low: Math.min(open, close) - wick,
+        close,
+        volume: 180 + index * 2 + symbolIndex * 30,
+        status: "final",
+        indicatorValues: {
+          "trend-ema:value": close - (symbolIndex ? -movement * 0.35 : movement * 0.35),
+          "session-vwap:session_vwap": close - (symbolIndex ? -movement * 0.2 : movement * 0.2),
+        },
+      };
+    });
+    return [symbol, bars];
+  }));
+  const selected = symbols.map((symbol, index) => {
+    const lane = request.modelLanes[index % request.modelLanes.length];
+    const model = modelIdentity[lane];
+    const bars = barsBySymbol.get(symbol);
     return {
-      timestamp: new Date(Date.parse("2026-07-24T00:00:00.000Z") + index * 60_000).toISOString(),
-      open,
-      high: Math.max(open, close) + 25,
-      low: Math.min(open, close) - 25,
-      close,
-      volume: 180 + index * 2,
-      status: "final",
-      indicatorValues: {},
+      symbol,
+      name: symbol === "ETHUSDT" ? "Ethereum perpetual" : "Bitcoin perpetual",
+      score: 0.91 - index * 0.07,
+      upProbability: index === 0 ? 0.68 : 0.31,
+      predictedMedianReturn: index === 0 ? 0.004 : -0.003,
+      currentPrice: bars.at(-1).close,
+      priceObservedAt: "2026-07-24T00:23:12.345Z",
+      model: {
+        modelId: model.modelId,
+        modelRevision: model.modelRevision,
+        device: "cuda:0",
+      },
     };
+  });
+  const futuresPositions = symbols.map((symbol, index) => {
+    const bars = barsBySymbol.get(symbol);
+    const entryPrice = bars[10].close;
+    const markPrice = bars.at(-1).close;
+    const quantity = symbol === "ETHUSDT" ? 0.3 : 0.015;
+    const notional = markPrice * quantity;
+    const side = index === 0 ? "long" : "short";
+    const leverage = Math.min(request.riskLimits.maximumLeverage, 5 + index);
+    return {
+      symbol,
+      side,
+      marginMode: "isolated",
+      quantity,
+      leverage,
+      entryPrice,
+      markPrice,
+      notional,
+      initialMargin: notional / leverage,
+      maintenanceMargin: notional * 0.005,
+      liquidationPrice: side === "long" ? entryPrice * 0.81 : entryPrice * 1.17,
+      liquidationBufferRatio: side === "long" ? 0.196 : 0.172,
+      protectiveStopPrice: side === "long" ? entryPrice * 0.991 : entryPrice * 1.009,
+      realizedPnl: 0,
+      unrealizedPnl: side === "long"
+        ? (markPrice - entryPrice) * quantity
+        : (entryPrice - markPrice) * quantity,
+      funding: index === 0 ? -0.12 : 0.06,
+      fees: index === 0 ? 0.81 : 0.67,
+      slippage: index === 0 ? 0.2 : 0.16,
+    };
+  });
+  const charts = symbols.map((symbol, index) => {
+    const bars = barsBySymbol.get(symbol);
+    return {
+      symbol,
+      name: symbol === "ETHUSDT" ? "Ethereum perpetual" : "Bitcoin perpetual",
+      currency: "USDT",
+      bars,
+      indicators: [{
+        id: "trend-ema",
+        kind: "ema",
+        status: "available",
+        values: { value: bars.at(-1).indicatorValues["trend-ema:value"] },
+      }, {
+        id: "momentum-rsi",
+        kind: "rsi",
+        status: "available",
+        values: { value: index === 0 ? 63.4 : 38.1 },
+      }],
+      patterns: [{
+        detectedAt: bars.at(-2).timestamp,
+        name: index === 0 ? "bullish_engulfing" : "bearish_engulfing",
+        bias: index === 0 ? "bullish" : "bearish",
+        strength: 0.82 - index * 0.06,
+      }],
+      updatedAt: bars.at(-1).timestamp,
+    };
+  });
+  const trades = symbols.flatMap((symbol, index) => {
+    const bars = barsBySymbol.get(symbol);
+    const position = futuresPositions[index];
+    const openSide = index === 0 ? "buy" : "sell";
+    const reduceSide = index === 0 ? "sell" : "buy";
+    return [{
+      symbol,
+      side: openSide,
+      positionSide: position.side,
+      reduceOnly: false,
+      executedAt: "2026-07-24T00:10:15.000Z",
+      signalEligibleAfter: "2026-07-24T00:10:00.000Z",
+      price: bars[10].close,
+      quantity: position.quantity,
+      amount: bars[10].close * position.quantity,
+      cost: index === 0 ? 0.6 : 0.52,
+      totalCosts: index === 0 ? 0.6 : 0.52,
+      source: "next_valid_agg_trade",
+    }, {
+      symbol,
+      side: reduceSide,
+      positionSide: position.side,
+      reduceOnly: true,
+      executedAt: "2026-07-24T00:18:15.000Z",
+      signalEligibleAfter: "2026-07-24T00:18:00.000Z",
+      price: bars[18].close,
+      quantity: position.quantity / 3,
+      amount: bars[18].close * position.quantity / 3,
+      cost: index === 0 ? 0.2 : 0.17,
+      totalCosts: index === 0 ? 0.2 : 0.17,
+      source: "next_valid_agg_trade",
+    }];
+  });
+  const decisions = symbols.map((symbol, index) => ({
+    id: `crypto-decision-${index + 1}`,
+    lane: request.modelLanes[index % request.modelLanes.length],
+    symbol,
+    originAt: "2026-07-24T00:10:00.000Z",
+    decisionAt: "2026-07-24T00:10:00.250Z",
+    fillEligibleAfter: "2026-07-24T00:10:00.250Z",
+    action: index === 0 ? "open_long" : "open_short",
+    direction: index === 0 ? "long" : "short",
+    confidence: index === 0 ? 0.73 : 0.7,
+    probabilityAboveCost: index === 0 ? 0.68 : 0.69,
+    reason: index === 0
+      ? "quantile_cost_threshold · protected_liquidation_buffer"
+      : "downside_quantile_cost_threshold · protected_liquidation_buffer",
+    technicalState: index === 0 ? "trend:long" : "trend:short",
+    chartPatternBias: index === 0 ? "bullish" : "bearish",
+    chartPatterns: [index === 0 ? "bullish_engulfing" : "bearish_engulfing"],
+    components: { confidence: index === 0 ? 0.73 : 0.7, minimumConfidence: 0.55 },
+    model: selected[index].model,
+  }));
+  const modelForecasts = symbols.flatMap((symbol, symbolIndex) => {
+    const bars = barsBySymbol.get(symbol);
+    const origin = bars.at(-1).timestamp;
+    const originPrice = bars.at(-1).close;
+    return request.modelLanes.map((lane, laneIndex) => {
+      const model = modelIdentity[lane];
+      const direction = symbolIndex === 0 ? 1 : -1;
+      return {
+        lane,
+        signalSymbol: symbol,
+        status: "available",
+        origin,
+        generatedAt: new Date(Date.parse(origin) + model.latencyMs).toISOString(),
+        modelId: model.modelId,
+        modelRevision: model.modelRevision,
+        points: [5, 15, 30, 60].map((horizonMinutes, horizonIndex) => {
+          const drift = direction * (horizonIndex + 1) * (0.0018 + laneIndex * 0.0002);
+          return {
+            horizonMinutes,
+            targetTimestamp: new Date(Date.parse(origin) + horizonMinutes * 60_000).toISOString(),
+            q10Price: originPrice * (1 + drift - 0.006),
+            medianPrice: originPrice * (1 + drift),
+            q90Price: originPrice * (1 + drift + 0.006),
+            upProbability: symbolIndex === 0 ? 0.64 + horizonIndex * 0.02 : 0.36 - horizonIndex * 0.02,
+          };
+        }),
+      };
+    });
   });
   return {
     phase,
@@ -106,87 +298,42 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     market: request.market,
     currency: "USDT",
     initialCash: request.initialCash,
-    cash: active ? request.initialCash - 670 : request.initialCash,
+    cash: hasResults ? request.initialCash - 670 : request.initialCash,
     equity: cancelled ? request.initialCash + 12 : request.initialCash + 31.5,
     progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
     selection: request.selection,
-    criterion: request.selection.criterion,
+    criterion: request.selection.mode === "auto" ? request.selection.criterion : "volatility",
     preset: request.preset,
     riskTolerance: request.riskTolerance,
-    selected: active ? [{
-      symbol: "BTCUSDT",
-      name: "Bitcoin perpetual",
-      score: 0.91,
-      upProbability: 0.68,
-      predictedMedianReturn: 0.004,
-      currentPrice: 67_418,
-      priceObservedAt: "2026-07-24T00:23:12.345Z",
-      model: { modelId: "NeoQuasar/Kronos-base", modelRevision: "ui-fixture", device: "cuda:0" },
-    }] : [],
-    positions: [],
-    futuresPositions: active ? [{
-      symbol: "BTCUSDT",
-      side: "long",
-      marginMode: "isolated",
-      quantity: 0.015,
-      leverage: 5,
-      entryPrice: 67_100,
-      markPrice: 67_418,
-      notional: 1_011.27,
-      initialMargin: 202.25,
-      maintenanceMargin: 5.1,
-      liquidationPrice: 54_190,
-      liquidationBufferRatio: 0.196,
-      protectiveStopPrice: 66_510,
-      realizedPnl: 0,
-      unrealizedPnl: 4.77,
-      funding: -0.12,
-      fees: 0.81,
-      slippage: 0.2,
-    }] : [],
+    decisionCadence: {
+      trigger: "finalized_one_minute_bar",
+      triggeredEvents: hasResults ? decisions.length : 0,
+      coalescedEvents: 0,
+      duplicateEvents: 0,
+      inFlight: false,
+      lastTriggeredAt: "2026-07-24T00:23:00.000Z",
+      lastStartedAt: "2026-07-24T00:23:00.020Z",
+      lastFinishedAt: "2026-07-24T00:23:00.250Z",
+    },
+    selected: hasResults ? selected : [],
+    positions: hasResults ? futuresPositions : [],
+    futuresPositions: hasResults ? futuresPositions : [],
     futuresRisk: {
       dailyLossRatio: -0.0012,
-      dailyLossLimitRatio: 0.03,
+      dailyLossLimitRatio: request.riskLimits.dailyLossLimitRate,
       newEntriesBlocked: false,
-      grossExposureRatio: 0.101,
-      marginUsageRatio: 0.0202,
-      riskPerTradeRatio: 0.005,
+      grossExposureRatio: 0.18,
+      grossExposureLimitRatio: request.riskLimits.grossExposureLimitRate,
+      marginUsageRatio: 0.036,
+      marginUsageLimitRatio: request.riskLimits.marginUsageLimitRate,
+      riskPerTradeRatio: request.riskLimits.riskPerTradeRate,
+      maximumLeverage: request.riskLimits.maximumLeverage,
+      liquidationBufferMultiple: request.riskLimits.liquidationBufferMultiple,
     },
-    charts: active ? [{
-      symbol: "BTCUSDT",
-      name: "Bitcoin perpetual",
-      currency: "USDT",
-      bars,
-      indicators: [],
-      patterns: [],
-      updatedAt: bars.at(-1).timestamp,
-    }] : [],
-    trades: active ? [{
-      symbol: "BTCUSDT",
-      side: "buy",
-      positionSide: "long",
-      reduceOnly: false,
-      executedAt: "2026-07-24T00:10:15.000Z",
-      signalEligibleAfter: "2026-07-24T00:10:00.000Z",
-      price: 67_100,
-      quantity: 0.015,
-      amount: 1_006.5,
-      cost: 0.6,
-      totalCosts: 0.6,
-      source: "next_valid_agg_trade",
-    }] : [],
-    decisions: active ? [{
-      symbol: "BTCUSDT",
-      action: "buy",
-      direction: "long",
-      decidedAt: "2026-07-24T00:10:00.000Z",
-      eligibleAfter: "2026-07-24T00:10:00.001Z",
-      reason: "quantile_cost_threshold · protected_liquidation_buffer",
-      score: 0.91,
-      upProbability: 0.68,
-      chartPatterns: [],
-      model: "NeoQuasar/Kronos-base · ui-fixture",
-    }] : [],
+    charts: hasResults ? charts : [],
+    trades: hasResults ? trades : [],
+    decisions: hasResults ? decisions : [],
+    modelForecasts: hasResults ? modelForecasts : [],
     warnings: ["UI fixture · realOrder false"],
     capabilities: { realOrder: false, nextValidFillOnly: true },
     modelLanes: request.modelLanes,
@@ -198,11 +345,26 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
       sameContext: true,
       sameCosts: true,
       sameFillBarrier: true,
-      symbol: "BTCUSDT",
+      symbol: symbols.join(","),
       lanes: request.modelLanes.map((id) => ({
         id,
         status: "completed",
-        precision: id === "fincast" ? "fp16" : "fp32",
+        precision: modelIdentity[id].precision,
+        provenance: {
+          modelId: modelIdentity[id].modelId,
+          modelRevision: modelIdentity[id].modelRevision,
+          sourceRevision: modelIdentity[id].sourceRevision,
+          loaderVersion: modelIdentity[id].loaderVersion,
+          loaded: true,
+          device: "cuda:0",
+          deviceName: "Tesla P40",
+          cudaCapability: "6.1",
+          attentionBackend: "sdpa",
+          precisionValidation: id === "fincast" ? "passed" : "not_required",
+          memoryStatus: "ok",
+          peakVramMb: modelIdentity[id].peakVramMb,
+          precisionFailureReasons: [],
+        },
         metrics: {
           pinballLoss: id === "fincast" ? 0.008 : 0.009,
           medianReturnMae: 0.004,
@@ -215,7 +377,7 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
           turnover: 2.4,
           latencyMs: id === "fincast" ? 112 : 86,
           availabilityRatio: 1,
-          peakVramMb: id === "fincast" ? 4_920 : 3_860,
+          peakVramMb: modelIdentity[id].peakVramMb,
         },
       })),
     },
@@ -290,7 +452,11 @@ function snapshot({
       ...(index === 0 ? {
         signalSymbol: decisionSymbol,
         modelOutputs: {
-          kronos: kronosBaseForecastOutput(decisionSymbol, decidedAt, 50_220),
+          kronos: kronosBaseForecastOutput(
+            decisionSymbol,
+            "2026-07-24T00:22:00.000Z",
+            50_220,
+          ),
         },
       } : {}),
     };
@@ -681,6 +847,7 @@ export async function routeSimulationUiApi(page) {
           runId,
           status: active.cancelled ? "cancelled" : "running",
           startedAt: new Date(Date.parse("2026-07-24T00:20:00.000Z") + index * 1_000).toISOString(),
+          market: active.body.market,
           marketCountry: active.body.marketCountry,
           preset: active.body.preset,
           riskTolerance: active.body.riskTolerance,
@@ -923,6 +1090,9 @@ async function verify(browser, baseUrl, viewport, theme) {
   const selectionMode = viewport.width >= 1_000 ? "auto" : "manual";
   const requestedSymbolCount = selectionMode === "auto" ? 2 : 1;
   const requestedRiskTolerance = selectionMode === "auto" ? 73 : 27;
+  let cryptoSetupScreenshot;
+  let cryptoResultScreenshot;
+  let inlineForecastScreenshot;
   try {
     await page.goto(`${baseUrl}/?simulation-ui=${viewport.width}#simulation`, {
       waitUntil: "domcontentloaded",
@@ -945,8 +1115,10 @@ async function verify(browser, baseUrl, viewport, theme) {
     await historyPanel.locator(`[data-simulation-report="${state.archivedRunId}"]`).waitFor({ timeout: 10_000 });
     await historyPanel.getByText("실행 설정", { exact: true }).waitFor();
     await historyPanel.getByText("캔들·지표·패턴 근거", { exact: true }).waitFor();
-    await historyPanel.locator("[data-ai-simulation-kronos-forecast-chart]").first().waitFor();
-    await historyPanel.locator('[data-ai-simulation-kronos-origin-mark="exact-final"]').first().waitFor();
+    await historyPanel.locator("[data-ai-simulation-model-forecast-overlay]").first().waitFor();
+    await historyPanel.locator(
+      '[data-ai-simulation-model-forecast="kronos_base"][data-ai-simulation-model-forecast-origin="exact-final"]',
+    ).first().waitFor();
     const historyScroll = historyPanel.locator("[data-simulation-history-scroll]");
     const historyScrollMetrics = await historyScroll.evaluate((element) => ({
       clientHeight: element.clientHeight,
@@ -964,6 +1136,229 @@ async function verify(browser, baseUrl, viewport, theme) {
       document.documentElement.classList.contains("dark") ? "dark" : "light"
     ));
     check(actualTheme === theme, `${viewport.width}px 테마가 ${theme}가 아니라 ${actualTheme}입니다.`);
+
+    const assetClassControl = page.getByRole("radiogroup", { name: "시뮬레이션 자산군" });
+    await assetClassControl.getByRole("radio", { name: /암호화폐/ }).click();
+    await page.getByRole("combobox", { name: "암호화폐 종목 선택 방식" }).waitFor();
+    await page.getByRole("combobox", { name: "암호화폐 판단 프리셋" }).waitFor();
+    await page.getByRole("slider", { name: "암호화폐 공격 방어 성향" }).waitFor();
+    await page.getByRole("combobox", { name: "암호화폐 scanner 기준" }).waitFor();
+    await page.getByRole("combobox", { name: "암호화폐 선정 계약 수" }).waitFor();
+    await page.locator('[data-crypto-candidate="BTCUSDT"][data-candidate-selected="true"]')
+      .waitFor({ timeout: 10_000 });
+    const cryptoRiskLabels = [
+      "암호화폐 거래당 위험",
+      "암호화폐 UTC 일손실 중단선",
+      "암호화폐 최대 레버리지",
+      "암호화폐 Gross exposure 상한",
+      "암호화폐 증거금 사용률 상한",
+      "암호화폐 청산 buffer / 손절",
+    ];
+    for (const label of cryptoRiskLabels) {
+      const input = page.getByRole("spinbutton", { name: label, exact: true });
+      await input.waitFor();
+      check(await input.isEnabled(), `${label} 입력을 편집할 수 없습니다.`);
+    }
+    const cryptoRiskPerTrade = page.getByRole("spinbutton", {
+      name: "암호화폐 거래당 위험",
+      exact: true,
+    });
+    const cryptoMaximumLeverage = page.getByRole("spinbutton", {
+      name: "암호화폐 최대 레버리지",
+      exact: true,
+    });
+    await page.getByRole("combobox", { name: "암호화폐 선정 계약 수" }).click();
+    await page.getByRole("option", { name: "2계약 · 독립 비교", exact: true }).click();
+    await page.locator('[data-crypto-candidate="ETHUSDT"][data-candidate-selected="true"]')
+      .waitFor({ timeout: 10_000 });
+    await page.locator('[data-model-lane-toggle="fincast"]').click();
+    await page.locator('[data-model-lane-toggle="fincast"][aria-pressed="true"]').waitFor();
+    await cryptoRiskPerTrade.fill("0.4");
+    await cryptoMaximumLeverage.fill("12");
+    check(
+      await cryptoRiskPerTrade.inputValue() === "0.4",
+      "암호화폐 거래당 위험 변경값이 제어 상태에 반영되지 않았습니다.",
+    );
+    check(
+      await cryptoMaximumLeverage.inputValue() === "12",
+      "암호화폐 최대 레버리지 변경값이 제어 상태에 반영되지 않았습니다.",
+    );
+    await mkdir(screenshotDirectory, { recursive: true });
+    cryptoSetupScreenshot = path.join(
+      screenshotDirectory,
+      `${viewport.width}x${viewport.height}-${theme}-crypto-setup.png`,
+    );
+    await page.locator("[data-crypto-simulation-setup]").screenshot({
+      path: cryptoSetupScreenshot,
+      animations: "disabled",
+    });
+    const cryptoStartButton = page.locator("[data-crypto-simulation-start]");
+    await cryptoStartButton.waitFor();
+    await page.waitForFunction(() => {
+      const button = document.querySelector("[data-crypto-simulation-start]");
+      return button instanceof HTMLButtonElement && !button.disabled;
+    });
+    await cryptoStartButton.click();
+    await page.locator("[data-simulation-run]")
+      .getByText("가상 원장을 준비하고 있습니다.", { exact: true })
+      .waitFor({ timeout: 10_000 });
+    check(state.starts.length === 1, "암호화폐 시작 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
+    const cryptoRequest = state.starts[0];
+    const cryptoRunId = [...state.active.keys()][0];
+    check(Boolean(cryptoRunId), "암호화폐 run ID가 fixture에 보존되지 않았습니다.");
+    check(
+      JSON.stringify(cryptoRequest?.market) === JSON.stringify({
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      }),
+      "암호화폐 v7 market union이 요청 body에 보존되지 않았습니다.",
+    );
+    check(!("marketCountry" in cryptoRequest), "암호화폐 요청에 legacy marketCountry가 포함됐습니다.");
+    check(cryptoRequest?.initialCash === 10_000, "암호화폐 시작 USDT가 요청 body에 보존되지 않았습니다.");
+    check(cryptoRequest?.durationMinutes === 120, "암호화폐 shadow 기간이 요청 body에 보존되지 않았습니다.");
+    check(
+      JSON.stringify(cryptoRequest?.selection) === JSON.stringify({
+        mode: "auto",
+        criterion: "volatility",
+        symbolCount: 2,
+      }),
+      "암호화폐 2계약 자동 선정 설정이 요청 body에 보존되지 않았습니다.",
+    );
+    check(
+      JSON.stringify(cryptoRequest?.modelLanes) === JSON.stringify(["kronos_base", "fincast"]),
+      "암호화폐 독립 모델 lane 선택이 요청 body에 보존되지 않았습니다.",
+    );
+    check(cryptoRequest?.execution?.mode === "paper", "암호화폐 실행 mode가 paper가 아닙니다.");
+    check(
+      JSON.stringify(cryptoRequest?.riskLimits) === JSON.stringify({
+        riskPerTradeRate: 0.004,
+        dailyLossLimitRate: 0.03,
+        maximumLeverage: 12,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 2,
+      }),
+      `암호화폐 hard-envelope 위험 한도가 요청 body와 다릅니다: ${JSON.stringify(cryptoRequest?.riskLimits)}`,
+    );
+
+    const cryptoRunPanel = page.locator(`[data-simulation-run="${cryptoRunId}"]`);
+    await cryptoRunPanel.getByText("시뮬레이션 진행", { exact: true }).waitFor({ timeout: 10_000 });
+    check(
+      await cryptoRunPanel.locator("[data-simulation-selected] article").count() === 2,
+      "암호화폐 실행 결과에 BTC·ETH 2계약이 표시되지 않았습니다.",
+    );
+    check(
+      await cryptoRunPanel.locator("[data-futures-position]").count() === 2,
+      "암호화폐 실행 결과에 롱·숏 선물 포지션 2개가 표시되지 않았습니다.",
+    );
+    await cryptoRunPanel.locator('[data-futures-position="BTCUSDT"][data-futures-position-side="long"]').waitFor();
+    await cryptoRunPanel.locator('[data-futures-position="ETHUSDT"][data-futures-position-side="short"]').waitFor();
+    await cryptoRunPanel.getByText("BTCUSDT · 롱 진입", { exact: true }).waitFor();
+    await cryptoRunPanel.getByText("ETHUSDT · 숏 진입", { exact: true }).waitFor();
+    await cryptoRunPanel.locator('[data-model-lane="kronos_base"]').waitFor();
+    await cryptoRunPanel.locator('[data-model-lane="fincast"]').waitFor();
+    await cryptoRunPanel.locator('[data-model-lane-provenance="kronos_base"]').waitFor();
+    await cryptoRunPanel.locator('[data-model-lane-provenance="fincast"]').waitFor();
+    await cryptoRunPanel.getByText("Vincent05R/FinCast", { exact: false }).first().waitFor();
+    await cryptoRunPanel.locator(
+      '[data-ai-simulation-trade-marker="buy"][data-ai-simulation-trade-color="red"]',
+    ).first().waitFor();
+    await cryptoRunPanel.locator(
+      '[data-ai-simulation-trade-marker="sell"][data-ai-simulation-trade-color="blue"]',
+    ).first().waitFor();
+    const cryptoCharts = cryptoRunPanel.locator("[data-simulation-charts] [data-ai-simulation-chart]");
+    check(await cryptoCharts.count() === 2, "암호화폐 BTC·ETH 분봉 차트가 각각 표시되지 않았습니다.");
+    for (const lane of ["kronos_base", "fincast"]) {
+      await cryptoCharts.first().locator(
+        `[data-ai-simulation-model-forecast="${lane}"][data-ai-simulation-model-forecast-origin="exact-final"]`,
+      ).waitFor();
+      for (const horizon of [5, 15, 30, 60]) {
+        await cryptoCharts.first().locator(
+          `[data-ai-simulation-model-forecast-horizon="${lane}:${horizon}"]`,
+        ).waitFor();
+      }
+    }
+    const cryptoForecastGeometry = await cryptoCharts.evaluateAll((charts, lanes) => (
+      charts.flatMap((chart) => lanes.map((lane) => {
+        const lineNode = chart.querySelector(`[data-ai-simulation-forecast-line="${lane}"]`);
+        const linePath = lineNode?.matches("path")
+          ? lineNode
+          : lineNode?.querySelector("path");
+        const bandNode = chart.querySelector(`[data-ai-simulation-forecast-band="${lane}"]`);
+        const bandPath = bandNode?.matches("path")
+          ? bandNode
+          : bandNode?.querySelector("path");
+        const originNode = chart.querySelector(`[data-ai-simulation-forecast-origin="${lane}"]`);
+        const originLine = originNode?.matches("line")
+          ? originNode
+          : originNode?.querySelector("line");
+        const lineLength = typeof linePath?.getTotalLength === "function"
+          ? linePath.getTotalLength()
+          : 0;
+        const start = lineLength > 0 ? linePath.getPointAtLength(0) : undefined;
+        const end = lineLength > 0 ? linePath.getPointAtLength(lineLength) : undefined;
+        return {
+          chart: chart.getAttribute("data-ai-simulation-chart"),
+          lane,
+          lineD: linePath?.getAttribute("d") ?? "",
+          bandD: bandPath?.getAttribute("d") ?? "",
+          originX: Number(originLine?.getAttribute("x1")),
+          startX: start?.x,
+          endX: end?.x,
+        };
+      }))
+    ), ["kronos_base", "fincast"]);
+    for (const geometry of cryptoForecastGeometry) {
+      check(
+        geometry.lineD.trim().length > 0 && geometry.bandD.trim().length > 0,
+        `암호화폐 ${geometry.chart} ${geometry.lane} 예측 SVG path가 비어 있습니다.`,
+      );
+      check(
+        Number.isFinite(geometry.originX)
+          && Number.isFinite(geometry.startX)
+          && Math.abs(geometry.startX - geometry.originX) <= 2,
+        `암호화폐 ${geometry.chart} ${geometry.lane} 예측선이 마지막 확정봉 origin에 붙지 않았습니다: ${JSON.stringify(geometry)}`,
+      );
+      check(
+        Number.isFinite(geometry.endX) && geometry.endX > geometry.originX + 1,
+        `암호화폐 ${geometry.chart} ${geometry.lane} 미래 예측이 마지막 캔들 오른쪽 x-domain으로 이어지지 않았습니다: ${JSON.stringify(geometry)}`,
+      );
+    }
+    cryptoResultScreenshot = path.join(
+      screenshotDirectory,
+      `${viewport.width}x${viewport.height}-${theme}-crypto-result.png`,
+    );
+    await cryptoRunPanel.screenshot({
+      path: cryptoResultScreenshot,
+      animations: "disabled",
+    });
+
+    await page.locator("[data-crypto-simulation-stop]").click();
+    await cryptoRunPanel.getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
+    check(state.cancels.length === 1, "암호화폐 테스트 중단이 정확히 한 번 호출되지 않았습니다.");
+    await historyPanel.getByRole("button", { name: "시뮬레이션 기록 새로고침" }).click();
+    const cryptoHistoryItem = historyPanel.locator(`[data-simulation-history-item="${cryptoRunId}"]`);
+    await cryptoHistoryItem.waitFor({ timeout: 10_000 });
+    await cryptoHistoryItem.click();
+    const cryptoHistoryReport = historyPanel.locator(`[data-simulation-report="${cryptoRunId}"]`);
+    await cryptoHistoryReport.waitFor({ timeout: 10_000 });
+    await cryptoHistoryReport.locator("[data-futures-ledger]").waitFor();
+    await cryptoHistoryReport.locator('[data-model-lane-provenance="kronos_base"]').waitFor();
+    await cryptoHistoryReport.locator('[data-model-lane-provenance="fincast"]').waitFor();
+    check(
+      await cryptoHistoryReport.locator("[data-simulation-report-charts] [data-ai-simulation-chart]").count() === 2,
+      "암호화폐 히스토리 보고서가 BTC·ETH 차트 2개를 복원하지 못했습니다.",
+    );
+    await cryptoHistoryReport.getByText("BTCUSDT · 롱 진입", { exact: true }).waitFor();
+    await cryptoHistoryReport.getByText("ETHUSDT · 숏 진입", { exact: true }).waitFor();
+    await cryptoHistoryReport.getByText("Kronos-base · FinCast lane·판단 주기", { exact: true }).waitFor();
+
+    const startsBeforeStock = state.starts.length;
+    const cancelsBeforeStock = state.cancels.length;
+    await assetClassControl.getByRole("radio", { name: /주식/ }).click();
+    await page.locator('[data-simulation-asset-class="stock"]').waitFor();
 
     await page.locator("summary").filter({ hasText: "비용 가정 · bps" }).click();
     const strategyGroup = page.getByRole("radiogroup", {
@@ -1006,7 +1401,10 @@ async function verify(browser, baseUrl, viewport, theme) {
       return button instanceof HTMLButtonElement && !button.disabled;
     });
     await page.waitForTimeout(900);
-    check(state.starts.length === 0, "화면 진입만으로 시뮬레이션 run이 자동 시작됐습니다.");
+    check(
+      state.starts.length === startsBeforeStock,
+      "주식 화면 전환만으로 시뮬레이션 run이 자동 시작됐습니다.",
+    );
 
     await page.getByRole("spinbutton", { name: "시작 예수금" }).fill("2500000");
     await page.getByRole("spinbutton", { name: "테스트 기간" }).fill("45");
@@ -1052,8 +1450,11 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.locator("[data-simulation-run]").getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
     const stopButton = page.getByRole("button", { name: "테스트 중단", exact: true });
     await stopButton.waitFor();
-    check(state.starts.length === 1, "시작 버튼 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
-    const firstRequest = state.starts[0];
+    check(
+      state.starts.length === startsBeforeStock + 1,
+      "주식 시작 버튼 한 번에 정확히 하나의 run이 생성되지 않았습니다.",
+    );
+    const firstRequest = state.starts[startsBeforeStock];
     check(firstRequest?.initialCash === 2_500_000, "시작 예수금이 요청 body에 보존되지 않았습니다.");
     check(firstRequest?.durationMinutes === 45, "테스트 기간이 요청 body에 보존되지 않았습니다.");
     check(firstRequest?.marketCountry === "KR", "기본 국내 시장이 요청 body에 보존되지 않았습니다.");
@@ -1074,7 +1475,10 @@ async function verify(browser, baseUrl, viewport, theme) {
 
     await stopButton.click();
     await page.locator("[data-simulation-run]").getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
-    check(state.cancels.length === 1, "준비 단계 테스트 중단이 정확히 한 번 호출되지 않았습니다.");
+    check(
+      state.cancels.length === cancelsBeforeStock + 1,
+      "준비 단계 테스트 중단이 정확히 한 번 호출되지 않았습니다.",
+    );
 
     await startButton.waitFor();
     await page.waitForFunction(() => {
@@ -1084,9 +1488,12 @@ async function verify(browser, baseUrl, viewport, theme) {
     });
     await startButton.click();
     await page.locator("[data-simulation-run]").getByText("가상 원장을 준비하고 있습니다.", { exact: true }).waitFor({ timeout: 10_000 });
-    check(state.starts.length === 2, "준비 단계 중단 후 새 테스트를 다시 시작하지 못했습니다.");
     check(
-      JSON.stringify(state.starts[1]) === JSON.stringify(firstRequest),
+      state.starts.length === startsBeforeStock + 2,
+      "준비 단계 중단 후 새 테스트를 다시 시작하지 못했습니다.",
+    );
+    check(
+      JSON.stringify(state.starts[startsBeforeStock + 1]) === JSON.stringify(firstRequest),
       "중단 후 재시작하면서 v3 설정 요청이 달라졌습니다.",
     );
 
@@ -1125,18 +1532,34 @@ async function verify(browser, baseUrl, viewport, theme) {
     await chartGrid.locator('[data-ai-simulation-indicator-badge="rsi"]').first().waitFor();
     await chartGrid.locator('[data-ai-simulation-price-overlay="trend-ema:value"]').first().waitFor();
     await chartGrid.locator('[data-ai-simulation-pattern="bullish"]').first().waitFor();
-    await chartGrid.locator('[data-ai-simulation-trade-marker="buy"]').first().waitFor();
-    const liveForecastSection = currentRunPanel.locator("[data-ai-simulation-kronos-forecast-section]");
-    await liveForecastSection.waitFor();
-    await liveForecastSection.locator("[data-ai-simulation-kronos-forecast-chart]").first().waitFor();
-    await liveForecastSection.locator('[data-ai-simulation-kronos-origin-mark="exact-final"]').first().waitFor();
+    await chartGrid.locator(
+      '[data-ai-simulation-trade-marker="buy"][data-ai-simulation-trade-color="red"]',
+    ).first().waitFor();
+    await chartGrid.locator(
+      '[data-ai-simulation-trade-marker="sell"][data-ai-simulation-trade-color="blue"]',
+    ).first().waitFor();
+    const liveForecastOverlays = chartGrid.locator("[data-ai-simulation-model-forecast-overlay]");
+    await liveForecastOverlays.first().waitFor();
+    await chartGrid.locator(
+      '[data-ai-simulation-model-forecast="kronos_base"][data-ai-simulation-model-forecast-origin="exact-final"]',
+    ).first().waitFor();
     for (const horizon of [5, 15, 30, 60]) {
-      await liveForecastSection.locator(`[data-ai-simulation-kronos-horizon="${horizon}"]`).waitFor();
+      await chartGrid.locator(
+        `[data-ai-simulation-model-forecast-horizon="kronos_base:${horizon}"]`,
+      ).waitFor();
     }
-    const liveForecastCount = await liveForecastSection
-      .locator("[data-ai-simulation-kronos-forecast-chart]")
-      .count();
-    check(liveForecastCount === 1, `Kronos-base 예측 그래프가 1개가 아니라 ${liveForecastCount}개입니다.`);
+    const liveForecastCount = await liveForecastOverlays.count();
+    check(liveForecastCount === 1, `인라인 모델 예측 overlay가 1개가 아니라 ${liveForecastCount}개입니다.`);
+    await mkdir(screenshotDirectory, { recursive: true });
+    inlineForecastScreenshot = path.join(
+      screenshotDirectory,
+      `${viewport.width}x${viewport.height}-${theme}-inline-forecast.png`,
+    );
+    await page.mouse.move(0, 0);
+    await chartGrid.locator("[data-ai-simulation-chart]").first().screenshot({
+      path: inlineForecastScreenshot,
+      animations: "disabled",
+    });
 
     const scrollMetrics = {};
     for (const [name, selector] of [
@@ -1171,7 +1594,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       "[data-simulation-selected]",
       "[data-simulation-positions]",
       "[data-simulation-charts]",
-      "[data-ai-simulation-kronos-forecast-section]",
+      "[data-ai-simulation-model-forecast-overlay]",
       "[data-simulation-trades]",
       "[data-simulation-decisions]",
     ].join(",")).evaluateAll((items) => items.map((item) => ({
@@ -1191,7 +1614,10 @@ async function verify(browser, baseUrl, viewport, theme) {
 
     await page.getByRole("button", { name: "테스트 중단", exact: true }).click();
     await page.locator("[data-simulation-run]").getByText("취소됨", { exact: true }).waitFor({ timeout: 10_000 });
-    check(state.cancels.length === 2, "각 테스트 중단이 정확히 한 번씩 cancel API를 호출하지 않았습니다.");
+    check(
+      state.cancels.length === cancelsBeforeStock + 2,
+      "각 주식 테스트 중단이 정확히 한 번씩 cancel API를 호출하지 않았습니다.",
+    );
     check(
       Object.values(errors).every((items) => items.length === 0),
       `브라우저 오류: ${JSON.stringify(errors)}`,
@@ -1224,6 +1650,9 @@ async function verify(browser, baseUrl, viewport, theme) {
       zeroSize: zeroSize.length,
       overflow,
       errors,
+      cryptoSetupScreenshot,
+      cryptoResultScreenshot,
+      inlineForecastScreenshot,
       screenshot,
     };
   } finally {

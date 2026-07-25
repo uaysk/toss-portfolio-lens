@@ -120,6 +120,58 @@ describe("futures paper execution and risk", () => {
     });
   });
 
+  it("charges a nonzero exit tax on every reduce-only close and preserves its cost breakdown", () => {
+    const ledger = new FuturesPaperLedger({
+      initialCash: 10_000,
+      feeBpsPerSide: 4,
+      exitTaxBps: 10,
+      slippageBpsPerSide: 0,
+    });
+    const opened = ledger.open({
+      fillId: "tax-open-fill",
+      clientOrderId: "tax-open-order",
+      rules,
+      side: "long",
+      quantity: 1,
+      observedPrice: 100,
+      leverage: 3,
+      protectiveStopPrice: 95,
+      decisionAt: 1_000,
+      executedAt: 1_001,
+    });
+    const closed = ledger.reduce({
+      fillId: "tax-close-fill",
+      clientOrderId: "tax-close-order",
+      symbol: "BTCUSDT",
+      quantity: 1,
+      observedPrice: 110,
+      decisionAt: 2_000,
+      executedAt: 2_001,
+      reduceOnly: true,
+    });
+    const snapshot = ledger.snapshot();
+
+    expect(opened).toMatchObject({
+      fee: 0.04,
+      exitTax: 0,
+    });
+    expect(closed.exitTax).toBeCloseTo(0.11, 12);
+    expect(closed.fee).toBeCloseTo(0.154, 12);
+    expect(closed.realizedPnl).toBe(10);
+    expect(snapshot).toMatchObject({
+      realizedPnl: 10,
+      exitTaxes: 0.11,
+      positions: [],
+    });
+    expect(snapshot.fees).toBeCloseTo(0.194, 12);
+    expect(snapshot.walletBalance).toBeCloseTo(10_009.806, 10);
+    expect(snapshot.equity).toBeCloseTo(10_009.806, 10);
+    expect(snapshot.equity - snapshot.initialCash).toBeCloseTo(
+      closed.realizedPnl - opened.fee - closed.fee,
+      10,
+    );
+  });
+
   it("sizes at 0.5% risk under exposure/margin/leverage and enforces a UTC 3% kill switch", () => {
     const sizing = sizeFuturesPosition({
       mode: "paper",
@@ -162,6 +214,119 @@ describe("futures paper execution and risk", () => {
       blocked: true,
       closeAllReduceOnly: false,
     });
+  });
+
+  it("applies custom sizing caps and a custom UTC daily-loss threshold", () => {
+    const sizing = sizeFuturesPosition({
+      mode: "paper",
+      side: "long",
+      equity: 10_000,
+      currentGrossExposure: 0,
+      currentMargin: 0,
+      price: 100,
+      atr14: 1,
+      adverseQuantileDistance: 2,
+      spreadBps: 4,
+      slippageBpsPerSide: 1,
+      requestedLeverage: 15,
+      limits: {
+        riskPerTradeRate: 0.004,
+        maximumLeverage: 4,
+        grossExposureLimitRate: 0.8,
+        marginUsageLimitRate: 0.1,
+        liquidationBufferMultiple: 3,
+      },
+      rules,
+    });
+    expect(sizing).toMatchObject({
+      accepted: true,
+      leverage: 4,
+      riskBudget: 40,
+      notional: 2_000,
+      isolatedMargin: 500,
+      grossExposureLimit: 8_000,
+      marginLimit: 1_000,
+    });
+    expect(sizing.liquidationBufferRate).toBeGreaterThanOrEqual(
+      (sizing.protectiveStopDistance / 100) * 3,
+    );
+
+    const day = Date.parse("2026-07-25T00:00:00.000Z");
+    const initial = updateDailyLossGate(undefined, 10_000, day, 0.02);
+    const stillOpen = updateDailyLossGate(initial, 9_850, day + 60_000, 0.02);
+    expect(stillOpen).toMatchObject({
+      blocked: false,
+      closeAllReduceOnly: false,
+    });
+    expect(stillOpen.drawdownRate).toBeCloseTo(0.015, 12);
+    const blocked = updateDailyLossGate(stillOpen, 9_800, day + 120_000, 0.02);
+    expect(blocked).toMatchObject({
+      blocked: true,
+      closeAllReduceOnly: true,
+    });
+    expect(blocked.drawdownRate).toBeCloseTo(0.02, 12);
+    expect(updateDailyLossGate(blocked, 9_700, day + 180_000, 0.02)).toMatchObject({
+      blocked: true,
+      closeAllReduceOnly: false,
+    });
+  });
+
+  it("rejects custom limits that would loosen the deployment hard envelope", () => {
+    const base = {
+      mode: "paper" as const,
+      side: "long" as const,
+      equity: 10_000,
+      currentGrossExposure: 0,
+      currentMargin: 0,
+      price: 100,
+      atr14: 1,
+      adverseQuantileDistance: 2,
+      spreadBps: 4,
+      slippageBpsPerSide: 1,
+      requestedLeverage: 15,
+      rules,
+    };
+    for (const limits of [
+      {
+        riskPerTradeRate: 0.006,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 2,
+      },
+      {
+        riskPerTradeRate: 0.005,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.51,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 2,
+      },
+      {
+        riskPerTradeRate: 0.005,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.21,
+        liquidationBufferMultiple: 2,
+      },
+      {
+        riskPerTradeRate: 0.005,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 1.9,
+      },
+    ]) {
+      expect(sizeFuturesPosition({ ...base, limits })).toMatchObject({
+        accepted: false,
+        reason: "invalid_input",
+      });
+    }
+    expect(() => updateDailyLossGate(
+      undefined,
+      10_000,
+      Date.parse("2026-07-25T00:00:00.000Z"),
+      0.031,
+    )).toThrow("invalid");
   });
 
   it("fails closed when signed maintenance-margin brackets are unavailable", () => {

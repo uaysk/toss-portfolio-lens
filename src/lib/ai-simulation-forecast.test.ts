@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   kronosForecastChartRows,
+  normalizeAiSimulationModelForecasts,
   selectExactKronosForecastActualMark,
   selectLatestKronosForecasts,
 } from "./ai-simulation-forecast";
+import { normalizeAiSimulationSnapshot } from "./ai-simulation";
 
 const ORIGIN = "2026-07-24T17:02:00.000Z";
 
@@ -65,6 +67,39 @@ function decision({
         },
       },
     },
+  };
+}
+
+function directForecast(
+  lane: "kronos_base" | "fincast",
+  {
+    origin = ORIGIN,
+    generatedOffsetMs = lane === "kronos_base" ? 250 : 300,
+  }: {
+    origin?: string;
+    generatedOffsetMs?: number;
+  } = {},
+) {
+  const modelId = lane === "kronos_base"
+    ? "NeoQuasar/Kronos-base"
+    : "Vincent05R/FinCast";
+  const base = lane === "kronos_base" ? 250 : 252;
+  return {
+    lane,
+    signalSymbol: "TSLA",
+    status: "available",
+    origin,
+    generatedAt: new Date(Date.parse(origin) + generatedOffsetMs).toISOString(),
+    modelId,
+    modelRevision: `${lane}-revision`,
+    points: [5, 15].map((minutes, index) => ({
+      horizonMinutes: minutes,
+      targetTimestamp: new Date(Date.parse(origin) + minutes * 60_000).toISOString(),
+      q10Price: base + index - 2,
+      medianPrice: base + index,
+      q90Price: base + index + 2,
+      upProbability: 0.6 + index / 100,
+    })),
   };
 }
 
@@ -180,5 +215,93 @@ describe("Kronos-base simulation forecast normalization", () => {
         ]),
       }),
     ]);
+  });
+
+  it("preserves direct Kronos and FinCast projections as independent lanes", () => {
+    const forecasts = normalizeAiSimulationModelForecasts([
+      directForecast("kronos_base"),
+      directForecast("fincast"),
+    ]);
+
+    expect(forecasts).toEqual([
+      expect.objectContaining({
+        lane: "fincast",
+        signalSymbol: "TSLA",
+        modelId: "Vincent05R/FinCast",
+        points: [
+          expect.objectContaining({
+            horizonMinutes: 5,
+            targetTimestamp: "2026-07-24T17:07:00.000Z",
+            medianPrice: 252,
+          }),
+          expect.objectContaining({ horizonMinutes: 15, medianPrice: 253 }),
+        ],
+      }),
+      expect.objectContaining({
+        lane: "kronos_base",
+        signalSymbol: "TSLA",
+        modelId: "NeoQuasar/Kronos-base",
+        points: [
+          expect.objectContaining({
+            horizonMinutes: 5,
+            targetTimestamp: "2026-07-24T17:07:00.000Z",
+            medianPrice: 250,
+          }),
+          expect.objectContaining({ horizonMinutes: 15, medianPrice: 251 }),
+        ],
+      }),
+    ]);
+  });
+
+  it("rejects a direct forecast whose known model identity contradicts its lane", () => {
+    expect(normalizeAiSimulationModelForecasts([{
+      ...directForecast("fincast"),
+      modelId: "NeoQuasar/Kronos-base",
+    }])).toEqual([]);
+    expect(normalizeAiSimulationModelForecasts([{
+      ...directForecast("kronos_base"),
+      modelId: "Vincent05R/FinCast",
+    }])).toEqual([]);
+  });
+
+  it("merges direct lane forecasts with legacy decision-derived Kronos output", () => {
+    const snapshot = normalizeAiSimulationSnapshot({
+      phase: "running",
+      market: { kind: "stock", country: "US" },
+      currency: "USD",
+      initialCash: 10_000,
+      cash: 10_000,
+      equity: 10_000,
+      progress: 0.5,
+      modelForecasts: [directForecast("fincast")],
+      decisions: [decision()],
+      charts: [],
+      trades: [],
+      selected: [],
+      positions: [],
+      warnings: [],
+      capabilities: { realOrder: false },
+    });
+
+    expect(snapshot.modelForecasts).toEqual([
+      expect.objectContaining({
+        lane: "fincast",
+        signalSymbol: "TSLA",
+        modelId: "Vincent05R/FinCast",
+      }),
+      expect.objectContaining({
+        lane: "kronos_base",
+        signalSymbol: "TSLA",
+        modelId: "NeoQuasar/Kronos-base",
+      }),
+    ]);
+    expect(snapshot.kronosForecasts).toEqual([
+      expect.objectContaining({
+        signalSymbol: "TSLA",
+        modelId: "NeoQuasar/Kronos-base",
+        status: "available",
+      }),
+    ]);
+    expect(snapshot.kronosForecasts[0]).not.toHaveProperty("lane");
   });
 });

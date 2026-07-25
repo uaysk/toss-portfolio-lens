@@ -17,6 +17,10 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+  AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+} from "@/lib/ai-simulation";
 import type {
   AiSimulationCandidateSnapshot,
   AiSimulationCryptoRequest,
@@ -48,6 +52,39 @@ const MODEL_LABELS: Record<AiSimulationModelLane, string> = {
   kronos_base: "Kronos-base",
   fincast: "FinCast",
 };
+
+const CRYPTO_PRESET_DETAILS: Record<
+  AiSimulationCryptoRequest["preset"],
+  { label: string; description: string; recommendedRisk: number }
+> = {
+  trend: {
+    label: "추세 수익",
+    description: "EMA 추세와 모델 방향이 일치할 때 진입합니다.",
+    recommendedRisk: 60,
+  },
+  breakout: {
+    label: "돌파 가속 · 최대 공격",
+    description: "Donchian 돌파와 모델 비용 초과 확률을 함께 확인합니다.",
+    recommendedRisk: 100,
+  },
+  mean_reversion: {
+    label: "반등 수익",
+    description: "RSI·Bollinger 과매수/과매도와 모델 반전 방향을 확인합니다.",
+    recommendedRisk: 50,
+  },
+  risk_management: {
+    label: "방어 수익",
+    description: "EMA·RSI 상태를 참고하고 더 높은 모델 확신도로 진입을 제한합니다.",
+    recommendedRisk: 25,
+  },
+};
+
+function cryptoRiskDisposition(value: number): string {
+  if (value >= 80) return "최대 공격";
+  if (value >= 60) return "공격";
+  if (value >= 40) return "균형";
+  return "방어";
+}
 
 function percent(value?: number, digits = 2): string {
   return Number.isFinite(value) ? `${((value as number) * 100).toFixed(digits)}%` : "unavailable";
@@ -212,12 +249,27 @@ function CandidateTable({
   snapshot,
   loading,
   error,
+  selection,
+  disabled,
+  onToggleSymbol,
 }: {
   snapshot?: AiSimulationCandidateSnapshot;
   loading: boolean;
   error?: string;
+  selection: AiSimulationCryptoRequest["selection"];
+  disabled: boolean;
+  onToggleSymbol: (symbol: string) => void;
 }) {
-  const automaticCandidate = snapshot?.candidates.find(({ eligible }) => eligible);
+  const selectedSymbols = selection.mode === "auto"
+    ? new Set(
+      snapshot?.candidates.filter(({ eligible }) => eligible)
+        .slice(0, selection.symbolCount)
+        .map(({ symbol }) => symbol) ?? [],
+    )
+    : new Set(selection.symbols);
+  const selectedCandidates = snapshot?.candidates.filter(
+    ({ symbol }) => selectedSymbols.has(symbol),
+  ) ?? [];
   return (
     <section className="rounded-2xl bg-secondary p-4" data-crypto-scanner>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -243,9 +295,9 @@ function CandidateTable({
         <p className="mt-4 rounded-2xl bg-destructive/10 p-4 text-xs text-destructive" role="alert">{error}</p>
       ) : snapshot?.candidates.length ? (
         <div
-          className="mt-4 overflow-x-auto"
+          className="mt-4 max-h-[32rem] overflow-auto"
           role="region"
-          aria-label="암호화폐 선물 scanner 순위 가로 스크롤"
+          aria-label="암호화폐 선물 scanner 상위 50개 순위 스크롤"
           tabIndex={0}
           onKeyDown={(event) => {
             if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -260,6 +312,7 @@ function CandidateTable({
           <table className="w-full min-w-[630px] border-separate border-spacing-y-1.5 text-left text-[9px]">
             <thead className="text-muted-foreground">
               <tr>
+                <th className="px-3 py-1">선택</th>
                 <th className="px-3 py-1">순위 · 계약</th>
                 <th className="px-3 py-1">점수</th>
                 <th className="px-3 py-1">현재 / Mark</th>
@@ -271,14 +324,30 @@ function CandidateTable({
               </tr>
             </thead>
             <tbody>
-              {snapshot.candidates.slice(0, 8).map((candidate, index) => (
+              {snapshot.candidates.slice(0, 50).map((candidate, index) => (
                 <tr
                   key={candidate.symbol}
-                  className={cn("bg-card", index === 0 && candidate.eligible && "outline outline-1 outline-cyan-500/40")}
+                  className={cn(
+                    "bg-card",
+                    selectedSymbols.has(candidate.symbol) && "outline outline-1 outline-cyan-500/50",
+                  )}
                   data-crypto-candidate={candidate.symbol}
                   data-candidate-eligible={candidate.eligible}
+                  data-candidate-selected={selectedSymbols.has(candidate.symbol)}
                 >
-                  <td className="rounded-l-xl px-3 py-3 font-black">#{candidate.rank ?? index + 1} · {candidate.symbol}</td>
+                  <td className="rounded-l-xl px-3 py-3">
+                    <button
+                      type="button"
+                      aria-label={`${candidate.symbol} ${selectedSymbols.has(candidate.symbol) ? "선택 해제" : "선택"}`}
+                      aria-pressed={selectedSymbols.has(candidate.symbol)}
+                      disabled={disabled || !candidate.eligible || selection.mode === "auto"}
+                      onClick={() => onToggleSymbol(candidate.symbol)}
+                      className="grid size-7 place-items-center rounded-lg bg-secondary disabled:opacity-50"
+                    >
+                      {selectedSymbols.has(candidate.symbol) ? <Check className="size-3.5" /> : null}
+                    </button>
+                  </td>
+                  <td className="px-3 py-3 font-black">#{candidate.rank ?? index + 1} · {candidate.symbol}</td>
                   <td className="px-3 py-3 font-black">{decimal(candidate.score, 3)}</td>
                   <td className="px-3 py-3">
                     {candidate.markPrice !== undefined || candidate.currentPrice !== undefined
@@ -309,28 +378,24 @@ function CandidateTable({
           조건을 통과한 후보가 없습니다. 새 snapshot으로 다시 확인해 주세요.
         </p>
       )}
-      {automaticCandidate ? (
+      {selectedCandidates.length ? (
         <details className="mt-3 rounded-2xl bg-card p-4" data-crypto-selection-evidence>
           <summary className="cursor-pointer text-[10px] font-black">
-            자동 선택 후보 · {automaticCandidate.symbol}
+            {selection.mode === "auto" ? "자동 선정" : "직접 선택"} · {selectedCandidates.map(({ symbol }) => symbol).join(", ")}
           </summary>
-          <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-            {Object.entries(automaticCandidate.scoreComponents).map(([key, value]) => (
-              <div key={key} className="rounded-xl bg-secondary p-3 text-[9px]">
-                <dt className="break-words text-muted-foreground">{key}</dt>
-                <dd className="mt-1 font-black">{decimal(value, 4)}</dd>
-              </div>
+          <div className="mt-3 space-y-2">
+            {selectedCandidates.map((candidate) => (
+              <article key={candidate.symbol} className="rounded-xl bg-secondary p-3">
+                <p className="text-[9px] font-black">{candidate.symbol}</p>
+                <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                  {Object.entries(candidate.scoreComponents)
+                    .map(([key, value]) => `${key} ${decimal(value, 4)}`)
+                    .join(" · ") || "점수 구성 unavailable"}
+                  {" · "}품질 {candidate.quality.status}
+                </p>
+              </article>
             ))}
-          </dl>
-          <p className="mt-3 text-[9px] leading-4 text-muted-foreground">
-            품질 {automaticCandidate.quality.status}
-            {automaticCandidate.quality.sources.length
-              ? ` · source ${automaticCandidate.quality.sources.join(", ")}`
-              : ""}
-            {automaticCandidate.quality.reasons.length
-              ? ` · ${automaticCandidate.quality.reasons.join(" · ")}`
-              : ""}
-          </p>
+          </div>
         </details>
       ) : null}
       {snapshot?.warnings.length ? (
@@ -374,6 +439,7 @@ export function AiSimulationCryptoSetup({
   onRefreshCandidates,
   onStart,
   onCancel,
+  limits,
 }: {
   request: AiSimulationCryptoRequest;
   status?: AiSimulationCryptoStatus;
@@ -391,11 +457,25 @@ export function AiSimulationCryptoSetup({
   onRefreshCandidates: () => void;
   onStart: () => void;
   onCancel: () => void;
+  limits?: {
+    minimumDurationMinutes?: number;
+    maximumDurationMinutes?: number;
+  };
 }) {
   const paperGateOpen = status?.executionGates.paper === true;
   const selectedWorkersAvailable = request.modelLanes.every(
     (lane) => status?.workers[lane]?.available === true,
   );
+  const eligibleCandidates = candidateSnapshot?.candidates.filter(
+    ({ eligible }) => eligible,
+  ) ?? [];
+  const selectionReady = request.selection.mode === "auto"
+    ? eligibleCandidates.length >= request.selection.symbolCount
+    : request.selection.symbols.length >= 1
+      && request.selection.symbols.length <= 2
+      && request.selection.symbols.every((symbol) => (
+        eligibleCandidates.some((candidate) => candidate.symbol === symbol)
+      ));
   const runtimeGateMessage = active
     ? undefined
     : !paperGateOpen
@@ -412,6 +492,19 @@ export function AiSimulationCryptoSetup({
       modelLanes: next,
     });
   };
+  const toggleManualSymbol = (symbol: string) => {
+    if (request.selection.mode !== "manual") return;
+    const selected = request.selection.symbols.includes(symbol);
+    const symbols = selected
+      ? request.selection.symbols.filter((item) => item !== symbol)
+      : request.selection.symbols.length < 2
+        ? [...request.selection.symbols, symbol]
+        : request.selection.symbols;
+    onRequestChange({
+      ...request,
+      selection: { mode: "manual", symbols },
+    });
+  };
 
   return (
     <Card className="bg-card p-5 sm:p-7" data-crypto-simulation-setup>
@@ -424,7 +517,8 @@ export function AiSimulationCryptoSetup({
           </p>
         </div>
         <span className="rounded-full bg-cyan-500/10 px-3 py-1.5 text-[10px] font-black text-cyan-700 dark:text-cyan-300">
-          {request.durationMinutes}분 · 위험 0.5% · 최대 15×
+          {request.durationMinutes}분 · 위험 {(request.riskLimits.riskPerTradeRate * 100).toFixed(2)}%
+          {" · "}최대 {request.riskLimits.maximumLeverage}×
         </span>
       </div>
 
@@ -448,47 +542,52 @@ export function AiSimulationCryptoSetup({
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
+          <p className="rounded-xl bg-card px-3 py-2.5 text-xs font-black" aria-label="암호화폐 대상 시장">
+            Binance USDⓈ-M · USDT 무기한
+          </p>
+        </div>
         <label className="rounded-2xl bg-secondary p-3">
-          <span className="mb-2 block text-[10px] font-black text-muted-foreground">Scanner 순위</span>
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
           <Select
-            value={request.selection.criterion}
+            value={request.selection.mode}
             disabled={disabled}
             onValueChange={(value) => onRequestChange({
               ...request,
-              selection: { ...request.selection, criterion: value as AiSimulationCriterion },
+              selection: value === "manual"
+                ? { mode: "manual", symbols: [] }
+                : { mode: "auto", criterion: "volatility", symbolCount: 1 },
             })}
           >
-            <SelectTrigger className="w-full bg-card" aria-label="암호화폐 scanner 기준"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full bg-card" aria-label="암호화폐 종목 선택 방식"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {Object.entries(CRITERION_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+              <SelectItem value="auto">거래 지표로 자동 선정</SelectItem>
+              <SelectItem value="manual">Scanner에서 직접 선택</SelectItem>
             </SelectContent>
           </Select>
         </label>
         <label className="rounded-2xl bg-secondary p-3">
-          <span className="mb-2 block text-[10px] font-black text-muted-foreground">시작 자산 · USDT</span>
-          <Input
-            aria-label="암호화폐 시작 자산"
-            type="number"
-            min={1}
-            step={100}
-            value={request.initialCash}
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">판단 프리셋</span>
+          <Select
+            value={request.preset}
             disabled={disabled}
-            className="bg-card"
-            onChange={(event) => onRequestChange({ ...request, initialCash: Number(event.target.value) })}
-          />
-        </label>
-        <label className="rounded-2xl bg-secondary p-3">
-          <span className="mb-2 block text-[10px] font-black text-muted-foreground">Shadow 기간 · 분</span>
-          <Input
-            aria-label="암호화폐 테스트 기간"
-            type="number"
-            min={1}
-            step={1}
-            value={request.durationMinutes}
-            disabled={disabled}
-            className="bg-card"
-            onChange={(event) => onRequestChange({ ...request, durationMinutes: Number(event.target.value) })}
-          />
+            onValueChange={(value) => {
+              const preset = value as AiSimulationCryptoRequest["preset"];
+              onRequestChange({
+                ...request,
+                preset,
+                riskTolerance: CRYPTO_PRESET_DETAILS[preset].recommendedRisk,
+              });
+            }}
+          >
+            <SelectTrigger className="w-full bg-card" aria-label="암호화폐 판단 프리셋"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {Object.entries(CRYPTO_PRESET_DETAILS).map(([value, details]) => (
+                <SelectItem key={value} value={value}>{details.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </label>
         <fieldset className="rounded-2xl bg-secondary p-3">
           <legend className="px-1 text-[10px] font-black text-muted-foreground">독립 모델 lane</legend>
@@ -517,6 +616,135 @@ export function AiSimulationCryptoSetup({
         </fieldset>
       </div>
 
+      <div className="mt-3 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-2xl bg-secondary p-4">
+          <p className="text-xs font-black">{CRYPTO_PRESET_DETAILS[request.preset].label}</p>
+          <p className="mt-1 text-[9px] leading-4 text-muted-foreground">
+            {CRYPTO_PRESET_DETAILS[request.preset].description}
+          </p>
+        </div>
+        <label className="rounded-2xl bg-secondary p-4">
+          <span className="flex items-center justify-between gap-3 text-[10px] font-black text-muted-foreground">
+            <span>공격·방어 성향</span>
+            <span className="rounded-full bg-card px-2.5 py-1 text-foreground">
+              {cryptoRiskDisposition(request.riskTolerance)} {request.riskTolerance}
+            </span>
+          </span>
+          <input
+            aria-label="암호화폐 공격 방어 성향"
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={request.riskTolerance}
+            disabled={disabled}
+            onChange={(event) => onRequestChange({
+              ...request,
+              riskTolerance: Number(event.target.value),
+            })}
+            className="mt-4 h-2 w-full cursor-pointer accent-primary disabled:cursor-not-allowed"
+          />
+          <span className="mt-2 flex justify-between text-[9px] font-black text-muted-foreground">
+            <span>방어 · 높은 확인 기준</span>
+            <span>공격 · 높은 배분</span>
+          </span>
+        </label>
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {request.selection.mode === "auto" ? (
+        <label className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">Scanner 순위</span>
+          <Select
+            value={request.selection.criterion}
+            disabled={disabled}
+            onValueChange={(value) => onRequestChange({
+              ...request,
+              selection: {
+                mode: "auto",
+                criterion: value as AiSimulationCriterion,
+                symbolCount: request.selection.mode === "auto"
+                  ? request.selection.symbolCount
+                  : 1,
+              },
+            })}
+          >
+            <SelectTrigger className="w-full bg-card" aria-label="암호화폐 scanner 기준"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {Object.entries(CRITERION_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </label>
+        ) : (
+          <div className="rounded-2xl bg-secondary p-3">
+            <span className="mb-2 block text-[10px] font-black text-muted-foreground">Scanner 직접 선택</span>
+            <p className="rounded-xl bg-card px-3 py-2.5 text-xs font-black">
+              {request.selection.symbols.length}/2 계약 선택
+            </p>
+          </div>
+        )}
+        {request.selection.mode === "auto" ? (
+          <label className="rounded-2xl bg-secondary p-3">
+            <span className="mb-2 block text-[10px] font-black text-muted-foreground">선정 계약 수</span>
+            <Select
+              value={String(request.selection.symbolCount)}
+              disabled={disabled}
+              onValueChange={(value) => onRequestChange({
+                ...request,
+                selection: {
+                  mode: "auto",
+                  criterion: request.selection.mode === "auto"
+                    ? request.selection.criterion
+                    : "volatility",
+                  symbolCount: Number(value) as 1 | 2,
+                },
+              })}
+            >
+              <SelectTrigger className="w-full bg-card" aria-label="암호화폐 선정 계약 수"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">1계약 · 단일</SelectItem>
+                <SelectItem value="2">2계약 · 독립 비교</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+        ) : (
+          <div className="rounded-2xl bg-secondary p-3">
+            <span className="mb-2 block text-[10px] font-black text-muted-foreground">전략 실행 방식</span>
+            <p className="rounded-xl bg-card px-3 py-2.5 text-xs font-black">
+              {request.selection.symbols.length === 2 ? "2계약 독립 비교" : "단일 계약"}
+            </p>
+          </div>
+        )}
+        <label className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">시작 자산 · USDT</span>
+          <Input
+            aria-label="암호화폐 시작 자산"
+            type="number"
+            min={AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH}
+            max={AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH}
+            step={100}
+            value={request.initialCash}
+            disabled={disabled}
+            className="bg-card"
+            onChange={(event) => onRequestChange({ ...request, initialCash: Number(event.target.value) })}
+          />
+        </label>
+        <label className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">Shadow 기간 · 분</span>
+          <Input
+            aria-label="암호화폐 테스트 기간"
+            type="number"
+            min={limits?.minimumDurationMinutes ?? 1}
+            max={limits?.maximumDurationMinutes}
+            step={1}
+            value={request.durationMinutes}
+            disabled={disabled}
+            className="bg-card"
+            onChange={(event) => onRequestChange({ ...request, durationMinutes: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+
       <div className="mt-3 flex flex-col gap-3 rounded-2xl bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
           <Waves className="mt-0.5 size-4 shrink-0" />
@@ -530,7 +758,14 @@ export function AiSimulationCryptoSetup({
       </div>
 
       <div className="mt-3">
-        <CandidateTable snapshot={candidateSnapshot} loading={candidateLoading} error={candidateError} />
+        <CandidateTable
+          snapshot={candidateSnapshot}
+          loading={candidateLoading}
+          error={candidateError}
+          selection={request.selection}
+          disabled={disabled}
+          onToggleSymbol={toggleManualSymbol}
+        />
       </div>
 
       <details className="mt-3 rounded-2xl bg-secondary p-4">
@@ -558,6 +793,53 @@ export function AiSimulationCryptoSetup({
                 onChange={(event) => onRequestChange({
                   ...request,
                   costs: { ...request.costs, [key]: Number(event.target.value) },
+                })}
+              />
+            </label>
+          ))}
+        </div>
+      </details>
+
+      <details className="mt-3 rounded-2xl bg-secondary p-4" open>
+        <summary className="cursor-pointer text-xs font-black">Paper 위험 한도 · 직접 설정</summary>
+        <p className="mt-2 text-[9px] leading-4 text-muted-foreground">
+          아래 값은 이 실행의 가상 원장에만 적용됩니다. 배포에 고정된 안전선 안에서 더 보수적으로만
+          조정할 수 있으며, hard envelope보다 완화할 수 없습니다. 실주문 capability와 live/testnet
+          gate에는 영향을 주지 않습니다.
+        </p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {([
+            ["riskPerTradeRate", "거래당 위험", 0.1, 0.5, 0.1, 100, "%"],
+            ["dailyLossLimitRate", "UTC 일손실 중단선", 0.5, 3, 0.5, 100, "%"],
+            ["maximumLeverage", "최대 레버리지", 1, 15, 1, 1, "×"],
+            ["grossExposureLimitRate", "Gross exposure 상한", 10, 150, 5, 100, "%"],
+            ["marginUsageLimitRate", "증거금 사용률 상한", 5, 20, 5, 100, "%"],
+            ["liquidationBufferMultiple", "청산 buffer / 손절", 2, 5, 0.25, 1, "×"],
+          ] as const).map(([key, label, minimum, maximum, step, displayScale, unit]) => (
+            <label key={key} className="rounded-xl bg-card p-3">
+              <span className="mb-2 flex items-center justify-between gap-2 text-[9px] font-black text-muted-foreground">
+                <span>{label}</span>
+                <span className="text-foreground">
+                  {(request.riskLimits[key] * displayScale).toFixed(
+                    key === "maximumLeverage" ? 0 : key === "liquidationBufferMultiple" ? 2 : 1,
+                  )}{unit}
+                </span>
+              </span>
+              <Input
+                aria-label={`암호화폐 ${label}`}
+                type="number"
+                min={minimum}
+                max={maximum}
+                step={step}
+                disabled={disabled}
+                value={request.riskLimits[key] * displayScale}
+                className="h-10 bg-secondary text-xs"
+                onChange={(event) => onRequestChange({
+                  ...request,
+                  riskLimits: {
+                    ...request.riskLimits,
+                    [key]: Number(event.target.value) / displayScale,
+                  },
                 })}
               />
             </label>
@@ -602,7 +884,7 @@ export function AiSimulationCryptoSetup({
             disabled={disabled
               || starting
               || issues.length > 0
-              || !candidateSnapshot?.candidates.some(({ eligible }) => eligible)
+              || !selectionReady
               || !paperGateOpen
               || !selectedWorkersAvailable}
             onClick={onStart}

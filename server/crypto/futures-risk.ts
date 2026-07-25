@@ -115,6 +115,13 @@ export type FuturesRiskSizingInput = {
   spreadBps: number;
   slippageBpsPerSide: number;
   requestedLeverage: number;
+  limits?: {
+    riskPerTradeRate: number;
+    maximumLeverage: number;
+    grossExposureLimitRate: number;
+    marginUsageLimitRate: number;
+    liquidationBufferMultiple: number;
+  };
   rules: BinanceInstrumentRules;
 };
 
@@ -151,6 +158,15 @@ function rejected(
 export function sizeFuturesPosition(
   input: FuturesRiskSizingInput,
 ): FuturesRiskSizingResult {
+  const limits = input.limits ?? {
+    riskPerTradeRate: FUTURES_TRADE_RISK_RATE,
+    maximumLeverage: input.mode === "paper" ? 15 : 10,
+    grossExposureLimitRate: input.mode === "paper"
+      ? PAPER_MAX_GROSS_EXPOSURE_RATE
+      : LIVE_MAX_GROSS_EXPOSURE_RATE,
+    marginUsageLimitRate: MAX_MARGIN_USAGE_RATE,
+    liquidationBufferMultiple: 2,
+  };
   const finite = [
     input.equity,
     input.currentGrossExposure,
@@ -160,13 +176,32 @@ export function sizeFuturesPosition(
     input.adverseQuantileDistance,
     input.spreadBps,
     input.slippageBpsPerSide,
+    limits.riskPerTradeRate,
+    limits.maximumLeverage,
+    limits.grossExposureLimitRate,
+    limits.marginUsageLimitRate,
+    limits.liquidationBufferMultiple,
   ].every(Number.isFinite);
-  const deploymentMaximumLeverage = input.mode === "paper" ? 15 : 10;
-  const deploymentGrossExposureLimit = input.equity * (
-    input.mode === "paper" ? PAPER_MAX_GROSS_EXPOSURE_RATE : LIVE_MAX_GROSS_EXPOSURE_RATE
+  const hardMaximumLeverage = input.mode === "paper" ? 15 : 10;
+  const hardGrossExposureLimitRate = input.mode === "paper"
+    ? PAPER_MAX_GROSS_EXPOSURE_RATE
+    : LIVE_MAX_GROSS_EXPOSURE_RATE;
+  const deploymentMaximumLeverage = Math.min(
+    hardMaximumLeverage,
+    Math.trunc(limits.maximumLeverage),
   );
-  const marginLimit = input.equity * MAX_MARGIN_USAGE_RATE;
-  const riskBudget = input.equity * FUTURES_TRADE_RISK_RATE;
+  const deploymentGrossExposureLimit = input.equity * Math.min(
+    hardGrossExposureLimitRate,
+    limits.grossExposureLimitRate,
+  );
+  const marginLimit = input.equity * Math.min(
+    MAX_MARGIN_USAGE_RATE,
+    limits.marginUsageLimitRate,
+  );
+  const riskBudget = input.equity * Math.min(
+    FUTURES_TRADE_RISK_RATE,
+    limits.riskPerTradeRate,
+  );
   const unresolvedEmpty = {
     leverage: 1,
     quantity: 0,
@@ -195,7 +230,17 @@ export function sizeFuturesPosition(
   );
   if (!finite || input.equity <= 0 || input.price <= 0 || input.atr14 < 0
     || input.adverseQuantileDistance < 0 || input.spreadBps < 0
-    || input.slippageBpsPerSide < 0) {
+    || input.slippageBpsPerSide < 0
+    || limits.riskPerTradeRate <= 0
+    || limits.riskPerTradeRate > FUTURES_TRADE_RISK_RATE
+    || !Number.isInteger(limits.maximumLeverage)
+    || limits.maximumLeverage > hardMaximumLeverage
+    || deploymentMaximumLeverage < 1
+    || limits.grossExposureLimitRate <= 0
+    || limits.grossExposureLimitRate > hardGrossExposureLimitRate
+    || limits.marginUsageLimitRate <= 0
+    || limits.marginUsageLimitRate > MAX_MARGIN_USAGE_RATE
+    || limits.liquidationBufferMultiple < 2) {
     return rejected("invalid_input", empty);
   }
   const observedCostDistance = input.price
@@ -252,7 +297,10 @@ export function sizeFuturesPosition(
     input.rules.maintenanceMarginRate,
   );
   let liquidationBufferRate = Math.abs(input.price - liquidationPrice) / input.price;
-  while (leverage > 1 && liquidationBufferRate < stopRate * 2) {
+  while (
+    leverage > 1
+    && liquidationBufferRate < stopRate * limits.liquidationBufferMultiple
+  ) {
     leverage -= 1;
     liquidationPrice = estimatedLiquidationPrice(
       input.side,
@@ -262,7 +310,7 @@ export function sizeFuturesPosition(
     );
     liquidationBufferRate = Math.abs(input.price - liquidationPrice) / input.price;
   }
-  if (liquidationBufferRate < stopRate * 2) {
+  if (liquidationBufferRate < stopRate * limits.liquidationBufferMultiple) {
     return rejected("liquidation_buffer", {
       ...empty,
       leverage,
@@ -310,8 +358,14 @@ export function updateDailyLossGate(
   previous: DailyLossGateState | undefined,
   equity: number,
   now: number,
+  dailyLossLimitRate = FUTURES_DAILY_LOSS_LIMIT_RATE,
 ): DailyLossGateState & { closeAllReduceOnly: boolean } {
-  if (!Number.isFinite(equity) || !Number.isSafeInteger(now) || now < 0) {
+  if (!Number.isFinite(equity)
+    || !Number.isSafeInteger(now)
+    || now < 0
+    || !Number.isFinite(dailyLossLimitRate)
+    || dailyLossLimitRate <= 0
+    || dailyLossLimitRate > FUTURES_DAILY_LOSS_LIMIT_RATE) {
     throw new Error("Daily loss gate input is invalid.");
   }
   const date = utcDate(now);
@@ -329,7 +383,7 @@ export function updateDailyLossGate(
   const drawdownRate = previous.dayStartEquity > 0
     ? Math.max(0, (previous.dayStartEquity - equity) / previous.dayStartEquity)
     : 1;
-  const crossed = drawdownRate >= FUTURES_DAILY_LOSS_LIMIT_RATE;
+  const crossed = drawdownRate >= dailyLossLimitRate;
   return {
     utcDate: date,
     dayStartEquity: previous.dayStartEquity,

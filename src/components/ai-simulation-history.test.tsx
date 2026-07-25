@@ -214,5 +214,51 @@ describe("AI simulation history", () => {
     );
     expect(cryptoMarkup).toContain("2계약");
     expect(cryptoMarkup).not.toContain("2주");
+
+    const fincastOnlyMarkup = renderToStaticMarkup(
+      <SimulationRunReportView
+        report={{
+          ...report,
+          configuration: {
+            ...report.configuration,
+            marketCountry: undefined,
+            market: {
+              kind: "crypto_futures",
+              venue: "BINANCE_USDM",
+              quoteAsset: "USDT",
+              contractType: "PERPETUAL",
+            },
+            modelLanes: ["fincast"],
+          },
+          selected: [{
+            symbol: "ETHUSDT",
+            model: "Vincent05R/FinCast · fincast-revision · CUDA:0",
+          }],
+          performance: { ...report.performance, currency: "USDT" },
+          modelProvenance: ["Vincent05R/FinCast · fincast-revision · CUDA:0"],
+          decisionProvenance: [{
+            decisionId: "fincast-decision",
+            signalSymbol: "ETHUSDT",
+            direction: "short",
+            origin: "2026-07-24T01:01:00.000Z",
+            decisionAt: "2026-07-24T01:01:01.000Z",
+            degraded: false,
+            models: [{
+              component: "fincast",
+              status: "available",
+              modelId: "Vincent05R/FinCast",
+              modelRevision: "fincast-revision",
+              degraded: false,
+            }],
+          }],
+          modelComparison: undefined,
+          strategyComparison: undefined,
+        }}
+      />,
+    );
+    expect(fincastOnlyMarkup).toContain("FinCast lane·판단 주기");
+    expect(fincastOnlyMarkup).toContain("판단 provenance 1건 · FinCast");
+    expect(fincastOnlyMarkup).toContain('data-simulation-model-provenance="fincast"');
+    expect(fincastOnlyMarkup).not.toContain("Kronos-base · FinCast lane");
   });
 });

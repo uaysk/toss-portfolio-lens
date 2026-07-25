@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   AI_SIMULATION_CONTRACT_VERSION,
+  DEFAULT_CRYPTO_FUTURES_RISK_LIMITS,
   DEFAULT_SIMULATION_COSTS,
   createSimulationStartRequestSchema,
 } from "./contracts.js";
 
 describe("AI paper simulation contracts", () => {
   const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
+  const cryptoMarket = {
+    kind: "crypto_futures" as const,
+    venue: "BINANCE_USDM" as const,
+    quoteAsset: "USDT" as const,
+    contractType: "PERPETUAL" as const,
+  };
 
   it("publishes the normalized stock and crypto contract as v7", () => {
     expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v7");
@@ -37,12 +44,7 @@ describe("AI paper simulation contracts", () => {
 
   it("normalizes Binance USDT perpetual requests and keeps legacy stock state off the wire", () => {
     const parsed = schema.parse({
-      market: {
-        kind: "crypto_futures",
-        venue: "BINANCE_USDM",
-        quoteAsset: "USDT",
-        contractType: "PERPETUAL",
-      },
+      market: cryptoMarket,
       initialCash: 10_000,
       durationMinutes: 120,
       selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
@@ -56,29 +58,150 @@ describe("AI paper simulation contracts", () => {
       spreadBpsRoundTrip: 2,
       slippageBpsPerSide: 1,
     });
+    expect(parsed.riskLimits).toEqual(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS);
     expect(JSON.parse(JSON.stringify(parsed))).not.toHaveProperty("marketCountry");
-    expect(() => schema.parse({
-      market: {
-        kind: "crypto_futures",
-        venue: "BINANCE_USDM",
-        quoteAsset: "USDT",
-        contractType: "PERPETUAL",
-      },
+    expect(schema.parse({
+      market: cryptoMarket,
       initialCash: 10_000,
       durationMinutes: 120,
       selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
-    })).toThrow();
+    }).selection).toEqual({
+      mode: "auto",
+      criterion: "volatility",
+      symbolCount: 2,
+    });
     expect(() => schema.parse({
-      market: {
-        kind: "crypto_futures",
-        venue: "BINANCE_USDM",
-        quoteAsset: "USDT",
-        contractType: "PERPETUAL",
-      },
+      market: cryptoMarket,
       initialCash: 10_000,
       durationMinutes: 120,
       selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
       execution: { mode: "live" },
+    })).toThrow();
+  });
+
+  it("accepts one or two crypto symbols in auto/manual mode across every preset and risk endpoint", () => {
+    const presets = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
+    for (const [index, preset] of presets.entries()) {
+      const riskTolerance = index % 2 === 0 ? 0 : 100;
+      expect(schema.parse({
+        market: cryptoMarket,
+        initialCash: 10_000,
+        durationMinutes: 120,
+        selection: {
+          mode: "auto",
+          criterion: "volatility",
+          symbolCount: index % 2 === 0 ? 1 : 2,
+        },
+        preset,
+        riskTolerance,
+      })).toMatchObject({ preset, riskTolerance });
+    }
+    expect(schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: [" btcusdt "] },
+    }).selection).toEqual({ mode: "manual", symbols: ["BTCUSDT"] });
+    expect(schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: [" ethusdt ", "btcusdt"] },
+    }).selection).toEqual({ mode: "manual", symbols: ["ETHUSDT", "BTCUSDT"] });
+  });
+
+  it("defaults, partially overrides, and bounds every crypto futures risk limit", () => {
+    const base = {
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "auto" as const, criterion: "volatility" as const, symbolCount: 1 as const },
+    };
+    expect(schema.parse({
+      ...base,
+      riskLimits: { maximumLeverage: 7 },
+    }).riskLimits).toEqual({
+      ...DEFAULT_CRYPTO_FUTURES_RISK_LIMITS,
+      maximumLeverage: 7,
+    });
+    expect(schema.parse({
+      ...base,
+      riskLimits: {
+        riskPerTradeRate: 0.001,
+        dailyLossLimitRate: 0.005,
+        maximumLeverage: 1,
+        grossExposureLimitRate: 0.1,
+        marginUsageLimitRate: 0.05,
+        liquidationBufferMultiple: 2,
+      },
+    }).riskLimits).toEqual({
+      riskPerTradeRate: 0.001,
+      dailyLossLimitRate: 0.005,
+      maximumLeverage: 1,
+      grossExposureLimitRate: 0.1,
+      marginUsageLimitRate: 0.05,
+      liquidationBufferMultiple: 2,
+    });
+    expect(schema.parse({
+      ...base,
+      riskLimits: {
+        riskPerTradeRate: 0.005,
+        dailyLossLimitRate: 0.03,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 5,
+      },
+    }).riskLimits).toEqual({
+      riskPerTradeRate: 0.005,
+      dailyLossLimitRate: 0.03,
+      maximumLeverage: 15,
+      grossExposureLimitRate: 1.5,
+      marginUsageLimitRate: 0.2,
+      liquidationBufferMultiple: 5,
+    });
+
+    for (const riskLimits of [
+      { riskPerTradeRate: 0.0009 },
+      { riskPerTradeRate: 0.0051 },
+      { dailyLossLimitRate: 0.004 },
+      { dailyLossLimitRate: 0.031 },
+      { maximumLeverage: 0 },
+      { maximumLeverage: 16 },
+      { maximumLeverage: 1.5 },
+      { grossExposureLimitRate: 0.09 },
+      { grossExposureLimitRate: 1.51 },
+      { marginUsageLimitRate: 0.04 },
+      { marginUsageLimitRate: 0.201 },
+      { liquidationBufferMultiple: 1.99 },
+      { liquidationBufferMultiple: 5.01 },
+      { hiddenLimit: 1 },
+    ]) {
+      expect(() => schema.parse({ ...base, riskLimits })).toThrow();
+    }
+  });
+
+  it("rejects crypto pair/live execution and stock-only use of futures risk limits", () => {
+    expect(() => schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      strategy: { mode: "pair", pairId: "tsla-tsll-tslq" },
+    })).toThrow();
+    expect(() => schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
+      execution: { mode: "live" },
+    })).toThrow();
+    expect(() => schema.parse({
+      marketCountry: "US",
+      initialCash: 100_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: ["AAPL"] },
+      riskLimits: DEFAULT_CRYPTO_FUTURES_RISK_LIMITS,
     })).toThrow();
   });
 

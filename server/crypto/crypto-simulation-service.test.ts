@@ -56,6 +56,16 @@ const selected: BinanceScannerCandidate = {
   },
 };
 
+const secondSelected: BinanceScannerCandidate = {
+  ...selected,
+  rank: 2,
+  symbol: "ETHUSDT",
+  price: 3_500,
+  quoteVolume: 750_000_000,
+  volatilityScore: 0.9,
+  score: 0.9,
+};
+
 const scannerSnapshot: BinanceScannerSnapshot = {
   schemaVersion: "binance-usdm-scanner/v1",
   market: {
@@ -92,6 +102,17 @@ const scannerSnapshot: BinanceScannerSnapshot = {
   },
 };
 
+const twoSymbolScannerSnapshot: BinanceScannerSnapshot = {
+  ...scannerSnapshot,
+  candidates: [selected, secondSelected],
+  evidence: {
+    ...scannerSnapshot.evidence,
+    universeSize: 2,
+    liquidityPoolSize: 2,
+    spreadQualifiedSize: 2,
+  },
+};
+
 function request(): SimulationStartRequest {
   return createSimulationStartRequestSchema({ maxDurationMinutes: 390 }).parse({
     market: {
@@ -103,6 +124,22 @@ function request(): SimulationStartRequest {
     initialCash: 10_000,
     durationMinutes: 120,
     selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
+    modelLanes: ["kronos_base", "fincast"],
+    execution: { mode: "paper" },
+  });
+}
+
+function requestForSelection(selection: unknown): SimulationStartRequest {
+  return createSimulationStartRequestSchema({ maxDurationMinutes: 390 }).parse({
+    market: {
+      kind: "crypto_futures",
+      venue: "BINANCE_USDM",
+      quoteAsset: "USDT",
+      contractType: "PERPETUAL",
+    },
+    initialCash: 10_000,
+    durationMinutes: 120,
+    selection,
     modelLanes: ["kronos_base", "fincast"],
     execution: { mode: "paper" },
   });
@@ -151,7 +188,12 @@ class FakeRunRepository {
 
   private nextId = 1;
 
-  admit(ownerSubject: string, config: unknown, dataRevision: string): PortfolioRunRecord {
+  admit(
+    ownerSubject: string,
+    config: unknown,
+    dataRevision: string,
+    totalCandidates = 1,
+  ): PortfolioRunRecord {
     const id = `crypto-run-${this.nextId++}`;
     const run: PortfolioRunRecord = {
       id,
@@ -163,7 +205,7 @@ class FakeRunRepository {
       status: "queued",
       progress: 0,
       completedCandidates: 0,
-      totalCandidates: 1,
+      totalCandidates,
       input: structuredClone(config),
       warnings: [],
       tags: [],
@@ -348,10 +390,12 @@ function harness(input: {
       ownerSubject: string;
       config: unknown;
       dataRevision: string;
+      totalCandidates?: number;
     }) => repository.admit(
       createInput.ownerSubject,
       createInput.config,
       createInput.dataRevision,
+      createInput.totalCandidates,
     )),
   };
   const execution: FuturesExecution = {
@@ -471,6 +515,77 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
     expect(test.repository.runs.size).toBe(1);
   });
 
+  it.each([
+    {
+      mode: "auto",
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
+      expectedSelected: [selected, secondSelected],
+    },
+    {
+      mode: "manual",
+      selection: { mode: "manual", symbols: ["ETHUSDT", "BTCUSDT"] },
+      expectedSelected: [secondSelected, selected],
+    },
+  ])(
+    "uses one scanner snapshot and per-symbol bracket preflight for a two-symbol $mode run",
+    async ({ selection, expectedSelected }) => {
+      const runtime: CryptoSimulationRuntime = {
+        run: vi.fn().mockResolvedValue({ summary: {}, result: {} }),
+      };
+      const prepareRiskData = vi.fn().mockResolvedValue(undefined);
+      const test = harness({
+        runtime,
+        scannerSelection: Promise.resolve({
+          snapshot: twoSymbolScannerSnapshot,
+          selected,
+        }),
+        prepareRiskData,
+      });
+      const parsedRequest = requestForSelection(selection);
+      const started = await test.coordinator.start(parsedRequest, "owner-a") as {
+        run: PortfolioRunRecord;
+        snapshot: {
+          selectedSymbols: string[];
+          selected: BinanceScannerCandidate[];
+        };
+      };
+      const expectedSymbols = expectedSelected.map((candidate) => candidate.symbol);
+
+      expect(test.scanner.selectionSnapshot).toHaveBeenCalledTimes(1);
+      expect(test.scanner.selectionSnapshot).toHaveBeenCalledWith("volatility");
+      expect(prepareRiskData.mock.calls).toEqual(
+        expectedSymbols.map((symbol) => [symbol, 15_000]),
+      );
+      expect(started.run.totalCandidates).toBe(2);
+      expect(started.snapshot).toMatchObject({
+        selectedSymbols: expectedSymbols,
+        selected: expectedSelected,
+      });
+      expect(test.repository.runs.get(started.run.id)?.input).toMatchObject({
+        scannerSnapshotId: SNAPSHOT_ID,
+        selectedSymbols: expectedSymbols,
+      });
+
+      await eventually(() => vi.mocked(runtime.run).mock.calls.length === 1);
+      expect(vi.mocked(runtime.run).mock.calls[0]?.[0]).toMatchObject({
+        request: parsedRequest,
+        snapshot: twoSymbolScannerSnapshot,
+        selected: expectedSelected,
+      });
+      await eventually(() => test.artifacts.values.get(started.run.id)
+        ?.has("simulation-selection") === true);
+      expect(test.artifacts.values.get(started.run.id)?.get("simulation-selection"))
+        .toMatchObject({
+          rowCount: 2,
+          content: {
+            scannerSnapshotId: SNAPSHOT_ID,
+            selected: expectedSelected,
+            rankedCandidates: twoSymbolScannerSnapshot.candidates,
+          },
+        });
+    },
+  );
+
   it("persists create → running → complete, artifacts/report, ownership, progress, and status gates", async () => {
     const completion = deferred<Awaited<ReturnType<CryptoSimulationRuntime["run"]>>>();
     let workerState: Partial<Record<"kronos_base" | "fincast", CryptoWorkerPublicState>> = {
@@ -509,10 +624,10 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       ?.has("simulation-selection") === true);
     expect(test.artifacts.values.get(started.run.id)?.get("simulation-selection"))
       .toMatchObject({
-        rowCount: scannerSnapshot.candidates.length,
+        rowCount: 1,
         content: {
           scannerSnapshotId: SNAPSHOT_ID,
-          selected,
+          selected: [selected],
           rankedCandidates: scannerSnapshot.candidates,
           evidence: scannerSnapshot.evidence,
           realOrder: false,

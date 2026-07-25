@@ -372,6 +372,165 @@ describe("AI simulation response normalization", () => {
     expect(snapshot.decisions).toHaveLength(1);
   });
 
+  it("keeps crypto runtime decision aliases visible in live and archived views", () => {
+    const snapshot = normalizeAiSimulationSnapshot({
+      phase: "running",
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      currency: "USDT",
+      initialCash: 10_000,
+      cash: 9_900,
+      equity: 10_025,
+      progress: 0.5,
+      selected: [{
+        symbol: "BTCUSDT",
+        model: {
+          modelId: "Vincent05R/FinCast",
+          modelRevision: "fincast-revision",
+          device: "cuda:0",
+        },
+      }, {
+        symbol: "ETHUSDT",
+        model: {
+          modelId: "untrusted/fallback-model",
+          modelRevision: "must-not-display",
+          device: "cuda:0",
+        },
+      }],
+      decisions: [{
+        id: "crypto-decision-1",
+        lane: "kronos_base",
+        symbol: "BTCUSDT",
+        originAt: "2026-07-24T00:09:59.999Z",
+        decisionAt: "2026-07-24T00:10:00.250Z",
+        fillEligibleAfter: "2026-07-24T00:10:00.250Z",
+        action: "open_long",
+        direction: "long",
+        confidence: 0.73,
+        probabilityAboveCost: 0.68,
+        technicalState: "trend:long",
+        chartPatternBias: "bullish",
+        chartPatterns: ["bullish_engulfing"],
+        components: { confidence: 0.73, minimumConfidence: 0.55 },
+        status: "pending",
+        reason: "cost_exceeding_quantile_signal",
+      }],
+    });
+
+    expect(snapshot.decisions).toEqual([expect.objectContaining({
+      symbol: "BTCUSDT",
+      action: "open_long",
+      decidedAt: "2026-07-24T00:10:00.250Z",
+      eligibleAfter: "2026-07-24T00:10:00.250Z",
+      score: 0.73,
+      upProbability: 0.68,
+      direction: "long",
+      technicalState: "trend:long",
+      chartPatternBias: "bullish",
+      chartPatterns: ["bullish_engulfing"],
+      components: { confidence: 0.73, minimumConfidence: 0.55 },
+    })]);
+    expect(snapshot.selected[0]?.model)
+      .toBe("Vincent05R/FinCast · fincast-revision · CUDA:0");
+    expect(snapshot.selected[1]?.model).toBeUndefined();
+
+    const fallbackOrigin = normalizeAiSimulationSnapshot({
+      phase: "running",
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      decisions: [{
+        symbol: "ETHUSDT",
+        origin_at: "2026-07-24T00:11:00.000Z",
+        action: "none",
+        reason: "worker_unavailable",
+      }],
+    });
+    expect(fallbackOrigin.decisions[0]?.decidedAt)
+      .toBe("2026-07-24T00:11:00.000Z");
+  });
+
+  it("preserves FinCast-only lane and decision provenance in crypto reports", () => {
+    const report = normalizeAiSimulationReport({
+      run: { runId: "crypto-fincast-report", status: "completed" },
+      report: {
+        configuration: {
+          market: {
+            kind: "crypto_futures",
+            venue: "BINANCE_USDM",
+            quoteAsset: "USDT",
+            contractType: "PERPETUAL",
+          },
+          modelLanes: ["fincast"],
+          initialCash: 10_000,
+        },
+        selected: [{
+          symbol: "ETHUSDT",
+          model: {
+            modelId: "Vincent05R/FinCast",
+            modelRevision: "fincast-revision",
+            device: "cuda:0",
+          },
+        }],
+        performance: {
+          currency: "USDT",
+          initialCash: 10_000,
+          finalEquity: 10_020,
+        },
+        modelProvenance: [{
+          modelId: "Vincent05R/FinCast",
+          modelRevision: "fincast-revision",
+          device: "cuda:0",
+        }, {
+          modelId: "untrusted/fallback-model",
+          modelRevision: "must-not-display",
+          device: "cuda:0",
+        }],
+        decisionProvenance: [{
+          decisionId: "fincast-decision",
+          signalSymbol: "ETHUSDT",
+          direction: "short",
+          origin: "2026-07-24T00:10:00.000Z",
+          decisionAt: "2026-07-24T00:10:00.250Z",
+          models: {
+            fincast: {
+              status: "available",
+              inputEndAt: "2026-07-24T00:10:00.000Z",
+              generatedAt: "2026-07-24T00:10:00.200Z",
+              provenance: {
+                modelId: "Vincent05R/FinCast",
+                modelRevision: "fincast-revision",
+                device: "cuda:0",
+                deviceName: "Tesla P40",
+                latencyMs: 112,
+              },
+            },
+          },
+        }],
+      },
+    });
+
+    expect(report?.configuration.modelLanes).toEqual(["fincast"]);
+    expect(report?.selected[0]?.model)
+      .toBe("Vincent05R/FinCast · fincast-revision · CUDA:0");
+    expect(report?.modelProvenance)
+      .toEqual(["Vincent05R/FinCast · fincast-revision · CUDA:0"]);
+    expect(report?.decisionProvenance[0]?.models).toEqual([
+      expect.objectContaining({
+        component: "fincast",
+        modelId: "Vincent05R/FinCast",
+        modelRevision: "fincast-revision",
+      }),
+    ]);
+  });
+
   it("normalizes snake-case three-lane comparisons and rejects removed or malformed lanes", () => {
     const lanes = {
       kronos_base: {

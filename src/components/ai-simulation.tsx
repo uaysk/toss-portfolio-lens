@@ -27,12 +27,13 @@ import {
   AiSimulationModelComparisonPanel,
 } from "@/components/ai-simulation-futures";
 import { AiSimulationHistory } from "@/components/ai-simulation-history";
-import { AiSimulationKronosForecastSection } from "@/components/ai-simulation-kronos-forecast-chart";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+  AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
   DEFAULT_AI_SIMULATION_REQUEST,
   DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   aiSimulationErrorMessage,
@@ -132,6 +133,10 @@ const ACTION_LABELS: Record<string, string> = {
   watch: "관망",
   skip: "건너뜀",
   cash: "현금 유지",
+  open_long: "롱 진입",
+  open_short: "숏 진입",
+  reduce: "축소·청산",
+  none: "진입 없음",
 };
 
 const PATTERN_LABELS: Record<string, string> = {
@@ -638,6 +643,11 @@ function RunPanel({
   const pnl = snapshot.equity - snapshot.initialCash;
   const returnRatio = snapshot.initialCash > 0 ? pnl / snapshot.initialCash : undefined;
   const cryptoFutures = snapshot.market?.kind === "crypto_futures";
+  const modelForecasts = snapshot.modelForecasts
+    ?? snapshot.kronosForecasts.map((forecast) => ({
+      ...forecast,
+      lane: "kronos_base" as const,
+    }));
 
   return (
     <div className="space-y-3" data-simulation-run={run.runId ?? "unknown"}>
@@ -692,7 +702,9 @@ function RunPanel({
           ) : null}
           {snapshot.policyProfile?.targetAllocationRate !== undefined ? (
             <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
-              목표 투자 {(snapshot.policyProfile.targetAllocationRate * 100).toFixed(0)}% · 현금 {((snapshot.policyProfile.cashReserveRate ?? 1 - snapshot.policyProfile.targetAllocationRate) * 100).toFixed(0)}%
+              {cryptoFutures
+                ? `위험 산출 수량 ${(snapshot.policyProfile.targetAllocationRate * 100).toFixed(0)}%`
+                : `목표 투자 ${(snapshot.policyProfile.targetAllocationRate * 100).toFixed(0)}% · 현금 ${((snapshot.policyProfile.cashReserveRate ?? 1 - snapshot.policyProfile.targetAllocationRate) * 100).toFixed(0)}%`}
             </span>
           ) : null}
         </div>
@@ -732,6 +744,9 @@ function RunPanel({
               indicators={chart.indicators}
               patterns={chart.patterns}
               updatedAt={chart.updatedAt}
+              forecasts={modelForecasts.filter(
+                (forecast) => forecast.signalSymbol === chart.symbol,
+              )}
               trades={snapshot.trades.flatMap((trade) => {
                 if (trade.symbol !== chart.symbol) return [];
                 const side = trade.side.toLowerCase();
@@ -748,11 +763,6 @@ function RunPanel({
           ))}
         </div>
       ) : null}
-      <AiSimulationKronosForecastSection
-        forecasts={snapshot.kronosForecasts}
-        charts={snapshot.charts}
-        currency={snapshot.currency}
-      />
       <TradesAndDecisions snapshot={snapshot} />
       {snapshot.warnings.length ? (
         <Card className="bg-secondary p-5" role="status">
@@ -791,7 +801,12 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
   const issues = useMemo(
     () => assetClass === "crypto_futures"
-      ? validateAiSimulationCryptoRequest(cryptoRequest)
+      ? validateAiSimulationCryptoRequest(cryptoRequest, {
+          minimumInitialCash: AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+          maximumInitialCash: AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+          minimumDurationMinutes: status?.limits.minimumDurationMinutes,
+          maximumDurationMinutes: status?.limits.maximumDurationMinutes,
+        })
       : validateAiSimulationRequest(request, status?.limits),
     [assetClass, cryptoRequest, request, status?.limits],
   );
@@ -802,7 +817,9 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     setCandidateLoading(true);
     setCandidateError("");
     try {
-      const criterion = cryptoRequest.selection.criterion;
+      const criterion = cryptoRequest.selection.mode === "auto"
+        ? cryptoRequest.selection.criterion
+        : "volatility";
       const response = await fetch(
         `/api/portfolio/simulation/candidates?criterion=${encodeURIComponent(criterion)}`,
         { headers: { Accept: "application/json" }, signal },
@@ -823,7 +840,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     } finally {
       if (!signal?.aborted) setCandidateLoading(false);
     }
-  }, [cryptoRequest.selection.criterion, onUnauthorized]);
+  }, [cryptoRequest.selection, onUnauthorized]);
 
   useEffect(() => {
     if (assetClass !== "crypto_futures" || runActive) return;
@@ -969,7 +986,12 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
   const startSimulation = useCallback(async () => {
     const validation = assetClass === "crypto_futures"
-      ? validateAiSimulationCryptoRequest(cryptoRequest)
+      ? validateAiSimulationCryptoRequest(cryptoRequest, {
+          minimumInitialCash: AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+          maximumInitialCash: AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
+          minimumDurationMinutes: status?.limits.minimumDurationMinutes,
+          maximumDurationMinutes: status?.limits.maximumDurationMinutes,
+        })
       : validateAiSimulationRequest(request, status?.limits);
     if (validation.length) {
       setError(validation[0]);
@@ -1142,12 +1164,12 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             </h2>
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
               {assetClass === "crypto_futures"
-                ? "Binance USDⓈ-M USDT 무기한 계약 중 유동성 조건을 통과한 한 종목을 고르고, 확정봉과 다음 유효 체결만으로 롱·숏 paper 결과를 검증합니다. 읽기 전용 키와 공개 시세 외에는 외부로 주문을 전송하지 않습니다."
+                ? "Binance USDⓈ-M USDT 무기한 계약 중 유동성 조건을 통과한 1~2개 계약을 자동 또는 직접 고르고, 확정봉과 다음 유효 체결만으로 롱·숏 paper 결과를 검증합니다. 읽기 전용 키와 공개 시세 외에는 외부로 주문을 전송하지 않습니다."
                 : "보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 Kronos-base 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다."}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "유동성 통과 1종목" : "AI 또는 직접 선택"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "자동·직접 1~2계약" : "AI 또는 직접 선택"}</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "USDT · isolated" : "현금 100% · 0주"}</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "Kronos · FinCast" : "Kronos-base · Rust · 패턴"}</p></div>
@@ -1161,8 +1183,8 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" data-crypto-simulation-disclosure>
           <p className="font-black text-foreground">선물 paper 전용 · 실주문 capability false</p>
           <p className="mt-1">
-            거래당 위험 0.5%, UTC 일손실 3% 중단, paper gross exposure 150%·증거금 20% 상한을 적용합니다.
-            추정 청산가가 보호 손절 거리의 두 배 이상 떨어져 있지 않으면 수량을 줄이거나 진입하지 않습니다.
+            거래당 위험, UTC 일손실 중단선, 최대 레버리지, gross exposure, 증거금 사용률과 청산 buffer를 실행별로 설정합니다.
+            기본값은 0.5%·3%·15배·150%·20%·손절 거리 2배이며 모든 값은 paper 원장에만 적용됩니다.
           </p>
         </Card>
       )}
@@ -1186,6 +1208,10 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           onRefreshCandidates={() => void loadCryptoCandidates()}
           onStart={() => void startSimulation()}
           onCancel={() => void cancelSimulation()}
+          limits={{
+            minimumDurationMinutes: status?.limits.minimumDurationMinutes,
+            maximumDurationMinutes: status?.limits.maximumDurationMinutes,
+          }}
         />
       ) : null}
 

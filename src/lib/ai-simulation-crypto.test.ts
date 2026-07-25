@@ -4,6 +4,7 @@ import {
   normalizeAiSimulationCandidates,
   normalizeAiSimulationCryptoStatus,
   normalizeAiSimulationFuturesPositions,
+  normalizeAiSimulationFuturesRisk,
   normalizeAiSimulationMarket,
   normalizeAiSimulationModelComparison,
   validateAiSimulationCryptoRequest,
@@ -111,7 +112,7 @@ describe("ai simulation v7 crypto contract", () => {
       quantity: 0.5,
       leverage: 4,
     });
-    expect(normalizeAiSimulationModelComparison({
+    const comparison = normalizeAiSimulationModelComparison({
       outcome: "inconclusive",
       same_origin: true,
       same_context: true,
@@ -119,12 +120,62 @@ describe("ai simulation v7 crypto contract", () => {
       same_fill_barrier: true,
       models: {
         kronos: { status: "complete", dtype: "float32", pinball_loss: 0.01 },
-        fincast: { status: "complete", dtype: "float16", pinball_loss: 0.009 },
+        fincast: {
+          status: "complete",
+          dtype: "float16",
+          pinball_loss: 0.009,
+          provenance: {
+            model_id: "Vincent05R/FinCast",
+            model_revision: "fincast-revision",
+            source_revision: "source-sha",
+            loader_version: "loader-v1",
+            loaded: true,
+            device: "cuda:0",
+            device_name: "Tesla P40",
+            precision_validation: "passed",
+            memory_status: "ok",
+            peak_vram_mb: 4_920,
+            precision_failure_reasons: [],
+          },
+        },
       },
-    })?.lanes.map(({ id, precision }) => [id, precision])).toEqual([
+    });
+    expect(comparison?.lanes.map(({ id, precision }) => [id, precision])).toEqual([
       ["kronos_base", "fp32"],
       ["fincast", "fp16"],
     ]);
+    expect(comparison?.lanes[1]).toMatchObject({
+      provenance: {
+        modelId: "Vincent05R/FinCast",
+        modelRevision: "fincast-revision",
+        sourceRevision: "source-sha",
+        loaderVersion: "loader-v1",
+        loaded: true,
+        device: "cuda:0",
+        deviceName: "Tesla P40",
+        precisionValidation: "passed",
+        memoryStatus: "ok",
+        peakVramMb: 4_920,
+        precisionFailureReasons: [],
+      },
+    });
+    expect(normalizeAiSimulationFuturesRisk({
+      riskPerTradeRatio: 0.008,
+      dailyLossLimitRatio: 0.05,
+      grossExposureRatio: 0.4,
+      grossExposureLimitRatio: 1.2,
+      marginUsageRatio: 0.1,
+      marginUsageLimitRatio: 0.3,
+      maximumLeverage: 12,
+      liquidationBufferMultiple: 2.5,
+    })).toMatchObject({
+      riskPerTradeRatio: 0.008,
+      dailyLossLimitRatio: 0.05,
+      grossExposureLimitRatio: 1.2,
+      marginUsageLimitRatio: 0.3,
+      maximumLeverage: 12,
+      liquidationBufferMultiple: 2.5,
+    });
   });
 
   it("allows paper only and requires at least one unique model lane", () => {
@@ -133,5 +184,50 @@ describe("ai simulation v7 crypto contract", () => {
       ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
       execution: { mode: "live" as "paper" },
     })).toContain("현재 운영에서는 paper 실행만 허용됩니다.");
+  });
+
+  it("matches the server cash hard caps and applies the advertised duration cap", () => {
+    expect(validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      initialCash: 99,
+      durationMinutes: 391,
+    }, {
+      maximumDurationMinutes: 390,
+    })).toEqual(expect.arrayContaining([
+      "시작 USDT는 100 이상이어야 합니다.",
+      "테스트 기간은 390분 이하여야 합니다.",
+    ]));
+    expect(validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      initialCash: 100_000_001,
+    })).toContain("시작 USDT는 100000000 이하여야 합니다.");
+    expect(validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      initialCash: 100,
+      durationMinutes: 390,
+    }, {
+      maximumDurationMinutes: 390,
+    })).toEqual([]);
+  });
+
+  it("rejects risk overrides outside the backend hard safety envelope", () => {
+    const issues = validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      riskLimits: {
+        riskPerTradeRate: 0.006,
+        dailyLossLimitRate: 0.035,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.55,
+        marginUsageLimitRate: 0.25,
+        liquidationBufferMultiple: 1.75,
+      },
+    });
+    expect(issues).toEqual(expect.arrayContaining([
+      "거래당 위험 값은 0.001~0.005 범위여야 합니다.",
+      "UTC 일손실 중단선 값은 0.005~0.03 범위여야 합니다.",
+      "gross exposure 상한 값은 0.1~1.5 범위여야 합니다.",
+      "증거금 사용률 상한 값은 0.05~0.2 범위여야 합니다.",
+      "청산 buffer 배수 값은 2~5 범위여야 합니다.",
+    ]));
   });
 });

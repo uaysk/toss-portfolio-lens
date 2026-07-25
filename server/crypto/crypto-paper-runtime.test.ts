@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RunTaskContext } from "../services/run-service.js";
 import type { SimulationModelLane, SimulationStartRequest } from "../simulation/contracts.js";
 import {
+  SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
   type AiForecastRequest,
 } from "../worker/ai-contract.js";
@@ -17,10 +18,18 @@ import type {
 } from "./contracts.js";
 import { FuturesPaperLedger } from "./futures-paper-ledger.js";
 import {
+  aggregatePortfolioEquitySeries,
+  aggregatePortfolioLaneMetrics,
+  aggregatePortfolioLaneProvenance,
   canonicalCryptoModelInputDigest,
+  cryptoModelForecastIsFresh,
   CryptoPaperRuntime,
   CryptoPaperRuntimeError,
+  cryptoRuntimeClientOrderId,
+  cryptoRuntimeEntityId,
+  groupPortfolioRuntimeArtifacts,
   monotonicCryptoRiskClock,
+  PortfolioDailyLossGate,
   type CryptoAiLaneClient,
   type CryptoPaperRuntimeSnapshot,
   type CryptoPublicStreams,
@@ -431,6 +440,34 @@ function response(
   };
 }
 
+function responseWithDisplayPath(
+  raw: ReturnType<typeof response>,
+  options: {
+    shiftedTargetHorizon?: number;
+  } = {},
+): unknown {
+  const output = structuredClone(raw) as UnknownRecord;
+  const series = (output.series as UnknownRecord[])[0]!;
+  const inputEndAt = Date.parse(series.input_end_at as string);
+  const originalHorizon = (series.horizons as UnknownRecord[])[0]!;
+  const returnQuantiles = structuredClone(originalHorizon.return_quantiles);
+  series.horizons = SCALPING_AI_HORIZONS.map((horizon, horizonIndex) => ({
+    horizon_minutes: horizon,
+    up_probability: 0.64,
+    target_timestamp: new Date(
+      inputEndAt
+      + horizon * 60_000
+      + (options.shiftedTargetHorizon === horizon ? 1_000 : 0),
+    ).toISOString(),
+    return_quantiles: structuredClone(returnQuantiles),
+    price_quantiles: SCALPING_AI_QUANTILES.map((quantile, quantileIndex) => ({
+      quantile,
+      value: 100 + horizonIndex + quantileIndex * 0.1,
+    })),
+  }));
+  return output;
+}
+
 function laneClient(
   lane: SimulationModelLane,
   generatedAt: number,
@@ -527,10 +564,91 @@ async function runProvenanceSimulation(options: {
     selected: candidate,
     context: context().value,
   });
-  return { result, client };
+  return { result, client, runtime };
 }
 
 describe("CryptoPaperRuntime", () => {
+  it("serializes same-lane worker calls even when portfolio symbols request concurrently", async () => {
+    const clock = new ScheduledClock();
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams: new ScheduledStreams(clock, []),
+      laneClients: {},
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const gates = [deferred<void>(), deferred<void>()];
+    let invocation = 0;
+    let active = 0;
+    let maximumActive = 0;
+    const client: CryptoAiLaneClient = {
+      request: vi.fn(async () => {
+        const index = invocation;
+        invocation += 1;
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        try {
+          await gates[index]!.promise;
+          return { index };
+        } finally {
+          active -= 1;
+        }
+      }),
+    };
+    const requestLane = (
+      runtime as unknown as {
+        requestLane: (
+          lane: SimulationModelLane,
+          laneClient: CryptoAiLaneClient,
+          request: AiForecastRequest,
+          signal: AbortSignal,
+        ) => Promise<unknown>;
+      }
+    ).requestLane.bind(runtime);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const request = {} as AiForecastRequest;
+
+    const first = requestLane("kronos_base", client, request, firstController.signal);
+    await vi.waitFor(() => expect(client.request).toHaveBeenCalledTimes(1));
+    const second = requestLane("kronos_base", client, request, secondController.signal);
+    await Promise.resolve();
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(maximumActive).toBe(1);
+
+    gates[0]!.resolve(undefined);
+    await first;
+    await vi.waitFor(() => expect(client.request).toHaveBeenCalledTimes(2));
+    expect(maximumActive).toBe(1);
+    gates[1]!.resolve(undefined);
+    await second;
+    expect(maximumActive).toBe(1);
+  });
+
+  it("scopes same-timestamp portfolio identifiers by run and symbol", () => {
+    const common = {
+      runId: "crypto-run-1",
+      lane: "kronos_base" as const,
+      at: START + 123,
+      sequence: 1,
+    };
+    const identifiers = ["BTCUSDT", "ETHUSDT"].flatMap((symbol) => [
+      cryptoRuntimeEntityId("decision", { ...common, symbol }),
+      cryptoRuntimeEntityId("fill", { ...common, symbol }),
+      cryptoRuntimeClientOrderId({ ...common, symbol, action: "open" }),
+    ]);
+
+    expect(new Set(identifiers).size).toBe(identifiers.length);
+    expect(cryptoRuntimeEntityId("decision", {
+      ...common,
+      symbol: "BTCUSDT",
+    })).toBe(identifiers[0]);
+    for (const clientOrderId of [identifiers[2]!, identifiers[5]!]) {
+      expect(clientOrderId).toMatch(/^[.A-Z:/a-z0-9_-]{1,36}$/);
+    }
+  });
+
   it("matches the Python worker canonical input digest byte-for-byte", () => {
     expect(canonicalCryptoModelInputDigest([
       {
@@ -564,6 +682,262 @@ describe("CryptoPaperRuntime", () => {
       afterRollover + 100,
       latePriorDay,
     )).toBe(afterRollover + 100);
+  });
+
+  it("shares a portfolio daily-loss gate without blocking an offset sleeve early", () => {
+    const gate = new PortfolioDailyLossGate({
+      lanes: ["kronos_base"],
+      symbols: ["BTCUSDT", "ETHUSDT"],
+      perSymbolInitialCash: 5_000,
+      dailyLossLimitRate: 0.03,
+      observedAt: START,
+    });
+
+    expect(gate.observe({
+      lane: "kronos_base",
+      symbol: "BTCUSDT",
+      equity: 4_800,
+      observedAt: START + 1_000,
+      dailyLossLimitRate: 0.03,
+    })).toMatchObject({
+      drawdownRate: 0.02,
+      blocked: false,
+      closeAllReduceOnly: false,
+    });
+    expect(gate.observe({
+      lane: "kronos_base",
+      symbol: "ETHUSDT",
+      equity: 5_200,
+      observedAt: START + 1_001,
+      dailyLossLimitRate: 0.03,
+    })).toMatchObject({
+      drawdownRate: 0,
+      blocked: false,
+      closeAllReduceOnly: false,
+    });
+    expect(gate.observe({
+      lane: "kronos_base",
+      symbol: "BTCUSDT",
+      equity: 4_500,
+      observedAt: START + 2_000,
+      dailyLossLimitRate: 0.03,
+    })).toMatchObject({
+      drawdownRate: 0.03,
+      blocked: true,
+      closeAllReduceOnly: true,
+    });
+    expect(gate.state("kronos_base").blocked).toBe(true);
+
+    const rollover = Date.parse("2026-07-26T00:00:00.000Z");
+    expect(gate.observe({
+      lane: "kronos_base",
+      symbol: "ETHUSDT",
+      equity: 5_100,
+      observedAt: rollover,
+      dailyLossLimitRate: 0.03,
+    })).toMatchObject({
+      dayStartEquity: 9_600,
+      drawdownRate: 0,
+      blocked: false,
+    });
+  });
+
+  it("aggregates partitioned equity as one causal portfolio drawdown series", () => {
+    const points = aggregatePortfolioEquitySeries([
+      [
+        { timestamp: new Date(START).toISOString(), equity: 5_000, drawdown: 0 },
+        { timestamp: new Date(START + 1_000).toISOString(), equity: 4_800, drawdown: 0.04 },
+        { timestamp: new Date(START + 2_000).toISOString(), equity: 4_900, drawdown: 0.02 },
+      ],
+      [
+        { timestamp: new Date(START).toISOString(), equity: 5_000, drawdown: 0 },
+        { timestamp: new Date(START + 1_000).toISOString(), equity: 5_200, drawdown: 0 },
+        { timestamp: new Date(START + 2_000).toISOString(), equity: 5_000, drawdown: 0.038 },
+      ],
+    ], 5_000);
+
+    expect(points.map(({ equity }) => equity)).toEqual([10_000, 10_000, 9_900]);
+    expect(points[0]?.drawdown).toBe(0);
+    expect(points[1]?.drawdown).toBe(0);
+    expect(points[2]?.drawdown).toBeCloseTo(0.01, 12);
+  });
+
+  it("aggregates two-symbol lane metrics by their additive and weighted semantics", () => {
+    const at = (offset: number) => new Date(START + offset).toISOString();
+    const firstLane = {
+      aggregationBasis: {
+        schemaVersion: "crypto-model-metric-aggregation/v1",
+        prediction: {
+          pinballLossSum: 2,
+          pinballLossCount: 2,
+          medianAbsoluteErrorSum: 1,
+          medianAbsoluteErrorCount: 2,
+          directionHitSum: 1,
+          directionCount: 2,
+          coverageHitSum: 1,
+          coverageCount: 2,
+          nominalCoverageSum: 1.6,
+          nominalCoverageCount: 2,
+        },
+        trading: {
+          netPnl: 10,
+          grossProfit: 30,
+          grossLoss: 10,
+          winCount: 2,
+          outcomeCount: 3,
+          turnoverNotional: 1_000,
+          initialCash: 5_000,
+          funding: 2,
+          fees: 3,
+          leverageDistribution: [2],
+        },
+        operations: {
+          attempts: 10,
+          successes: 8,
+          latencySum: 800,
+          latencyCount: 8,
+          timeoutCount: 1,
+          peakVramMb: 6_000,
+        },
+        equity: [
+          { timestamp: at(0), equity: 5_000, drawdown: 0 },
+          { timestamp: at(1_000), equity: 4_800, drawdown: 0.04 },
+          { timestamp: at(2_000), equity: 4_900, drawdown: 0.02 },
+        ],
+      },
+    };
+    const secondLane = {
+      aggregationBasis: {
+        schemaVersion: "crypto-model-metric-aggregation/v1",
+        prediction: {
+          pinballLossSum: 8,
+          pinballLossCount: 4,
+          medianAbsoluteErrorSum: 3,
+          medianAbsoluteErrorCount: 4,
+          directionHitSum: 3,
+          directionCount: 4,
+          coverageHitSum: 2,
+          coverageCount: 4,
+          nominalCoverageSum: 3.2,
+          nominalCoverageCount: 4,
+        },
+        trading: {
+          netPnl: -5,
+          grossProfit: 10,
+          grossLoss: 20,
+          winCount: 1,
+          outcomeCount: 2,
+          turnoverNotional: 2_000,
+          initialCash: 5_000,
+          funding: -1,
+          fees: 4,
+          leverageDistribution: [3, 4],
+        },
+        operations: {
+          attempts: 10,
+          successes: 4,
+          latencySum: 1_200,
+          latencyCount: 4,
+          timeoutCount: 2,
+          peakVramMb: 9_000,
+        },
+        equity: [
+          { timestamp: at(0), equity: 5_000, drawdown: 0 },
+          { timestamp: at(1_000), equity: 5_100, drawdown: 0 },
+          { timestamp: at(2_000), equity: 4_800, drawdown: 0.0588 },
+        ],
+      },
+    };
+
+    const aggregated = aggregatePortfolioLaneMetrics(
+      [firstLane, secondLane],
+      2,
+    );
+
+    expect(aggregated.consistent).toBe(true);
+    expect(aggregated.metrics).toMatchObject({
+      netPnl: 5,
+      funding: 1,
+      fees: 7,
+      timeoutCount: 3,
+      peakVramMb: 9_000,
+      availabilityRatio: 0.6,
+      winRate: 0.6,
+      profitFactor: 4 / 3,
+      turnover: 0.3,
+      leverageDistribution: [2, 3, 4],
+    });
+    expect(aggregated.metrics.pinballLoss).toBeCloseTo(10 / 6, 12);
+    expect(aggregated.metrics.medianReturnMae).toBeCloseTo(4 / 6, 12);
+    expect(aggregated.metrics.directionAccuracy).toBeCloseTo(4 / 6, 12);
+    expect(aggregated.metrics.quantileCoverage).toBeCloseTo(0.5, 12);
+    expect(aggregated.metrics.calibrationError).toBeCloseTo(0.3, 12);
+    expect(aggregated.metrics.latencyMs).toBeCloseTo(2_000 / 12, 12);
+    expect(aggregated.metrics.maxDrawdown).toBeCloseTo(0.03, 12);
+  });
+
+  it("counts each rowless per-symbol diagnostics artifact as one portfolio item", () => {
+    const grouped = groupPortfolioRuntimeArtifacts([
+      {
+        summary: {},
+        result: {},
+        artifacts: [{
+          type: "simulation-diagnostics",
+          content: { symbol: "BTCUSDT" },
+        }],
+      },
+      {
+        summary: {},
+        result: {},
+        artifacts: [{
+          type: "simulation-diagnostics",
+          content: { symbol: "ETHUSDT" },
+        }],
+      },
+    ]);
+
+    expect(grouped).toEqual([{
+      type: "simulation-diagnostics",
+      contents: [
+        { symbol: "BTCUSDT" },
+        { symbol: "ETHUSDT" },
+      ],
+      rowCount: 2,
+    }]);
+  });
+
+  it("preserves matching portfolio lane provenance and fails mismatches closed", () => {
+    const provenance = {
+      modelId: "NeoQuasar/Kronos-base",
+      modelRevision: kronosModelRevision,
+      precision: "fp32",
+      device: "cuda",
+    };
+    expect(aggregatePortfolioLaneProvenance([
+      { provenance },
+      { provenance: structuredClone(provenance) },
+    ], 2)).toEqual({
+      consistent: true,
+      provenance,
+    });
+    expect(aggregatePortfolioLaneProvenance([
+      { provenance },
+      {
+        provenance: {
+          ...provenance,
+          modelRevision: "unexpected-revision",
+        },
+      },
+    ], 2)).toMatchObject({
+      consistent: false,
+      provenance,
+    });
+    expect(aggregatePortfolioLaneProvenance([
+      { provenance },
+    ], 2)).toMatchObject({
+      consistent: false,
+      provenance,
+    });
   });
 
   it("normalizes omitted Kronos precision provenance to safe native defaults", async () => {
@@ -602,6 +976,245 @@ describe("CryptoPaperRuntime", () => {
       successes: 1,
       errors: [],
     });
+  });
+
+  it("keeps matching child provenance in the portfolio lane and marks drift partial", async () => {
+    const { result, runtime } = await runProvenanceSimulation({ lane: "kronos_base" });
+    const firstSnapshot = (result.result as {
+      snapshot: CryptoPaperRuntimeSnapshot;
+    }).snapshot;
+    const secondSnapshot = structuredClone(firstSnapshot);
+    secondSnapshot.runId = "crypto-run-1:2:ETHUSDT";
+    const request: SimulationStartRequest = {
+      ...simulationRequest(["kronos_base"]),
+      selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
+    };
+    const aggregate = (
+      runtime as unknown as {
+        aggregatePortfolioSnapshots: (
+          runId: string,
+          input: SimulationStartRequest,
+          snapshots: readonly CryptoPaperRuntimeSnapshot[],
+        ) => CryptoPaperRuntimeSnapshot;
+      }
+    ).aggregatePortfolioSnapshots.bind(runtime);
+
+    const matching = aggregate(
+      "crypto-run-1",
+      request,
+      [firstSnapshot, secondSnapshot],
+    );
+    const matchingLane = (
+      (matching.modelComparison as UnknownRecord).lanes as UnknownRecord[]
+    )[0]!;
+    expect(matchingLane).toMatchObject({
+      id: "kronos_base",
+      status: "healthy",
+      provenanceConsistent: true,
+      provenance: {
+        modelId: "NeoQuasar/Kronos-base",
+        modelRevision: kronosModelRevision,
+        precision: "fp32",
+      },
+    });
+
+    const driftedSnapshot = structuredClone(secondSnapshot);
+    const driftedComparison = driftedSnapshot.modelComparison as UnknownRecord;
+    const driftedLane = (driftedComparison.lanes as UnknownRecord[])[0]!;
+    const driftedProvenance = driftedLane.provenance as UnknownRecord;
+    driftedProvenance.modelRevision = "unexpected-revision";
+    const drifted = aggregate(
+      "crypto-run-1",
+      request,
+      [firstSnapshot, driftedSnapshot],
+    );
+    expect(((drifted.modelComparison as UnknownRecord).lanes as UnknownRecord[])[0])
+      .toMatchObject({
+        id: "kronos_base",
+        status: "partial",
+        provenanceConsistent: false,
+        unavailableReason: "portfolio_model_provenance_inconsistent",
+      });
+  });
+
+  it("publishes strict 5/15/30/60 minute price paths for the candle timeline", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "kronos_base",
+      transform: (raw) => responseWithDisplayPath(raw),
+    });
+    const snapshot = (result.result as {
+      snapshot: CryptoPaperRuntimeSnapshot;
+    }).snapshot;
+    const forecast = snapshot.modelForecasts[0] as UnknownRecord;
+    const points = forecast.points as UnknownRecord[];
+
+    expect(forecast).toMatchObject({
+      lane: "kronos_base",
+      signalSymbol: "BTCUSDT",
+      status: "available",
+      modelId: "NeoQuasar/Kronos-base",
+    });
+    expect(points.map((point) => point.horizonMinutes)).toEqual([5, 15, 30, 60]);
+    expect(points.map((point) => Date.parse(point.targetTimestamp as string))).toEqual(
+      SCALPING_AI_HORIZONS.map((horizon) => (
+        Date.parse(forecast.origin as string) + horizon * 60_000
+      )),
+    );
+    expect(snapshot.selected[0]).toMatchObject({
+      symbol: "BTCUSDT",
+      currentPrice: 100,
+      priceObservedAt: new Date(START + 20).toISOString(),
+      observedAt: new Date(START + 20).toISOString(),
+      upProbability: 0.64,
+      predictedMedianReturn: 0,
+      model: {
+        modelId: "NeoQuasar/Kronos-base",
+        modelRevision: kronosModelRevision,
+        device: "cuda",
+      },
+    });
+    expect(snapshot.futuresRisk).toMatchObject({
+      dailyLossLimitRatio: 0.03,
+      riskPerTradeRatio: 0.005,
+      grossExposureLimitRatio: 1.5,
+      marginUsageLimitRatio: 0.2,
+      maximumLeverage: 15,
+      liquidationBufferMultiple: 2,
+    });
+    expect(snapshot.kronosForecasts).toEqual(snapshot.modelForecasts);
+  });
+
+  it("fails forecast visibility closed after later failures, circuit-open origins, or max horizon", () => {
+    const inputEndAt = new Date(START).toISOString();
+    const targets = [5, 15, 30, 60].map((minutes) => (
+      new Date(START + minutes * 60_000).toISOString()
+    ));
+    expect(cryptoModelForecastIsFresh({
+      inputEndAt,
+      targetTimestamps: targets,
+      latestFinalCandleCloseTime: START,
+    })).toBe(true);
+    expect(cryptoModelForecastIsFresh({
+      inputEndAt,
+      targetTimestamps: targets,
+      latestFinalCandleCloseTime: START + 60_000,
+    })).toBe(false);
+    expect(cryptoModelForecastIsFresh({
+      inputEndAt,
+      targetTimestamps: targets,
+      latestFinalCandleCloseTime: START + 60 * 60_000,
+    })).toBe(false);
+    expect(cryptoModelForecastIsFresh({
+      inputEndAt,
+      targetTimestamps: [new Date(START).toISOString()],
+      latestFinalCandleCloseTime: START,
+    })).toBe(false);
+  });
+
+  it("does not republish a successful price path after a later failure opens the circuit", async () => {
+    const clock = new ScheduledClock();
+    let invocation = 0;
+    const client: CryptoAiLaneClient = {
+      request: vi.fn(async (request: AiForecastRequest) => {
+        invocation += 1;
+        if (invocation > 1) throw new Error("model_call_failed");
+        return responseWithDisplayPath(response(
+          "kronos_base",
+          request,
+          Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+          flatReturns,
+        ));
+      }),
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...riskPrelude(START + 60_010, 101),
+      {
+        at: START + 60_100,
+        event: nextFinalKline(START, START + 60_100),
+      },
+      ...riskPrelude(START + 120_010, 102),
+      {
+        at: START + 120_100,
+        event: nextFinalKline(START + 60_000, START + 120_100),
+      },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      circuitBreaker: {
+        failureThreshold: 1,
+        cooldownMs: 3_600_000,
+      },
+    });
+
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 3 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+    const terminal = (result.result as {
+      snapshot: CryptoPaperRuntimeSnapshot;
+    }).snapshot;
+
+    expect(client.request).toHaveBeenCalledTimes(2);
+    expect(terminal.modelForecasts).toEqual([
+      expect.objectContaining({
+        lane: "kronos_base",
+        status: "unavailable",
+        points: [],
+        unavailableReason: "model_forecast_stale",
+      }),
+    ]);
+    expect(terminal.selected[0]).toMatchObject({
+      symbol: "BTCUSDT",
+      currentPrice: 102,
+      observedAt: new Date(START + 120_020).toISOString(),
+    });
+    expect(terminal.selected[0]).not.toHaveProperty("upProbability");
+    expect(terminal.selected[0]).not.toHaveProperty("predictedMedianReturn");
+    expect(terminal.selected[0]).not.toHaveProperty("inputEndAt");
+    expect(terminal.selected[0]).not.toHaveProperty("generatedAt");
+    expect(terminal.selected[0]).not.toHaveProperty("model");
+    expect(artifact(result, "simulation-decisions").decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "unavailable",
+          reason: "model_call_failed",
+        }),
+        expect.objectContaining({
+          status: "unavailable",
+          reason: "worker_circuit_open",
+        }),
+      ]),
+    );
+  });
+
+  it("fails a display path closed when a model target is not the requested timestamp", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "kronos_base",
+      transform: (raw) => responseWithDisplayPath(raw, {
+        shiftedTargetHorizon: 15,
+      }),
+    });
+    const snapshot = (result.result as {
+      snapshot: CryptoPaperRuntimeSnapshot;
+    }).snapshot;
+
+    expect(snapshot.modelForecasts).toEqual([
+      expect.objectContaining({
+        lane: "kronos_base",
+        status: "unavailable",
+        points: [],
+        unavailableReason: "model_price_quantiles_invalid",
+      }),
+    ]);
   });
 
   it("preserves complete FinCast mixed-FP16 validation provenance", async () => {
@@ -1578,6 +2191,93 @@ describe("CryptoPaperRuntime", () => {
     ]);
   });
 
+  it("applies a nonzero exit-tax override to terminal paper fills and artifacts", async () => {
+    const clock = new ScheduledClock();
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      {
+        at: START + 60_000,
+        event: {
+          ...aggTrade(START + 60_002, 102),
+          receivedAt: START + 500,
+        },
+      },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const baseRequest = simulationRequest();
+    const result = await runtime.run({
+      request: {
+        ...baseRequest,
+        costs: {
+          ...baseRequest.costs,
+          taxBpsOnExit: 10,
+        },
+      },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    const fills = ledger.fills as UnknownRecord[];
+    const opened = fills[0]!;
+    const closed = fills[1]!;
+    const tradeRows = trades.trades as UnknownRecord[];
+    const closingRow = tradeRows[1]!;
+    const expectedExitTax = (closed.notional as number) * 10 / 10_000;
+
+    expect(fills).toHaveLength(2);
+    expect(opened.exitTax).toBe(0);
+    expect(closed).toMatchObject({
+      action: "reduce",
+      reduceOnly: true,
+      reason: "terminal_settlement",
+    });
+    expect(closed.exitTax).toBeCloseTo(expectedExitTax, 12);
+    expect(closed.fee).toBeCloseTo(
+      (closed.notional as number) * 14 / 10_000,
+      12,
+    );
+    expect(ledger.exitTaxes).toBeCloseTo(expectedExitTax, 12);
+    expect(ledger.fees).toBeCloseTo(
+      (opened.fee as number) + (closed.fee as number),
+      12,
+    );
+    expect(ledger.walletBalance).toBeCloseTo(
+      10_000
+      + (closed.realizedPnl as number)
+      + (ledger.funding as number)
+      - (ledger.fees as number),
+      12,
+    );
+    expect(closingRow).toMatchObject({
+      exitTax: expect.any(Number),
+      commission: expect.any(Number),
+    });
+    expect(closingRow.exitTax).toBeCloseTo(expectedExitTax, 12);
+    expect(closingRow.cost).toBeCloseTo(
+      (closed.fee as number)
+      + (closed.slippageCost as number)
+      - (closed.funding as number),
+      12,
+    );
+    const settlement = trades.terminalSettlement as UnknownRecord;
+    const settlementLane = (settlement.lanes as UnknownRecord[])[0]!;
+    expect(settlementLane.exitTax).toBeCloseTo(expectedExitTax, 12);
+  });
+
   it("drains pre-expiry ingress before the ordered terminal boundary", async () => {
     const clock = new ScheduledClock();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -2032,6 +2732,79 @@ describe("CryptoPaperRuntime", () => {
       newEntriesBlocked: true,
       dailyLossLimitRatio: 0.03,
     });
+  });
+
+  it("closes a child sleeve reduce-only when its shared portfolio gate crosses", async () => {
+    const clock = new ScheduledClock();
+    const wideSpreadCandidate = { ...candidate, spreadBps: 9 };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      { at: START + 300, event: markPrice(START + 300, 95) },
+      { at: START + 400, event: aggTrade(START + 400, 94) },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const sharedGate = new PortfolioDailyLossGate({
+      lanes: ["kronos_base"],
+      symbols: ["BTCUSDT", "ETHUSDT"],
+      perSymbolInitialCash: 5_000,
+      dailyLossLimitRate: 0.01,
+      observedAt: START,
+    });
+    const childRequest: SimulationStartRequest = {
+      ...simulationRequest(),
+      initialCash: 5_000,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      riskLimits: {
+        riskPerTradeRate: 0.005,
+        dailyLossLimitRate: 0.01,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 0.2,
+        liquidationBufferMultiple: 2,
+      },
+    };
+    const runSingle = (
+      runtime as unknown as {
+        runSingle: (input: {
+          request: SimulationStartRequest;
+          snapshot: BinanceScannerSnapshot;
+          selected: BinanceScannerCandidate;
+          context: RunTaskContext;
+          portfolioDailyLossGate: PortfolioDailyLossGate;
+        }) => ReturnType<CryptoPaperRuntime["run"]>;
+      }
+    ).runSingle.bind(runtime);
+
+    const result = await runSingle({
+      request: childRequest,
+      snapshot: scannerSnapshot,
+      selected: wideSpreadCandidate,
+      context: context().value,
+      portfolioDailyLossGate: sharedGate,
+    });
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    const fills = ledger.fills as Array<UnknownRecord>;
+    expect(sharedGate.state("kronos_base").blocked).toBe(true);
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reduceOnly: true,
+      reason: "daily_loss_gate",
+      executedAt: START + 400,
+    });
+    expect(ledger.positions).toEqual([]);
   });
 
   it("does not reopen from a forecast that predates a protective close", async () => {

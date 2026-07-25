@@ -1,4 +1,7 @@
 export const AI_SIMULATION_KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
+export const AI_SIMULATION_FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
+
+export type AiSimulationForecastLane = "kronos_base" | "fincast";
 
 export type AiSimulationKronosForecastPoint = {
   horizonMinutes: number;
@@ -18,6 +21,10 @@ export type AiSimulationKronosForecast = {
   modelRevision?: string;
   points: AiSimulationKronosForecastPoint[];
   unavailableReason?: string;
+};
+
+export type AiSimulationModelForecast = AiSimulationKronosForecast & {
+  lane: AiSimulationForecastLane;
 };
 
 export type AiSimulationKronosActualMark = {
@@ -215,9 +222,12 @@ function normalizePoint(
   const horizonMinutes = finite(first(source, "horizonMinutes", "horizon_minutes"));
   const targetTimestamp = timestamp(first(source, "targetTimestamp", "target_timestamp"));
   const prices = first(source, "priceQuantiles", "price_quantiles");
-  const q10Price = directQuantile(prices, 0.1);
-  const medianPrice = directQuantile(prices, 0.5);
-  const q90Price = directQuantile(prices, 0.9);
+  const q10Price = directQuantile(prices, 0.1)
+    ?? finite(first(source, "q10Price", "q10_price"));
+  const medianPrice = directQuantile(prices, 0.5)
+    ?? finite(first(source, "medianPrice", "median_price", "q50Price", "q50_price"));
+  const q90Price = directQuantile(prices, 0.9)
+    ?? finite(first(source, "q90Price", "q90_price"));
   if (
     horizonMinutes === undefined
     || !Number.isSafeInteger(horizonMinutes)
@@ -381,6 +391,119 @@ export function mergeLatestKronosForecasts(
     }
   }
   return [...selected.values()].sort((left, right) => left.signalSymbol.localeCompare(right.signalSymbol));
+}
+
+function directForecastLane(value: unknown, modelId: string | undefined): AiSimulationForecastLane | undefined {
+  const normalized = text(value)?.toLowerCase().replaceAll("-", "_");
+  const explicitLane = normalized === "kronos" || normalized === "kronos_base"
+    ? "kronos_base"
+    : normalized === "fincast"
+      ? "fincast"
+      : undefined;
+  let modelLane: AiSimulationForecastLane | undefined;
+  if (modelId?.toLowerCase() === AI_SIMULATION_KRONOS_BASE_MODEL_ID.toLowerCase()) {
+    modelLane = "kronos_base";
+  }
+  if (modelId?.toLowerCase() === AI_SIMULATION_FINCAST_MODEL_ID.toLowerCase()) {
+    modelLane = "fincast";
+  }
+  // A known model identity must never be relabelled as the other independent
+  // lane. Unknown/versioned model IDs still require an explicit lane and are
+  // retained for provenance instead of being guessed from their name.
+  if (explicitLane && modelLane && explicitLane !== modelLane) return undefined;
+  return explicitLane ?? modelLane;
+}
+
+function normalizeDirectModelForecast(value: unknown): AiSimulationModelForecast | undefined {
+  const source = record(value);
+  const signalSymbol = symbol(first(source, "signalSymbol", "signal_symbol", "symbol"));
+  const modelId = text(first(source, "modelId", "model_id"));
+  const lane = directForecastLane(first(source, "lane", "modelLane", "model_lane"), modelId);
+  const origin = timestamp(first(source, "origin", "inputEndAt", "input_end_at"));
+  const generatedAt = timestamp(first(source, "generatedAt", "generated_at"));
+  const rawStatus = text(source.status)?.toLowerCase();
+  const rawPoints = first(source, "points", "horizons");
+  if (!signalSymbol || !lane || (rawStatus !== "available" && rawStatus !== "unavailable")) {
+    return undefined;
+  }
+  const points = (Array.isArray(rawPoints) ? rawPoints : [])
+    .map((point) => normalizePoint(point, origin))
+    .filter((point): point is AiSimulationKronosForecastPoint => point !== undefined)
+    .sort((left, right) => (
+      Date.parse(left.targetTimestamp) - Date.parse(right.targetTimestamp)
+      || left.horizonMinutes - right.horizonMinutes
+    ))
+    .filter((point, index, values) => (
+      !index
+      || point.targetTimestamp !== values[index - 1]?.targetTimestamp
+      || point.horizonMinutes !== values[index - 1]?.horizonMinutes
+    ));
+  const available = rawStatus === "available" && Boolean(origin) && points.length > 0;
+  return {
+    lane,
+    signalSymbol,
+    status: available ? "available" : "unavailable",
+    ...(origin ? { origin } : {}),
+    ...(generatedAt ? { generatedAt } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(text(first(source, "modelRevision", "model_revision", "revision"))
+      ? { modelRevision: text(first(source, "modelRevision", "model_revision", "revision")) }
+      : {}),
+    points: available ? points : [],
+    ...(!available ? {
+      unavailableReason: text(first(source, "unavailableReason", "unavailable_reason", "reason"))
+        ?? "모델이 표시 가능한 가격 분위수 경로를 반환하지 않았습니다.",
+    } : {}),
+  };
+}
+
+/**
+ * Normalizes the explicit v7 per-lane forecast projection. Legacy stock
+ * artifacts continue to flow through selectLatestKronosForecasts.
+ */
+export function normalizeAiSimulationModelForecasts(
+  value: unknown,
+): AiSimulationModelForecast[] {
+  return mergeLatestModelForecasts(
+    (Array.isArray(value) ? value : [])
+      .map(normalizeDirectModelForecast)
+      .filter((forecast): forecast is AiSimulationModelForecast => forecast !== undefined),
+  );
+}
+
+export function mergeLatestModelForecasts(
+  ...groups: readonly AiSimulationModelForecast[][]
+): AiSimulationModelForecast[] {
+  const selected = new Map<string, AiSimulationModelForecast>();
+  for (const forecast of groups.flatMap((group) => group)) {
+    const key = `${forecast.signalSymbol}:${forecast.lane}`;
+    const current = selected.get(key);
+    const forecastOrigin = forecastTimestamp(forecast);
+    const currentOrigin = current ? forecastTimestamp(current) : Number.NEGATIVE_INFINITY;
+    const forecastGenerated = forecast.generatedAt
+      ? Date.parse(forecast.generatedAt)
+      : Number.NEGATIVE_INFINITY;
+    const currentGenerated = current?.generatedAt
+      ? Date.parse(current.generatedAt)
+      : Number.NEGATIVE_INFINITY;
+    if (
+      !current
+      || forecastOrigin > currentOrigin
+      || (forecastOrigin === currentOrigin && forecastGenerated > currentGenerated)
+      || (
+        forecastOrigin === currentOrigin
+        && forecastGenerated === currentGenerated
+        && forecast.status === "available"
+        && current.status !== "available"
+      )
+    ) {
+      selected.set(key, forecast);
+    }
+  }
+  return [...selected.values()].sort((left, right) => (
+    left.signalSymbol.localeCompare(right.signalSymbol)
+    || left.lane.localeCompare(right.lane)
+  ));
 }
 
 /**
