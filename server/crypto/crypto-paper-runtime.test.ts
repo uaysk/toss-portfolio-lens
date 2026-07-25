@@ -17,6 +17,7 @@ import type {
 } from "./contracts.js";
 import { FuturesPaperLedger } from "./futures-paper-ledger.js";
 import {
+  canonicalCryptoModelInputDigest,
   CryptoPaperRuntime,
   CryptoPaperRuntimeError,
   monotonicCryptoRiskClock,
@@ -327,24 +328,55 @@ function riskPrelude(at = START + 10, price = 100): Array<{ at: number; event: B
 
 const longReturns = [-0.01, -0.005, 0.005, 0.02, 0.04, 0.06, 0.08];
 const shortReturns = [-0.08, -0.06, -0.04, -0.02, -0.005, 0.005, 0.01];
+const flatReturns = [0, 0, 0, 0, 0, 0, 0];
+const kronosModelRevision = "2b554741eca47781b64468546e77fef3e85130e6";
+const kronosSourceRevision = "67b630e67f6a18c9e9be918d9b4337c960db1e9a";
+const kronosTokenizerRevision = "0e0117387f39004a9016484a186a908917e22426";
+const fincastModelRevision = "2d7d90b159db8961d27c2cf165d51195902ef92b";
+const fincastSourceRevision = "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4";
 
 function response(
   lane: SimulationModelLane,
   request: AiForecastRequest,
   generatedAt: number,
   returns: readonly number[],
+  modelOverrides: UnknownRecord = {},
 ) {
+  const model = {
+    model_id: lane === "kronos_base" ? "NeoQuasar/Kronos-base" : "Vincent05R/FinCast",
+    model_revision: lane === "kronos_base" ? kronosModelRevision : fincastModelRevision,
+    source_revision: lane === "kronos_base" ? kronosSourceRevision : fincastSourceRevision,
+    loader_version: lane === "kronos_base"
+      ? "kronos-source-67b630e"
+      : "fincast-source-488b19d",
+    license: lane === "kronos_base" ? "MIT" : "Apache-2.0",
+    tokenizer_id: lane === "kronos_base" ? "NeoQuasar/Kronos-Tokenizer-base" : null,
+    tokenizer_revision: lane === "kronos_base" ? kronosTokenizerRevision : null,
+    loaded: true,
+    device: "cuda",
+    device_name: "Tesla P40",
+    cuda_capability: "6.1",
+    attention_backend: "math",
+    dtype: lane === "kronos_base" ? "float32" : "mixed_float16",
+    ...(lane === "kronos_base"
+      ? { peak_vram_mb: 6_000 }
+      : {
+        precision_validation: "passed",
+        peak_vram_bytes: 4_000 * 1024 * 1024,
+        peak_vram_measurement: "cuda_allocated_or_reserved",
+        memory_status: "ok",
+        quantile_tail_policy: "tail_clamped_q10_q90",
+        precision_failure_reasons: [],
+      }),
+    ...modelOverrides,
+  };
+  const modelInputBars = request.series[0]!.bars.slice(-512);
   return {
     request_id: request.request_id,
     mode: "forecast",
     status: "available",
     generated_at: new Date(generatedAt).toISOString(),
-    model: {
-      model_id: lane === "kronos_base" ? "NeoQuasar/Kronos-base" : "Vincent05R/FinCast",
-      model_revision: lane === "kronos_base" ? "k-rev" : "f-rev",
-      dtype: lane === "kronos_base" ? "float32" : "mixed_float16",
-      peak_vram_mb: lane === "kronos_base" ? 6_000 : 4_000,
-    },
+    model: structuredClone(model),
     latency_ms: 10,
     model_runs: [{
       role: lane,
@@ -352,12 +384,15 @@ function response(
         ? "NeoQuasar/Kronos-base"
         : "Vincent05R/FinCast",
       latency_ms: 10,
-      model: {
-        model_id: lane === "kronos_base" ? "NeoQuasar/Kronos-base" : "Vincent05R/FinCast",
-        model_revision: lane === "kronos_base" ? "k-rev" : "f-rev",
-        dtype: lane === "kronos_base" ? "float32" : "mixed_float16",
-        peak_vram_mb: lane === "kronos_base" ? 6_000 : 4_000,
-      },
+      model: structuredClone(model),
+      input_origins: [{
+        instrument_key: request.series[0]!.instrument_key,
+        context_start_at: modelInputBars[0]!.timestamp,
+        input_end_at: request.series[0]!.input_end_at,
+        bar_count: modelInputBars.length,
+        input_digest: canonicalCryptoModelInputDigest(modelInputBars),
+      }],
+      input_end_aligned: true,
     }],
     series: [{
       instrument_key: request.series[0]!.instrument_key,
@@ -414,7 +449,91 @@ function artifact(
 
 type UnknownRecord = Record<string, unknown>;
 
+async function runProvenanceSimulation(options: {
+  lane: SimulationModelLane;
+  attempts?: 1 | 2;
+  modelOverrides?: (attempt: number) => UnknownRecord;
+  transform?: (
+    raw: ReturnType<typeof response>,
+    attempt: number,
+  ) => unknown;
+}) {
+  const clock = new ScheduledClock();
+  const attempts = options.attempts ?? 1;
+  let invocation = 0;
+  const client: CryptoAiLaneClient = {
+    request: vi.fn(async (request: AiForecastRequest) => {
+      const attempt = invocation;
+      invocation += 1;
+      const raw = response(
+        options.lane,
+        request,
+        Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+        flatReturns,
+        options.modelOverrides?.(attempt),
+      );
+      return options.transform?.(raw, attempt) ?? raw;
+    }),
+  };
+  const streams = new ScheduledStreams(clock, [
+    ...riskPrelude(),
+    { at: START + 100, event: finalKline(START + 100, true) },
+    ...(attempts === 2
+      ? [
+        ...riskPrelude(START + 60_010, 101),
+        {
+          at: START + 60_100,
+          event: nextFinalKline(START, START + 60_100),
+        },
+      ]
+      : []),
+  ]);
+  const runtime = new CryptoPaperRuntime({
+    rest: rest(),
+    streams,
+    laneClients: { [options.lane]: client },
+    instrumentRules: rules,
+    clock,
+    contextBars: 64,
+  });
+  const result = await runtime.run({
+    request: {
+      ...simulationRequest([options.lane]),
+      durationMinutes: attempts,
+    },
+    snapshot: scannerSnapshot,
+    selected: candidate,
+    context: context().value,
+  });
+  return { result, client };
+}
+
 describe("CryptoPaperRuntime", () => {
+  it("matches the Python worker canonical input digest byte-for-byte", () => {
+    expect(canonicalCryptoModelInputDigest([
+      {
+        timestamp: "2026-07-25T00:00:59.999Z",
+        open: 100,
+        high: 100.5,
+        low: 99.25,
+        close: 100.125,
+        volume: 12.5,
+        amount: 1_251.5625,
+        complete: true,
+      },
+      {
+        timestamp: "2026-07-25T00:01:59.999Z",
+        open: 0.1,
+        high: 0.3,
+        low: 0.05,
+        close: 0.2,
+        volume: 0,
+        amount: null,
+        complete: true,
+      },
+    ])).toBe("5c040b70809bc0c525e6f438de98b4fe66341dc7a55953e2b688b95d136ec5d0");
+  });
+
   it("never rewinds the daily-risk clock for a late prior-day event after UTC rollover", () => {
     const afterRollover = Date.parse("2026-07-26T00:00:00.250Z");
     const latePriorDay = Date.parse("2026-07-25T23:59:59.900Z");
@@ -424,6 +543,345 @@ describe("CryptoPaperRuntime", () => {
       latePriorDay,
     )).toBe(afterRollover + 100);
   });
+
+  it("normalizes omitted Kronos precision provenance to safe native defaults", async () => {
+    const { result } = await runProvenanceSimulation({ lane: "kronos_base" });
+    const comparisonLane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    const comparisonProvenance = comparisonLane.provenance as UnknownRecord;
+    expect(comparisonProvenance).toMatchObject({
+      modelId: "NeoQuasar/Kronos-base",
+      modelRevision: kronosModelRevision,
+      sourceRevision: kronosSourceRevision,
+      loaderVersion: "kronos-source-67b630e",
+      license: "MIT",
+      tokenizerId: "NeoQuasar/Kronos-Tokenizer-base",
+      tokenizerRevision: kronosTokenizerRevision,
+      loaded: true,
+      device: "cuda",
+      deviceName: "Tesla P40",
+      cudaCapability: "6.1",
+      attentionBackend: "math",
+      precision: "fp32",
+      precisionValidation: "not_required",
+      memoryStatus: "ok",
+      quantileTailPolicy: "native",
+      precisionFailureReasons: [],
+      peakVramMb: 6_000,
+    });
+    const storedLane = (
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]!;
+    expect(storedLane).toMatchObject({
+      ...comparisonProvenance,
+      attempts: 1,
+      successes: 1,
+      errors: [],
+    });
+  });
+
+  it("preserves complete FinCast mixed-FP16 validation provenance", async () => {
+    const { result } = await runProvenanceSimulation({ lane: "fincast" });
+    const comparisonLane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    expect(comparisonLane).toMatchObject({
+      id: "fincast",
+      precision: "fp16",
+      provenance: {
+        modelId: "Vincent05R/FinCast",
+        modelRevision: fincastModelRevision,
+        sourceRevision: fincastSourceRevision,
+        loaderVersion: "fincast-source-488b19d",
+        license: "Apache-2.0",
+        tokenizerId: null,
+        tokenizerRevision: null,
+        loaded: true,
+        device: "cuda",
+        deviceName: "Tesla P40",
+        cudaCapability: "6.1",
+        attentionBackend: "math",
+        precision: "fp16",
+        precisionValidation: "passed",
+        memoryStatus: "ok",
+        quantileTailPolicy: "tail_clamped_q10_q90",
+        precisionFailureReasons: [],
+        peakVramBytes: 4_000 * 1024 * 1024,
+        peakVramMeasurement: "cuda_allocated_or_reserved",
+        peakVramMb: 4_000,
+      },
+    });
+    const storedLane = (
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]!;
+    expect(storedLane).toMatchObject({
+      precisionValidation: "passed",
+      memoryStatus: "ok",
+      quantileTailPolicy: "tail_clamped_q10_q90",
+      precisionFailureReasons: [],
+      peakVramBytes: 4_000 * 1024 * 1024,
+      peakVramMeasurement: "cuda_allocated_or_reserved",
+    });
+  });
+
+  it("preserves FinCast FP32 fallback qualification and bounded failure reasons", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      modelOverrides: () => ({
+        dtype: "float32",
+        precision_validation: "fallback_fp32",
+        precision_failure_reasons: [
+          "q50_p95_error_above_15pct_fp32_iqr",
+          "peak_vram_reduction_below_25pct",
+        ],
+      }),
+    });
+    const comparisonLane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    expect(comparisonLane).toMatchObject({
+      precision: "fp32",
+      provenance: {
+        precision: "fp32",
+        precisionValidation: "fallback_fp32",
+        memoryStatus: "ok",
+        quantileTailPolicy: "tail_clamped_q10_q90",
+        precisionFailureReasons: [
+          "q50_p95_error_above_15pct_fp32_iqr",
+          "peak_vram_reduction_below_25pct",
+        ],
+      },
+    });
+    expect((
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]).toMatchObject({
+      precisionValidation: "fallback_fp32",
+      precisionFailureReasons: [
+        "q50_p95_error_above_15pct_fp32_iqr",
+        "peak_vram_reduction_below_25pct",
+      ],
+    });
+  });
+
+  it.each([
+    ["validated precision profile", {
+      dtype: "float32",
+      precision_validation: "fallback_fp32",
+      precision_failure_reasons: ["peak_vram_reduction_below_25pct"],
+    }],
+    ["validated peak VRAM", {
+      peak_vram_bytes: 3_900 * 1024 * 1024,
+    }],
+  ] as const)(
+    "fails a successful lane closed when its %s drifts",
+    async (_label, driftedModel) => {
+      const { result, client } = await runProvenanceSimulation({
+        lane: "fincast",
+        attempts: 2,
+        modelOverrides: (attempt) => attempt === 0 ? {} : driftedModel,
+      });
+      expect(client.request).toHaveBeenCalledTimes(2);
+      const comparisonLane = (
+        artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+      )[0]!;
+      expect(comparisonLane).toMatchObject({
+        status: "partial",
+        unavailableReason: "model_provenance_inconsistent",
+        provenance: {
+          modelRevision: fincastModelRevision,
+          precision: "fp16",
+          precisionValidation: "passed",
+        },
+      });
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        modelRevision: fincastModelRevision,
+        precision: "fp16",
+        precisionValidation: "passed",
+        attempts: 2,
+        successes: 1,
+        errors: ["model_provenance_inconsistent"],
+      });
+    },
+  );
+
+  it.each([
+    ["model_id", "/tmp/private-model/id", "model_identity_mismatch"],
+    ["model_revision", "/tmp/private-model/revision", "model_provenance_invalid"],
+    ["source_revision", "/tmp/private-model/source", "model_provenance_invalid"],
+    ["loader_version", "/tmp/private-model/loader", "model_provenance_invalid"],
+    ["license", "/tmp/private-model/license", "model_provenance_invalid"],
+  ] as const)(
+    "rejects unpinned %s without persisting the supplied value",
+    async (field, unsafeValue, expectedError) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "fincast",
+        modelOverrides: () => ({ [field]: unsafeValue }),
+      });
+      const serialized = JSON.stringify(result.artifacts);
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: [expectedError],
+      });
+      expect(serialized).not.toContain(unsafeValue);
+    },
+  );
+
+  it.each([
+    ["tokenizer_id", "/tmp/private-tokenizer/id"],
+    ["tokenizer_revision", "/tmp/private-tokenizer/revision"],
+  ] as const)(
+    "requires the pinned Kronos %s and bounds the persisted error",
+    async (field, unsafeValue) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "kronos_base",
+        modelOverrides: () => ({ [field]: unsafeValue }),
+      });
+      const serialized = JSON.stringify(result.artifacts);
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: ["model_tokenizer_provenance_invalid"],
+      });
+      expect(serialized).not.toContain(unsafeValue);
+    },
+  );
+
+  it.each([
+    ["loaded", false],
+    ["device", "cpu"],
+    ["device_name", "/tmp/private-device"],
+    ["cuda_capability", "7.0"],
+    ["attention_backend", "flash"],
+  ] as const)(
+    "requires safe loaded P40 CUDA math runtime provenance when %s is invalid",
+    async (field, unsafeValue) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "fincast",
+        modelOverrides: () => ({ [field]: unsafeValue }),
+      });
+      const serialized = JSON.stringify(result.artifacts);
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: ["model_runtime_provenance_invalid"],
+      });
+      if (typeof unsafeValue === "string" && unsafeValue.startsWith("/tmp/")) {
+        expect(serialized).not.toContain(unsafeValue);
+      }
+    },
+  );
+
+  it("rejects pinned provenance drift before it can replace prior lane provenance", async () => {
+    const unsafeRevision = "/tmp/private-model/drifted-revision";
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      attempts: 2,
+      modelOverrides: (attempt) => attempt === 0
+        ? {}
+        : { model_revision: unsafeRevision },
+    });
+    expect((
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]).toMatchObject({
+      modelRevision: fincastModelRevision,
+      attempts: 2,
+      successes: 1,
+      errors: ["model_provenance_invalid"],
+    });
+    expect(JSON.stringify(result.artifacts)).not.toContain(unsafeRevision);
+  });
+
+  it.each([
+    ["precision_validation", "model_precision_validation_invalid"],
+    ["memory_status", "model_memory_status_invalid"],
+    ["quantile_tail_policy", "model_quantile_tail_policy_invalid"],
+    ["precision_failure_reasons", "model_precision_failure_reasons_invalid"],
+    ["peak_vram_bytes", "model_peak_vram_invalid"],
+  ] as const)(
+    "rejects a FinCast response that omits mandatory %s provenance",
+    async (field, expectedError) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "fincast",
+        transform: (raw) => {
+          delete (raw.model as UnknownRecord)[field];
+          const modelRuns = raw.model_runs as Array<UnknownRecord>;
+          delete (modelRuns[0]!.model as UnknownRecord)[field];
+          return raw;
+        },
+      });
+      const comparisonLane = (
+        artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+      )[0]!;
+      expect(comparisonLane).toMatchObject({
+        status: "unavailable",
+        unavailableReason: expectedError,
+      });
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: [expectedError],
+      });
+    },
+  );
+
+  it("rejects path-like FinCast precision failure details", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      modelOverrides: () => ({
+        dtype: "float32",
+        precision_validation: "fallback_fp32",
+        precision_failure_reasons: ["/tmp/private-model/checkpoint"],
+      }),
+    });
+    const storedLane = (
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]!;
+    expect(storedLane).toMatchObject({
+      attempts: 1,
+      successes: 0,
+      errors: ["model_precision_failure_reasons_invalid"],
+    });
+    expect(JSON.stringify(storedLane)).not.toContain("/tmp/private-model");
+  });
+
+  it.each([
+    ["context_start_at", "2026-01-01T00:00:00.000Z"],
+    ["input_end_at", "2026-07-25T00:09:59.999001Z"],
+    ["bar_count", 63],
+    ["input_digest", "b".repeat(64)],
+  ] as const)(
+    "rejects model-run input origin evidence when %s does not match the sent bars",
+    async (field, driftedValue) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "fincast",
+        transform: (raw) => {
+          const modelRuns = raw.model_runs as Array<UnknownRecord>;
+          const origins = modelRuns[0]!.input_origins as Array<UnknownRecord>;
+          origins[0]![field] = driftedValue;
+          return raw;
+        },
+      });
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: ["model_input_origin_mismatch"],
+      });
+    },
+  );
 
   it("lets only a final kline trigger inference and fills on the first strictly later eligible event", async () => {
     const clock = new ScheduledClock();

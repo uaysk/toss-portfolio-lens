@@ -1,0 +1,20 @@
+services:
+  fincast-worker:
+    environment:
+      AI_WEBSOCKET_HOST: 0.0.0.0
+      AI_WEBSOCKET_PORT: "8766"
+      AI_WEBSOCKET_GENERATE_AUTH_TOKEN: "false"
+    ports:
+      - name: fincast-ai-websocket
+        target: 8766
+        published: "${AI_FINCAST_REMOTE_PORT:-18766}"
+        host_ip: ${AI_FINCAST_REMOTE_BIND_ADDRESS:-${AI_REMOTE_BIND_ADDRESS:?set AI_REMOTE_BIND_ADDRESS to the GPU server private LAN address}}
+        protocol: tcp
+    volumes:
+      - ${AI_FINCAST_MODEL_CACHE_SOURCE:?set AI_FINCAST_MODEL_CACHE_SOURCE to an absolute offline model cache directory}:/models:ro
+      - ${AI_FINCAST_AUTH_SECRET_SOURCE:?set AI_FINCAST_AUTH_SECRET_SOURCE to an absolute FinCast token directory}:/app/fincast-auth:ro
+      - ${AI_FINCAST_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
+
+networks:
+  ai_internal:
+    internal: false

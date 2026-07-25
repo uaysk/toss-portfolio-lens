@@ -8,4 +8,6 @@ services:
       AI_FINCAST_COMPUTE_URL: ${AI_FINCAST_COMPUTE_URL:-}
       AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: ${AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS:-false}
   ai-worker:
-    profiles: ["local-ai-disabled"]
+    profiles: !override ["local-ai-disabled"]
+  fincast-worker:
+    profiles: !override ["local-ai-disabled"]

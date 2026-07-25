@@ -16,7 +16,7 @@ import sys
 import uuid
 
 
-SCHEMA_VERSION = "scalping-ai-model-manifest/v1"
+SCHEMA_VERSION = "scalping-ai-model-manifest/v2"
 REQUIRED_FILES = ("config.json", "model.safetensors")
 
 

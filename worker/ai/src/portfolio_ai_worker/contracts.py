@@ -14,6 +14,7 @@ FIXED_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 FORECAST_STEPS = max(FIXED_HORIZONS)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
+FINCAST_MODEL_ID = "Vincent05R/FinCast"
 
 
 class StrictModel(BaseModel):
@@ -286,9 +287,15 @@ class ModelProvenance(StrictModel):
     device: Literal["cuda", "cpu", "unavailable"]
     device_name: str | None = Field(default=None, min_length=1, max_length=256)
     cuda_capability: str | None = Field(default=None, pattern=r"^\d+\.\d+$", max_length=16)
-    dtype: Literal["float32"]
+    dtype: Literal["float32", "mixed_float16"]
     attention_backend: Literal["math", "unavailable"]
     loaded: bool
+    precision_validation: Literal["not_required", "passed", "fallback_fp32", "unavailable"] = "not_required"
+    peak_vram_bytes: int | None = Field(default=None, ge=0)
+    peak_vram_measurement: Literal["cuda_allocated_or_reserved"] | None = None
+    memory_status: Literal["ok", "memory_pressure", "unavailable"] = "unavailable"
+    quantile_tail_policy: Literal["native", "tail_clamped_q10_q90", "unavailable"] = "native"
+    precision_failure_reasons: tuple[str, ...] = ()
     fallback_from: str | None = Field(default=None, min_length=1, max_length=256)
     fallback_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
@@ -303,6 +310,14 @@ class ModelProvenance(StrictModel):
             raise ValueError("CUDA device provenance is valid only for a loaded CUDA model")
         if (self.device_name is None) != (self.cuda_capability is None):
             raise ValueError("CUDA device name and capability must be recorded together")
+        if self.dtype == "mixed_float16" and self.precision_validation != "passed":
+            raise ValueError("mixed_float16 provenance requires a passed precision validation")
+        if self.peak_vram_bytes is not None and not self.loaded:
+            raise ValueError("peak VRAM is valid only for a loaded model")
+        if (self.peak_vram_bytes is None) != (self.peak_vram_measurement is None):
+            raise ValueError("peak VRAM value and measurement basis must be recorded together")
+        if any(not reason or len(reason) > 300 for reason in self.precision_failure_reasons):
+            raise ValueError("precision failure reasons must contain 1~300 characters")
         return self
 
 
@@ -425,8 +440,8 @@ class ModelRunInputOrigin(StrictModel):
 
 
 class ModelRun(StrictModel):
-    role: Literal["kronos_base"]
-    expected_model_id: Literal["NeoQuasar/Kronos-base"]
+    role: Literal["kronos_base", "fincast"]
+    expected_model_id: Literal["NeoQuasar/Kronos-base", "Vincent05R/FinCast"]
     status: Literal["available", "partial", "unavailable"]
     model: ModelProvenance
     generated_at: datetime
@@ -445,14 +460,18 @@ class ModelRun(StrictModel):
 
     @model_validator(mode="after")
     def validate_run(self) -> "ModelRun":
-        if self.expected_model_id != KRONOS_BASE_MODEL_ID:
+        expected_by_role = {
+            "kronos_base": KRONOS_BASE_MODEL_ID,
+            "fincast": FINCAST_MODEL_ID,
+        }
+        if self.expected_model_id != expected_by_role[self.role]:
             raise ValueError("model run role and expected model ID do not match")
         if (
             self.model.model_id != self.expected_model_id
             or self.model.fallback_from is not None
             or self.model.fallback_reason is not None
         ):
-            raise ValueError("Kronos-base model runs cannot contain fallback provenance")
+            raise ValueError("independent model runs cannot contain fallback provenance")
 
         origins = tuple((item.instrument_key, item.input_end_at) for item in self.input_origins)
         results = tuple((item.instrument_key, item.input_end_at) for item in self.raw_series)
@@ -498,6 +517,8 @@ class HorizonEvaluationMetrics(StrictModel):
     horizon_minutes: Literal[5, 15, 30, 60]
     overall: MetricGroup
     quantile_coverage: tuple[QuantileValue, ...]
+    mean_pinball_loss: float | None = Field(default=None, ge=0)
+    quantile_pinball_loss: tuple[QuantileValue, ...] = ()
     up_probability_brier: float | None = Field(default=None, ge=0)
     target_stop_first_count: int = Field(ge=0)
     target_stop_first_accuracy: float | None = Field(default=None, ge=0, le=1)
@@ -679,11 +700,11 @@ class AIResponse(StrictModel):
         if self.model_runs is not None:
             if self.mode != "forecast" or self.error is not None:
                 raise ValueError("per-model runs are supported only on successful forecast responses")
-            if tuple(item.role for item in self.model_runs) != ("kronos_base",):
-                raise ValueError("model runs must contain exactly one Kronos-base result")
+            if len(self.model_runs) != 1:
+                raise ValueError("an independent worker response must contain exactly one model lane")
             primary = self.model_runs[0]
             if self.model != primary.model or self.series != primary.raw_series or self.status != primary.status:
-                raise ValueError("top-level response fields must mirror the Kronos-base model run")
+                raise ValueError("top-level response fields must mirror the independent model run")
             if any(item.generated_at > self.generated_at for item in self.model_runs):
                 raise ValueError("response generated_at cannot precede a model run")
         return self

@@ -6,16 +6,21 @@ WebSocket endpoint `/ws/scalping-ai/v1`.
 
 ## Runtime policy
 
-- Production runs only the manifest-pinned `NeoQuasar/Kronos-base` finance OHLCV model. Forecast responses contain one
-  `model_runs` item with role `kronos_base`; the top-level model, status, and series mirror that item.
+- Each process runs exactly one manifest-pinned lane: `NeoQuasar/Kronos-base` (`kronos_base`) or
+  `Vincent05R/FinCast` (`fincast`). Forecast and evaluate responses contain one independent `model_runs` item; the
+  top-level model, status, and series mirror that item.
 - Runtime startup and requests never download weights. Hub downloads and telemetry are disabled before loading.
   Missing, incomplete, or revision-mismatched cache entries return `MODEL_UNAVAILABLE`; no prediction or fallback is
   fabricated.
 - Every run records the exact context start, input end, confirmed-bar count, canonical input SHA-256 digest, pinned
   model/tokenizer/source revisions, generation time, device, and latency.
-- P40 execution uses float32 and the math scaled-dot-product-attention backend. The CUDA device name must exactly match
+- Kronos P40 execution uses float32 and the math scaled-dot-product-attention backend. The CUDA device name must exactly match
   `AI_EXPECTED_CUDA_DEVICE_NAME` (default `Tesla P40`), compute capability must match `6.1`, and the installed PyTorch
   wheel must contain a compatible Pascal cubin. Production fails closed if these checks resolve to CPU.
+- FinCast uses 512 confirmed close bars and a separately qualified mixed-FP16 safetensors artifact. Attention softmax,
+  RMSNorm, router logits, and final post-processing retain FP32 islands. Failure of any fixed 128-context numerical
+  gate selects the lossless FP32 safetensors artifact. Missing validation, an artifact SHA mismatch, or insufficient
+  NVML headroom fails closed.
 - Input bars must be complete, strictly ordered, timezone-aware OHLCV bars. The finance-specific Kronos predictor uses
   the confirmed range only and forecasts fixed 5, 15, 30, and 60 minute horizons with fixed
   5/10/25/50/75/90/95 percentiles.
@@ -40,6 +45,14 @@ kronos-base/model.safetensors
 kronos-tokenizer-base/.revision
 kronos-tokenizer-base/config.json
 kronos-tokenizer-base/model.safetensors
+fincast-source/.source-revision
+fincast-source/.source-archive-sha256
+fincast-source/src/ffm/pytorch_patched_decoder_MOE.py
+fincast-source/src/st_moe_pytorch/st_moe_pytorch.py
+fincast/.revision
+fincast/model.fp32.safetensors
+fincast/model.mixed-fp16.safetensors
+fincast/precision-validation.json
 ```
 
 Each marker must contain the exact revision from `model-manifest.json`. The image build and worker perform no model

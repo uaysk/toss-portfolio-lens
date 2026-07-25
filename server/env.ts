@@ -126,6 +126,7 @@ export type ScalpingAiConfig = {
 export type CryptoAiLaneConfig = {
   url: string;
   authTokenFile: string;
+  authTokenMustDifferFromFile?: string;
   timeoutMs: number;
   connectTimeoutMs: number;
   reconnectBaseMs: number;
@@ -589,7 +590,7 @@ function readAiTlsCa(): string | undefined {
   return value;
 }
 
-function readCryptoAiConfig(): CryptoAiConfig {
+export function readCryptoAiConfig(): CryptoAiConfig {
   const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
   const tlsCa = readAiTlsCa();
   const timeoutMs = readBoundedInteger("AI_COMPUTE_TIMEOUT_MS", 120_000, 1_000, 3_600_000);
@@ -681,10 +682,16 @@ function readCryptoAiConfig(): CryptoAiConfig {
       "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE은 Kronos와 분리된 token 절대 경로여야 합니다.",
     );
   }
+  const guardedKronos = fincast
+    ? { ...kronos, authTokenMustDifferFromFile: fincast.authTokenFile }
+    : kronos;
+  const guardedFincast = fincast
+    ? { ...fincast, authTokenMustDifferFromFile: kronos.authTokenFile }
+    : undefined;
 
   return {
-    kronos,
-    ...(fincast ? { fincast } : {}),
+    kronos: guardedKronos,
+    ...(guardedFincast ? { fincast: guardedFincast } : {}),
     sequentialDeadlineMs: readBoundedInteger(
       "AI_CRYPTO_SEQUENTIAL_DEADLINE_MS",
       240_000,

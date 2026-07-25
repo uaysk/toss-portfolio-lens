@@ -44,6 +44,10 @@ class AISettings:
     sample_count: int
     max_request_bytes: int
     max_response_bytes: int
+    model_lane: str = "kronos_base"
+    fincast_context_bars: int = 512
+    fincast_min_vram_headroom_bytes: int = 2 * 1024 * 1024 * 1024
+    fincast_nvml_device_index: int = 0
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 8765
     websocket_path: str = "/ws/scalping-ai/v1"
@@ -70,6 +74,9 @@ class AISettings:
         expected_device_name = os.getenv("AI_EXPECTED_CUDA_DEVICE_NAME", "Tesla P40").strip()
         if not expected_device_name:
             raise ValueError("AI_EXPECTED_CUDA_DEVICE_NAME cannot be empty")
+        model_lane = os.getenv("AI_MODEL_LANE", "kronos_base").strip().lower()
+        if model_lane not in {"kronos_base", "fincast"}:
+            raise ValueError("AI_MODEL_LANE must be kronos_base or fincast")
         return cls(
             model_cache_dir=Path(os.getenv("AI_MODEL_CACHE_DIR", "/models")),
             manifest_path=Path(os.getenv("AI_MODEL_MANIFEST", str(package_root / "model-manifest.json"))),
@@ -85,6 +92,12 @@ class AISettings:
             sample_count=_bounded_int("AI_KRONOS_SAMPLE_COUNT", 20, 2, 256),
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+            model_lane=model_lane,
+            fincast_context_bars=_bounded_int("AI_FINCAST_CONTEXT_BARS", 512, 512, 512),
+            fincast_min_vram_headroom_bytes=(
+                _bounded_int("AI_FINCAST_MIN_VRAM_HEADROOM_MIB", 2_048, 0, 65_536) * 1024 * 1024
+            ),
+            fincast_nvml_device_index=_bounded_int("AI_FINCAST_NVML_DEVICE_INDEX", 0, 0, 64),
             websocket_host=os.getenv("AI_WEBSOCKET_HOST", "127.0.0.1").strip(),
             websocket_port=_bounded_int("AI_WEBSOCKET_PORT", 8765, 1, 65_535),
             websocket_path=os.getenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v1").strip(),
@@ -92,7 +105,7 @@ class AISettings:
             websocket_generate_auth_token=_boolean("AI_WEBSOCKET_GENERATE_AUTH_TOKEN", False),
             websocket_max_connections=_bounded_int("AI_WEBSOCKET_MAX_CONNECTIONS", 16, 1, 1_024),
             websocket_queue_capacity=_bounded_int("AI_WEBSOCKET_QUEUE_CAPACITY", 16, 1, 10_000),
-            websocket_max_in_flight=_bounded_int("AI_WEBSOCKET_MAX_IN_FLIGHT", 4, 1, 256),
+            websocket_max_in_flight=_bounded_int("AI_WEBSOCKET_MAX_IN_FLIGHT", 1, 1, 256),
             websocket_ping_interval_seconds=_bounded_int("AI_WEBSOCKET_PING_INTERVAL_SECONDS", 20, 1, 300),
             websocket_ping_timeout_seconds=_bounded_int("AI_WEBSOCKET_PING_TIMEOUT_SECONDS", 20, 1, 300),
             websocket_close_timeout_seconds=_bounded_int("AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS", 10, 1, 300),
@@ -107,6 +120,13 @@ class AISettings:
     def validate(self) -> "AISettings":
         if self.min_context_bars > self.max_context_bars:
             raise ValueError("AI_MIN_CONTEXT_BARS cannot exceed AI_MAX_CONTEXT_BARS")
+        if self.model_lane not in {"kronos_base", "fincast"}:
+            raise ValueError("AI_MODEL_LANE must be kronos_base or fincast")
+        if self.model_lane == "fincast" and (
+            self.min_context_bars != self.fincast_context_bars
+            or self.max_context_bars != self.fincast_context_bars
+        ):
+            raise ValueError("FinCast requires AI_MIN/MAX_CONTEXT_BARS=AI_FINCAST_CONTEXT_BARS=512")
         if not self.model_cache_dir.is_absolute():
             raise ValueError("AI model cache path must be absolute")
         if not self.expected_cuda_device_name.strip():

@@ -16,6 +16,15 @@ wheels = [
 ]
 
 [[package]]
+name = "beartype"
+version = "0.20.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/99/eaf0847301a6ca2042927c83f8cc72a29c153132ce49d9a720fe121440ba/beartype-0.20.2.tar.gz", hash = "sha256:38c60c065ad99364a8c767e8a0e71ba8263d467b91414ed5dcffb7758a2e8079", size = 1410390, upload-time = "2025-03-22T04:56:03.899Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/05/536d025b3e17cf938f836665dde32e86f65ee76acd0ae14e22bda6aee274/beartype-0.20.2-py3-none-any.whl", hash = "sha256:5171a91ecf01438a59884f0cde37d2d5da2c992198b53d6ba31db3940f47ff04", size = 1161292, upload-time = "2025-03-22T04:56:01.77Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
@@ -69,6 +78,21 @@ wheels = [
 ]
 
 [[package]]
+name = "colt5-attention"
+version = "0.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "local-attention" },
+    { name = "packaging" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/1d/f8cf4255de72e826ad822c2e77d447e12c8abb9718420c86bb50e3735326/colt5_attention-0.11.1.tar.gz", hash = "sha256:7a8082efa20a86f6257ba3c76b9e4cd8a978ddc073483189accf9a7ef4cce61b", size = 20482, upload-time = "2024-09-06T14:56:13.762Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/a8/c32db57cc3352c686e6941c55bb85fc3ad41e139f9c66e0ff2dce976fca4/CoLT5_attention-0.11.1-py3-none-any.whl", hash = "sha256:90cd68b4bf24e7513be67cc0572f29ff579b4ccbd9ae9bceeb7ff3db02c0f085", size = 18586, upload-time = "2024-09-06T14:56:12.838Z" },
+]
+
+[[package]]
 name = "einops"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -78,12 +102,35 @@ wheels = [
 ]
 
 [[package]]
+name = "einx"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "frozendict" },
+    { name = "numpy" },
+    { name = "sympy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/95/af/2a2f83f981e969ae3ec5dc30f9b0cd1a258acabc2ff7b33eb9726e334e55/einx-0.3.0.tar.gz", hash = "sha256:17ff87c6a0f68ab358c1da489f00e95f1de106fd12ff17d0fb3e210aaa1e5f8c", size = 84758, upload-time = "2024-06-11T13:49:37.532Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/04/4a730d74fd908daad86d6b313f235cdf8e0cf1c255b392b7174ff63ea81a/einx-0.3.0-py3-none-any.whl", hash = "sha256:367d62bab8dbb8c4937308512abb6f746cc0920990589892ba0d281356d39345", size = 102958, upload-time = "2024-06-11T13:49:36.441Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.31.1"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/55/1e19b2b56a24a4b94624f7e819e1bb87fa6c5609dbaf621df3aa6568a761/filelock-3.31.1.tar.gz", hash = "sha256:9e0c4e88ebe90833c1beafd3a547ccbc0bf7f491cd3858c3ec7aed63efe02163", size = 196656, upload-time = "2026-07-20T03:14:32.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/61/df1d9db18f188d0ae648956a1decadc0e3b77d0571474370fd01f28a82b1/filelock-3.31.1-py3-none-any.whl", hash = "sha256:9ea33146c780161bf67cb20c7cb26b651566820d65ad8dfdd79422602a2dcfc0", size = 97189, upload-time = "2026-07-20T03:14:31.307Z" },
+]
+
+[[package]]
+name = "frozendict"
+version = "2.4.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/b2/2a3d1374b7780999d3184e171e25439a8358c47b481f68be883c14086b4c/frozendict-2.4.7.tar.gz", hash = "sha256:e478fb2a1391a56c8a6e10cc97c4a9002b410ecd1ac28c18d780661762e271bd", size = 317082, upload-time = "2025-11-11T22:40:14.251Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/74/f94141b38a51a553efef7f510fc213894161ae49b88bffd037f8d2a7cb2f/frozendict-2.4.7-py3-none-any.whl", hash = "sha256:972af65924ea25cf5b4d9326d549e69a9a4918d8a76a9d3a7cd174d98b237550", size = 16264, upload-time = "2025-11-11T22:40:12.836Z" },
 ]
 
 [[package]]
@@ -131,6 +178,20 @@ wheels = [
 ]
 
 [[package]]
+name = "hyper-connections"
+version = "0.4.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch" },
+    { name = "torch-einops-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/2e/47f00583d958527f006459e0e769aa3b20dc61b7b1916df1fa0b9820a192/hyper_connections-0.4.11.tar.gz", hash = "sha256:d4f852733cf8595b2b15e81597ec0ce931907f284a812272c03edea0a4ef12e3", size = 17864, upload-time = "2026-05-13T18:28:47.553Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/2d/23143d9e5af1b6a2e7ed4e5f88a6c0cbf7587563acb8f15a740b726ce07f/hyper_connections-0.4.11-py3-none-any.whl", hash = "sha256:92a8d24340ef6dbf2a356b1f2e74ebb877d680aa96afc6f9f1cff636ab2e55f0", size = 29558, upload-time = "2026-05-13T18:28:46.304Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.18"
 source = { registry = "https://pypi.org/simple" }
@@ -158,6 +219,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
+]
+
+[[package]]
+name = "local-attention"
+version = "1.11.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "hyper-connections" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/b4/7cc5b3122ff63d58c7dd58cb122edfc8f5c74c88b14fcd22b444f0527952/local_attention-1.11.2.tar.gz", hash = "sha256:94e48fec748e96fa81ac6c3e27a357950eaab22cd8f69a10c50b23d6eec8f09c", size = 10918, upload-time = "2025-07-16T14:30:37.094Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/f6/074ef5c98f2d062177af24a9e20db20b009d141e4ca827c1e419461595b0/local_attention-1.11.2-py3-none-any.whl", hash = "sha256:8bbb03cef6a6f0b694de64f9ecd81886fd1e73ef367b57f02995b469ac52fd16", size = 9504, upload-time = "2025-07-16T14:30:35.9Z" },
 ]
 
 [[package]]
@@ -668,6 +743,19 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-einops-utils"
+version = "0.1.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c5/33/ac8759989bdd5d41e36241b1a23b9c3d7c3fb06e06ab46ca3cc45c460bee/torch_einops_utils-0.1.8.tar.gz", hash = "sha256:ba90ccd490a089b24fc8bae5cf3029e665b62ddec3bed0bb2694a243ce6e5322", size = 12257, upload-time = "2026-07-18T18:37:19.041Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/4b/bad6d265da4fb583cd5e50245bfdce347651b5591f6936a555506735ab76/torch_einops_utils-0.1.8-py3-none-any.whl", hash = "sha256:53c01992176465246184820358b4fca9895fd693387ec4de94eb9a4ea02f63b2", size = 8911, upload-time = "2026-07-18T18:37:18.035Z" },
+]
+
+[[package]]
 name = "toss-portfolio-lens-ai-worker"
 version = "0.1.0"
 source = { editable = "." }
@@ -681,6 +769,15 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+fincast = [
+    { name = "beartype" },
+    { name = "colt5-attention" },
+    { name = "einops" },
+    { name = "einx" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch" },
+]
 model = [
     { name = "einops" },
     { name = "huggingface-hub" },
@@ -692,18 +789,25 @@ model = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beartype", marker = "extra == 'fincast'", specifier = "==0.20.2" },
+    { name = "colt5-attention", marker = "extra == 'fincast'", specifier = "==0.11.1" },
+    { name = "einops", marker = "extra == 'fincast'", specifier = "==0.8.1" },
     { name = "einops", marker = "extra == 'model'", specifier = "==0.8.1" },
+    { name = "einx", marker = "extra == 'fincast'", specifier = "==0.3.0" },
     { name = "huggingface-hub", marker = "extra == 'model'", specifier = "==0.33.1" },
+    { name = "numpy", marker = "extra == 'fincast'", specifier = "==2.2.6" },
     { name = "numpy", marker = "extra == 'model'", specifier = "==2.2.6" },
     { name = "pandas", marker = "extra == 'model'", specifier = "==2.2.3" },
     { name = "pydantic", specifier = "==2.11.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.12.12" },
+    { name = "safetensors", marker = "extra == 'fincast'", specifier = "==0.6.2" },
     { name = "safetensors", marker = "extra == 'model'", specifier = "==0.6.2" },
+    { name = "torch", marker = "extra == 'fincast'", specifier = "==2.6.0" },
     { name = "torch", marker = "extra == 'model'", specifier = "==2.6.0" },
     { name = "websockets", specifier = "==15.0.1" },
 ]
-provides-extras = ["model", "dev"]
+provides-extras = ["model", "fincast", "dev"]
 
 [[package]]
 name = "tqdm"

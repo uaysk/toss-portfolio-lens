@@ -1,9 +1,28 @@
 {
-  "schema_version": "scalping-ai-model-manifest/v1",
+  "schema_version": "scalping-ai-model-manifest/v2",
   "kronos_source": {
     "repository": "https://github.com/shiyu-coder/Kronos",
     "revision": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
     "license": "MIT"
+  },
+  "fincast_source": {
+    "repository": "https://github.com/vincent05r/FinCast-fts",
+    "revision": "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
+    "archive_sha256": "ed4c3967c6d548465307fc0b63895ac9c9d8b44a950ccf936ab97e1755451a91",
+    "required_file_sha256": {
+      "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "src/ffm/__init__.py": "d34f04310fbc42fb6a35d1b0cb033356da617a8cbbd5a3228f07e3089c379434",
+      "src/ffm/pytorch_patched_decoder_MOE.py": "58c8d5dfea859c87958e1b35fa2b2eb9c9a1d8bd99813be528adbdaf37c15dbe",
+      "src/st_moe_pytorch/__init__.py": "5d67d4f81d080199049af3217f947fa1e6de83671675e1543801995f4c602553",
+      "src/st_moe_pytorch/st_moe_pytorch.py": "c38a8789120f6d5009be4fd91cce1a9d75011adb1ddb73f45060b99f0d7ae477",
+      "src/st_moe_pytorch/distributed.py": "3a3742c3389be59305c3eb22e88cbaef3fcfec514687856b7b1954a3a5db129a"
+    },
+    "license": "Apache-2.0"
+  },
+  "fincast_paper": {
+    "url": "https://arxiv.org/pdf/2508.19609v1",
+    "revision": "2508.19609v1",
+    "sha256": "c8dc23c7e0013d85732af1dee2785263b42c7384fc1a9a0f73bfdbb0d5061244"
   },
   "models": {
     "kronos-base": {
@@ -13,6 +32,23 @@
       "tokenizer_revision": "0e0117387f39004a9016484a186a908917e22426",
       "license": "MIT",
       "loader_version": "kronos-source-67b630e"
+    },
+    "fincast": {
+      "model_id": "Vincent05R/FinCast",
+      "revision": "2d7d90b159db8961d27c2cf165d51195902ef92b",
+      "checkpoint_file": "v1.pth",
+      "checkpoint_sha256": "d5ca999b02c944effa60d2b94174dc4d5a0cd2c0543ae289b2e36f37431492a8",
+      "fp32_artifact": "model.fp32.safetensors",
+      "mixed_fp16_artifact": "model.mixed-fp16.safetensors",
+      "precision_validation": "precision-validation.json",
+      "validation_contexts": "tests/fixtures/fincast-crypto-contexts.json",
+      "validation_contexts_sha256": "3ee014f25181c595949580acec1ad83908819e3f283b378f449ab679bef75f6f",
+      "validation_context_count": 128,
+      "validation_context_bars": 512,
+      "native_quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+      "quantile_tail_policy": "tail_clamped_q10_q90",
+      "license": "Apache-2.0",
+      "loader_version": "fincast-source-488b19d"
     }
   }
 }

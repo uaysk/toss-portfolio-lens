@@ -13,6 +13,9 @@ models
 **/__pycache__
 **/.pytest_cache
 **/*.py[cod]
+**/*.pth
+**/*.safetensors
+**/token
 dist
 .git
 .env

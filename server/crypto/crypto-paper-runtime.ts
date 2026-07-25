@@ -71,8 +71,96 @@ const MAX_FINAL_KLINE_RISK_EVIDENCE_BUCKETS = 3;
 const MAX_FINAL_KLINE_FUNDING_EVIDENCE = 4;
 const BOOK_TICKER_FRESHNESS_MS = 15_000;
 const MARK_PRICE_FRESHNESS_MS = 5_000;
+const PRECISION_FAILURE_REASONS = [
+  "non_finite_output",
+  "quantile_crossing",
+  "signal_direction_agreement_below_99pct",
+  "q50_median_error_above_5pct_fp32_iqr",
+  "q50_p95_error_above_15pct_fp32_iqr",
+  "peak_vram_reduction_below_25pct",
+  "mixed_cuda_out_of_memory",
+  "mixed_unsupported_operation",
+  "mixed_setup_failure",
+  "mixed_model_load_failure",
+  "mixed_inference_failure",
+  "mixed_evaluation_failure",
+] as const;
+const SAFE_MODEL_ERROR_CODES = new Set([
+  "crypto_lane_sequential_deadline_exceeded",
+  "crypto_runtime_expiry_deadline_exceeded",
+  "model_call_failed",
+  "model_generated_at_invalid",
+  "model_generated_before_origin",
+  "model_identity_mismatch",
+  "model_input_origin_mismatch",
+  "model_lane_count_mismatch",
+  "model_lane_identity_mismatch",
+  "model_memory_status_invalid",
+  "model_mode_mismatch",
+  "model_peak_vram_invalid",
+  "model_precision_failure_reasons_invalid",
+  "model_precision_invalid",
+  "model_precision_provenance_invalid",
+  "model_precision_validation_invalid",
+  "model_provenance_invalid",
+  "model_provenance_inconsistent",
+  "model_quantile_tail_policy_invalid",
+  "model_request_id_mismatch",
+  "model_response_not_object",
+  "model_return_quantiles_incomplete",
+  "model_return_quantiles_invalid",
+  "model_return_quantiles_non_monotone",
+  "model_revision_invalid",
+  "model_runtime_provenance_invalid",
+  "model_series_unavailable",
+  "model_tokenizer_provenance_invalid",
+  "model_unavailable",
+  "terminal_settlement_unavailable",
+  "worker_circuit_open",
+  "worker_unavailable",
+]);
+const MAXIMUM_PROVENANCE_ERROR_CODES = 20;
 
 type UnknownRecord = Record<string, unknown>;
+type ModelPrecision = "fp16" | "fp32";
+type ModelPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
+type ModelMemoryStatus = "ok";
+type ModelQuantileTailPolicy = "native" | "tail_clamped_q10_q90";
+type ModelPeakVramMeasurement = "cuda_allocated_or_reserved";
+type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
+type PinnedModelRuntimeProvenance = {
+  modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
+  modelRevision: string;
+  sourceRevision: string;
+  loaderVersion: string;
+  license: "MIT" | "Apache-2.0";
+  tokenizerId: string | null;
+  tokenizerRevision: string | null;
+};
+
+const PINNED_MODEL_RUNTIME_PROVENANCE = {
+  kronos_base: {
+    modelId: KRONOS_BASE_MODEL_ID,
+    modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
+    sourceRevision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+    loaderVersion: "kronos-source-67b630e",
+    license: "MIT",
+    tokenizerId: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizerRevision: "0e0117387f39004a9016484a186a908917e22426",
+  },
+  fincast: {
+    modelId: FINCAST_MODEL_ID,
+    modelRevision: "2d7d90b159db8961d27c2cf165d51195902ef92b",
+    sourceRevision: "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
+    loaderVersion: "fincast-source-488b19d",
+    license: "Apache-2.0",
+    tokenizerId: null,
+    tokenizerRevision: null,
+  },
+} as const satisfies Record<SimulationModelLane, PinnedModelRuntimeProvenance>;
+const PINNED_GPU_DEVICE_NAME = "Tesla P40";
+const PINNED_GPU_CUDA_CAPABILITY = "6.1";
+const SAFE_GPU_DEVICE_NAME = /^[A-Za-z0-9 ._()+-]{1,128}$/;
 
 export const CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS = Object.freeze({
   lifecycle: "event_driven_background_session",
@@ -157,10 +245,26 @@ type NormalizedLaneForecast = {
   generatedAtIso: string;
   inputEndAt: string;
   quantiles: ReturnQuantile[];
-  modelId?: string;
-  modelRevision?: string;
-  precision: "fp16" | "fp32" | "unknown";
+  modelId: string;
+  modelRevision: string;
+  sourceRevision: string;
+  loaderVersion: string;
+  license: string;
+  tokenizerId: string | null;
+  tokenizerRevision: string | null;
+  loaded: true;
+  device: "cuda";
+  deviceName: string;
+  cudaCapability: "6.1";
+  attentionBackend: "math";
+  precision: ModelPrecision;
+  precisionValidation: ModelPrecisionValidation;
+  memoryStatus: ModelMemoryStatus;
+  quantileTailPolicy: ModelQuantileTailPolicy;
+  precisionFailureReasons: PrecisionFailureReason[];
   latencyMs?: number;
+  peakVramBytes?: number;
+  peakVramMeasurement?: ModelPeakVramMeasurement;
   peakVramMb?: number;
 };
 
@@ -301,10 +405,26 @@ type LaneState = {
   successes: number;
   timeoutCount: number;
   latencies: number[];
+  peakVramBytes?: number;
+  peakVramMeasurement?: ModelPeakVramMeasurement;
   peakVramMb?: number;
   precision: "fp16" | "fp32" | "unknown";
   modelId?: string;
   modelRevision?: string;
+  sourceRevision?: string;
+  loaderVersion?: string;
+  license?: string;
+  tokenizerId?: string | null;
+  tokenizerRevision?: string | null;
+  loaded?: true;
+  device?: "cuda";
+  deviceName?: string;
+  cudaCapability?: "6.1";
+  attentionBackend?: "math";
+  precisionValidation?: ModelPrecisionValidation;
+  memoryStatus?: ModelMemoryStatus;
+  quantileTailPolicy?: ModelQuantileTailPolicy;
+  precisionFailureReasons?: PrecisionFailureReason[];
   errors: string[];
   consecutiveFailures: number;
   circuitOpenUntil?: number;
@@ -440,6 +560,15 @@ function text(value: unknown): string | undefined {
   return normalized || undefined;
 }
 
+function exactText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function nullableExactText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  return exactText(value);
+}
+
 function first(source: UnknownRecord | undefined, ...keys: string[]): unknown {
   if (!source) return undefined;
   for (const key of keys) {
@@ -463,8 +592,75 @@ function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+type CryptoModelInputBar = AiForecastRequest["series"][number]["bars"][number];
+
+function pythonFloatHex(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new Error("Crypto model input contains a non-finite number.");
+  }
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, false);
+  const bits = view.getBigUint64(0, false);
+  const negative = (bits >> 63n) === 1n;
+  const exponentBits = Number((bits >> 52n) & 0x7ffn);
+  const fractionBits = bits & 0xfffffffffffffn;
+  const sign = negative ? "-" : "";
+  if (exponentBits === 0 && fractionBits === 0n) {
+    return `${sign}0x0.0p+0`;
+  }
+  const fraction = fractionBits.toString(16).padStart(13, "0");
+  if (exponentBits === 0) {
+    return `${sign}0x0.${fraction}p-1022`;
+  }
+  const exponent = exponentBits - 1023;
+  return `${sign}0x1.${fraction}p${exponent >= 0 ? "+" : ""}${exponent}`;
+}
+
+function pythonUtcMicrosecondTimestamp(value: string): string {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("Crypto model input contains an invalid timestamp.");
+  }
+  return new Date(milliseconds).toISOString().replace(/Z$/, "000Z");
+}
+
+function matchesWorkerTimestamp(value: unknown, expected: string): boolean {
+  const candidate = exactText(value);
+  return candidate === expected || candidate === pythonUtcMicrosecondTimestamp(expected);
+}
+
+export function canonicalCryptoModelInputDigest(
+  bars: readonly CryptoModelInputBar[],
+): string {
+  const number = (value: number | null | undefined): string | null => (
+    value === null || value === undefined ? null : pythonFloatHex(value)
+  );
+  const payload = bars.map((bar) => ({
+    amount: number(bar.amount),
+    close: number(bar.close),
+    complete: bar.complete,
+    high: number(bar.high),
+    low: number(bar.low),
+    open: number(bar.open),
+    timestamp: pythonUtcMicrosecondTimestamp(bar.timestamp),
+    volume: number(bar.volume),
+  }));
+  return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+}
+
 function unique(values: readonly string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
+}
+
+function safeModelErrorCode(value: unknown): string {
+  const candidate = text(value);
+  return candidate && SAFE_MODEL_ERROR_CODES.has(candidate)
+    ? candidate
+    : "model_call_failed";
+}
+
+function safeProvenanceErrorCodes(values: readonly string[]): string[] {
+  return unique(values.map(safeModelErrorCode)).slice(-MAXIMUM_PROVENANCE_ERROR_CODES);
 }
 
 function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -876,14 +1072,48 @@ function terminalObservedPrice(event: BinanceMarketEvent): number | undefined {
   return (event.bidPrice + event.askPrice) / 2;
 }
 
-function normalizedPrecision(value: unknown): "fp16" | "fp32" | "unknown" {
-  const normalized = text(value)?.toLowerCase();
-  if (normalized === "fp16"
-    || normalized === "float16"
-    || normalized === "mixed_float16"
-    || normalized === "half") return "fp16";
-  if (normalized === "fp32" || normalized === "float32" || normalized === "float") return "fp32";
-  return "unknown";
+function normalizedPrecision(value: unknown): ModelPrecision | undefined {
+  if (value === "mixed_float16") return "fp16";
+  if (value === "float32") return "fp32";
+  return undefined;
+}
+
+function exactEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? value as T
+    : undefined;
+}
+
+function normalizedPrecisionFailureReasons(value: unknown): PrecisionFailureReason[] | undefined {
+  if (!Array.isArray(value) || value.length > PRECISION_FAILURE_REASONS.length) {
+    return undefined;
+  }
+  const normalized: PrecisionFailureReason[] = [];
+  for (const reason of value) {
+    const candidate = exactEnum(reason, PRECISION_FAILURE_REASONS);
+    if (!candidate || normalized.includes(candidate)) return undefined;
+    normalized.push(candidate);
+  }
+  return normalized;
+}
+
+function safePeakVramBytes(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    ? value
+    : undefined;
+}
+
+function safePeakVramMb(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 0
+    ? value
+    : undefined;
 }
 
 function normalizeLaneForecast(
@@ -917,8 +1147,8 @@ function normalizeLaneForecast(
   if (!series || text(series.status)?.toLowerCase() !== "available") {
     throw new Error("model_series_unavailable");
   }
-  const inputEndAt = text(first(series, "input_end_at", "inputEndAt"));
-  if (!inputEndAt || Date.parse(inputEndAt) !== Date.parse(expectedSeries.input_end_at)) {
+  const inputEndAt = exactText(first(series, "input_end_at", "inputEndAt"));
+  if (!inputEndAt || !matchesWorkerTimestamp(inputEndAt, expectedSeries.input_end_at)) {
     throw new Error("model_input_origin_mismatch");
   }
   if (generatedAt < Date.parse(inputEndAt)) {
@@ -960,28 +1190,196 @@ function normalizeLaneForecast(
   if (role !== lane && !(lane === "kronos_base" && role === "kronos")) {
     throw new Error("model_lane_identity_mismatch");
   }
+  const expectedContext = expectedSeries.bars.slice(-DEFAULT_CONTEXT_BARS);
+  const expectedContextStartAt = expectedContext[0]?.timestamp;
+  const rawInputOrigins = first(laneRun, "input_origins", "inputOrigins");
+  const inputOrigins = Array.isArray(rawInputOrigins) ? rawInputOrigins.map(record) : [];
+  const inputOrigin = inputOrigins[0];
+  const originBarCount = first(inputOrigin, "bar_count", "barCount");
+  const originInputDigest = exactText(first(inputOrigin, "input_digest", "inputDigest"));
+  if (!expectedContextStartAt
+    || inputOrigins.length !== 1
+    || !inputOrigin
+    || exactText(first(inputOrigin, "instrument_key", "instrumentKey"))
+      !== expectedSeries.instrument_key
+    || !matchesWorkerTimestamp(
+      first(inputOrigin, "context_start_at", "contextStartAt"),
+      expectedContextStartAt,
+    )
+    || !matchesWorkerTimestamp(
+      first(inputOrigin, "input_end_at", "inputEndAt"),
+      expectedSeries.input_end_at,
+    )
+    || typeof originBarCount !== "number"
+    || !Number.isSafeInteger(originBarCount)
+    || originBarCount !== expectedContext.length
+    || !originInputDigest
+    || !/^[0-9a-f]{64}$/.test(originInputDigest)
+    || originInputDigest !== canonicalCryptoModelInputDigest(expectedContext)
+    || first(laneRun, "input_end_aligned", "inputEndAligned") !== true) {
+    throw new Error("model_input_origin_mismatch");
+  }
   const model = record(first(laneRun, "model", "provenance"))
     ?? record(first(response, "model", "provenance"));
-  const expectedModelId = lane === "kronos_base" ? KRONOS_BASE_MODEL_ID : FINCAST_MODEL_ID;
-  if (text(first(laneRun, "expected_model_id", "expectedModelId")) !== expectedModelId
-    || text(first(model, "model_id", "modelId", "id")) !== expectedModelId) {
+  const pinned = PINNED_MODEL_RUNTIME_PROVENANCE[lane];
+  if (exactText(first(laneRun, "expected_model_id", "expectedModelId")) !== pinned.modelId
+    || exactText(first(model, "model_id", "modelId", "id")) !== pinned.modelId) {
     throw new Error("model_identity_mismatch");
   }
-  const peakVramBytes = finite(first(model, "peak_vram_bytes", "peakVramBytes"));
+  const modelId = exactText(first(model, "model_id", "modelId", "id"));
+  const modelRevision = exactText(first(model, "model_revision", "modelRevision", "revision"));
+  const sourceRevision = exactText(first(model, "source_revision", "sourceRevision"));
+  const loaderVersion = exactText(first(model, "loader_version", "loaderVersion"));
+  const license = exactText(first(model, "license"));
+  if (modelId !== pinned.modelId
+    || modelRevision !== pinned.modelRevision
+    || sourceRevision !== pinned.sourceRevision
+    || loaderVersion !== pinned.loaderVersion
+    || license !== pinned.license) {
+    throw new Error("model_provenance_invalid");
+  }
+  const rawTokenizerId = model?.tokenizer_id !== undefined
+    ? model.tokenizer_id
+    : model?.tokenizerId;
+  const rawTokenizerRevision = model?.tokenizer_revision !== undefined
+    ? model.tokenizer_revision
+    : model?.tokenizerRevision;
+  const tokenizerId = nullableExactText(rawTokenizerId);
+  const tokenizerRevision = nullableExactText(rawTokenizerRevision);
+  if (tokenizerId === undefined
+    || tokenizerRevision === undefined
+    || tokenizerId !== pinned.tokenizerId
+    || tokenizerRevision !== pinned.tokenizerRevision) {
+    throw new Error("model_tokenizer_provenance_invalid");
+  }
+  const loaded = first(model, "loaded");
+  const device = exactText(first(model, "device"));
+  const deviceName = exactText(first(model, "device_name", "deviceName"));
+  const cudaCapability = exactText(first(model, "cuda_capability", "cudaCapability"));
+  const attentionBackend = exactText(first(model, "attention_backend", "attentionBackend"));
+  if (loaded !== true
+    || device !== "cuda"
+    || deviceName !== PINNED_GPU_DEVICE_NAME
+    || !SAFE_GPU_DEVICE_NAME.test(deviceName)
+    || cudaCapability !== PINNED_GPU_CUDA_CAPABILITY
+    || attentionBackend !== "math") {
+    throw new Error("model_runtime_provenance_invalid");
+  }
+  const precision = normalizedPrecision(first(model, "dtype", "precision"));
+  if (!precision) throw new Error("model_precision_invalid");
+
+  const rawPrecisionValidation = first(
+    model,
+    "precision_validation",
+    "precisionValidation",
+  );
+  const rawMemoryStatus = first(model, "memory_status", "memoryStatus");
+  const rawQuantileTailPolicy = first(
+    model,
+    "quantile_tail_policy",
+    "quantileTailPolicy",
+  );
+  const rawPrecisionFailureReasons = first(
+    model,
+    "precision_failure_reasons",
+    "precisionFailureReasons",
+  );
+  const precisionValidation = rawPrecisionValidation === undefined && lane === "kronos_base"
+    ? "not_required"
+    : exactEnum(rawPrecisionValidation, ["not_required", "passed", "fallback_fp32"] as const);
+  const memoryStatus = rawMemoryStatus === undefined && lane === "kronos_base"
+    ? "ok"
+    : exactEnum(rawMemoryStatus, ["ok"] as const);
+  const quantileTailPolicy = rawQuantileTailPolicy === undefined && lane === "kronos_base"
+    ? "native"
+    : exactEnum(rawQuantileTailPolicy, ["native", "tail_clamped_q10_q90"] as const);
+  const precisionFailureReasons = (
+    rawPrecisionFailureReasons === undefined && lane === "kronos_base"
+  )
+    ? []
+    : normalizedPrecisionFailureReasons(rawPrecisionFailureReasons);
+  if (!precisionValidation) throw new Error("model_precision_validation_invalid");
+  if (!memoryStatus) throw new Error("model_memory_status_invalid");
+  if (!quantileTailPolicy) throw new Error("model_quantile_tail_policy_invalid");
+  if (!precisionFailureReasons) {
+    throw new Error("model_precision_failure_reasons_invalid");
+  }
+
+  const rawPeakVramBytes = first(model, "peak_vram_bytes", "peakVramBytes");
+  const rawPeakVramMeasurement = first(
+    model,
+    "peak_vram_measurement",
+    "peakVramMeasurement",
+  );
+  const peakVramBytes = rawPeakVramBytes === undefined
+    ? undefined
+    : safePeakVramBytes(rawPeakVramBytes);
+  const peakVramMeasurement = rawPeakVramMeasurement === undefined
+    ? undefined
+    : exactEnum(rawPeakVramMeasurement, ["cuda_allocated_or_reserved"] as const);
+  if ((rawPeakVramBytes !== undefined && peakVramBytes === undefined)
+    || (rawPeakVramMeasurement !== undefined && peakVramMeasurement === undefined)
+    || ((peakVramBytes === undefined) !== (peakVramMeasurement === undefined))) {
+    throw new Error("model_peak_vram_invalid");
+  }
+  const legacyPeakVramMb = safePeakVramMb(first(model, "peak_vram_mb", "peakVramMb"))
+    ?? safePeakVramMb(first(laneRun, "peak_vram_mb", "peakVramMb"));
+  const peakVramMb = peakVramBytes === undefined
+    ? legacyPeakVramMb
+    : peakVramBytes / (1024 * 1024);
+
+  if (lane === "kronos_base") {
+    if (precision !== "fp32"
+      || precisionValidation !== "not_required"
+      || memoryStatus !== "ok"
+      || quantileTailPolicy !== "native"
+      || precisionFailureReasons.length > 0) {
+      throw new Error("model_precision_provenance_invalid");
+    }
+  } else {
+    const mixedPrecisionValid = precision === "fp16"
+      && precisionValidation === "passed"
+      && precisionFailureReasons.length === 0;
+    const fp32FallbackValid = precision === "fp32"
+      && precisionValidation === "fallback_fp32"
+      && precisionFailureReasons.length > 0;
+    if ((!mixedPrecisionValid && !fp32FallbackValid)
+      || memoryStatus !== "ok"
+      || quantileTailPolicy !== "tail_clamped_q10_q90"
+      || peakVramBytes === undefined
+      || peakVramBytes <= 0
+      || peakVramMeasurement !== "cuda_allocated_or_reserved") {
+      throw new Error("model_precision_provenance_invalid");
+    }
+  }
   return {
     lane,
     generatedAt,
     generatedAtIso: iso(generatedAt),
     inputEndAt,
     quantiles,
-    modelId: text(first(model, "model_id", "modelId", "id")),
-    modelRevision: text(first(model, "model_revision", "modelRevision", "revision")),
-    precision: normalizedPrecision(first(model, "dtype", "precision")),
+    modelId,
+    modelRevision,
+    sourceRevision,
+    loaderVersion,
+    license,
+    tokenizerId,
+    tokenizerRevision,
+    loaded: true,
+    device: "cuda",
+    deviceName,
+    cudaCapability: PINNED_GPU_CUDA_CAPABILITY,
+    attentionBackend: "math",
+    precision,
+    precisionValidation,
+    memoryStatus,
+    quantileTailPolicy,
+    precisionFailureReasons,
     latencyMs: finite(first(laneRun, "latency_ms", "latencyMs"))
       ?? finite(first(response, "latency_ms", "latencyMs")),
-    peakVramMb: finite(first(model, "peak_vram_mb", "peakVramMb"))
-      ?? finite(first(laneRun, "peak_vram_mb", "peakVramMb"))
-      ?? (peakVramBytes === undefined ? undefined : peakVramBytes / (1024 * 1024)),
+    peakVramBytes,
+    peakVramMeasurement,
+    peakVramMb,
   };
 }
 
@@ -1156,6 +1554,67 @@ function modelMetrics(state: LaneState) {
 function laneStatus(state: LaneState): "completed" | "partial" | "unavailable" {
   if (state.successes === 0) return "unavailable";
   return state.successes === state.attempts ? "completed" : "partial";
+}
+
+function laneModelProvenanceIsConsistent(
+  state: LaneState,
+  forecast: NormalizedLaneForecast,
+): boolean {
+  if (state.successes === 0) return true;
+  return state.modelId === forecast.modelId
+    && state.modelRevision === forecast.modelRevision
+    && state.sourceRevision === forecast.sourceRevision
+    && state.loaderVersion === forecast.loaderVersion
+    && state.license === forecast.license
+    && state.tokenizerId === forecast.tokenizerId
+    && state.tokenizerRevision === forecast.tokenizerRevision
+    && state.loaded === forecast.loaded
+    && state.device === forecast.device
+    && state.deviceName === forecast.deviceName
+    && state.cudaCapability === forecast.cudaCapability
+    && state.attentionBackend === forecast.attentionBackend
+    && state.precision === forecast.precision
+    && state.precisionValidation === forecast.precisionValidation
+    && state.memoryStatus === forecast.memoryStatus
+    && state.quantileTailPolicy === forecast.quantileTailPolicy
+    && state.peakVramBytes === forecast.peakVramBytes
+    && state.peakVramMeasurement === forecast.peakVramMeasurement
+    && state.peakVramMb === forecast.peakVramMb
+    && JSON.stringify(state.precisionFailureReasons)
+      === JSON.stringify(forecast.precisionFailureReasons);
+}
+
+function maximumDefined(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+}
+
+function persistedLaneModelProvenance(state: LaneState) {
+  return {
+    modelId: state.modelId,
+    modelRevision: state.modelRevision,
+    sourceRevision: state.sourceRevision,
+    loaderVersion: state.loaderVersion,
+    license: state.license,
+    tokenizerId: state.tokenizerId,
+    tokenizerRevision: state.tokenizerRevision,
+    loaded: state.loaded,
+    device: state.device,
+    deviceName: state.deviceName,
+    cudaCapability: state.cudaCapability,
+    attentionBackend: state.attentionBackend,
+    precision: state.precision,
+    precisionValidation: state.precisionValidation,
+    memoryStatus: state.memoryStatus,
+    quantileTailPolicy: state.quantileTailPolicy,
+    ...(state.precisionFailureReasons
+      ? { precisionFailureReasons: [...state.precisionFailureReasons] }
+      : {}),
+    peakVramBytes: state.peakVramBytes,
+    peakVramMeasurement: state.peakVramMeasurement,
+    peakVramMb: state.peakVramMb,
+  };
 }
 
 function futuresPositions(
@@ -1746,13 +2205,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             ...(settlementUnavailable
               ? { unavailableReason: "terminal_settlement_unavailable" }
               : state.errors.length
-                ? { unavailableReason: state.errors.at(-1) }
+                ? { unavailableReason: safeModelErrorCode(state.errors.at(-1)) }
                 : {}),
             metrics: modelMetrics(state),
-            provenance: {
-              modelId: state.modelId,
-              modelRevision: state.modelRevision,
-            },
+            provenance: persistedLaneModelProvenance(state),
           };
         }),
       };
@@ -2775,7 +3231,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             });
           } catch (error) {
             await cancellationCheckpoint();
-            const reason = error instanceof Error ? error.message : "model_call_failed";
+            const reason = safeModelErrorCode(
+              error instanceof Error ? error.message : "model_call_failed",
+            );
             outcomes.set(lane, {
               attemptAt,
               error: reason,
@@ -2858,6 +3316,13 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         const outcome = outcomes.get(lane);
         if (!outcome) continue;
         state.attempts += 1;
+        if (outcome.forecast && !laneModelProvenanceIsConsistent(state, outcome.forecast)) {
+          outcome.forecast = undefined;
+          outcome.error = "model_provenance_inconsistent";
+          outcome.incrementsFailure = true;
+          outcome.timedOut = false;
+          outcome.failureObservedAt = this.clock.now();
+        }
         if (outcome.forecast) {
           const forecast = outcome.forecast;
           state.successes += 1;
@@ -2867,8 +3332,26 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           state.precision = forecast.precision;
           state.modelId = forecast.modelId;
           state.modelRevision = forecast.modelRevision;
-          state.peakVramMb = Math.max(state.peakVramMb ?? 0, forecast.peakVramMb ?? 0)
-            || undefined;
+          state.sourceRevision = forecast.sourceRevision;
+          state.loaderVersion = forecast.loaderVersion;
+          state.license = forecast.license;
+          state.tokenizerId = forecast.tokenizerId;
+          state.tokenizerRevision = forecast.tokenizerRevision;
+          state.loaded = forecast.loaded;
+          state.device = forecast.device;
+          state.deviceName = forecast.deviceName;
+          state.cudaCapability = forecast.cudaCapability;
+          state.attentionBackend = forecast.attentionBackend;
+          state.precisionValidation = forecast.precisionValidation;
+          state.memoryStatus = forecast.memoryStatus;
+          state.quantileTailPolicy = forecast.quantileTailPolicy;
+          state.precisionFailureReasons = [...forecast.precisionFailureReasons];
+          state.peakVramBytes = maximumDefined(
+            state.peakVramBytes,
+            forecast.peakVramBytes,
+          );
+          state.peakVramMeasurement = forecast.peakVramMeasurement;
+          state.peakVramMb = maximumDefined(state.peakVramMb, forecast.peakVramMb);
           const observation: RuntimeForecastObservation = {
             ...forecast,
             originPrice: bar.close,
@@ -3916,13 +4399,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         return {
           lane,
           status: settlementUnavailable ? "partial" : laneStatus(state),
-          precision: state.precision,
-          modelId: state.modelId,
-          modelRevision: state.modelRevision,
+          ...persistedLaneModelProvenance(state),
           attempts: state.attempts,
           successes: state.successes,
-          peakVramMb: state.peakVramMb,
-          errors: unique([
+          errors: safeProvenanceErrorCodes([
             ...state.errors,
             ...(settlementUnavailable ? ["terminal_settlement_unavailable"] : []),
           ]),

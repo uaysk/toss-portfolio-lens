@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
@@ -17,6 +17,7 @@ import {
 export type AiComputeClientConfig = {
   url: string;
   authTokenFile: string;
+  authTokenMustDifferFromFile?: string;
   timeoutMs: number;
   connectTimeoutMs: number;
   reconnectBaseMs: number;
@@ -81,6 +82,7 @@ const MINIMUM_FRAME_BYTES = 1_024;
 const MAXIMUM_FRAME_BYTES = 512 * 1024 * 1024;
 const MAXIMUM_ENVELOPE_OVERHEAD_BYTES = 16 * 1024;
 const MAXIMUM_IGNORED_RESPONSE_IDS = 1_024;
+const MAXIMUM_REQUEST_TIMEOUT_MS = 24 * 60 * 60_000;
 const OPEN_READY_STATE = 1;
 
 function frameLimit(value: number | undefined, fallback: number, name: string): number {
@@ -166,7 +168,13 @@ export class AiComputeClient {
     if (!config.authTokenFile.trim() || !isAbsolute(config.authTokenFile)) {
       throw new Error("AI compute 인증 토큰 파일은 절대 경로여야 합니다.");
     }
-    positiveInteger(config.timeoutMs, 1, 3_600_000, "AI compute timeout");
+    if (config.authTokenMustDifferFromFile !== undefined
+      && (!config.authTokenMustDifferFromFile.trim()
+        || !isAbsolute(config.authTokenMustDifferFromFile)
+        || config.authTokenMustDifferFromFile === config.authTokenFile)) {
+      throw new Error("AI compute 비교 인증 토큰 파일은 다른 절대 경로여야 합니다.");
+    }
+    positiveInteger(config.timeoutMs, 1, MAXIMUM_REQUEST_TIMEOUT_MS, "AI compute timeout");
     positiveInteger(config.connectTimeoutMs, 1, 60_000, "AI compute 연결 timeout");
     positiveInteger(config.reconnectBaseMs, 1, 60_000, "AI compute 재연결 기본 지연");
     positiveInteger(config.reconnectMaxMs, config.reconnectBaseMs, 600_000, "AI compute 재연결 최대 지연");
@@ -291,15 +299,34 @@ export class AiComputeClient {
     try {
       authToken = this.readAuthTokenFile(this.config.authTokenFile).trim();
       if (!/^[\x21-\x7e]{32,4096}$/.test(authToken)) throw new Error("invalid token file");
-    } catch {
+      if (this.config.authTokenMustDifferFromFile) {
+        const peerAuthToken = this.readAuthTokenFile(
+          this.config.authTokenMustDifferFromFile,
+        ).trim();
+        if (!/^[\x21-\x7e]{32,4096}$/.test(peerAuthToken)) {
+          throw new Error("invalid peer token file");
+        }
+        const authTokenDigest = createHash("sha256").update(authToken, "utf8").digest();
+        const peerAuthTokenDigest = createHash("sha256").update(peerAuthToken, "utf8").digest();
+        if (timingSafeEqual(authTokenDigest, peerAuthTokenDigest)) {
+          throw new AiComputeTransportError(
+            "AI compute lane 인증 토큰은 서로 달라야 합니다.",
+            "AUTH_TOKEN_REUSED",
+            false,
+          );
+        }
+      }
+    } catch (error) {
       this.handleDisconnect(
         undefined,
         generation,
-        new AiComputeTransportError(
-          "AI compute 인증 토큰 파일을 아직 읽을 수 없습니다.",
-          "AUTH_TOKEN_UNAVAILABLE",
-          true,
-        ),
+        error instanceof AiComputeTransportError
+          ? error
+          : new AiComputeTransportError(
+            "AI compute 인증 토큰 파일을 아직 읽을 수 없습니다.",
+            "AUTH_TOKEN_UNAVAILABLE",
+            true,
+          ),
       );
       return;
     }

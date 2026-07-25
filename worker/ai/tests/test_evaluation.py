@@ -261,6 +261,25 @@ def test_metrics_grouping_calibration_coverage_drawdown_and_trade_counts() -> No
     assert metric.overall.direction_accuracy == 1
     assert metric.overall.mae == pytest.approx(0.01)
     assert metric.overall.rmse == pytest.approx(0.01)
+    expected_pinball = sum(
+        max(
+            quantile.quantile * (record.actual_return - quantile.value),
+            (quantile.quantile - 1) * (record.actual_return - quantile.value),
+        )
+        for record in result.records
+        if record.horizon_minutes == 5 and record.actual_return is not None
+        for quantile in record.predicted_quantiles
+    ) / (2 * 7)
+    assert metric.mean_pinball_loss == pytest.approx(expected_pinball)
+    assert tuple(item.quantile for item in metric.quantile_pinball_loss) == (
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        0.75,
+        0.9,
+        0.95,
+    )
     assert metric.up_probability_brier == pytest.approx(0.04)
     assert metric.by_symbol["KRX:A"].count == 1
     assert metric.by_symbol["KRX:B"].count == 1

@@ -7,6 +7,15 @@ const postgresCaPath = "/tmp/toss-portfolio-lens-env-test-postgres-ca.pem";
 const mcpClientSecretPath = "/tmp/toss-portfolio-lens-env-test-mcp-client";
 const mcpSigningKeyPath = "/tmp/toss-portfolio-lens-env-test-mcp-key";
 const aiCaPath = "/tmp/toss-portfolio-lens-env-test-ai-ca.pem";
+const legacyAiTokenPath = "/tmp/toss-portfolio-lens-env-test-legacy-ai-token";
+const kronosAiTokenPath = "/tmp/toss-portfolio-lens-env-test-kronos-ai-token";
+const fincastAiTokenPath = "/tmp/toss-portfolio-lens-env-test-fincast-ai-token";
+
+function writeDistinctCryptoAiTokens(): void {
+  writeFileSync(legacyAiTokenPath, "legacy-kronos-token\n", "utf8");
+  writeFileSync(kronosAiTokenPath, "explicit-kronos-token\n", "utf8");
+  writeFileSync(fincastAiTokenPath, "fincast-token\n", "utf8");
+}
 
 describe("database environment configuration", () => {
   const originalEnvironment = { ...process.env };
@@ -26,6 +35,9 @@ describe("database environment configuration", () => {
     rmSync(mcpClientSecretPath, { force: true });
     rmSync(mcpSigningKeyPath, { force: true });
     rmSync(aiCaPath, { force: true });
+    rmSync(legacyAiTokenPath, { force: true });
+    rmSync(kronosAiTokenPath, { force: true });
+    rmSync(fincastAiTokenPath, { force: true });
     process.env = { ...originalEnvironment };
     vi.restoreAllMocks();
   });
@@ -323,12 +335,13 @@ describe("database environment configuration", () => {
   });
 
   it("암호화폐 AI lane은 Kronos legacy fallback과 독립 FinCast 설정을 검증한다", () => {
+    writeDistinctCryptoAiTokens();
     Object.assign(process.env, {
       AI_COMPUTE_URL: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
-      AI_COMPUTE_AUTH_TOKEN_FILE: "/run/legacy-ai/token",
+      AI_COMPUTE_AUTH_TOKEN_FILE: legacyAiTokenPath,
       AI_COMPUTE_MAX_IN_FLIGHT: "1",
       AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
-      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: "/run/fincast-ai/token",
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: fincastAiTokenPath,
       AI_FINCAST_COMPUTE_MAX_IN_FLIGHT: "1",
       AI_COMPUTE_TIMEOUT_MS: "90000",
       AI_COMPUTE_CONNECT_TIMEOUT_MS: "9000",
@@ -345,7 +358,8 @@ describe("database environment configuration", () => {
     expect(cryptoAi).toEqual({
       kronos: {
         url: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
-        authTokenFile: "/run/legacy-ai/token",
+        authTokenFile: legacyAiTokenPath,
+        authTokenMustDifferFromFile: fincastAiTokenPath,
         timeoutMs: 90_000,
         connectTimeoutMs: 9_000,
         reconnectBaseMs: 500,
@@ -356,7 +370,8 @@ describe("database environment configuration", () => {
       },
       fincast: {
         url: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
-        authTokenFile: "/run/fincast-ai/token",
+        authTokenFile: fincastAiTokenPath,
+        authTokenMustDifferFromFile: legacyAiTokenPath,
         timeoutMs: 90_000,
         connectTimeoutMs: 9_000,
         reconnectBaseMs: 500,
@@ -373,10 +388,10 @@ describe("database environment configuration", () => {
     });
 
     process.env.AI_KRONOS_COMPUTE_URL = "wss://kronos.example.test:18765/ws/scalping-ai/v1";
-    process.env.AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE = "/run/kronos-ai/token";
+    process.env.AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE = kronosAiTokenPath;
     expect(loadConfig().cryptoAi.kronos).toMatchObject({
       url: "wss://kronos.example.test:18765/ws/scalping-ai/v1",
-      authTokenFile: "/run/kronos-ai/token",
+      authTokenFile: kronosAiTokenPath,
     });
 
     process.env.AI_FINCAST_COMPUTE_URL = "ws://fincast-worker:8766/ws/scalping-ai/v1";
@@ -451,11 +466,12 @@ describe("database environment configuration", () => {
 
   it("암호화폐 AI lane은 공통 TLS CA와 독립 token 및 제어 한도를 강제한다", () => {
     writeFileSync(aiCaPath, "test-ca\n", "utf8");
+    writeDistinctCryptoAiTokens();
     Object.assign(process.env, {
       AI_KRONOS_COMPUTE_URL: "wss://kronos.example.test:18765/ws/scalping-ai/v1",
-      AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE: "/run/kronos/token",
+      AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE: kronosAiTokenPath,
       AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:18766/ws/scalping-ai/v1",
-      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: "/run/fincast/token",
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: fincastAiTokenPath,
       AI_COMPUTE_TLS_CA_FILE: aiCaPath,
     });
     expect(loadConfig().cryptoAi).toMatchObject({
@@ -463,9 +479,9 @@ describe("database environment configuration", () => {
       fincast: { tlsCa: "test-ca\n" },
     });
 
-    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "/run/kronos/token";
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = kronosAiTokenPath;
     expect(() => loadConfig()).toThrow("Kronos와 분리된 token 절대 경로");
-    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = "/run/fincast/token";
+    process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = fincastAiTokenPath;
     process.env.AI_FINCAST_COMPUTE_URL = "ws://10.20.30.41:18766/ws/scalping-ai/v1";
     process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";
     expect(() => loadConfig()).toThrow(
@@ -481,6 +497,30 @@ describe("database environment configuration", () => {
     process.env.AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD = "3";
     process.env.AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS = "999";
     expect(() => loadConfig()).toThrow("AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS");
+  });
+
+  it("암호화폐 AI lane은 시작 시 token 파일을 읽지 않고 양쪽 비교 경로를 보존한다", () => {
+    const missingKronosTokenPath = "/tmp/toss-portfolio-lens-missing-kronos-token";
+    const missingFincastTokenPath = "/tmp/toss-portfolio-lens-missing-fincast-token";
+    rmSync(missingKronosTokenPath, { force: true });
+    rmSync(missingFincastTokenPath, { force: true });
+    Object.assign(process.env, {
+      AI_KRONOS_COMPUTE_URL: "wss://kronos.example.test:18765/ws/scalping-ai/v1",
+      AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE: missingKronosTokenPath,
+      AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:18766/ws/scalping-ai/v1",
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: missingFincastTokenPath,
+    });
+
+    expect(loadConfig().cryptoAi).toMatchObject({
+      kronos: {
+        authTokenFile: missingKronosTokenPath,
+        authTokenMustDifferFromFile: missingFincastTokenPath,
+      },
+      fincast: {
+        authTokenFile: missingFincastTokenPath,
+        authTokenMustDifferFromFile: missingKronosTokenPath,
+      },
+    });
   });
 
   it("한국투자증권 환율 폴백 설정을 검증한다", () => {

@@ -53,6 +53,7 @@ services:
       - portfolio_data:/app/data
       - compute_socket:/app/run
       - ${AI_AUTH_SECRET_SOURCE:-ai_auth}:/run/ai-auth:ro
+      - ${AI_FINCAST_AUTH_SECRET_SOURCE:-fincast_auth}:/run/fincast-auth:ro
       - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
       - ${POSTGRES_CA_HOST_PATH:-/dev/null}:/app/certs/cnpg-ca.crt:ro
     networks:
@@ -156,6 +157,7 @@ services:
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       CUDA_MODULE_LOADING: LAZY
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       TZ: Asia/Seoul
     init: true
     restart: unless-stopped
@@ -181,10 +183,79 @@ services:
       retries: 12
       start_period: 120s
 
+  fincast-worker:
+    profiles: ["fincast"]
+    image: ${AI_FINCAST_WORKER_IMAGE:-toss-portfolio-lens-fincast-worker:local}
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.fincast
+    command: ["serve"]
+    environment:
+      AI_WEBSOCKET_HOST: 0.0.0.0
+      AI_WEBSOCKET_PORT: "8766"
+      AI_WEBSOCKET_PATH: /ws/scalping-ai/v1
+      AI_WEBSOCKET_AUTH_TOKEN_FILE: /app/fincast-auth/token
+      AI_WEBSOCKET_GENERATE_AUTH_TOKEN: ${AI_FINCAST_WEBSOCKET_GENERATE_AUTH_TOKEN:-true}
+      AI_WEBSOCKET_MAX_CONNECTIONS: ${AI_FINCAST_WEBSOCKET_MAX_CONNECTIONS:-4}
+      AI_WEBSOCKET_QUEUE_CAPACITY: ${AI_FINCAST_WEBSOCKET_QUEUE_CAPACITY:-4}
+      AI_WEBSOCKET_MAX_IN_FLIGHT: "1"
+      AI_WEBSOCKET_PING_INTERVAL_SECONDS: ${AI_WEBSOCKET_PING_INTERVAL_SECONDS:-20}
+      AI_WEBSOCKET_PING_TIMEOUT_SECONDS: ${AI_WEBSOCKET_PING_TIMEOUT_SECONDS:-20}
+      AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS: ${AI_WEBSOCKET_CLOSE_TIMEOUT_SECONDS:-10}
+      AI_WEBSOCKET_TLS_CERT_FILE: ${AI_FINCAST_WEBSOCKET_TLS_CERT_FILE:-}
+      AI_WEBSOCKET_TLS_KEY_FILE: ${AI_FINCAST_WEBSOCKET_TLS_KEY_FILE:-}
+      AI_MODEL_CACHE_DIR: /models
+      AI_MODEL_MANIFEST: /app/model-manifest.json
+      AI_MODEL_LANE: fincast
+      AI_DEVICE: ${AI_DEVICE:-cuda}
+      AI_ALLOW_CPU_FALLBACK: "false"
+      AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}
+      AI_EXPECTED_CUDA_DEVICE_NAME: ${AI_EXPECTED_CUDA_DEVICE_NAME:-Tesla P40}
+      AI_MICROBATCH_SIZE: "1"
+      AI_MAX_SERIES: ${AI_FINCAST_MAX_SERIES:-50}
+      AI_MAX_EVALUATION_ORIGINS: ${AI_MAX_EVALUATION_ORIGINS:-10000}
+      AI_MIN_CONTEXT_BARS: "512"
+      AI_MAX_CONTEXT_BARS: "512"
+      AI_FINCAST_CONTEXT_BARS: "512"
+      AI_FINCAST_MIN_VRAM_HEADROOM_MIB: ${AI_FINCAST_MIN_VRAM_HEADROOM_MIB:-2048}
+      AI_FINCAST_NVML_DEVICE_INDEX: ${AI_FINCAST_NVML_DEVICE_INDEX:-0}
+      AI_MAX_REQUEST_BYTES: ${AI_MAX_REQUEST_BYTES:-67108864}
+      AI_MAX_RESPONSE_BYTES: ${AI_MAX_RESPONSE_BYTES:-134217728}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      CUDA_MODULE_LOADING: LAZY
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      TZ: Asia/Seoul
+    init: true
+    restart: unless-stopped
+    read_only: true
+    expose:
+      - "8766"
+    networks:
+      - ai_internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - ${AI_FINCAST_MODEL_CACHE_SOURCE:-ai_model_cache}:/models:ro
+      - ${AI_FINCAST_AUTH_SECRET_SOURCE:-fincast_auth}:/app/fincast-auth
+      - ${AI_FINCAST_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 300s
+
 volumes:
   portfolio_data:
   compute_socket:
   ai_auth:
+  fincast_auth:
   ai_model_cache:
   ai_tls:
 

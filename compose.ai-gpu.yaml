@@ -11,3 +11,15 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+  fincast-worker:
+    environment:
+      AI_DEVICE: cuda
+      AI_ALLOW_CPU_FALLBACK: "false"
+      AI_EXPECTED_CUDA_DEVICE_NAME: ${AI_EXPECTED_CUDA_DEVICE_NAME:-Tesla P40}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

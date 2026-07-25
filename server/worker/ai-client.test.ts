@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import type { ClientOptions, RawData } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -166,7 +167,7 @@ function config(overrides: Partial<AiComputeClientConfig> = {}): AiComputeClient
 
 function harness(options: {
   config?: Partial<AiComputeClientConfig>;
-  readToken?: () => string;
+  readToken?: (path: string) => string;
   random?: () => number;
 } = {}) {
   const sockets: FakeWebSocket[] = [];
@@ -258,8 +259,16 @@ describe("AiComputeClient WebSocket transport", () => {
     expect(() => new AiComputeClient(config({ url: "https://ai.example/ws/scalping-ai/v1" }))).toThrow("ws:// 또는 wss://");
     expect(() => new AiComputeClient(config({ url: "wss://ai.example/other" }))).toThrow("/ws/scalping-ai/v1");
     expect(() => new AiComputeClient(config({ authTokenFile: "relative-token" }))).toThrow("절대 경로");
+    expect(() => new AiComputeClient(config({
+      authTokenMustDifferFromFile: "relative-peer-token",
+    }))).toThrow("비교 인증 토큰 파일");
+    expect(() => new AiComputeClient(config({
+      authTokenMustDifferFromFile: "/run/ai-auth/token",
+    }))).toThrow("다른 절대 경로");
     expect(() => new AiComputeClient(config({ maximumResponseBytes: 512 }))).toThrow("응답 상한");
     expect(() => new AiComputeClient(config({ maximumRequestBytes: 512 * 1024 * 1024 + 1 }))).toThrow("요청 상한");
+    expect(() => new AiComputeClient(config({ timeoutMs: 24 * 60 * 60_000 }))).not.toThrow();
+    expect(() => new AiComputeClient(config({ timeoutMs: 24 * 60 * 60_000 + 1 }))).toThrow("timeout");
     expect(() => harness({ config: { maximumRequestBytes: 1_024 } }).client.request(request())).toThrow("크기 상한");
   });
 
@@ -301,6 +310,69 @@ describe("AiComputeClient WebSocket transport", () => {
     answerStatus(sockets[0]!);
     answerRequest(sockets[0]!);
     await expect(pending).resolves.toMatchObject({ request_id: "request-1", status: "unavailable" });
+    client.close();
+  });
+
+  it("비교 lane token이 늦게 생성되면 양쪽 token 검증 전 연결하지 않는다", async () => {
+    vi.useFakeTimers();
+    const peerPath = "/run/fincast-auth/token";
+    let peerAvailable = false;
+    const { client, sockets } = harness({
+      config: { authTokenMustDifferFromFile: peerPath },
+      readToken: (path) => {
+        if (path === peerPath) {
+          if (!peerAvailable) throw new Error("ENOENT");
+          return "b".repeat(64);
+        }
+        return AUTH_TOKEN;
+      },
+      random: () => 0.5,
+    });
+    const pending = client.request(request());
+    expect(sockets).toHaveLength(0);
+    expect(client.snapshot()).toMatchObject({
+      connection: "reconnecting",
+      pendingRequests: 1,
+      lastErrorCode: "AUTH_TOKEN_UNAVAILABLE",
+    });
+
+    peerAvailable = true;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.open();
+    answerStatus(sockets[0]!);
+    answerRequest(sockets[0]!);
+    await expect(pending).resolves.toMatchObject({ request_id: "request-1" });
+    client.close();
+  });
+
+  it("서로 다른 경로의 동일 token은 첫 WebSocket 생성 전에 fail-closed한다", async () => {
+    const sharedSecret = "same-secret-value-that-must-not-leak".repeat(2);
+    const sharedDigest = createHash("sha256").update(sharedSecret, "utf8").digest("hex");
+    const { client, sockets, connectionOptions } = harness({
+      config: { authTokenMustDifferFromFile: "/run/fincast-auth/token" },
+      readToken: () => `  ${sharedSecret}  \n`,
+    });
+    const error = await client.request(request()).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "AUTH_TOKEN_REUSED",
+      retryable: false,
+    });
+    expect(sockets).toHaveLength(0);
+    expect(connectionOptions).toHaveLength(0);
+    expect(client.snapshot()).toMatchObject({
+      connection: "unavailable",
+      pendingRequests: 0,
+      lastErrorCode: "AUTH_TOKEN_REUSED",
+    });
+    const serialized = JSON.stringify({
+      error: error instanceof Error
+        ? { message: error.message, code: (error as AiComputeTransportError).code }
+        : error,
+      snapshot: client.snapshot(),
+    });
+    expect(serialized).not.toContain(sharedSecret);
+    expect(serialized).not.toContain(sharedDigest);
     client.close();
   });
 

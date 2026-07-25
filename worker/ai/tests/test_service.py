@@ -179,5 +179,56 @@ def test_response_rejects_multiple_or_wrong_model_roles(tmp_path) -> None:
     payload = response.model_dump(mode="python")
     assert payload["model_runs"] is not None
     payload["model_runs"] = (*payload["model_runs"], payload["model_runs"][0])
-    with pytest.raises(ValidationError, match="exactly one Kronos-base"):
+    with pytest.raises(ValidationError, match="exactly one model lane"):
         type(response).model_validate(payload)
+
+
+def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
+    fincast_model = ModelProvenance(
+        model_id="Vincent05R/FinCast",
+        model_revision="2d7d90b159db8961d27c2cf165d51195902ef92b",
+        source_revision="488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
+        loader_version="fincast-source-488b19d",
+        license="Apache-2.0",
+        device="cuda",
+        device_name="Tesla P40",
+        cuda_capability="6.1",
+        dtype="float32",
+        attention_backend="math",
+        loaded=True,
+        precision_validation="fallback_fp32",
+        peak_vram_bytes=10_000,
+        peak_vram_measurement="cuda_allocated_or_reserved",
+        memory_status="ok",
+        quantile_tail_policy="tail_clamped_q10_q90",
+        precision_failure_reasons=("peak_vram_reduction_below_25pct",),
+    )
+    fincast = DeterministicAdapter(fincast_model)
+    configured = settings(
+        tmp_path,
+        model_lane="fincast",
+        min_context_bars=512,
+        max_context_bars=512,
+    )
+    service = AIService(
+        configured,
+        fincast,
+        (ProductionModelBinding("fincast", "Vincent05R/FinCast", fincast),),
+    )
+    requested = _series("BINANCE_USDM:BTCUSDT", 512)
+    response = service.handle(
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="fincast-origin",
+            mode="forecast",
+            series=(requested,),
+        )
+    )
+
+    assert response.model_runs is not None
+    run = response.model_runs[0]
+    assert run.role == "fincast"
+    assert run.expected_model_id == "Vincent05R/FinCast"
+    assert run.input_origins[0].bar_count == 512
+    assert run.input_origins[0].input_digest == _canonical_input_digest(requested.bars)
+    assert fincast.calls[0][0].bars == requested.bars

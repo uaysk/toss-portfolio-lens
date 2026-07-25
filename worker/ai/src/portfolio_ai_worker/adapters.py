@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
 
-from .contracts import ModelProvenance, PriceBar
+from .contracts import FINCAST_MODEL_ID, KRONOS_BASE_MODEL_ID, ModelProvenance, PriceBar
 from .settings import AISettings
 
 
@@ -202,7 +202,7 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise AdapterLoadError("pinned model manifest is unavailable or invalid") from error
-    if not isinstance(value, dict) or value.get("schema_version") != "scalping-ai-model-manifest/v1":
+    if not isinstance(value, dict) or value.get("schema_version") != "scalping-ai-model-manifest/v2":
         raise AdapterLoadError("pinned model manifest schema is invalid")
     return value
 
@@ -243,6 +243,13 @@ def _provenance(
     device_name: str | None = None,
     cuda_capability: str | None = None,
     loaded: bool,
+    dtype: str = "float32",
+    precision_validation: str = "not_required",
+    peak_vram_bytes: int | None = None,
+    peak_vram_measurement: str | None = None,
+    memory_status: str | None = None,
+    quantile_tail_policy: str = "native",
+    precision_failure_reasons: tuple[str, ...] = (),
 ) -> ModelProvenance:
     return ModelProvenance(
         model_id=str(manifest_model["model_id"]),
@@ -255,9 +262,15 @@ def _provenance(
         device=device if loaded else "unavailable",
         device_name=device_name if loaded and device == "cuda" else None,
         cuda_capability=cuda_capability if loaded and device == "cuda" else None,
-        dtype="float32",
+        dtype=dtype,
         attention_backend="math" if loaded else "unavailable",
         loaded=loaded,
+        precision_validation=precision_validation if loaded else "unavailable",
+        peak_vram_bytes=peak_vram_bytes if loaded else None,
+        peak_vram_measurement=peak_vram_measurement if loaded else None,
+        memory_status=memory_status or ("ok" if loaded else "unavailable"),
+        quantile_tail_policy=quantile_tail_policy if loaded else "unavailable",
+        precision_failure_reasons=precision_failure_reasons,
     )
 
 
@@ -407,30 +420,43 @@ def _try_load(
     runtime: RuntimeDevice,
 ) -> ModelAdapter:
     models = manifest.get("models")
-    source = manifest.get("kronos_source")
+    source_key = "kronos_source" if name == "kronos-base" else "fincast_source"
+    source = manifest.get(source_key)
     if not isinstance(models, dict) or not isinstance(source, dict) or name not in models:
         raise AdapterLoadError("model manifest is incomplete")
     model = models[name]
-    if name != "kronos-base":
-        raise AdapterLoadError("only the pinned Kronos-base model is supported")
-    if (
-        not isinstance(model, dict)
-        or model.get("model_id") != "NeoQuasar/Kronos-base"
-        or model.get("tokenizer_id") != "NeoQuasar/Kronos-Tokenizer-base"
-        or not isinstance(model.get("revision"), str)
-        or not model["revision"]
-        or not isinstance(model.get("tokenizer_revision"), str)
-        or not model["tokenizer_revision"]
-        or not isinstance(source.get("revision"), str)
-        or not source["revision"]
-    ):
-        raise AdapterLoadError("Kronos-base manifest identity or revisions are invalid")
-    return KronosAdapter(
-        settings,
-        model,
-        str(source["revision"]),
-        runtime,
-    )
+    if name == "kronos-base":
+        if (
+            not isinstance(model, dict)
+            or model.get("model_id") != KRONOS_BASE_MODEL_ID
+            or model.get("tokenizer_id") != "NeoQuasar/Kronos-Tokenizer-base"
+            or not isinstance(model.get("revision"), str)
+            or not model["revision"]
+            or not isinstance(model.get("tokenizer_revision"), str)
+            or not model["tokenizer_revision"]
+            or not isinstance(source.get("revision"), str)
+            or not source["revision"]
+        ):
+            raise AdapterLoadError("Kronos-base manifest identity or revisions are invalid")
+        return KronosAdapter(
+            settings,
+            model,
+            str(source["revision"]),
+            runtime,
+        )
+    if name == "fincast":
+        if (
+            not isinstance(model, dict)
+            or model.get("model_id") != FINCAST_MODEL_ID
+            or model.get("revision") != "2d7d90b159db8961d27c2cf165d51195902ef92b"
+            or not isinstance(source, dict)
+            or source.get("revision") != "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4"
+        ):
+            raise AdapterLoadError("FinCast manifest identity or revisions are invalid")
+        from .fincast import FinCastAdapter
+
+        return FinCastAdapter(settings, model, source, runtime)
+    raise AdapterLoadError("unsupported production model lane")
 
 
 def _enable_offline_runtime() -> None:
@@ -440,7 +466,7 @@ def _enable_offline_runtime() -> None:
 
 
 def _expected_model_id(name: str) -> str:
-    return "NeoQuasar/Kronos-base" if name == "kronos-base" else name
+    return KRONOS_BASE_MODEL_ID if name == "kronos-base" else FINCAST_MODEL_ID if name == "fincast" else name
 
 
 def _unavailable_adapter(
@@ -459,24 +485,23 @@ def _unavailable_adapter(
             # manifest itself is malformed. A missing/corrupt snapshot must
             # never erase the identity of the model the role expected.
             model_manifest["model_id"] = expected_model_id
-        if name == "kronos-base":
-            source = manifest.get("kronos_source")
-            if isinstance(source, dict):
-                candidate_revision = source.get("revision")
-                if isinstance(candidate_revision, str) and 0 < len(candidate_revision) <= 256:
-                    source_revision = candidate_revision
-        else:
-            source_revision = str(model_manifest.get("loader_version", "unavailable"))
+        source = manifest.get("kronos_source" if name == "kronos-base" else "fincast_source")
+        if isinstance(source, dict):
+            candidate_revision = source.get("revision")
+            if isinstance(candidate_revision, str) and 0 < len(candidate_revision) <= 256:
+                source_revision = candidate_revision
+    is_memory_pressure = "memory_pressure" in reason
     provenance = _provenance(
         model_manifest,
         source_revision=source_revision,
         device="unavailable",
         loaded=False,
+        memory_status="memory_pressure" if is_memory_pressure else "unavailable",
     )
     detail = (reason or "offline model snapshots are unavailable").strip()[:300]
     return UnavailableAdapter(
         provenance,
-        "MODEL_UNAVAILABLE",
+        "MEMORY_PRESSURE" if is_memory_pressure else "MODEL_UNAVAILABLE",
         (
             "Pinned offline AI model snapshots or the required P40 CUDA runtime are unavailable "
             f"({detail}); no forecast was fabricated."
@@ -523,11 +548,11 @@ class ProductionModelSuite:
 
 
 def load_production_model_suite(settings: AISettings) -> ProductionModelSuite:
-    """Load only pinned Kronos-base; missing cache or P40 fails closed."""
-    kronos = _load_named_adapter(
-        settings,
-        "kronos-base",
-        require_cuda=True,
-    )
-    runs = (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", kronos),)
-    return ProductionModelSuite(primary=kronos, runs=runs)
+    """Load exactly one pinned lane per process; missing cache or P40 fails closed."""
+    if settings.model_lane == "fincast":
+        adapter = _load_named_adapter(settings, "fincast", require_cuda=True)
+        runs = (ProductionModelBinding("fincast", FINCAST_MODEL_ID, adapter),)
+    else:
+        adapter = _load_named_adapter(settings, "kronos-base", require_cuda=True)
+        runs = (ProductionModelBinding("kronos_base", KRONOS_BASE_MODEL_ID, adapter),)
+    return ProductionModelSuite(primary=adapter, runs=runs)

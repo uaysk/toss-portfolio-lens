@@ -189,6 +189,27 @@ def _quantile_coverage(observations: Sequence[EvaluationObservation]) -> tuple[Q
     )
 
 
+def _pinball_loss(
+    observations: Sequence[EvaluationObservation],
+) -> tuple[float | None, tuple[QuantileValue, ...]]:
+    available = [item for item in observations if item.available]
+    if not available:
+        return None, ()
+    by_quantile: list[QuantileValue] = []
+    for quantile in FIXED_QUANTILES:
+        losses: list[float] = []
+        for item in available:
+            assert item.actual_return is not None
+            assert item.predicted_quantiles is not None
+            error = item.actual_return - item.predicted_quantiles[quantile]
+            losses.append(max(quantile * error, (quantile - 1) * error))
+        by_quantile.append(QuantileValue(quantile=quantile, value=sum(losses) / len(losses)))
+    return (
+        sum(item.value for item in by_quantile) / len(by_quantile),
+        tuple(by_quantile),
+    )
+
+
 def _return_and_drawdown(returns: Iterable[float]) -> tuple[float, float]:
     equity = 1.0
     peak = 1.0
@@ -251,11 +272,14 @@ def build_evaluation_result(
             else None
         )
         first_count, first_accuracy = _target_stop_accuracy(values)
+        mean_pinball_loss, quantile_pinball_loss = _pinball_loss(values)
         metrics.append(
             HorizonEvaluationMetrics(
                 horizon_minutes=horizon,
                 overall=_metric_group(values),
                 quantile_coverage=_quantile_coverage(values),
+                mean_pinball_loss=mean_pinball_loss,
+                quantile_pinball_loss=quantile_pinball_loss,
                 up_probability_brier=brier,
                 target_stop_first_count=first_count,
                 target_stop_first_accuracy=first_accuracy,

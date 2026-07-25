@@ -11,6 +11,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const screenshotDirectory = process.env.SIMULATION_UI_SCREENSHOT_DIR
   ? path.resolve(process.env.SIMULATION_UI_SCREENSHOT_DIR)
   : "/tmp/toss-portfolio-lens-crypto-ui";
+const expectFinalReport = process.env.CRYPTO_REPORT_EXPECT_FINAL === "1";
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -213,7 +214,25 @@ async function verify(browser, baseUrl, viewport) {
       timeout: 30_000,
     });
     await page.getByRole("heading", { name: /Kronos와 FinCast/ }).waitFor();
-    await page.locator("#report-status").filter({ hasText: "검증 대기" }).waitFor();
+    const reportStatus = (await page.locator("#report-status").innerText()).trim();
+    if (expectFinalReport) {
+      check(
+        ["운영자 검토 필요", "결론 보류"].includes(reportStatus),
+        `최종 보고서 상태가 올바르지 않습니다: ${reportStatus}`,
+      );
+      check(
+        (await page.locator("#hero-symbol").innerText()).trim() !== "선정 대기",
+        "최종 보고서에 실제 선택 종목이 없습니다.",
+      );
+      check(
+        ["review_required", "inconclusive"].includes(
+          (await page.locator("#hero-outcome").innerText()).trim(),
+        ),
+        "최종 보고서 결론이 review_required 또는 inconclusive가 아닙니다.",
+      );
+    } else {
+      check(reportStatus === "검증 대기", `pending 보고서 상태가 올바르지 않습니다: ${reportStatus}`);
+    }
     const reportTabs = page.getByRole("tablist", { name: "보고서 섹션" });
     await reportTabs.getByRole("tab", { name: "개요" }).press("ArrowRight");
     check(
@@ -254,49 +273,101 @@ async function verify(browser, baseUrl, viewport) {
       check(await reportTableRegion.evaluate((element) => element.scrollLeft > 0), "모바일 보고서 표를 키보드로 가로 스크롤할 수 없습니다.");
       await reportTableRegion.evaluate((element) => { element.scrollLeft = 0; });
     }
-    const clippedReportText = await page.locator(".hero, .tabs, [role=\"tabpanel\"]:not([hidden])")
-      .evaluateAll((roots) => roots.flatMap((root) => (
-        Array.from(root.querySelectorAll("h1,h2,h3,h4,p,span,strong,button,th,td,dt,dd"))
+    const reportPanelScreenshots = {};
+    for (const [tabName, slug] of [
+      ["개요", "overview"],
+      ["모델 비교", "models"],
+      ["리스크·실행", "risk"],
+      ["Provenance", "provenance"],
+    ]) {
+      await reportTabs.getByRole("tab", { name: tabName, exact: true }).click();
+      const panelOverflow = await page.evaluate(() => Math.max(
+        0,
+        document.documentElement.scrollWidth - window.innerWidth,
+        document.body.scrollWidth - window.innerWidth,
+      ));
+      const panelOverflowElements = panelOverflow > 0
+        ? await page.evaluate(() => Array.from(document.body.querySelectorAll("*"))
           .flatMap((element) => {
-            const style = getComputedStyle(element);
             const rect = element.getBoundingClientRect();
-            const intentionallyTruncated = element.classList.contains("truncate")
-              || element.hasAttribute("title")
-              || style.textOverflow === "ellipsis";
-            const scrollContainer = ["auto", "scroll"].includes(style.overflowX)
-              || ["auto", "scroll"].includes(style.overflowY);
-            const clippedBySelf = rect.width > 0 && rect.height > 0
-              && ((["hidden", "clip"].includes(style.overflowX)
-                  && element.scrollWidth > element.clientWidth + 1)
-                || (["hidden", "clip"].includes(style.overflowY)
-                  && element.scrollHeight > element.clientHeight + 1));
-            let ancestor = element.parentElement;
-            let clippedByAncestor = false;
-            while (ancestor && root.contains(ancestor)) {
-              const ancestorStyle = getComputedStyle(ancestor);
-              if (["hidden", "clip"].includes(ancestorStyle.overflowX)
-                || ["hidden", "clip"].includes(ancestorStyle.overflowY)) {
-                const boundary = ancestor.getBoundingClientRect();
-                clippedByAncestor = rect.left < boundary.left - 1
-                  || rect.right > boundary.right + 1
-                  || rect.top < boundary.top - 1
-                  || rect.bottom > boundary.bottom + 1;
-                if (clippedByAncestor) break;
+            const style = getComputedStyle(element);
+            if (rect.width <= 0
+              || (rect.left >= -1 && rect.right <= window.innerWidth + 1)
+              || ["auto", "scroll"].includes(style.overflowX)) return [];
+            return [{
+              tag: element.tagName,
+              id: element.id,
+              className: typeof element.className === "string"
+                ? element.className.slice(0, 160)
+                : "",
+              bounds: [Math.round(rect.left), Math.round(rect.right), Math.round(rect.width)],
+              overflowX: style.overflowX,
+            }];
+          }).slice(0, 20))
+        : [];
+      check(
+        panelOverflow === 0,
+        `${viewport.width}px 보고서 ${tabName} 가로 overflow ${panelOverflow}px: `
+          + JSON.stringify(panelOverflowElements),
+      );
+      const clippedReportText = await page.locator(".hero, .tabs, [role=\"tabpanel\"]:not([hidden])")
+        .evaluateAll((roots) => roots.flatMap((root) => (
+          Array.from(root.querySelectorAll("h1,h2,h3,h4,p,span,strong,button,th,td,dt,dd"))
+            .flatMap((element) => {
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              const intentionallyTruncated = element.classList.contains("truncate")
+                || element.hasAttribute("title")
+                || style.textOverflow === "ellipsis";
+              const scrollContainer = ["auto", "scroll"].includes(style.overflowX)
+                || ["auto", "scroll"].includes(style.overflowY);
+              const clippedBySelf = rect.width > 0 && rect.height > 0
+                && ((["hidden", "clip"].includes(style.overflowX)
+                    && element.scrollWidth > element.clientWidth + 1)
+                  || (["hidden", "clip"].includes(style.overflowY)
+                    && element.scrollHeight > element.clientHeight + 1));
+              let ancestor = element.parentElement;
+              let clippedByAncestor = false;
+              while (ancestor && root.contains(ancestor)) {
+                const ancestorStyle = getComputedStyle(ancestor);
+                if (["hidden", "clip"].includes(ancestorStyle.overflowX)
+                  || ["hidden", "clip"].includes(ancestorStyle.overflowY)) {
+                  const boundary = ancestor.getBoundingClientRect();
+                  clippedByAncestor = rect.left < boundary.left - 1
+                    || rect.right > boundary.right + 1
+                    || rect.top < boundary.top - 1
+                    || rect.bottom > boundary.bottom + 1;
+                  if (clippedByAncestor) break;
+                }
+                ancestor = ancestor.parentElement;
               }
-              ancestor = ancestor.parentElement;
-            }
-            const clipped = clippedBySelf || clippedByAncestor;
-            return clipped && !intentionallyTruncated && !scrollContainer
-              ? [{
-                  tag: element.tagName,
-                  text: element.textContent?.trim().slice(0, 120),
-                  client: [element.clientWidth, element.clientHeight],
-                  scroll: [element.scrollWidth, element.scrollHeight],
-                }]
-              : [];
-          })
-      )));
-    check(!clippedReportText.length, `잘린 보고서 텍스트: ${JSON.stringify(clippedReportText)}`);
+              const clipped = clippedBySelf || clippedByAncestor;
+              return clipped && !intentionallyTruncated && !scrollContainer
+                ? [{
+                    tag: element.tagName,
+                    text: element.textContent?.trim().slice(0, 120),
+                    client: [element.clientWidth, element.clientHeight],
+                    scroll: [element.scrollWidth, element.scrollHeight],
+                  }]
+                : [];
+            })
+        )));
+      check(
+        !clippedReportText.length,
+        `잘린 보고서 ${tabName} 텍스트: ${JSON.stringify(clippedReportText)}`,
+      );
+      const panelScreenshot = path.join(
+        screenshotDirectory,
+        `${viewport.width}x${viewport.height}-report-${slug}-full.png`,
+      );
+      await page.screenshot({
+        path: panelScreenshot,
+        animations: "disabled",
+        fullPage: true,
+      });
+      reportPanelScreenshots[slug] = panelScreenshot;
+    }
+    await reportTabs.getByRole("tab", { name: "개요", exact: true }).click();
     await page.evaluate(() => {
       document.documentElement.style.scrollBehavior = "auto";
       document.body.style.scrollBehavior = "auto";
@@ -327,6 +398,7 @@ async function verify(browser, baseUrl, viewport) {
         runtimeScreenshot,
         comparisonScreenshot,
         reportScreenshot,
+        reportPanelScreenshots,
       },
     };
   } finally {

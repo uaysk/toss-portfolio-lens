@@ -23,37 +23,29 @@
     * { box-sizing: border-box; }
     html { background: hsl(var(--background)); scroll-behavior: smooth; }
     body { margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); }
-    button, a { font: inherit; }
-    button { color: inherit; }
-    a { color: inherit; }
+    button, a { color: inherit; font: inherit; }
     :focus-visible { outline: 2px solid hsl(var(--cyan)); outline-offset: 3px; }
     .shell { width: min(100% - 32px, 1480px); margin: 0 auto; padding: 24px 0 72px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 2px 20px; }
     .brand { font-size: 11px; font-weight: 900; letter-spacing: .12em; }
     .status { display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; padding: 8px 12px; background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 900; }
     .status::before { width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--amber)); content: ""; }
-    .hero { border-radius: calc(var(--radius) + .4rem); background: hsl(var(--foreground)); color: hsl(var(--background)); padding: clamp(28px, 5vw, 70px); overflow: hidden; }
-    .eyebrow { margin: 0; font-size: 10px; font-weight: 950; letter-spacing: .14em; color: hsl(var(--muted-foreground)); }
-    .hero h1 {
-      max-width: 1240px;
-      margin: 20px 0 0;
-      font-size: clamp(38px, 6.4vw, 92px);
-      line-height: .94;
-      letter-spacing: -.065em;
-      font-weight: 950;
-      word-break: keep-all;
-    }
-    .hero p { max-width: 780px; margin: 26px 0 0; font-size: 13px; line-height: 1.8; color: hsl(0 0% 34%); }
-    .hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-top: 38px; }
+    .status.cyan::before { background: hsl(var(--cyan)); }
+    .hero { overflow: hidden; border-radius: calc(var(--radius) + .4rem); background: hsl(var(--foreground)); color: hsl(var(--background)); padding: clamp(28px, 5vw, 70px); }
+    .eyebrow { margin: 0; color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 950; letter-spacing: .14em; }
+    .hero h1 { max-width: 1240px; margin: 20px 0 0; font-size: clamp(38px, 6.4vw, 92px); font-weight: 950; letter-spacing: -.065em; line-height: .94; word-break: keep-all; }
+    .hero p { max-width: 820px; margin: 26px 0 0; color: hsl(0 0% 34%); font-size: 13px; line-height: 1.8; }
+    .hero-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-top: 38px; }
     .hero-stat { min-width: 0; border-radius: 16px; background: hsl(0 0% 91%); padding: 16px; }
-    .hero-stat span { display: block; font-size: 9px; font-weight: 900; color: hsl(0 0% 42%); }
+    .hero-stat span { display: block; color: hsl(0 0% 42%); font-size: 9px; font-weight: 900; }
     .hero-stat strong { display: block; margin-top: 7px; overflow-wrap: anywhere; font-size: 13px; }
     .tabs { position: sticky; top: 10px; z-index: 5; display: flex; gap: 4px; margin: 14px 0; padding: 4px; overflow-x: auto; border-radius: 16px; background: hsl(var(--muted) / .94); backdrop-filter: blur(14px); }
     .tab { flex: 1 0 max-content; min-height: 42px; border: 0; border-radius: 12px; padding: 0 16px; background: transparent; color: hsl(var(--muted-foreground)); cursor: pointer; font-size: 10px; font-weight: 900; }
     .tab[aria-selected="true"] { background: hsl(var(--card)); color: hsl(var(--foreground)); }
     [role="tabpanel"][hidden] { display: none; }
-    .stack { display: grid; gap: 12px; }
-    .card { min-width: 0; border-radius: var(--radius); background: hsl(var(--card)); padding: clamp(18px, 3vw, 28px); }
+    .stack { display: grid; min-width: 0; gap: 12px; }
+    .stack > * { min-width: 0; }
+    .card, .chart-card { min-width: 0; border-radius: var(--radius); background: hsl(var(--card)); padding: clamp(18px, 3vw, 28px); }
     .card.muted { background: hsl(var(--muted)); }
     .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
     .section-head h2 { margin: 6px 0 0; font-size: clamp(20px, 3vw, 30px); letter-spacing: -.04em; }
@@ -63,27 +55,34 @@
     .pill.amber { background: hsl(var(--amber) / .12); color: hsl(var(--amber)); }
     .pill.red { background: hsl(var(--red) / .12); color: hsl(var(--red)); }
     .grid-2 { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
-    .grid-3 { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
     .grid-4 { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
+    .grid-5 { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 8px; }
     .metric { min-width: 0; border-radius: 14px; background: hsl(var(--muted)); padding: 14px; }
     .metric span { display: block; color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; letter-spacing: .04em; }
-    .metric strong { display: block; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; white-space: nowrap; }
+    .metric strong { display: block; margin-top: 7px; overflow-wrap: anywhere; font-size: 12px; }
+    .metric strong.cyan { color: hsl(var(--cyan)); }
+    .metric strong.red { color: hsl(var(--red)); }
+    .metric small { display: block; margin-top: 6px; color: hsl(var(--muted-foreground)); font-size: 8px; line-height: 1.5; }
+    .metric-group { margin: 22px 0 9px; color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; letter-spacing: .12em; }
     .table-wrap { margin-top: 18px; overflow-x: auto; }
-    table { width: 100%; min-width: 760px; border-collapse: separate; border-spacing: 0 6px; font-size: 10px; text-align: left; }
+    table { width: 100%; min-width: 840px; border-collapse: separate; border-spacing: 0 6px; font-size: 10px; text-align: left; }
     th { padding: 5px 12px; color: hsl(var(--muted-foreground)); font-size: 8px; }
     td { padding: 13px 12px; background: hsl(var(--muted)); }
     td:first-child { border-radius: 12px 0 0 12px; font-weight: 900; }
     td:last-child { border-radius: 0 12px 12px 0; }
     .empty-row td { color: hsl(var(--muted-foreground)); text-align: center; }
-    .toggle-bar { display: flex; gap: 6px; margin: 18px 0 0; padding: 4px; border-radius: 14px; background: hsl(var(--muted)); }
+    .toggle-bar { display: flex; gap: 6px; margin: 18px 0 12px; padding: 4px; border-radius: 14px; background: hsl(var(--muted)); }
     .model-toggle { flex: 1; min-height: 40px; border: 0; border-radius: 10px; background: transparent; color: hsl(var(--muted-foreground)); cursor: pointer; font-size: 10px; font-weight: 900; }
     .model-toggle[aria-pressed="true"] { background: hsl(var(--card)); color: hsl(var(--foreground)); }
-    .lane { display: none; margin-top: 12px; }
+    .lane { display: none; min-width: 0; }
     .lane.active { display: block; }
     .chart-grid { display: grid; grid-template-columns: 1.4fr .6fr; gap: 12px; }
-    .chart-card { min-width: 0; border-radius: var(--radius); background: hsl(var(--card)); padding: 20px; }
     .chart-card h3 { margin: 0; font-size: 13px; }
     .chart-card p { margin: 6px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .legend i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; background: currentColor; }
+    .legend .cyan { color: hsl(var(--cyan)); }
+    .legend .amber { color: hsl(var(--amber)); }
     .canvas-wrap { position: relative; width: 100%; height: 280px; margin-top: 16px; }
     .canvas-wrap.short { height: 132px; }
     canvas { display: block; width: 100%; height: 100%; }
@@ -94,11 +93,13 @@
     .flow-item span { display: block; margin-top: 7px; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.5; }
     .list { margin: 16px 0 0; padding-left: 18px; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.8; }
     .list strong { color: hsl(var(--foreground)); }
+    .error-list { overflow-wrap: anywhere; }
     .facts { display: grid; gap: 7px; margin-top: 16px; }
-    .fact { display: grid; grid-template-columns: 180px minmax(0,1fr); gap: 16px; border-radius: 13px; background: hsl(var(--muted)); padding: 13px; font-size: 9px; line-height: 1.6; }
+    .fact { display: grid; grid-template-columns: 190px minmax(0,1fr); gap: 16px; border-radius: 13px; background: hsl(var(--muted)); padding: 13px; font-size: 9px; line-height: 1.6; }
     .fact dt { color: hsl(var(--muted-foreground)); font-weight: 900; }
     .fact dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
     footer { padding: 28px 4px 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.7; }
+    @media (max-width: 1100px) { .grid-5 { grid-template-columns: repeat(3,minmax(0,1fr)); } }
     @media (max-width: 900px) {
       .hero-grid, .grid-4, .flow { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .chart-grid { grid-template-columns: 1fr; }
@@ -108,14 +109,8 @@
       .shell { width: min(100% - 20px, 1480px); padding-top: 10px; }
       .topbar { align-items: flex-start; }
       .hero { padding: 28px 20px; }
-      .hero h1 {
-        font-size: 34px;
-        line-height: 1.04;
-        letter-spacing: -.055em;
-        word-break: keep-all;
-        overflow-wrap: break-word;
-      }
-      .hero-grid, .grid-2, .grid-3, .grid-4, .flow { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 34px; line-height: 1.04; letter-spacing: -.055em; overflow-wrap: break-word; }
+      .hero-grid, .grid-2, .grid-4, .grid-5, .flow { grid-template-columns: 1fr; }
       .flow-item::after { content: "" !important; }
       .tabs { top: 4px; }
       .tab { min-height: 44px; padding: 0 13px; }
@@ -130,16 +125,12 @@
   <main class="shell">
     <div class="topbar">
       <div class="brand">PORTFOLIO LENS · RESEARCH</div>
-      <span class="status" id="report-status">검증 대기</span>
+      <span class="status " id="report-status">검증 대기</span>
     </div>
-
     <header class="hero">
       <p class="eyebrow">BINANCE USDⓈ-M · PAPER ONLY · AI-PAPER-SIMULATION/V7</p>
       <h1>Kronos와 FinCast,<br>같은 시장에서 따로 검증합니다.</h1>
-      <p>
-        동일 origin·context·비용·fill barrier로 두 모델의 예측, 비용 후 거래 성과와 GPU 운영 특성을 비교합니다.
-        이 문서는 자동 우승자를 만들지 않으며 실제 forward 결과가 준비되기 전까지 상태를 검증 대기로 유지합니다.
-      </p>
+      <p>동일 origin·context·비용·fill barrier로 예측, 비용 후 거래 성과와 GPU 운영 특성을 비교합니다. 자동 우승자나 자동 승격은 만들지 않습니다.</p>
       <div class="hero-grid">
         <div class="hero-stat"><span>대상</span><strong id="hero-symbol">선정 대기</strong></div>
         <div class="hero-stat"><span>Walk-forward</span><strong>최근 완결 7일 · 15분 origin</strong></div>
@@ -147,97 +138,176 @@
         <div class="hero-stat"><span>결론</span><strong id="hero-outcome">inconclusive</strong></div>
       </div>
     </header>
-
     <nav class="tabs" role="tablist" aria-label="보고서 섹션">
       <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true" tabindex="0">개요</button>
       <button class="tab" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="false" tabindex="-1">모델 비교</button>
       <button class="tab" role="tab" id="tab-risk" aria-controls="panel-risk" aria-selected="false" tabindex="-1">리스크·실행</button>
       <button class="tab" role="tab" id="tab-provenance" aria-controls="panel-provenance" aria-selected="false" tabindex="-1">Provenance</button>
     </nav>
-
     <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" class="stack">
       <article class="card">
         <div class="section-head">
-          <div><p class="eyebrow">SCANNER SNAPSHOT</p><h2>유동성 조건 내 변동성 1위</h2><p>상장 7일 이상, TRADING·PERPETUAL·USDT, 거래대금 상위 50, 스프레드 10bp 이하만 후보가 됩니다.</p></div>
+          <div><p class="eyebrow">SCANNER SNAPSHOT</p><h2>유동성 조건 내 scanner 순위</h2><p>선택 근거와 데이터 품질을 immutable snapshot 식별자와 함께 표시합니다.</p></div>
           <span class="pill amber" id="snapshot-id">snapshot 대기</span>
         </div>
         <div class="table-wrap" role="region" aria-label="암호화폐 선물 scanner 순위 가로 스크롤" tabindex="0">
           <table aria-label="암호화폐 선물 scanner 순위">
-            <thead><tr><th>순위 · 계약</th><th>종합 점수</th><th>60m 실현변동성</th><th>24h 변동성</th><th>ATR%</th><th>스프레드</th><th>데이터 품질</th></tr></thead>
-            <tbody id="scanner-body"><tr class="empty-row"><td colspan="7">실제 scanner snapshot을 기다리고 있습니다.</td></tr></tbody>
+            <thead><tr><th>순위 · 계약</th><th>종합 점수</th><th>거래대금</th><th>상대 거래량</th><th>60m 실현변동성</th><th>24h 변동성</th><th>ATR%</th><th>스프레드</th><th>데이터 품질</th></tr></thead>
+            <tbody id="scanner-body"><tr class="empty-row"><td colspan="9">scanner 결과 생성 전</td></tr></tbody>
           </table>
         </div>
       </article>
       <div class="chart-grid">
-        <article class="chart-card"><h3>확정 candle · 가상 체결</h3><p>상승/하락 candle, LONG cyan, SHORT amber</p><div class="canvas-wrap"><canvas id="candle-chart" aria-label="선택 계약 candle 차트" role="img"></canvas></div></article>
+        <article class="chart-card">
+          <h3>확정 candle · paper fill</h3><p>Candle과 결정 이후 체결된 LONG/SHORT fill만 표시</p>
+          <div class="legend"><span class="cyan"><i></i>상승 · LONG</span><span class="amber"><i></i>하락 · SHORT</span></div>
+          <div class="canvas-wrap"><canvas id="candle-chart" aria-label="선택 계약 candle 및 paper fill 차트" role="img"></canvas></div>
+        </article>
         <div class="stack">
-          <article class="chart-card"><h3>Paper equity</h3><p>비용·funding 차감 후</p><div class="canvas-wrap short"><canvas id="equity-chart" aria-label="paper equity 차트" role="img"></canvas></div></article>
-          <article class="chart-card"><h3>Drawdown</h3><p>UTC 일손실 3% gate</p><div class="canvas-wrap short"><canvas id="drawdown-chart" aria-label="drawdown 차트" role="img"></canvas></div></article>
+          <article class="chart-card">
+            <h3>Paper equity</h3><p>lane별 비용·funding 반영 equity</p>
+            <div class="legend"><span class="cyan"><i></i>Kronos</span><span class="amber"><i></i>FinCast</span></div>
+            <div class="canvas-wrap short"><canvas id="equity-chart" aria-label="lane별 paper equity 차트" role="img"></canvas></div>
+          </article>
+          <article class="chart-card">
+            <h3>Drawdown</h3><p>lane별 peak-to-current drawdown</p>
+            <div class="canvas-wrap short"><canvas id="drawdown-chart" aria-label="lane별 drawdown 차트" role="img"></canvas></div>
+          </article>
         </div>
       </div>
       <article class="card muted">
-        <div class="section-head"><div><p class="eyebrow">FORWARD RESULT</p><h2>아직 실제 비교 결과가 없습니다.</h2><p>7일 replay와 120분 shadow가 모두 완료된 뒤 이 영역을 실제 지표로 갱신합니다.</p></div><span class="pill amber">inconclusive</span></div>
+        <div class="section-head">
+          <div><p class="eyebrow">FORWARD RESULT</p><h2>실제 비교 결과 생성 전</h2><p>실행 lane은 Kronos-base이며 모델 승격 판단은 포함하지 않습니다.</p></div>
+          <span class="pill ">inconclusive</span>
+        </div>
         <div class="grid-4" style="margin-top:18px">
-          <div class="metric"><span>비용 후 PnL</span><strong>unavailable</strong></div>
-          <div class="metric"><span>Profit factor</span><strong>unavailable</strong></div>
-          <div class="metric"><span>Max drawdown</span><strong>unavailable</strong></div>
-          <div class="metric"><span>총 비용</span><strong>unavailable</strong></div>
+          <div class="metric"><span>비용 후 PnL</span><strong>—</strong></div>
+          <div class="metric"><span>Profit factor</span><strong>—</strong></div>
+          <div class="metric"><span>Max drawdown</span><strong>—</strong></div>
+          <div class="metric"><span>총 비용</span><strong>—</strong></div>
         </div>
       </article>
     </section>
-
     <section id="panel-models" role="tabpanel" aria-labelledby="tab-models" class="stack" hidden>
-      <article class="card">
-        <div class="section-head"><div><p class="eyebrow">INDEPENDENT LANES</p><h2>Fallback으로 위장하지 않는 비교</h2><p>한 모델의 실패를 다른 모델 출력으로 대체하지 않으며 각 availability와 오류를 그대로 집계합니다.</p></div><span class="pill">자동 승격 없음</span></div>
-        <div class="grid-4" style="margin-top:18px">
-          <div class="metric"><span>동일 origin</span><strong>검증 대기</strong></div>
-          <div class="metric"><span>동일 context</span><strong>검증 대기</strong></div>
-          <div class="metric"><span>동일 비용</span><strong>검증 대기</strong></div>
-          <div class="metric"><span>공통 fill barrier</span><strong>검증 대기</strong></div>
+      <article class="card muted">
+        <div class="section-head">
+          <div><p class="eyebrow">COMMON COMPARISON BOUNDARY</p><h2>같은 입력과 같은 실행 장벽</h2><p>Replay와 shadow 검증을 분리해 표시하고 둘 다 통과해야 overall PASS로 집계합니다.</p></div>
+          <span class="pill">자동 우승자 없음</span>
         </div>
+        <div class="grid-4" style="margin-top:18px"><div class="metric">
+      <span>동일 origin</span>
+      <strong class="">검증 대기</strong>
+      <small>Replay 검증 대기 · Shadow 검증 대기</small>
+    </div><div class="metric">
+      <span>동일 context</span>
+      <strong class="">검증 대기</strong>
+      <small>Replay 검증 대기 · Shadow 검증 대기</small>
+    </div><div class="metric">
+      <span>동일 비용</span>
+      <strong class="">검증 대기</strong>
+      <small>Replay 검증 대기 · Shadow 검증 대기</small>
+    </div><div class="metric">
+      <span>공통 fill barrier</span>
+      <strong class="">검증 대기</strong>
+      <small>Replay 검증 대기 · Shadow 검증 대기</small>
+    </div></div>
         <div class="toggle-bar" role="group" aria-label="표시 모델">
           <button class="model-toggle" data-model="kronos_base" aria-pressed="true">Kronos-base</button>
           <button class="model-toggle" data-model="fincast" aria-pressed="false">FinCast</button>
         </div>
-        <div class="lane active" data-lane="kronos_base">
-          <div class="grid-3">
-            <div class="metric"><span>Precision</span><strong id="kronos-precision">unknown</strong></div>
-            <div class="metric"><span>Pinball loss</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Median-return MAE</span><strong>unavailable</strong></div>
-            <div class="metric"><span>방향 정확도</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Inference latency</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Peak VRAM</span><strong>unavailable</strong></div>
-          </div>
-        </div>
-        <div class="lane" data-lane="fincast">
-          <div class="grid-3">
-            <div class="metric"><span>Precision</span><strong id="fincast-precision">unknown</strong></div>
-            <div class="metric"><span>Pinball loss</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Median-return MAE</span><strong>unavailable</strong></div>
-            <div class="metric"><span>방향 정확도</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Inference latency</span><strong>unavailable</strong></div>
-            <div class="metric"><span>Peak VRAM</span><strong>unavailable</strong></div>
-          </div>
-        </div>
       </article>
-      <article class="card muted">
-        <div class="section-head"><div><p class="eyebrow">METRICS</p><h2>예측 · 거래 · 운영</h2></div></div>
-        <div class="grid-3" style="margin-top:18px">
-          <div class="metric"><span>예측</span><strong>Pinball · MAE · 방향 · Coverage</strong></div>
-          <div class="metric"><span>거래</span><strong>PnL · PF · 승률 · DD · 비용</strong></div>
-          <div class="metric"><span>운영</span><strong>Latency · Timeout · VRAM · Precision</strong></div>
-        </div>
-      </article>
+      <div class="lane active" data-lane="kronos_base">
+    <article class="card">
+      <div class="section-head">
+        <div><p class="eyebrow">KRONOS-BASE</p><h2>Kronos-base 독립 lane</h2><p>Replay 예측 지표와 shadow 거래·운영 지표를 분리해 표시합니다.</p></div>
+        <span class="pill amber">pending</span>
+      </div>
+      <p class="metric-group">PREDICTION METRICS · 7-DAY REPLAY</p>
+      <div class="grid-5">
+        <div class="metric"><span>Pinball loss</span><strong>—</strong></div>
+        <div class="metric"><span>Median-return MAE</span><strong>—</strong></div>
+        <div class="metric"><span>방향 정확도</span><strong>—</strong></div>
+        <div class="metric"><span>Quantile coverage</span><strong>—</strong></div>
+        <div class="metric"><span>Calibration error</span><strong>—</strong></div>
+      </div>
+      <div class="table-wrap" role="region" aria-label="Kronos-base replay horizon 지표 가로 스크롤" tabindex="0">
+        <table aria-label="Kronos-base replay horizon 지표">
+          <thead><tr><th>Horizon</th><th>표본</th><th>Pinball</th><th>Median MAE</th><th>방향</th><th>q50 coverage</th><th>Calibration</th></tr></thead>
+          <tbody><tr class="empty-row"><td colspan="7">replay horizon 지표 생성 전</td></tr></tbody>
+        </table>
+      </div>
+      <p class="metric-group">TRADING METRICS · SHADOW</p>
+      <div class="grid-5">
+        <div class="metric"><span>비용 후 PnL</span><strong>—</strong></div>
+        <div class="metric"><span>Profit factor</span><strong>—</strong></div>
+        <div class="metric"><span>Win rate</span><strong>—</strong></div>
+        <div class="metric"><span>Max drawdown</span><strong>—</strong></div>
+        <div class="metric"><span>Turnover</span><strong>—</strong></div>
+        <div class="metric"><span>Funding</span><strong>—</strong></div>
+        <div class="metric"><span>Fees</span><strong>—</strong></div>
+        <div class="metric"><span>평균 leverage</span><strong>—</strong></div>
+      </div>
+      <p class="metric-group">OPERATIONAL METRICS</p>
+      <div class="grid-5">
+        <div class="metric"><span>Precision</span><strong>unknown</strong></div>
+        <div class="metric"><span>Inference latency</span><strong>—</strong><small>replay —</small></div>
+        <div class="metric"><span>Availability</span><strong>—</strong></div>
+        <div class="metric"><span>Timeout</span><strong>—</strong></div>
+        <div class="metric"><span>Peak VRAM</span><strong>—</strong></div>
+      </div>
+      <ul class="list error-list"><li><strong>Errors</strong> · 없음</li></ul>
+    </article>
+  </div><div class="lane" data-lane="fincast">
+    <article class="card">
+      <div class="section-head">
+        <div><p class="eyebrow">FINCAST</p><h2>FinCast 독립 lane</h2><p>Replay 예측 지표와 shadow 거래·운영 지표를 분리해 표시합니다.</p></div>
+        <span class="pill amber">pending</span>
+      </div>
+      <p class="metric-group">PREDICTION METRICS · 7-DAY REPLAY</p>
+      <div class="grid-5">
+        <div class="metric"><span>Pinball loss</span><strong>—</strong></div>
+        <div class="metric"><span>Median-return MAE</span><strong>—</strong></div>
+        <div class="metric"><span>방향 정확도</span><strong>—</strong></div>
+        <div class="metric"><span>Quantile coverage</span><strong>—</strong></div>
+        <div class="metric"><span>Calibration error</span><strong>—</strong></div>
+      </div>
+      <div class="table-wrap" role="region" aria-label="FinCast replay horizon 지표 가로 스크롤" tabindex="0">
+        <table aria-label="FinCast replay horizon 지표">
+          <thead><tr><th>Horizon</th><th>표본</th><th>Pinball</th><th>Median MAE</th><th>방향</th><th>q50 coverage</th><th>Calibration</th></tr></thead>
+          <tbody><tr class="empty-row"><td colspan="7">replay horizon 지표 생성 전</td></tr></tbody>
+        </table>
+      </div>
+      <p class="metric-group">TRADING METRICS · SHADOW</p>
+      <div class="grid-5">
+        <div class="metric"><span>비용 후 PnL</span><strong>—</strong></div>
+        <div class="metric"><span>Profit factor</span><strong>—</strong></div>
+        <div class="metric"><span>Win rate</span><strong>—</strong></div>
+        <div class="metric"><span>Max drawdown</span><strong>—</strong></div>
+        <div class="metric"><span>Turnover</span><strong>—</strong></div>
+        <div class="metric"><span>Funding</span><strong>—</strong></div>
+        <div class="metric"><span>Fees</span><strong>—</strong></div>
+        <div class="metric"><span>평균 leverage</span><strong>—</strong></div>
+      </div>
+      <p class="metric-group">OPERATIONAL METRICS</p>
+      <div class="grid-5">
+        <div class="metric"><span>Precision</span><strong>unknown</strong></div>
+        <div class="metric"><span>Inference latency</span><strong>—</strong><small>replay —</small></div>
+        <div class="metric"><span>Availability</span><strong>—</strong></div>
+        <div class="metric"><span>Timeout</span><strong>—</strong></div>
+        <div class="metric"><span>Peak VRAM</span><strong>—</strong></div>
+      </div>
+      <ul class="list error-list"><li><strong>Errors</strong> · 없음</li></ul>
+    </article>
+  </div>
     </section>
-
     <section id="panel-risk" role="tabpanel" aria-labelledby="tab-risk" class="stack" hidden>
       <article class="card">
         <div class="section-head"><div><p class="eyebrow">EXECUTION BARRIER</p><h2>판단과 체결 사이의 시간 경계</h2><p>미래 가격을 사용하지 않도록 결정 이후 최초 유효 aggTrade 또는 다음 확정봉 open만 허용합니다.</p></div><span class="pill cyan">paper only</span></div>
         <div class="flow">
-          <div class="flow-item"><strong>확정 1분봉</strong><span>forming 봉은 판단을 유발하지 않음</span></div>
-          <div class="flow-item"><strong>독립 모델 판단</strong><span>quantile CDF와 비용 초과 확률</span></div>
-          <div class="flow-item"><strong>공통 fill barrier</strong><span>결정 뒤 최초 유효 체결</span></div>
-          <div class="flow-item"><strong>격리 paper 원장</strong><span>수수료·슬리피지·funding 반영</span></div>
+          <div class="flow-item" data-flow-step="1"><strong>확정 1분봉</strong><span>forming 봉은 판단을 유발하지 않음</span></div>
+          <div class="flow-item" data-flow-step="2"><strong>독립 모델 판단</strong><span>lane별 quantile CDF와 비용 초과 확률</span></div>
+          <div class="flow-item" data-flow-step="3"><strong>후속 이벤트 장벽</strong><span>결정 뒤 최초 유효 aggTrade 또는 확정봉 open</span></div>
+          <div class="flow-item" data-flow-step="4"><strong>격리 paper 원장</strong><span>수수료·슬리피지·funding 반영</span></div>
         </div>
       </article>
       <div class="grid-2">
@@ -251,72 +321,44 @@
           </ul>
         </article>
         <article class="card muted">
-          <p class="eyebrow">FAIL CLOSED</p><h2 style="margin:8px 0 0">신규 진입 중단</h2>
+          <p class="eyebrow">OBSERVED COSTS</p><h2 style="margin:8px 0 0">공통 비용 가정</h2>
           <ul class="list">
-            <li><strong>UTC 일중 equity -3%</strong> 도달 시 reduce-only 청산</li>
-            <li>보호 주문 실패·원장 불일치·stream desync</li>
-            <li>모델 stale·rate limit·worker timeout</li>
-            <li>FinCast VRAM headroom 부족 시 memory_pressure</li>
+            <li>Commission / side · <strong>—bp</strong></li>
+            <li>Spread / round trip · <strong>—bp</strong></li>
+            <li>Slippage / side · <strong>—bp</strong></li>
+            <li>Tax / exit · <strong>—bp</strong></li>
           </ul>
         </article>
       </div>
       <article class="card">
-        <div class="section-head"><div><p class="eyebrow">LIVE CAPABILITY</p><h2>이번 배포의 realOrder는 false</h2><p>읽기 전용 키로 실제 주문이나 testnet 주문을 보내지 않습니다.</p></div><span class="pill red">LIVE 잠김</span></div>
-        <div class="grid-3" style="margin-top:18px">
-          <div class="metric"><span>PAPER</span><strong style="color:hsl(var(--cyan))">허용</strong></div>
+        <div class="section-head"><div><p class="eyebrow">LIVE CAPABILITY</p><h2>이번 보고서의 realOrder는 false</h2><p>입력에서 paper 실행과 realOrder=false가 명시적으로 확인된 필드만 사용합니다.</p></div><span class="pill red">LIVE 잠김</span></div>
+        <div class="grid-4" style="margin-top:18px">
+          <div class="metric"><span>PAPER</span><strong>허용</strong></div>
           <div class="metric"><span>TESTNET</span><strong>잠김</strong></div>
-          <div class="metric"><span>LIVE</span><strong style="color:hsl(var(--red))">잠김</strong></div>
+          <div class="metric"><span>LIVE</span><strong>잠김</strong></div>
+          <div class="metric"><span>Terminal settlement</span><strong>검증 대기</strong></div>
         </div>
       </article>
     </section>
-
     <section id="panel-provenance" role="tabpanel" aria-labelledby="tab-provenance" class="stack" hidden>
       <article class="card">
-        <div class="section-head"><div><p class="eyebrow">PROVENANCE</p><h2>재현 가능한 실행 경계</h2><p>revision·digest·precision·검증 결과는 실제 배포가 완료된 뒤 채워집니다. credential 원문은 기록하지 않습니다.</p></div><span class="pill amber">manifest 대기</span></div>
-        <dl class="facts">
-          <div class="fact"><dt>Schema</dt><dd>ai-paper-simulation/v7</dd></div>
-          <div class="fact"><dt>Market</dt><dd>BINANCE_USDM · USDT · PERPETUAL</dd></div>
-          <div class="fact"><dt>Kronos worker</dt><dd>worker-1 :18765 · revision/digest 검증 대기</dd></div>
-          <div class="fact"><dt>FinCast worker</dt><dd>worker-1 :18766 · FP16 validation / FP32 fallback 검증 대기</dd></div>
-          <div class="fact"><dt>데이터 경계</dt><dd>REST gap recovery + finalized kline · aggTrade · bookTicker · mark price</dd></div>
-          <div class="fact"><dt>Report generated</dt><dd id="generated-at">정적 scaffold</dd></div>
-        </dl>
+        <div class="section-head"><div><p class="eyebrow">PROVENANCE</p><h2>재현 가능한 실행 경계</h2><p>허용된 식별자·revision·digest·precision·VRAM만 기록하며 원본 오류 메시지나 계정 데이터는 포함하지 않습니다.</p></div><span class="pill amber">manifest 대기</span></div>
+        <dl class="facts"><div class="fact"><dt>Report schema</dt><dd>crypto-model-comparison-report/v1</dd></div><div class="fact"><dt>Simulation schema</dt><dd>ai-paper-simulation/v7</dd></div><div class="fact"><dt>Market</dt><dd>BINANCE_USDM · USDT · PERPETUAL</dd></div><div class="fact"><dt>Replay window</dt><dd>7 complete UTC days · 672 origins · 15분 stride</dd></div><div class="fact"><dt>Replay input digest</dt><dd>미기록</dd></div><div class="fact"><dt>Scanner snapshot</dt><dd>검증 대기</dd></div><div class="fact"><dt>Execution</dt><dd>paper · isolated · one-way · realOrder=false</dd></div><div class="fact"><dt>Report generated</dt><dd>실제 실행 완료 전</dd></div><div class="fact"><dt>Kronos-base model</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base revision</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base source / loader</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base device</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base precision validation</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base model digest</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base image digest</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base record digest</dt><dd>미기록</dd></div><div class="fact"><dt>Kronos-base precision / VRAM</dt><dd>unknown · —</dd></div><div class="fact"><dt>FinCast model</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast revision</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast source / loader</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast device</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast precision validation</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast model digest</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast image digest</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast record digest</dt><dd>미기록</dd></div><div class="fact"><dt>FinCast precision / VRAM</dt><dd>unknown · —</dd></div></dl>
       </article>
       <article class="card muted">
         <p class="eyebrow">LIMITATIONS</p><h2 style="margin:8px 0 0">해석 한계</h2>
-        <ul class="list">
-          <li>현재 파일은 <strong>실제 7일 replay와 120분 shadow 결과가 주입되기 전</strong>의 검증 대기 상태입니다.</li>
-          <li>짧은 표본에서 관측된 성과 차이는 통계적 우월성을 의미하지 않습니다.</li>
-          <li>paper fill은 실제 시장 충격, 주문장 우선순위와 네트워크 지연을 완전히 재현하지 못합니다.</li>
-          <li>모델 승격은 자동화하지 않으며 운영자가 비교 결과와 실패 원인을 검토해야 합니다.</li>
-        </ul>
+        <ul class="list"><li>현재 파일은 실제 7일 replay와 120분 shadow 결과를 주입하기 전의 검증 대기 scaffold입니다.</li><li>paper fill은 실제 시장 충격, 주문장 우선순위와 네트워크 지연을 완전히 재현하지 못합니다.</li><li>모델 승격과 실행 lane 변경은 자동화하지 않으며 운영자가 비교 결과를 검토해야 합니다.</li></ul>
       </article>
     </section>
-
     <footer>
       이 보고서는 외부 CDN·원격 스크립트·네트워크 요청 없이 동작하는 단일 HTML 파일입니다.
-      데이터와 상태는 파일 내부에만 포함되며 Binance credential, 잔고, 서명 또는 키 일부를 포함하지 않습니다.
+      데이터는 whitelist로 정규화해 파일 내부에만 포함하며 API credential, 서명, 계정 잔고 또는 키 일부를 복사하지 않습니다.
     </footer>
   </main>
-
   <script>
     "use strict";
-    const REPORT_DATA = Object.freeze({
-      status: "pending",
-      outcome: "inconclusive",
-      generatedAt: null,
-      snapshot: null,
-      candidates: [],
-      candles: [],
-      fills: [],
-      equity: [],
-      drawdown: [],
-      models: {
-        kronos_base: { precision: "unknown" },
-        fincast: { precision: "unknown" }
-      }
-    });
-
+    const REPORT_DATA = Object.freeze({"schemaVersion":"crypto-model-comparison-report/v1","status":"pending","outcome":"inconclusive","generatedAt":null,"symbol":null,"candles":[],"fills":[],"equityByLane":{"kronos_base":[],"fincast":[]}});
+    const COLORS = Object.freeze({ kronos_base: "#22d3ee", fincast: "#f59e0b" });
     const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
     function activateTab(next) {
       tabs.forEach((tab) => {
@@ -339,12 +381,13 @@
         tabs[nextIndex].focus();
       });
     });
-
     const modelToggles = Array.from(document.querySelectorAll(".model-toggle"));
     modelToggles.forEach((button) => button.addEventListener("click", () => {
       const model = button.dataset.model;
       modelToggles.forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
-      document.querySelectorAll("[data-lane]").forEach((lane) => lane.classList.toggle("active", lane.dataset.lane === model));
+      document.querySelectorAll("[data-lane]").forEach((lane) => {
+        lane.classList.toggle("active", lane.dataset.lane === model);
+      });
     }));
     document.querySelectorAll('[role="region"][aria-label*="가로 스크롤"]').forEach((region) => {
       region.addEventListener("keydown", (event) => {
@@ -356,16 +399,11 @@
         });
       });
     });
-
     function fitCanvas(canvas) {
       const rect = canvas.getBoundingClientRect();
       const scale = Math.min(window.devicePixelRatio || 1, 2);
-      const width = Math.max(1, Math.round(rect.width * scale));
-      const height = Math.max(1, Math.round(rect.height * scale));
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-      }
+      canvas.width = Math.max(1, Math.round(rect.width * scale));
+      canvas.height = Math.max(1, Math.round(rect.height * scale));
       const context = canvas.getContext("2d");
       context.setTransform(scale, 0, 0, scale, 0, 0);
       return { context, width: rect.width, height: rect.height };
@@ -376,7 +414,10 @@
       context.lineWidth = 1;
       for (let index = 1; index < 5; index += 1) {
         const y = (height / 5) * index;
-        context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+        context.stroke();
       }
     }
     function empty(context, width, height, label) {
@@ -385,53 +426,85 @@
       context.textAlign = "center";
       context.fillText(label, width / 2, height / 2);
     }
-    function drawSeries(canvasId, rows, key, color, emptyLabel) {
+    function drawMultiSeries(canvasId, groups, key, emptyLabel) {
       const canvas = document.getElementById(canvasId);
       if (!canvas || canvas.offsetParent === null) return;
       const { context, width, height } = fitCanvas(canvas);
       grid(context, width, height);
-      if (!rows.length) { empty(context, width, height, emptyLabel); return; }
-      const values = rows.map((row) => Number(row[key])).filter(Number.isFinite);
+      const available = Object.entries(groups).filter(([, rows]) => rows.length);
+      if (!available.length) { empty(context, width, height, emptyLabel); return; }
+      const values = available.flatMap(([, rows]) => rows.map((row) => Number(row[key])))
+        .filter(Number.isFinite);
       const min = Math.min(...values);
       const max = Math.max(...values);
-      const range = max - min || 1;
-      context.strokeStyle = color; context.lineWidth = 2; context.beginPath();
-      rows.forEach((row, index) => {
-        const x = rows.length === 1 ? width / 2 : (index / (rows.length - 1)) * width;
-        const y = height - ((Number(row[key]) - min) / range) * (height - 20) - 10;
-        index ? context.lineTo(x, y) : context.moveTo(x, y);
+      const range = max - min || Math.max(1, Math.abs(max));
+      available.forEach(([lane, rows]) => {
+        context.strokeStyle = COLORS[lane];
+        context.lineWidth = 2;
+        context.beginPath();
+        rows.forEach((row, index) => {
+          const x = rows.length === 1 ? width / 2 : (index / (rows.length - 1)) * width;
+          const y = height - ((Number(row[key]) - min) / range) * (height - 20) - 10;
+          index ? context.lineTo(x, y) : context.moveTo(x, y);
+        });
+        context.stroke();
       });
-      context.stroke();
+    }
+    function drawMarker(context, x, y, direction) {
+      const color = direction === "long" ? COLORS.kronos_base : COLORS.fincast;
+      context.fillStyle = color;
+      context.beginPath();
+      if (direction === "long") {
+        context.moveTo(x, y - 7); context.lineTo(x - 5, y + 2); context.lineTo(x + 5, y + 2);
+      } else {
+        context.moveTo(x, y + 7); context.lineTo(x - 5, y - 2); context.lineTo(x + 5, y - 2);
+      }
+      context.closePath();
+      context.fill();
     }
     function drawCandles() {
       const canvas = document.getElementById("candle-chart");
       if (!canvas || canvas.offsetParent === null) return;
       const { context, width, height } = fitCanvas(canvas);
       grid(context, width, height);
-      if (!REPORT_DATA.candles.length) { empty(context, width, height, "확정 candle 데이터 대기"); return; }
-      const low = Math.min(...REPORT_DATA.candles.map((row) => row.low));
-      const high = Math.max(...REPORT_DATA.candles.map((row) => row.high));
+      const rows = REPORT_DATA.candles;
+      if (!rows.length) { empty(context, width, height, "확정 candle 데이터 생성 전"); return; }
+      const low = Math.min(...rows.map((row) => row.low));
+      const high = Math.max(...rows.map((row) => row.high));
       const range = high - low || 1;
-      const step = width / REPORT_DATA.candles.length;
-      REPORT_DATA.candles.forEach((row, index) => {
+      const step = width / rows.length;
+      const y = (value) => height - ((value - low) / range) * (height - 20) - 10;
+      rows.forEach((row, index) => {
         const x = step * index + step / 2;
-        const y = (value) => height - ((value - low) / range) * (height - 20) - 10;
         const rising = row.close >= row.open;
-        context.strokeStyle = rising ? "#22d3ee" : "#f59e0b";
-        context.fillStyle = rising ? "#070707" : "#f59e0b";
-        context.beginPath(); context.moveTo(x, y(row.high)); context.lineTo(x, y(row.low)); context.stroke();
+        context.strokeStyle = rising ? COLORS.kronos_base : COLORS.fincast;
+        context.fillStyle = rising ? "#070707" : COLORS.fincast;
+        context.beginPath();
+        context.moveTo(x, y(row.high));
+        context.lineTo(x, y(row.low));
+        context.stroke();
         const top = Math.min(y(row.open), y(row.close));
-        context.fillRect(x - Math.max(1, step * .22), top, Math.max(2, step * .44), Math.max(2, Math.abs(y(row.open) - y(row.close))));
+        context.fillRect(
+          x - Math.max(1, step * .22),
+          top,
+          Math.max(2, step * .44),
+          Math.max(2, Math.abs(y(row.open) - y(row.close)))
+        );
+      });
+      const start = Date.parse(rows[0].timestamp);
+      const end = Date.parse(rows[rows.length - 1].timestamp);
+      REPORT_DATA.fills.filter((fill) => fill.direction).forEach((fill) => {
+        const at = Date.parse(fill.timestamp);
+        if (!Number.isFinite(at) || at < start || at > end) return;
+        const x = end === start ? width / 2 : ((at - start) / (end - start)) * width;
+        drawMarker(context, x, y(fill.price), fill.direction);
       });
     }
     function drawAll() {
       drawCandles();
-      drawSeries("equity-chart", REPORT_DATA.equity, "value", "#22d3ee", "paper equity 데이터 대기");
-      drawSeries("drawdown-chart", REPORT_DATA.drawdown, "value", "#ef4444", "drawdown 데이터 대기");
+      drawMultiSeries("equity-chart", REPORT_DATA.equityByLane, "value", "paper equity 데이터 생성 전");
+      drawMultiSeries("drawdown-chart", REPORT_DATA.equityByLane, "drawdown", "drawdown 데이터 생성 전");
     }
-    document.getElementById("generated-at").textContent = REPORT_DATA.generatedAt || "실제 실행 완료 전";
-    document.getElementById("kronos-precision").textContent = REPORT_DATA.models.kronos_base.precision;
-    document.getElementById("fincast-precision").textContent = REPORT_DATA.models.fincast.precision;
     window.addEventListener("resize", drawAll, { passive: true });
     requestAnimationFrame(drawAll);
   </script>

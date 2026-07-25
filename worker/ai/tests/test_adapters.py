@@ -221,7 +221,8 @@ def test_default_settings_are_fixed_to_single_model_and_p40(monkeypatch) -> None
 def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> None:
     manifest = json.loads(_manifest_path().read_text(encoding="utf-8"))
 
-    assert set(manifest["models"]) == {"kronos-base"}
+    assert manifest["schema_version"] == "scalping-ai-model-manifest/v2"
+    assert set(manifest["models"]) == {"kronos-base", "fincast"}
     assert manifest["models"]["kronos-base"] == {
         "model_id": "NeoQuasar/Kronos-base",
         "revision": MODEL_REVISION,
@@ -231,6 +232,28 @@ def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> No
         "loader_version": "kronos-source-67b630e",
     }
     assert manifest["kronos_source"]["revision"] == SOURCE_REVISION
+    assert manifest["fincast_source"]["repository"] == "https://github.com/vincent05r/FinCast-fts"
+    assert manifest["fincast_source"]["revision"] == "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4"
+    assert (
+        manifest["fincast_source"]["archive_sha256"]
+        == "ed4c3967c6d548465307fc0b63895ac9c9d8b44a950ccf936ab97e1755451a91"
+    )
+    assert manifest["fincast_source"]["license"] == "Apache-2.0"
+    assert len(manifest["fincast_source"]["required_file_sha256"]) == 6
+    assert manifest["fincast_paper"]["revision"] == "2508.19609v1"
+    assert (
+        manifest["fincast_paper"]["sha256"]
+        == "c8dc23c7e0013d85732af1dee2785263b42c7384fc1a9a0f73bfdbb0d5061244"
+    )
+    assert manifest["models"]["fincast"]["revision"] == "2d7d90b159db8961d27c2cf165d51195902ef92b"
+    assert (
+        manifest["models"]["fincast"]["checkpoint_sha256"]
+        == "d5ca999b02c944effa60d2b94174dc4d5a0cd2c0543ae289b2e36f37431492a8"
+    )
+    assert (
+        manifest["models"]["fincast"]["validation_contexts_sha256"]
+        == "3ee014f25181c595949580acec1ad83908819e3f283b378f449ab679bef75f6f"
+    )
 
 
 def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(tmp_path, monkeypatch) -> None:
@@ -384,3 +407,34 @@ def test_model_suite_keeps_expected_identity_when_manifest_is_missing(tmp_path) 
     assert len(suite.runs) == 1
     assert suite.primary.provenance.model_id == "NeoQuasar/Kronos-base"
     assert suite.primary.provenance.loaded is False
+
+
+def test_fincast_lane_is_independent_and_fails_closed_without_cache(tmp_path, monkeypatch) -> None:
+    configured = settings(
+        tmp_path,
+        manifest_path=_manifest_path(),
+        model_lane="fincast",
+        device="cuda",
+        allow_cpu_fallback=False,
+        min_context_bars=512,
+        max_context_bars=512,
+    )
+    monkeypatch.setattr(
+        adapters,
+        "preflight_device",
+        lambda _settings: adapters.RuntimeDevice(
+            "cuda",
+            SimpleNamespace(),
+            device_name="Tesla P40",
+            cuda_capability="6.1",
+        ),
+    )
+
+    suite = adapters.load_production_model_suite(configured)
+
+    assert len(suite.runs) == 1
+    assert suite.runs[0].role == "fincast"
+    assert suite.runs[0].expected_model_id == "Vincent05R/FinCast"
+    assert suite.primary.provenance.model_id == "Vincent05R/FinCast"
+    assert suite.primary.provenance.loaded is False
+    assert suite.primary.provenance.precision_validation == "unavailable"
