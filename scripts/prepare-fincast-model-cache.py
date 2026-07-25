@@ -202,6 +202,44 @@ def make_read_only(root: Path) -> None:
     root.chmod(0o555)
 
 
+def remove_read_only_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    root.chmod(0o755)
+    for path in root.rglob("*"):
+        if path.is_dir() and not path.is_symlink():
+            path.chmod(0o755)
+    shutil.rmtree(root)
+
+
+def publish_read_only_cache(
+    cache_dir: Path,
+    source_stage: Path,
+    model_stage: Path,
+) -> None:
+    final_source = cache_dir / "fincast-source"
+    final_model = cache_dir / "fincast"
+    published: list[Path] = []
+    try:
+        make_read_only(source_stage)
+        make_read_only(model_stage)
+        # Moving a directory to another parent updates its ".." entry on Linux,
+        # so the staged roots must remain writable until both atomic renames
+        # complete. Descendants are already immutable at this point.
+        source_stage.chmod(0o755)
+        model_stage.chmod(0o755)
+        os.replace(source_stage, final_source)
+        published.append(final_source)
+        os.replace(model_stage, final_model)
+        published.append(final_model)
+        final_source.chmod(0o555)
+        final_model.chmod(0o555)
+    except Exception:
+        for root in reversed(published):
+            remove_read_only_tree(root)
+        raise
+
+
 def verify_cache(cache_dir: Path) -> None:
     source = cache_dir / "fincast-source"
     model = cache_dir / "fincast"
@@ -275,12 +313,9 @@ def prepare(cache_dir: Path, source_archive: Path, checkpoint: Path) -> None:
                 model_stage / ".artifact-sha256.json",
                 json.dumps(hashes, sort_keys=True, separators=(",", ":")) + "\n",
             )
-            make_read_only(source_stage)
-            make_read_only(model_stage)
-            os.replace(source_stage, cache_dir / "fincast-source")
-            os.replace(model_stage, cache_dir / "fincast")
+            publish_read_only_cache(cache_dir, source_stage, model_stage)
         finally:
-            shutil.rmtree(stage, ignore_errors=True)
+            remove_read_only_tree(stage)
     verify_cache(cache_dir)
 
 

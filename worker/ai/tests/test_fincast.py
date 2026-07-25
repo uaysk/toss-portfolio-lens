@@ -744,6 +744,69 @@ def test_provisioning_uses_the_shared_fp32_island_predicate() -> None:
     assert converted["integer_buffer"] is integer
 
 
+def test_provisioning_publishes_staged_directories_before_locking_their_roots(
+    tmp_path: Path,
+) -> None:
+    module = _prepare_script()
+    cache = tmp_path / "cache"
+    source_stage = cache / ".stage" / "fincast-source"
+    model_stage = cache / ".stage" / "fincast"
+    (source_stage / "src").mkdir(parents=True)
+    model_stage.mkdir()
+    (source_stage / "src" / "module.py").write_text("reviewed = True\n", encoding="utf-8")
+    (model_stage / "model.safetensors").write_bytes(b"weights")
+
+    module.publish_read_only_cache(cache, source_stage, model_stage)
+
+    final_source = cache / "fincast-source"
+    final_model = cache / "fincast"
+    assert not source_stage.exists()
+    assert not model_stage.exists()
+    assert final_source.stat().st_mode & 0o777 == 0o555
+    assert final_model.stat().st_mode & 0o777 == 0o555
+    assert (final_source / "src").stat().st_mode & 0o777 == 0o555
+    assert (final_source / "src" / "module.py").stat().st_mode & 0o777 == 0o444
+    assert (final_model / "model.safetensors").stat().st_mode & 0o777 == 0o444
+
+    module.remove_read_only_tree(final_source)
+    module.remove_read_only_tree(final_model)
+    module.remove_read_only_tree(cache / ".stage")
+
+
+def test_provisioning_rolls_back_a_partial_atomic_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _prepare_script()
+    cache = tmp_path / "cache"
+    source_stage = cache / ".stage" / "fincast-source"
+    model_stage = cache / ".stage" / "fincast"
+    source_stage.mkdir(parents=True)
+    model_stage.mkdir()
+    (source_stage / "source.py").write_text("reviewed = True\n", encoding="utf-8")
+    (model_stage / "model.safetensors").write_bytes(b"weights")
+    real_replace = module.os.replace
+    replace_calls = 0
+
+    def fail_second_replace(source: Path, destination: Path) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise PermissionError("synthetic second publish failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(module.os, "replace", fail_second_replace)
+
+    with pytest.raises(PermissionError, match="second publish failure"):
+        module.publish_read_only_cache(cache, source_stage, model_stage)
+
+    assert replace_calls == 2
+    assert not (cache / "fincast-source").exists()
+    assert not (cache / "fincast").exists()
+    assert model_stage.exists()
+    module.remove_read_only_tree(cache / ".stage")
+
+
 def test_precision_hooks_observe_compute_restore_horizon_and_decode_dtypes() -> None:
     model = _MixedBoundaryModel()
     for module in (model.input_norm, model.moe_norm):
