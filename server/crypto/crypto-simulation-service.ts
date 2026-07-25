@@ -249,7 +249,7 @@ export class CryptoSimulationCoordinator {
         "Signed Binance maintenance-margin risk data is unavailable.",
       );
     }
-    const maximumActiveSessions = this.options.maximumActiveSessions ?? 2;
+    const maximumActiveSessions = this.options.maximumActiveSessions ?? 1;
     if (this.active.size + this.startingOwners.size >= maximumActiveSessions) {
       throw new Error("The crypto paper session limit has been reached.");
     }

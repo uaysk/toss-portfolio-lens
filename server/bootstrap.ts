@@ -308,7 +308,7 @@ const cryptoSimulationService = new CryptoSimulationCoordinator({
   artifacts: artifactService,
   runtime: cryptoPaperRuntime,
   runtimeSnapshots: cryptoRuntimeSnapshots,
-  maximumActiveSessions: config.scalping.simulation.maximumActiveSessions,
+  maximumActiveSessions: config.cryptoSimulation.maximumActiveSessions,
   credentials: {
     configured: binanceSignedRead.configured,
     signedReadSucceeded: binanceSignedRead.signedReadSucceeded,

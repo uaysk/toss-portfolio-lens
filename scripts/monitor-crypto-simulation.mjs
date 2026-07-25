@@ -376,6 +376,7 @@ function projectRun(payload) {
       decisionCadence: compact({
         trigger: text(snapshot?.decisionCadence?.trigger, 80),
         triggeredEvents: integer(snapshot?.decisionCadence?.triggeredEvents),
+        coalescedFinalKlines: integer(snapshot?.decisionCadence?.coalescedFinalKlines),
         lastTriggeredAt: text(snapshot?.decisionCadence?.lastTriggeredAt, 40),
         inFlight: boolean(snapshot?.decisionCadence?.inFlight),
       }),

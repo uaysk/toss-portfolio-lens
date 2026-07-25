@@ -92,6 +92,9 @@ function config(overrides: StorageConfigOverrides = {}): AppConfig {
         cooldownMs: 60_000,
       },
     },
+    cryptoSimulation: {
+      maximumActiveSessions: 1,
+    },
     ...overrides,
   };
 }

@@ -15,11 +15,13 @@ import type {
   BinanceScannerCandidate,
   BinanceScannerSnapshot,
 } from "./contracts.js";
+import { FuturesPaperLedger } from "./futures-paper-ledger.js";
 import {
   CryptoPaperRuntime,
   CryptoPaperRuntimeError,
   monotonicCryptoRiskClock,
   type CryptoAiLaneClient,
+  type CryptoPaperRuntimeSnapshot,
   type CryptoPublicStreams,
   type CryptoRuntimeClock,
 } from "./crypto-paper-runtime.js";
@@ -285,7 +287,10 @@ function aggTrade(at: number, price = 100): BinanceMarketEvent {
   };
 }
 
-function markPrice(at: number, price: number): BinanceMarketEvent {
+function markPrice(
+  at: number,
+  price: number,
+): Extract<BinanceMarketEvent, { kind: "mark_price" }> {
   return {
     kind: "mark_price",
     source: "binance_ws",
@@ -381,6 +386,16 @@ function laneClient(
       return response(lane, request, generatedAt, returns);
     }),
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function rest() {
@@ -484,6 +499,322 @@ describe("CryptoPaperRuntime", () => {
     });
     expect(snapshots.length).toBeGreaterThan(1);
     expect(taskContext.updates.at(-1)).toBe(1);
+  });
+
+  it("drains risk streams during deferred inference and fills only after the completion watermark", async () => {
+    const clock = new ScheduledClock();
+    const worker = deferred<unknown>();
+    const observed: AiForecastRequest[] = [];
+    const snapshots: CryptoPaperRuntimeSnapshot[] = [];
+    const client: CryptoAiLaneClient = {
+      request: vi.fn((request: AiForecastRequest) => {
+        observed.push(structuredClone(request));
+        return worker.promise;
+      }),
+    };
+    const staleBook = {
+      ...bookTicker(START + 30_000, 90, 110),
+      receivedAt: START + 31_610,
+    };
+    const staleMark = {
+      ...markPrice(START + 30_000, 1),
+      receivedAt: START + 31_620,
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      {
+        at: START + 31_000,
+        event: bookTicker(START + 31_000, 99.96, 100.04),
+      },
+      { at: START + 31_600, event: markPrice(START + 31_600, 100) },
+      { at: START + 31_610, event: staleBook },
+      { at: START + 31_620, event: staleMark },
+      // This arrived while the worker was unresolved and can never become
+      // the causal fill for the resulting decision.
+      { at: START + 31_940, event: aggTrade(START + 31_940) },
+      { at: START + 32_100, event: aggTrade(START + 32_100) },
+    ]);
+    clock.schedule(START + 32_000, () => {
+      const request = observed[0];
+      if (!request) throw new Error("worker request was not observed before resolution");
+      worker.resolve(response(
+        "kronos_base",
+        request,
+        START + 32_000,
+        longReturns,
+      ));
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        snapshots.push(snapshot);
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(Date.parse(observed[0]!.series[0]!.input_end_at)).toBe(START - 1);
+    expect(snapshots).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        decisionCadence: expect.objectContaining({ inFlight: true }),
+      }),
+    ]));
+    expect(snapshots.some((snapshot) => (
+      snapshot.decisionCadence.inFlight
+      && snapshot.futuresRisk.riskStreams.bookTicker.lastObservedAt
+        === new Date(START + 31_000).toISOString()
+      && snapshot.futuresRisk.riskStreams.markPrice.lastObservedAt
+        === new Date(START + 31_600).toISOString()
+    ))).toBe(true);
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      decisionAt: START + 32_000,
+      executedAt: START + 32_100,
+    });
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "open_long",
+        status: "executed",
+      }),
+    ]));
+    expect(decisions.find((decision) => decision.action === "open_long")?.roundTripCostRate)
+      .toBeCloseTo(0.0012, 10);
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.futuresRisk.riskStreams).toMatchObject({
+      bookTicker: {
+        lastObservedAt: new Date(START + 31_000).toISOString(),
+      },
+      markPrice: {
+        lastObservedAt: new Date(START + 31_600).toISOString(),
+      },
+    });
+  });
+
+  it("runs one worker at a time and coalesces finalized bars to the latest origin", async () => {
+    const clock = new ScheduledClock();
+    const firstWorker = deferred<unknown>();
+    const requests: AiForecastRequest[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    const client: CryptoAiLaneClient = {
+      request: vi.fn((request: AiForecastRequest) => {
+        const invocation = requests.length;
+        requests.push(structuredClone(request));
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        const result = invocation === 0
+          ? firstWorker.promise
+          : Promise.resolve(response(
+            "kronos_base",
+            request,
+            Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+            longReturns,
+          ));
+        return result.finally(() => {
+          active -= 1;
+        });
+      }),
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...riskPrelude(START + 60_020, 101),
+      {
+        at: START + 60_100,
+        event: nextFinalKline(START, START + 60_100),
+      },
+      ...riskPrelude(START + 120_020, 101),
+      {
+        at: START + 120_100,
+        event: nextFinalKline(START + 60_000, START + 120_100),
+      },
+      { at: START + 124_100, event: aggTrade(START + 124_100, 101) },
+    ]);
+    clock.schedule(START + 124_000, () => {
+      const request = requests[0];
+      if (!request) throw new Error("first worker request was not observed");
+      firstWorker.resolve(response(
+        "kronos_base",
+        request,
+        START + 124_000,
+        longReturns,
+      ));
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 3 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(client.request).toHaveBeenCalledTimes(2);
+    expect(maximumActive).toBe(1);
+    expect(requests.map((request) => Date.parse(request.series[0]!.input_end_at))).toEqual([
+      START - 1,
+      START + 119_999,
+    ]);
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.decisionCadence).toMatchObject({
+      triggeredEvents: 2,
+      coalescedFinalKlines: 1,
+      inFlight: false,
+    });
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      decisionAt: START + 124_000,
+      executedAt: START + 124_100,
+    });
+  });
+
+  it("discards an older coalesced origin when a newer final bar is blocked", async () => {
+    const clock = new ScheduledClock();
+    const worker = deferred<unknown>();
+    let workerRequest: AiForecastRequest | undefined;
+    const client: CryptoAiLaneClient = {
+      request: vi.fn((request) => {
+        workerRequest = structuredClone(request);
+        return worker.promise;
+      }),
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...riskPrelude(START + 60_020, 101),
+      {
+        at: START + 60_100,
+        event: nextFinalKline(START, START + 60_100),
+      },
+      // No risk refresh precedes this newer final. It supersedes the queued
+      // middle bar but is itself blocked for stale risk data.
+      {
+        at: START + 120_100,
+        event: nextFinalKline(START + 60_000, START + 120_100),
+      },
+    ]);
+    clock.schedule(START + 120_200, () => {
+      worker.resolve(response(
+        "kronos_base",
+        workerRequest!,
+        START + 120_200,
+        longReturns,
+      ));
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 3 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(client.request).toHaveBeenCalledTimes(1);
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.decisionCadence.coalescedFinalKlines).toBe(1);
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        originAt: new Date(START + 119_999).toISOString(),
+        status: "blocked",
+        reason: expect.stringContaining("risk_stream_"),
+      }),
+    ]));
+  });
+
+  it("backfills a late forecast metric from the earliest completed target bar", async () => {
+    const clock = new ScheduledClock();
+    const worker = deferred<unknown>();
+    let workerRequest: AiForecastRequest | undefined;
+    const futureCloses = [101, 102, 103, 104, 105, 120];
+    const scheduledBars = futureCloses.map((close, index) => {
+      const openTime = START + index * 60_000;
+      const receivedAt = START + (index + 1) * 60_000 + 100;
+      return {
+        at: receivedAt,
+        event: {
+          ...nextFinalKline(openTime, receivedAt),
+          open: close,
+          high: close + 0.5,
+          low: close - 0.5,
+          close,
+        },
+      };
+    });
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...scheduledBars,
+    ]);
+    clock.schedule(START + 360_200, () => {
+      worker.resolve(response(
+        "kronos_base",
+        workerRequest!,
+        START + 360_200,
+        longReturns,
+      ));
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: {
+          request: vi.fn((request) => {
+            workerRequest = structuredClone(request);
+            return worker.promise;
+          }),
+        },
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 7 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const comparison = artifact(result, "simulation-comparison");
+    const lanes = comparison.lanes as Array<UnknownRecord>;
+    const metrics = lanes[0]!.metrics as UnknownRecord;
+    // Origin=100, the exact five-minute target closes at 105, and q50=2%.
+    // The later 120 close must not be substituted after the worker returns.
+    expect(metrics.medianReturnMae as number).toBeCloseTo(0.03, 10);
   });
 
   it("never looks back to a kline open that preceded model completion", async () => {
@@ -710,6 +1041,87 @@ describe("CryptoPaperRuntime", () => {
     });
   });
 
+  it("does not reopen from a forecast that predates a protective close", async () => {
+    const clock = new ScheduledClock();
+    const secondWorker = deferred<unknown>();
+    const requests: AiForecastRequest[] = [];
+    const client: CryptoAiLaneClient = {
+      request: vi.fn((request: AiForecastRequest) => {
+        requests.push(structuredClone(request));
+        if (requests.length === 1) {
+          return Promise.resolve(response(
+            "kronos_base",
+            request,
+            START + 150,
+            longReturns,
+          ));
+        }
+        return secondWorker.promise;
+      }),
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      { at: START + 200, event: aggTrade(START + 200) },
+      ...riskPrelude(START + 60_020, 100),
+      {
+        at: START + 60_100,
+        event: nextFinalKline(START, START + 60_100),
+      },
+      { at: START + 60_200, event: markPrice(START + 60_200, 99) },
+      { at: START + 60_300, event: aggTrade(START + 60_300, 99) },
+      // A stale pre-stop forecast must not create a new pending open for this.
+      { at: START + 60_500, event: aggTrade(START + 60_500, 99) },
+    ]);
+    clock.schedule(START + 60_400, () => {
+      const request = requests[1];
+      if (!request) throw new Error("second worker request was not observed");
+      secondWorker.resolve(response(
+        "kronos_base",
+        request,
+        START + 60_400,
+        longReturns,
+      ));
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 2 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      executedAt: START + 200,
+    });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reduceOnly: true,
+      reason: "protection",
+      executedAt: START + 60_300,
+    });
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        originAt: new Date(START + 59_999).toISOString(),
+        status: "blocked",
+        reason: "position_changed_during_inference",
+      }),
+    ]));
+  });
+
   it("coalesces high-frequency market ingress and drops non-final klines without queue growth", async () => {
     const clock = new ScheduledClock();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -923,26 +1335,43 @@ describe("CryptoPaperRuntime", () => {
 
   it("escapes an abort-ignoring worker immediately on the coordinator signal", async () => {
     const clock = new ScheduledClock();
+    const worker = deferred<unknown>();
     let notifyStarted: (() => void) | undefined;
+    let workerRequest: AiForecastRequest | undefined;
+    let workerSignal: AbortSignal | undefined;
     const started = new Promise<void>((resolve) => {
       notifyStarted = resolve;
     });
     const client: CryptoAiLaneClient = {
-      request: vi.fn(async () => {
+      request: vi.fn((request, signal) => {
+        workerRequest = structuredClone(request);
+        workerSignal = signal;
         notifyStarted?.();
-        return await new Promise<never>(() => undefined);
+        return worker.promise;
       }),
     };
+    const snapshots: CryptoPaperRuntimeSnapshot[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
     const runtime = new CryptoPaperRuntime({
       rest: rest(),
-      streams: new ScheduledStreams(clock, [
-        ...riskPrelude(),
-        { at: START + 100, event: finalKline(START + 100, true) },
-      ]),
+      streams: {
+        subscribe: async (_symbols, onEvent) => {
+          for (const item of [
+            ...riskPrelude(),
+            { at: START + 100, event: finalKline(START + 100, true) },
+          ]) {
+            clock.schedule(item.at, () => onEvent(item.event));
+          }
+          return { close };
+        },
+      },
       laneClients: { kronos_base: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        snapshots.push(snapshot);
+      },
     });
     const taskContext = context();
     const running = runtime.run({
@@ -954,6 +1383,18 @@ describe("CryptoPaperRuntime", () => {
     await started;
     taskContext.controller.abort(new Error("test_cancelled"));
     await expect(running).rejects.toThrow("test_cancelled");
+    expect(workerSignal?.aborted).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
+    const snapshotsAfterReturn = snapshots.length;
+    worker.resolve(response(
+      "kronos_base",
+      workerRequest!,
+      START + 200,
+      longReturns,
+    ));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(snapshots).toHaveLength(snapshotsAfterReturn);
   });
 
   it("orders a replacement mark after an intervening fill event", async () => {
@@ -1003,7 +1444,128 @@ describe("CryptoPaperRuntime", () => {
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
     expect(fills[1]).toMatchObject({ action: "reduce", reason: "liquidation" });
     expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
-      coalescedMarkPrices: 1,
+      coalescedMarkPrices: 0,
+      overflowCount: 0,
+    });
+  });
+
+  it("preserves a wide pre-fill spread across a post-fill recovery quote", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        if (injected || !snapshot.decisions.some((decision) => decision.status === "pending")) {
+          return;
+        }
+        injected = true;
+        emit?.(bookTicker(START + 180, 99, 101));
+        emit?.(aggTrade(START + 200, 100));
+        emit?.(bookTicker(START + 210, 99.99, 100.01));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      executedAt: START + 200,
+    });
+    expect(fills[0]!.notional as number).toBeLessThan(3_000);
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions[0]!.protectiveStopPrice as number).toBeLessThanOrEqual(98.1);
+    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+      coalescedBookTickers: 0,
+      overflowCount: 0,
+    });
+  });
+
+  it("uses later same-event-time book ingress despite a receivedAt rollback", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        if (injected || !snapshot.decisions.some((decision) => decision.status === "pending")) {
+          return;
+        }
+        injected = true;
+        emit?.({
+          ...bookTicker(START + 300, 99, 101),
+          receivedAt: START + 350,
+        });
+        emit?.({
+          ...bookTicker(START + 300, 99.99, 100.01),
+          receivedAt: START + 340,
+        });
+        emit?.(aggTrade(START + 400, 100));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 400 });
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.futuresRisk.riskStreams.bookTicker.lastObservedAt).toBe(
+      new Date(START + 340).toISOString(),
+    );
+    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+      coalescedBookTickers: 1,
       overflowCount: 0,
     });
   });
@@ -1136,62 +1698,193 @@ describe("CryptoPaperRuntime", () => {
     ]));
   });
 
-  it("preserves a transient liquidation mark even when a recovery mark follows in the burst", async () => {
-    const clock = new ScheduledClock();
-    let emit: ((event: BinanceMarketEvent) => void) | undefined;
-    let fillInjected = false;
-    let marksInjected = false;
-    const streams: CryptoPublicStreams = {
-      subscribe: async (_symbols, onEvent) => {
-        emit = onEvent;
-        for (const item of [
-          ...riskPrelude(),
-          { at: START + 100, event: finalKline(START + 100, true) },
-        ]) {
-          clock.schedule(item.at, () => onEvent(item.event));
-        }
-        return { close: vi.fn().mockResolvedValue(undefined) };
-      },
-    };
-    const runtime = new CryptoPaperRuntime({
-      rest: rest(),
-      streams,
-      laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
-      },
-      instrumentRules: rules,
-      clock,
-      contextBars: 64,
-      onSnapshot: (_runId, snapshot) => {
-        if (!fillInjected
-          && snapshot.decisions.some((decision) => decision.status === "pending")) {
-          fillInjected = true;
-          emit?.(aggTrade(START + 200, 100));
-          return;
-        }
-        if (!marksInjected && snapshot.futuresPositions.length > 0) {
-          marksInjected = true;
-          emit?.(markPrice(START + 300, 0.1));
-          emit?.(markPrice(START + 310, 100));
-        }
-      },
-    });
-    const result = await runtime.run({
-      request: simulationRequest(),
-      snapshot: scannerSnapshot,
-      selected: candidate,
-      context: context().value,
-    });
-    const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
-      .ledger as UnknownRecord).fills as UnknownRecord[];
-    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
-    expect(fills[1]).toMatchObject({ action: "reduce", reason: "liquidation" });
-    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
-      preservedCriticalMarkPrices: 1,
-      overflowCount: 0,
-    });
-  });
+  it.each([
+    "recorded_before_reconnect",
+    "scheduled_across_reconnect",
+  ] as const)(
+    "preserves one canonical funding settlement through $case",
+    async (fundingCase) => {
+      const clock = new ScheduledClock();
+      const marketRest = rest();
+      const fundingEventAt = START + 400;
+      const fundingRate = 0.001;
+      const settlementMarkPrice = 110;
+      let emit: ((event: BinanceMarketEvent) => void) | undefined;
+      let emitState: (state: {
+        status: "reconnecting" | "connected";
+        generation: number;
+        reconnectAttempt: number;
+      }) => void = () => undefined;
+      let fillInjected = false;
+      let reconnectInjected = false;
+      const streams: CryptoPublicStreams = {
+        subscribe: async (_symbols, onEvent, _onDisconnect, onState) => {
+          emit = onEvent;
+          emitState = (state) => onState?.(state);
+          for (const item of [
+            ...riskPrelude(),
+            { at: START + 100, event: finalKline(START + 100, true) },
+          ]) {
+            clock.schedule(item.at, () => onEvent(item.event));
+          }
+          return { close: vi.fn().mockResolvedValue(undefined) };
+        },
+      };
+      const fundingSpy = vi.spyOn(FuturesPaperLedger.prototype, "applyFunding");
+      try {
+        const runtime = new CryptoPaperRuntime({
+          rest: marketRest,
+          streams,
+          laneClients: {
+            kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+          },
+          instrumentRules: rules,
+          clock,
+          contextBars: 64,
+          onSnapshot: (_runId, snapshot) => {
+            if (!fillInjected
+              && snapshot.decisions.some((decision) => decision.status === "pending")) {
+              fillInjected = true;
+              emit?.(aggTrade(START + 200, 100));
+              return;
+            }
+            if (reconnectInjected || snapshot.futuresPositions.length === 0) return;
+            reconnectInjected = true;
+            emit?.({
+              ...markPrice(START + 300, settlementMarkPrice),
+              fundingRate,
+              nextFundingTime: fundingEventAt,
+            });
+            if (fundingCase === "recorded_before_reconnect") {
+              emit?.({
+                ...markPrice(fundingEventAt, 111),
+                fundingRate: 0.009,
+                nextFundingTime: fundingEventAt + 8 * 60 * 60_000,
+              });
+            }
+            emitState({
+              status: "reconnecting",
+              generation: 1,
+              reconnectAttempt: 1,
+            });
+            emitState({
+              status: "connected",
+              generation: 2,
+              reconnectAttempt: 1,
+            });
+            emit?.(bookTicker(START + 500, 110.99, 111.01));
+            emit?.({
+              ...markPrice(START + 500, 111),
+              fundingRate: 0.009,
+              nextFundingTime: fundingEventAt + 8 * 60 * 60_000,
+            });
+            // A later mark revisits the retained bounded journal and proves
+            // the already consumed eventId cannot be charged twice.
+            emit?.(markPrice(START + 600, 111));
+          },
+        });
+        const result = await runtime.run({
+          request: simulationRequest(),
+          snapshot: scannerSnapshot,
+          selected: candidate,
+          context: context().value,
+        });
+
+        expect(marketRest.klines).toHaveBeenCalledTimes(2);
+        expect(fundingSpy).toHaveBeenCalledTimes(1);
+        expect(fundingSpy).toHaveBeenCalledWith({
+          eventId: `funding:BTCUSDT:${fundingEventAt}`,
+          symbol: "BTCUSDT",
+          rate: fundingRate,
+          eventAt: fundingEventAt,
+        });
+        const trades = artifact(result, "simulation-trades");
+        const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+          .ledger as UnknownRecord);
+        const fills = ledger.fills as UnknownRecord[];
+        expect(fills).toHaveLength(1);
+        const expectedFunding = -settlementMarkPrice
+          * (fills[0]!.quantity as number)
+          * fundingRate;
+        expect(ledger.funding).toBeCloseTo(expectedFunding, 12);
+        expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+          overflowCount: 0,
+        });
+      } finally {
+        fundingSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    { receiptOrder: "exact tie", laterReceivedAt: START + 350 },
+    { receiptOrder: "clock rollback", laterReceivedAt: START + 340 },
+  ])(
+    "lets a later same-event-time liquidation mark win on $receiptOrder",
+    async ({ laterReceivedAt }) => {
+      const clock = new ScheduledClock();
+      let emit: ((event: BinanceMarketEvent) => void) | undefined;
+      let fillInjected = false;
+      let marksInjected = false;
+      const streams: CryptoPublicStreams = {
+        subscribe: async (_symbols, onEvent) => {
+          emit = onEvent;
+          for (const item of [
+            ...riskPrelude(),
+            { at: START + 100, event: finalKline(START + 100, true) },
+          ]) {
+            clock.schedule(item.at, () => onEvent(item.event));
+          }
+          return { close: vi.fn().mockResolvedValue(undefined) };
+        },
+      };
+      const runtime = new CryptoPaperRuntime({
+        rest: rest(),
+        streams,
+        laneClients: {
+          kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        },
+        instrumentRules: rules,
+        clock,
+        contextBars: 64,
+        onSnapshot: (_runId, snapshot) => {
+          if (!fillInjected
+            && snapshot.decisions.some((decision) => decision.status === "pending")) {
+            fillInjected = true;
+            emit?.(aggTrade(START + 200, 100));
+            return;
+          }
+          if (!marksInjected && snapshot.futuresPositions.length > 0) {
+            marksInjected = true;
+            emit?.({
+              ...markPrice(START + 300, 100),
+              receivedAt: START + 350,
+            });
+            emit?.({
+              ...markPrice(START + 300, 0.1),
+              receivedAt: laterReceivedAt,
+            });
+            emit?.(markPrice(START + 360, 100));
+          }
+        },
+      });
+      const result = await runtime.run({
+        request: simulationRequest(),
+        snapshot: scannerSnapshot,
+        selected: candidate,
+        context: context().value,
+      });
+      const trades = artifact(result, "simulation-trades");
+      const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+        .ledger as UnknownRecord).fills as UnknownRecord[];
+      expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
+      expect(fills[1]).toMatchObject({ action: "reduce", reason: "liquidation" });
+      expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+        preservedCriticalMarkPrices: 1,
+        overflowCount: 0,
+      });
+    },
+  );
 
   it("preserves a transient protective-stop mark before a recovery mark", async () => {
     const clock = new ScheduledClock();
@@ -1255,6 +1948,1069 @@ describe("CryptoPaperRuntime", () => {
       preservedCriticalMarkPrices: 1,
       overflowCount: 0,
     });
+  });
+
+  it("preserves one bounded prospective stop mark after a queued open fill", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+        if (injected || pending?.protectiveStopPrice === undefined) return;
+        injected = true;
+        emit?.(aggTrade(START + 200, 110));
+        const prospectiveAdverseMark = pending.protectiveStopPrice + 5;
+        for (let index = 0; index < 1_000; index += 1) {
+          emit?.(markPrice(
+            START + 210 + index,
+            prospectiveAdverseMark - (index % 2) * 0.01,
+          ));
+        }
+        emit?.(markPrice(START + 1_300, 110));
+        clock.schedule(START + 2_000, () => emit?.(aggTrade(START + 2_000, 104)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      executedAt: START + 200,
+      price: 110.1,
+    });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reduceOnly: true,
+      reason: "protection",
+      executedAt: START + 2_000,
+    });
+    const queue = artifact(result, "simulation-diagnostics").marketEventQueue as UnknownRecord;
+    expect(queue).toMatchObject({
+      preservedCriticalMarkPrices: 1,
+      overflowCount: 0,
+    });
+    expect(queue.maximumDepth as number).toBeLessThanOrEqual(4);
+    expect(queue.coalescedMarkPrices as number).toBeGreaterThan(900);
+  });
+
+  it("does not let a stale crossing mark consume the prospective risk barrier", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+        if (injected || pending?.protectiveStopPrice === undefined) return;
+        injected = true;
+        emit?.(aggTrade(START + 200, 100));
+        emit?.({
+          ...markPrice(START + 15, pending.protectiveStopPrice - 0.1),
+          receivedAt: START + 210,
+        });
+        emit?.(markPrice(START + 220, pending.protectiveStopPrice - 0.1));
+        emit?.(markPrice(START + 230, 100));
+        clock.schedule(START + 400, () => emit?.(aggTrade(START + 400, 99)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "protection",
+      executedAt: START + 400,
+    });
+    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+      preservedCriticalMarkPrices: 1,
+      overflowCount: 0,
+    });
+  });
+
+  it("does not seed a fill barrier from a delayed pre-decision aggregate trade", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+        if (injected || pending?.protectiveStopPrice === undefined) return;
+        injected = true;
+        emit?.({
+          ...aggTrade(START + 120, 100),
+          receivedAt: START + 200,
+        });
+        emit?.(aggTrade(START + 210, 110));
+        emit?.(markPrice(START + 220, pending.protectiveStopPrice + 5));
+        emit?.(markPrice(START + 230, 110));
+        clock.schedule(START + 400, () => emit?.(aggTrade(START + 400, 104)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      price: 110.1,
+      executedAt: START + 210,
+    });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "protection",
+      executedAt: START + 400,
+    });
+  });
+
+  it("seeds prospective risk from a gap-priced finalized-kline fill", async () => {
+    const clock = new ScheduledClock();
+    let decisionProtectiveStop: number | undefined;
+    const close = vi.fn().mockResolvedValue(undefined);
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+          ...riskPrelude(START + 60_020, 110),
+          {
+            at: START + 60_100,
+            event: nextFinalKline(START, START + 60_100),
+          },
+          ...riskPrelude(START + 120_020, 110),
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        clock.schedule(START + 120_100, () => {
+          onEvent({
+            ...(nextFinalKline(
+              START + 60_000,
+              START + 120_100,
+            ) as Extract<BinanceMarketEvent, { kind: "kline" }>),
+            open: 110,
+            high: 110.5,
+            low: 109.5,
+            close: 110,
+          });
+          onEvent(markPrice(START + 120_110, decisionProtectiveStop! + 9));
+          onEvent(markPrice(START + 120_120, 110));
+        });
+        clock.schedule(
+          START + 120_200,
+          () => onEvent(aggTrade(START + 120_200, 108)),
+        );
+        return { close };
+      },
+    };
+    const client: CryptoAiLaneClient = {
+      request: vi.fn(async (request: AiForecastRequest) => response(
+        "kronos_base",
+        request,
+        Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+        longReturns,
+      )),
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+        if (pending?.protectiveStopPrice !== undefined) {
+          decisionProtectiveStop ??= pending.protectiveStopPrice;
+        }
+      },
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 3 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      price: 110.1,
+      executedAt: START + 60_000,
+    });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "protection",
+      executedAt: START + 120_200,
+    });
+  });
+
+  it("sizes a finalized-kline fallback only from its causal open and decision spread", async () => {
+    const runScenario = async (useReceiptTimeLookahead: boolean) => {
+      const clock = new ScheduledClock();
+      const fillBar = {
+        ...(nextFinalKline(
+          START + 60_000,
+          START + 120_100,
+        ) as Extract<BinanceMarketEvent, { kind: "kline" }>),
+        open: 110,
+        high: 110.5,
+        low: 109.5,
+        close: 110,
+      };
+      const receiptBook = useReceiptTimeLookahead
+        ? bookTicker(START + 119_880, 1, 199)
+        : bookTicker(START + 119_880, 109.99, 110.01);
+      const receiptMark = markPrice(
+        START + 119_900,
+        useReceiptTimeLookahead ? 1_000 : 110,
+      );
+      const streams = new ScheduledStreams(clock, [
+        ...riskPrelude(),
+        { at: START + 100, event: finalKline(START + 100, true) },
+        ...riskPrelude(START + 60_020, 110),
+        {
+          at: START + 60_100,
+          event: nextFinalKline(START, START + 60_100),
+        },
+        { at: START + 119_880, event: receiptBook },
+        { at: START + 119_900, event: receiptMark },
+        { at: START + 120_100, event: fillBar },
+      ]);
+      const client: CryptoAiLaneClient = {
+        request: vi.fn(async (request: AiForecastRequest) => response(
+          "kronos_base",
+          request,
+          Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+          longReturns,
+        )),
+      };
+      const runtime = new CryptoPaperRuntime({
+        rest: rest(),
+        streams,
+        laneClients: { kronos_base: client },
+        instrumentRules: rules,
+        clock,
+        contextBars: 64,
+      });
+      const result = await runtime.run({
+        request: { ...simulationRequest(), durationMinutes: 3 },
+        snapshot: scannerSnapshot,
+        selected: candidate,
+        context: context().value,
+      });
+      const trades = artifact(result, "simulation-trades");
+      return ((((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+        .ledger as UnknownRecord).fills as UnknownRecord[]);
+    };
+
+    const controlFills = await runScenario(false);
+    const lookaheadFills = await runScenario(true);
+    expect(controlFills).toHaveLength(1);
+    expect(lookaheadFills).toHaveLength(1);
+    expect(lookaheadFills[0]).toMatchObject({
+      action: "open",
+      price: 110.1,
+      executedAt: START + 60_000,
+      quantity: controlFills[0]!.quantity,
+      leverage: controlFills[0]!.leverage,
+    });
+  });
+
+  it.each([
+    {
+      label: "single lane",
+      lanes: ["kronos_base"] as ["kronos_base"],
+    },
+    {
+      label: "two lanes",
+      lanes: ["kronos_base", "fincast"] as ["kronos_base", "fincast"],
+    },
+  ])(
+    "replays one canonical pre-receipt funding settlement for $label",
+    async ({ lanes }) => {
+      const clock = new ScheduledClock();
+      const fundingEventAt = START + 90_000;
+      const fundingRate = 0.001;
+      const settlementMarkPrice = 110;
+      const fundingSeed = {
+        ...markPrice(START + 70_000, settlementMarkPrice),
+        fundingRate,
+        nextFundingTime: fundingEventAt,
+      };
+      const fundingTrigger = {
+        ...markPrice(fundingEventAt, settlementMarkPrice),
+        // The canonical rate must come from the preceding scheduled
+        // observation, not whichever coalesced mark triggers settlement.
+        fundingRate: 0.009,
+        nextFundingTime: fundingEventAt + 8 * 60 * 60_000,
+        // This callback precedes the final callback even though the local
+        // timestamp rolls backward at final ingress.
+        receivedAt: START + 120_150,
+      };
+      const fillBar = {
+        ...(nextFinalKline(
+          START + 60_000,
+          START + 120_100,
+        ) as Extract<BinanceMarketEvent, { kind: "kline" }>),
+        open: 110,
+        high: 110.5,
+        low: 109.5,
+        close: 110,
+      };
+      const streams = new ScheduledStreams(clock, [
+        ...riskPrelude(),
+        { at: START + 100, event: finalKline(START + 100, true) },
+        ...riskPrelude(START + 60_020, settlementMarkPrice),
+        {
+          at: START + 60_100,
+          event: nextFinalKline(START, START + 60_100),
+        },
+        { at: START + 70_000, event: fundingSeed },
+        { at: fundingEventAt, event: fundingTrigger },
+        {
+          at: START + 119_880,
+          event: bookTicker(START + 119_880, 109.99, 110.01),
+        },
+        {
+          at: START + 119_900,
+          event: markPrice(START + 119_900, settlementMarkPrice),
+        },
+        { at: START + 120_100, event: fillBar },
+        // Once the retro lane is an ordinary live position, revisiting the
+        // bounded journal must not consume the same eventId a second time.
+        {
+          at: START + 120_200,
+          event: markPrice(START + 120_200, settlementMarkPrice),
+        },
+      ]);
+      const laneClients: Partial<Record<SimulationModelLane, CryptoAiLaneClient>> = {};
+      for (const lane of lanes) {
+        laneClients[lane] = {
+          request: vi.fn(async (request: AiForecastRequest) => response(
+            lane,
+            request,
+            Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+            longReturns,
+          )),
+        };
+      }
+      const fundingSpy = vi.spyOn(FuturesPaperLedger.prototype, "applyFunding");
+      try {
+        const runtime = new CryptoPaperRuntime({
+          rest: rest(),
+          streams,
+          laneClients,
+          instrumentRules: rules,
+          clock,
+          contextBars: 64,
+        });
+        const result = await runtime.run({
+          request: { ...simulationRequest(lanes), durationMinutes: 3 },
+          snapshot: scannerSnapshot,
+          selected: candidate,
+          context: context().value,
+        });
+
+        expect(fundingSpy).toHaveBeenCalledTimes(lanes.length);
+        expect(fundingSpy.mock.calls.map(([input]) => input)).toEqual(
+          lanes.map(() => ({
+            eventId: `funding:BTCUSDT:${fundingEventAt}`,
+            symbol: "BTCUSDT",
+            rate: fundingRate,
+            eventAt: fundingEventAt,
+          })),
+        );
+        const trades = artifact(result, "simulation-trades");
+        for (const lane of lanes) {
+          const ledger = (((trades.lanes as UnknownRecord)[lane] as UnknownRecord)
+            .ledger as UnknownRecord);
+          const fills = ledger.fills as UnknownRecord[];
+          expect(fills).toHaveLength(1);
+          expect(fills[0]).toMatchObject({
+            action: "open",
+            executedAt: START + 60_000,
+          });
+          const expectedFunding = -settlementMarkPrice
+            * (fills[0]!.quantity as number)
+            * fundingRate;
+          expect(ledger.funding).toBeCloseTo(expectedFunding, 12);
+          expect(ledger.walletBalance).toBeCloseTo(
+            10_000 - (ledger.fees as number) + expectedFunding,
+            12,
+          );
+          expect(ledger.equity).toBeCloseTo(
+            (ledger.walletBalance as number) + (ledger.unrealizedPnl as number),
+            12,
+          );
+        }
+        const terminal = (result.result as UnknownRecord)
+          .snapshot as CryptoPaperRuntimeSnapshot;
+        const executionLedger = (((trades.lanes as UnknownRecord)[lanes[0]!] as UnknownRecord)
+          .ledger as UnknownRecord);
+        expect(terminal.futuresRisk.dailyLossRatio).toBeCloseTo(
+          Math.max(0, 1 - (executionLedger.equity as number) / 10_000),
+          12,
+        );
+      } finally {
+        fundingSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    {
+      severity: "protection" as const,
+      expectedExecutedAt: START + 120_200,
+    },
+    {
+      severity: "liquidation" as const,
+      expectedExecutedAt: START + 120_020,
+    },
+  ])(
+    "replays bounded pre-receipt $severity evidence after a finalized-kline open fill",
+    async ({ severity, expectedExecutedAt }) => {
+      const clock = new ScheduledClock();
+      let decisionProtectiveStop: number | undefined;
+      const close = vi.fn().mockResolvedValue(undefined);
+      const streams: CryptoPublicStreams = {
+        subscribe: async (_symbols, onEvent) => {
+          for (const item of [
+            ...riskPrelude(),
+            { at: START + 100, event: finalKline(START + 100, true) },
+            ...riskPrelude(START + 60_020, 110),
+            {
+              at: START + 60_100,
+              event: nextFinalKline(START, START + 60_100),
+            },
+          ]) {
+            clock.schedule(item.at, () => onEvent(item.event));
+          }
+          clock.schedule(
+            START + 119_880,
+            () => onEvent(bookTicker(START + 119_880, 109.99, 110.01)),
+          );
+          clock.schedule(START + 119_900, () => {
+            onEvent({
+              ...markPrice(START + 119_900, decisionProtectiveStop! + 9),
+              // Callback order is authoritative even when Date.now rolls
+              // backward before the later final-kline callback.
+              receivedAt: START + 120_150,
+            });
+          });
+          if (severity === "liquidation") {
+            clock.schedule(
+              START + 120_020,
+              () => onEvent(markPrice(START + 120_020, 0.1)),
+            );
+          }
+          clock.schedule(
+            severity === "liquidation" ? START + 120_040 : START + 119_940,
+            () => onEvent(markPrice(
+              severity === "liquidation" ? START + 120_040 : START + 119_940,
+              110,
+            )),
+          );
+          clock.schedule(START + 120_100, () => {
+            onEvent({
+              ...(nextFinalKline(
+                START + 60_000,
+                START + 120_100,
+              ) as Extract<BinanceMarketEvent, { kind: "kline" }>),
+              open: 110,
+              high: 110.5,
+              low: 109.5,
+              close: 110,
+            });
+            // These arrive after the final event was enqueued and roll the
+            // bounded live buffer forward by more than three minutes. The
+            // pre-final evidence must survive in the event's frozen snapshot.
+            for (let index = 0; index < 4; index += 1) {
+              const at = START + (index + 3) * 60_000 + 10;
+              onEvent(markPrice(at, 110));
+            }
+          });
+          if (severity === "protection") {
+            clock.schedule(
+              START + 120_200,
+              () => onEvent(aggTrade(START + 120_200, 108)),
+            );
+          }
+          return { close };
+        },
+      };
+      const client: CryptoAiLaneClient = {
+        request: vi.fn(async (request: AiForecastRequest) => response(
+          "kronos_base",
+          request,
+          Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+          longReturns,
+        )),
+      };
+      const runtime = new CryptoPaperRuntime({
+        rest: rest(),
+        streams,
+        laneClients: { kronos_base: client },
+        instrumentRules: rules,
+        clock,
+        contextBars: 64,
+        onSnapshot: (_runId, snapshot) => {
+          const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+          if (pending?.protectiveStopPrice !== undefined) {
+            decisionProtectiveStop ??= pending.protectiveStopPrice;
+          }
+        },
+      });
+      const result = await runtime.run({
+        request: { ...simulationRequest(), durationMinutes: 3 },
+        snapshot: scannerSnapshot,
+        selected: candidate,
+        context: context().value,
+      });
+
+      const trades = artifact(result, "simulation-trades");
+      const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+        .ledger as UnknownRecord).fills as UnknownRecord[];
+      expect(fills).toHaveLength(2);
+      expect(fills[0]).toMatchObject({
+        action: "open",
+        price: 110.1,
+        executedAt: START + 60_000,
+      });
+      expect(fills[1]).toMatchObject({
+        action: "reduce",
+        reason: severity,
+        executedAt: expectedExecutedAt,
+      });
+      const queue = artifact(result, "simulation-diagnostics").marketEventQueue as UnknownRecord;
+      expect(queue.overflowCount).toBe(0);
+      expect(queue.maximumDepth as number).toBeLessThanOrEqual(4);
+    },
+  );
+
+  it("fails closed when bounded risk evidence was evicted before final-kline ingress", async () => {
+    const clock = new ScheduledClock();
+    const delayedFillBar = {
+      ...(nextFinalKline(
+        START + 60_000,
+        START + 300_100,
+      ) as Extract<BinanceMarketEvent, { kind: "kline" }>),
+      open: 110,
+      high: 110.5,
+      low: 109.5,
+      close: 110,
+    };
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...riskPrelude(START + 60_020, 110),
+      {
+        at: START + 60_100,
+        event: nextFinalKline(START, START + 60_100),
+      },
+      { at: START + 120_010, event: markPrice(START + 120_010, 110) },
+      { at: START + 180_010, event: markPrice(START + 180_010, 110) },
+      { at: START + 240_010, event: markPrice(START + 240_010, 110) },
+      {
+        at: START + 300_000,
+        event: bookTicker(START + 300_000, 109.99, 110.01),
+      },
+      { at: START + 300_010, event: markPrice(START + 300_010, 110) },
+      { at: START + 300_100, event: delayedFillBar },
+    ]);
+    const client: CryptoAiLaneClient = {
+      request: vi.fn(async (request: AiForecastRequest) => response(
+        "kronos_base",
+        request,
+        Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
+        longReturns,
+      )),
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: { kronos_base: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: { ...simulationRequest(), durationMinutes: 6 },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord);
+    expect(ledger.fills).toEqual([]);
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "open_long",
+        status: "blocked",
+        reason: "final_kline_risk_evidence_incomplete",
+      }),
+    ]));
+  });
+
+  it("does not apply a later-ingressed aggregate trade from before the queued fill", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        if (injected || !snapshot.decisions.some((decision) => decision.status === "pending")) {
+          return;
+        }
+        injected = true;
+        emit?.(aggTrade(START + 300, 100));
+        emit?.({
+          ...aggTrade(START + 200, 1),
+          receivedAt: START + 310,
+        });
+        clock.schedule(START + 400, () => emit?.(aggTrade(START + 400, 100)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      action: "open",
+      executedAt: START + 300,
+    });
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "reduce", reason: "protection" }),
+    ]));
+  });
+
+  it("ignores a mark from before the queued fill without consuming the valid stop barrier", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let injected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        const pending = snapshot.decisions.find((decision) => decision.status === "pending");
+        if (injected || pending?.protectiveStopPrice === undefined) return;
+        injected = true;
+        emit?.(aggTrade(START + 300, 100));
+        emit?.({
+          ...markPrice(START + 200, 0.1),
+          receivedAt: START + 310,
+        });
+        emit?.(markPrice(START + 320, pending.protectiveStopPrice - 0.1));
+        emit?.(markPrice(START + 330, 100));
+        clock.schedule(START + 400, () => emit?.(aggTrade(START + 400, 99)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "protection",
+      executedAt: START + 400,
+    });
+    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+      preservedCriticalMarkPrices: 1,
+      overflowCount: 0,
+    });
+  });
+
+  it("does not let a stale mark consume an already-open position risk barrier", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let openInjected = false;
+    let marksInjected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        if (!openInjected
+          && snapshot.decisions.some((decision) => decision.status === "pending")) {
+          openInjected = true;
+          emit?.(aggTrade(START + 300, 100));
+          return;
+        }
+        const position = snapshot.futuresPositions[0] as
+          | { protectiveStopPrice?: number }
+          | undefined;
+        if (marksInjected || position?.protectiveStopPrice === undefined) return;
+        marksInjected = true;
+        emit?.({
+          ...markPrice(START + 200, 0.1),
+          receivedAt: START + 310,
+        });
+        emit?.(markPrice(START + 320, position.protectiveStopPrice - 0.1));
+        emit?.(markPrice(START + 330, 100));
+        clock.schedule(START + 400, () => emit?.(aggTrade(START + 400, 99)));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "protection",
+      executedAt: START + 400,
+    });
+    expect(artifact(result, "simulation-diagnostics").marketEventQueue).toMatchObject({
+      preservedCriticalMarkPrices: 1,
+      overflowCount: 0,
+    });
+  });
+
+  it("preserves a liquidation escalation after a stop-only mark in the same burst", async () => {
+    const clock = new ScheduledClock();
+    let emit: ((event: BinanceMarketEvent) => void) | undefined;
+    let openInjected = false;
+    let marksInjected = false;
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent) => {
+        emit = onEvent;
+        for (const item of [
+          ...riskPrelude(),
+          { at: START + 100, event: finalKline(START + 100, true) },
+        ]) {
+          clock.schedule(item.at, () => onEvent(item.event));
+        }
+        return { close: vi.fn().mockResolvedValue(undefined) };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+      },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        if (!openInjected
+          && snapshot.decisions.some((decision) => decision.status === "pending")) {
+          openInjected = true;
+          emit?.(aggTrade(START + 300, 100));
+          return;
+        }
+        const position = snapshot.futuresPositions[0] as
+          | { protectiveStopPrice?: number; liquidationPrice?: number }
+          | undefined;
+        if (marksInjected
+          || position?.protectiveStopPrice === undefined
+          || position.liquidationPrice === undefined) return;
+        marksInjected = true;
+        const stopOnlyPrice = (
+          position.protectiveStopPrice + position.liquidationPrice
+        ) / 2;
+        emit?.(markPrice(START + 310, stopOnlyPrice));
+        emit?.(markPrice(START + 320, position.liquidationPrice - 0.1));
+        emit?.(markPrice(START + 330, 100));
+      },
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    const trades = artifact(result, "simulation-trades");
+    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      .ledger as UnknownRecord).fills as UnknownRecord[];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
+    expect(fills[1]).toMatchObject({
+      action: "reduce",
+      reason: "liquidation",
+      executedAt: START + 320,
+    });
+    const queue = artifact(result, "simulation-diagnostics").marketEventQueue as UnknownRecord;
+    expect(queue).toMatchObject({
+      preservedCriticalMarkPrices: 2,
+      overflowCount: 0,
+    });
+    expect(queue.maximumDepth as number).toBeLessThanOrEqual(3);
+  });
+
+  it.each(["completion_first", "disconnect_first"] as const)(
+    "discards deferred inference when %s races a stream disconnect",
+    async (order) => {
+      const clock = new ScheduledClock();
+      const worker = deferred<unknown>();
+      let workerRequest: AiForecastRequest | undefined;
+      const snapshots: CryptoPaperRuntimeSnapshot[] = [];
+      const close = vi.fn().mockResolvedValue(undefined);
+      const streams: CryptoPublicStreams = {
+        subscribe: async (_symbols, onEvent, onDisconnect) => {
+          for (const item of [
+            ...riskPrelude(),
+            { at: START + 100, event: finalKline(START + 100, true) },
+          ]) {
+            clock.schedule(item.at, () => onEvent(item.event));
+          }
+          clock.schedule(START + 1_000, () => {
+            const complete = () => worker.resolve(response(
+              "kronos_base",
+              workerRequest!,
+              START + 1_000,
+              longReturns,
+            ));
+            const disconnect = () => onDisconnect?.(new Error("socket raced completion"));
+            if (order === "completion_first") {
+              complete();
+              disconnect();
+            } else {
+              disconnect();
+              complete();
+            }
+          });
+          return { close };
+        },
+      };
+      const runtime = new CryptoPaperRuntime({
+        rest: rest(),
+        streams,
+        laneClients: {
+          kronos_base: {
+            request: vi.fn((request) => {
+              workerRequest = structuredClone(request);
+              return worker.promise;
+            }),
+          },
+        },
+        instrumentRules: rules,
+        clock,
+        contextBars: 64,
+        onSnapshot: (_runId, snapshot) => {
+          snapshots.push(snapshot);
+        },
+      });
+
+      await expect(runtime.run({
+        request: simulationRequest(),
+        snapshot: scannerSnapshot,
+        selected: candidate,
+        context: context().value,
+      })).rejects.toMatchObject({
+        name: "CryptoPaperRuntimeError",
+        code: "stream_desync",
+      } satisfies Partial<CryptoPaperRuntimeError>);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(snapshots.at(-1)?.phase).toBe("failed");
+      expect(snapshots.flatMap((snapshot) => snapshot.decisions)).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: "executed" }),
+        ]),
+      );
+    },
+  );
+
+  it("cannot lose a disconnect control event when the market queue is full", async () => {
+    const clock = new ScheduledClock();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const streams: CryptoPublicStreams = {
+      subscribe: async (_symbols, onEvent, onDisconnect) => {
+        clock.schedule(START + 100, () => {
+          // One event resolves the active waiter and 256 fill the bounded
+          // queue, so the following disconnect exercises the overflow path.
+          for (let index = 0; index < 257; index += 1) {
+            onEvent(finalKline(START + 100 + index, true));
+          }
+          onDisconnect?.(new Error("socket closed with a full queue"));
+        });
+        return { close };
+      },
+    };
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {},
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+
+    await expect(runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    })).rejects.toMatchObject({
+      name: "CryptoPaperRuntimeError",
+      code: "stream_desync",
+    } satisfies Partial<CryptoPaperRuntimeError>);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed with stream_desync instead of continuing on stale public data", async () => {

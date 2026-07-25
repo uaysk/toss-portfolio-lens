@@ -93,6 +93,9 @@ describe("database environment configuration", () => {
         cooldownMs: 60_000,
       },
     });
+    expect(config.cryptoSimulation).toEqual({
+      maximumActiveSessions: 1,
+    });
   });
 
   it("단타 기능은 provider 실측 한도를 명시해야만 활성화한다", () => {
@@ -380,6 +383,38 @@ describe("database environment configuration", () => {
     expect(loadConfig().cryptoAi.fincast?.url).toBe(
       "ws://fincast-worker:8766/ws/scalping-ai/v1",
     );
+  });
+
+  it("암호화폐 paper session 상한은 주식 상한과 독립적으로 기본 1을 사용한다", () => {
+    expect(loadConfig()).toMatchObject({
+      scalping: {
+        simulation: {
+          maximumActiveSessions: 2,
+        },
+      },
+      cryptoSimulation: {
+        maximumActiveSessions: 1,
+      },
+    });
+
+    process.env.SCALPING_SIMULATION_MAX_ACTIVE_SESSIONS = "4";
+    process.env.CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS = "3";
+    expect(loadConfig()).toMatchObject({
+      scalping: {
+        simulation: {
+          maximumActiveSessions: 4,
+        },
+      },
+      cryptoSimulation: {
+        maximumActiveSessions: 3,
+      },
+    });
+
+    process.env.CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS = "0";
+    expect(() => loadConfig()).toThrow("CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS");
+
+    process.env.CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS = "21";
+    expect(() => loadConfig()).toThrow("CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS");
   });
 
   it("암호화폐 AI lane은 URL, token, 직렬화 상한 오류를 해당 변수 이름으로 보고한다", () => {

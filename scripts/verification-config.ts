@@ -71,4 +71,7 @@ export const verificationConfigDefaults = {
       cooldownMs: 60_000,
     },
   },
+  cryptoSimulation: {
+    maximumActiveSessions: 1,
+  },
 } as const satisfies Partial<AppConfig>;

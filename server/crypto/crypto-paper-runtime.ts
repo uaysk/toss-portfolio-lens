@@ -32,6 +32,7 @@ import type {
 } from "./crypto-simulation-service.js";
 import {
   ceilToStep,
+  estimatedLiquidationPrice,
   floorToStep,
   FuturesPaperLedger,
   type FuturesPaperLedgerSnapshot,
@@ -62,6 +63,8 @@ const PROGRESS_UPDATE_INTERVAL_MS = 5_000;
 const EQUITY_SAMPLE_INTERVAL_MS = 5_000;
 const MAX_EQUITY_SAMPLES_PER_LANE = 5_000;
 const MAX_MARKET_EVENT_QUEUE_DEPTH = 256;
+const MAX_FINAL_KLINE_RISK_EVIDENCE_BUCKETS = 3;
+const MAX_FINAL_KLINE_FUNDING_EVIDENCE = 4;
 const BOOK_TICKER_FRESHNESS_MS = 15_000;
 const MARK_PRICE_FRESHNESS_MS = 5_000;
 
@@ -203,6 +206,7 @@ type PendingAction = {
 type LaneState = {
   lane: SimulationModelLane;
   ledger: FuturesPaperLedger;
+  riskGeneration: number;
   dailyGate: DailyLossGateState;
   pending?: PendingAction;
   attempts: number;
@@ -228,6 +232,29 @@ type LaneState = {
   equityPeak: number;
   maximumDrawdown: number;
   lastEquitySampleAt: number;
+};
+
+type RuntimeLaneInferenceOutcome = {
+  attemptAt: number;
+  forecast?: NormalizedLaneForecast;
+  error?: string;
+  observedLatency?: number;
+  incrementsFailure: boolean;
+  timedOut: boolean;
+  failureObservedAt?: number;
+};
+
+type RuntimeInferenceCompletion = {
+  id: number;
+  streamEpoch: number;
+  bar: BinanceKline;
+  bars: BinanceKline[];
+  requestDigest: string;
+  outcomes: Map<SimulationModelLane, RuntimeLaneInferenceOutcome>;
+  riskGenerations: Map<SimulationModelLane, number>;
+  decisionSpreadBps: number;
+  currentAtr: number;
+  currentVolatility: number;
 };
 
 export type CryptoPaperRuntimeSnapshot = {
@@ -289,6 +316,7 @@ export type CryptoPaperRuntimeSnapshot = {
   decisionCadence: {
     trigger: "final_binance_1m_kline";
     triggeredEvents: number;
+    coalescedFinalKlines: number;
     lastTriggeredAt?: string;
     inFlight: boolean;
   };
@@ -381,13 +409,19 @@ const systemClock: CryptoRuntimeClock = {
 type QueuedMarketEvent =
   | BinanceMarketEvent
   | { kind: "disconnect"; error?: unknown }
-  | { kind: "connection_state"; state: BinancePublicStreamConnectionState };
+  | { kind: "connection_state"; state: BinancePublicStreamConnectionState }
+  | { kind: "inference_complete" };
 type CoalescedMarketEventKind = "book_ticker" | "mark_price";
+type CoalescedMarketEvent = Extract<
+  BinanceMarketEvent,
+  { kind: CoalescedMarketEventKind }
+>;
 type MarketEventQueueToken =
   | { kind: "direct_event"; event: QueuedMarketEvent; queueSequence: number }
   | {
     kind: "coalesced_event";
     eventKind: CoalescedMarketEventKind;
+    segment: number;
     queueSequence: number;
   }
   | {
@@ -395,6 +429,7 @@ type MarketEventQueueToken =
     event: Extract<BinanceMarketEvent, { kind: "agg_trade" }>;
     ingressSequence: number;
     fillCandidate: boolean;
+    segment: number;
     queueSequence: number;
   };
 
@@ -413,10 +448,7 @@ type MarketEventQueueStats = {
 
 class AsyncMarketEventQueue {
   private readonly events: MarketEventQueueToken[] = [];
-  private readonly coalesced = new Map<
-    CoalescedMarketEventKind,
-    BinanceMarketEvent
-  >();
+  private readonly coalesced = new Map<string, CoalescedMarketEvent>();
   private readonly waiters = new Set<
     (event: QueuedMarketEvent) => void
   >();
@@ -429,21 +461,29 @@ class AsyncMarketEventQueue {
   private maximumBufferedAggTrades = 0;
   private overflowCount = 0;
   private queueSequence = 0;
+  private coalescingSegment = 0;
+  private activeFillBarrierKey: string | undefined;
+  private readonly preservedMarkRiskBarrierKeys = new Set<string>();
 
   push(
     event: QueuedMarketEvent,
     metadata?: {
       ingressSequence?: number;
       fillCandidate?: boolean;
-      preserveMarkRisk?: boolean;
+      fillBarrierKey?: string;
+      markRiskBarrierKey?: string;
     },
   ): boolean {
     if (event.kind === "kline" && !event.final) {
       this.droppedNonFinalKlines += 1;
       return true;
     }
-    if (event.kind === "mark_price" && metadata?.preserveMarkRisk) {
+    if (event.kind === "mark_price"
+      && metadata?.markRiskBarrierKey
+      && !this.preservedMarkRiskBarrierKeys.has(metadata.markRiskBarrierKey)) {
+      this.preservedMarkRiskBarrierKeys.add(metadata.markRiskBarrierKey);
       this.preservedCriticalMarkPrices += 1;
+      this.coalescingSegment += 1;
       return this.enqueue({
         kind: "direct_event",
         event,
@@ -452,25 +492,43 @@ class AsyncMarketEventQueue {
     }
     if (event.kind === "book_ticker" || event.kind === "mark_price") {
       const queueSequence = ++this.queueSequence;
-      const existing = this.coalesced.has(event.kind);
-      this.coalesced.set(event.kind, event);
+      const segment = this.coalescingSegment;
+      const coalescedKey = this.coalescedKey(event.kind, segment);
+      const existingEvent = this.coalesced.get(coalescedKey);
+      const existing = existingEvent !== undefined;
+      // Exchange event time orders distinct observations. Exact ties follow
+      // callback/queue order because the local receivedAt clock may roll back.
+      if (existingEvent && event.eventTime < existingEvent.eventTime) {
+        if (event.kind === "book_ticker") this.coalescedBookTickers += 1;
+        else this.coalescedMarkPrices += 1;
+        return true;
+      }
+      this.coalesced.set(coalescedKey, event);
       if (existing) {
         if (event.kind === "book_ticker") this.coalescedBookTickers += 1;
         else this.coalescedMarkPrices += 1;
         const tokenIndex = this.events.findIndex((queued) => (
-          queued.kind === "coalesced_event" && queued.eventKind === event.kind
+          queued.kind === "coalesced_event"
+          && queued.eventKind === event.kind
+          && queued.segment === segment
         ));
         if (tokenIndex >= 0) {
           this.events[tokenIndex] = {
             kind: "coalesced_event",
             eventKind: event.kind,
+            segment,
             queueSequence,
           };
           this.sortByIngress();
         }
         return true;
       }
-      return this.enqueue({ kind: "coalesced_event", eventKind: event.kind, queueSequence });
+      return this.enqueue({
+        kind: "coalesced_event",
+        eventKind: event.kind,
+        segment,
+        queueSequence,
+      });
     }
     // Preserve the first eligible aggregate trade. It is the causal fill
     // barrier. Also retain the adverse minimum and maximum while the event
@@ -481,11 +539,21 @@ class AsyncMarketEventQueue {
       if (ingressSequence === undefined) {
         throw new Error("aggTrade ingress sequence is required.");
       }
+      if (metadata?.fillCandidate
+        && metadata.fillBarrierKey
+        && metadata.fillBarrierKey !== this.activeFillBarrierKey) {
+        // The first eligible fill for a pending decision is a causal barrier:
+        // risk observations before it and recovery observations after it must
+        // never coalesce into one movable token.
+        this.coalescingSegment += 1;
+        this.activeFillBarrierKey = metadata.fillBarrierKey;
+      }
       const token: Extract<MarketEventQueueToken, { kind: "agg_event" }> = {
         kind: "agg_event",
         event,
         ingressSequence,
         fillCandidate: metadata?.fillCandidate === true,
+        segment: this.coalescingSegment,
         queueSequence: ++this.queueSequence,
       };
       const waiter = this.waiters.values().next().value as
@@ -493,7 +561,7 @@ class AsyncMarketEventQueue {
         | undefined;
       const buffered = this.events.filter(
         (queued): queued is Extract<MarketEventQueueToken, { kind: "agg_event" }> => (
-          queued.kind === "agg_event"
+          queued.kind === "agg_event" && queued.segment === token.segment
         ),
       );
       if (waiter && buffered.length === 0) {
@@ -537,7 +605,10 @@ class AsyncMarketEventQueue {
         selectedTokens.length,
       );
       for (let index = this.events.length - 1; index >= 0; index -= 1) {
-        if (this.events[index]!.kind === "agg_event") this.events.splice(index, 1);
+        const queued = this.events[index]!;
+        if (queued.kind === "agg_event" && queued.segment === token.segment) {
+          this.events.splice(index, 1);
+        }
       }
       if (this.events.length + selectedTokens.length > MAX_MARKET_EVENT_QUEUE_DEPTH) {
         this.overflowCount += 1;
@@ -548,6 +619,7 @@ class AsyncMarketEventQueue {
       this.maximumDepth = Math.max(this.maximumDepth, this.events.length);
       return true;
     }
+    this.coalescingSegment += 1;
     return this.enqueue({
       kind: "direct_event",
       event,
@@ -635,7 +707,7 @@ class AsyncMarketEventQueue {
     if (this.events.length >= MAX_MARKET_EVENT_QUEUE_DEPTH) {
       this.overflowCount += 1;
       if (event.kind === "coalesced_event") {
-        this.coalesced.delete(event.eventKind);
+        this.coalesced.delete(this.coalescedKey(event.eventKind, event.segment));
       }
       return false;
     }
@@ -665,9 +737,14 @@ class AsyncMarketEventQueue {
 
   private resolveToken(event: MarketEventQueueToken): QueuedMarketEvent | undefined {
     if (event.kind === "direct_event" || event.kind === "agg_event") return event.event;
-    const resolved = this.coalesced.get(event.eventKind);
-    this.coalesced.delete(event.eventKind);
+    const key = this.coalescedKey(event.eventKind, event.segment);
+    const resolved = this.coalesced.get(key);
+    this.coalesced.delete(key);
     return resolved;
+  }
+
+  private coalescedKey(kind: CoalescedMarketEventKind, segment: number): string {
+    return `${segment}:${kind}`;
   }
 
   private sortByIngress(): void {
@@ -1124,6 +1201,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const decisions: RuntimeDecision[] = [];
     const states = new Map<SimulationModelLane, LaneState>();
     let currentSpreadBps = selected.spreadBps;
+    let ingressSpreadBps = selected.spreadBps;
     let currentMarkPrice = selected.price;
     let lastTriggeredAt: string | undefined;
     let triggeredEvents = 0;
@@ -1131,7 +1209,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let klineDataHealthy = true;
     let klineDataBlockReason: string | undefined;
     let closing = false;
-    let scheduledFunding: { eventAt: number; rate: number } | undefined;
     let streamDisconnected: { error?: unknown } | undefined;
     let subscription: BinanceWebsocketSubscription | undefined;
     let lastPublishedAt = Number.NEGATIVE_INFINITY;
@@ -1141,7 +1218,178 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let lastProcessedFinalOpenTime = Number.NEGATIVE_INFINITY;
     let lastBookTickerObservedAt: number | undefined;
     let lastMarkPriceObservedAt: number | undefined;
+    let lastBookTickerEventTime: number | undefined;
+    let lastMarkPriceEventTime: number | undefined;
+    let lastIngressBookTickerEventTime: number | undefined;
+    let lastIngressMarkPriceEventTime: number | undefined;
     let lastIngressSequence = 0;
+    let coalescedFinalKlines = 0;
+    let coalescedInferenceBar: BinanceKline | undefined;
+    let inferenceTask: Promise<void> | undefined;
+    let inferenceFailure: unknown;
+    let readyInferenceCompletion: RuntimeInferenceCompletion | undefined;
+    let activeInferenceController: AbortController | undefined;
+    let acceptInferenceCompletions = true;
+    let streamEpoch = 0;
+    let inferenceSequence = 0;
+    const prospectivePendingOpenRisk = new Map<SimulationModelLane, {
+      pendingKey: string;
+      fillIngressSequence: number;
+      fillCausalAt: number;
+      protectiveStopPrice: number;
+      estimatedLiquidationPrice: number;
+    }>();
+    type BufferedMarkRiskEvidence = {
+      event: Extract<BinanceMarketEvent, { kind: "mark_price" }>;
+      ingressSequence: number;
+    };
+    type MarkRiskEvidenceBucket = {
+      minimum: BufferedMarkRiskEvidence;
+      maximum: BufferedMarkRiskEvidence;
+      latest: BufferedMarkRiskEvidence;
+    };
+    type CanonicalFundingSettlement = {
+      eventId: string;
+      eventAt: number;
+      rate: number;
+      settlementMarkPrice: number;
+      triggerIngressSequence: number;
+      triggerEvent: Extract<BinanceMarketEvent, { kind: "mark_price" }>;
+    };
+    type FrozenFinalKlineRiskEvidence = {
+      marks: readonly BufferedMarkRiskEvidence[];
+      fundingSettlements: readonly CanonicalFundingSettlement[];
+      complete: boolean;
+    };
+    const finalKlineRiskEvidence = new Map<number, MarkRiskEvidenceBucket>();
+    const finalKlineRiskEvidenceSnapshots = new WeakMap<
+      object,
+      FrozenFinalKlineRiskEvidence
+    >();
+    const canonicalFundingSettlements: CanonicalFundingSettlement[] = [];
+    const consumedFundingSettlements = new Map<
+      SimulationModelLane,
+      Set<string>
+    >(selectedLanes.map((lane) => [lane, new Set<string>()]));
+    let ingressScheduledFunding: { eventAt: number; rate: number } | undefined;
+    let lastIngressAcceptedMarkPrice = selected.price;
+    let markEvidenceEvictedThroughEventTime: number | undefined;
+    let fundingEvidenceEvictedThroughEventAt: number | undefined;
+    const bufferFinalKlineRiskEvidence = (
+      event: Extract<BinanceMarketEvent, { kind: "mark_price" }>,
+      ingressSequence: number,
+    ): void => {
+      const intervalOpenTime = Math.floor(event.eventTime / MINUTE_MS) * MINUTE_MS;
+      const evidence = {
+        event: { ...event },
+        ingressSequence,
+      };
+      const existing = finalKlineRiskEvidence.get(intervalOpenTime);
+      finalKlineRiskEvidence.set(intervalOpenTime, existing
+        ? {
+          minimum: event.markPrice < existing.minimum.event.markPrice
+            ? evidence
+            : existing.minimum,
+          maximum: event.markPrice > existing.maximum.event.markPrice
+            ? evidence
+            : existing.maximum,
+          latest: evidence,
+        }
+        : { minimum: evidence, maximum: evidence, latest: evidence });
+      const intervalKeys = Array.from(finalKlineRiskEvidence.keys())
+        .sort((left, right) => left - right);
+      while (intervalKeys.length > MAX_FINAL_KLINE_RISK_EVIDENCE_BUCKETS) {
+        const evictedKey = intervalKeys.shift()!;
+        const evicted = finalKlineRiskEvidence.get(evictedKey);
+        if (evicted) {
+          markEvidenceEvictedThroughEventTime = Math.max(
+            markEvidenceEvictedThroughEventTime ?? Number.NEGATIVE_INFINITY,
+            evicted.minimum.event.eventTime,
+            evicted.maximum.event.eventTime,
+            evicted.latest.event.eventTime,
+          );
+        }
+        finalKlineRiskEvidence.delete(evictedKey);
+      }
+    };
+    const bufferCanonicalFundingSettlement = (
+      event: Extract<BinanceMarketEvent, { kind: "mark_price" }>,
+      ingressSequence: number,
+    ): void => {
+      if (ingressScheduledFunding && event.eventTime >= ingressScheduledFunding.eventAt) {
+        const settlement: CanonicalFundingSettlement = {
+          eventId: `funding:${symbol}:${ingressScheduledFunding.eventAt}`,
+          eventAt: ingressScheduledFunding.eventAt,
+          rate: ingressScheduledFunding.rate,
+          settlementMarkPrice: lastIngressAcceptedMarkPrice,
+          triggerIngressSequence: ingressSequence,
+          triggerEvent: { ...event },
+        };
+        if (!canonicalFundingSettlements.some(
+          (candidateSettlement) => candidateSettlement.eventId === settlement.eventId,
+        )) {
+          canonicalFundingSettlements.push(settlement);
+          canonicalFundingSettlements.sort(
+            (left, right) => left.eventAt - right.eventAt
+              || left.triggerIngressSequence - right.triggerIngressSequence,
+          );
+          while (
+            canonicalFundingSettlements.length > MAX_FINAL_KLINE_FUNDING_EVIDENCE
+          ) {
+            const evicted = canonicalFundingSettlements.shift()!;
+            fundingEvidenceEvictedThroughEventAt = Math.max(
+              fundingEvidenceEvictedThroughEventAt ?? Number.NEGATIVE_INFINITY,
+              evicted.eventAt,
+            );
+          }
+        }
+        ingressScheduledFunding = undefined;
+      }
+      lastIngressAcceptedMarkPrice = event.markPrice;
+      if (event.nextFundingTime > event.eventTime) {
+        ingressScheduledFunding = {
+          eventAt: event.nextFundingTime,
+          rate: event.fundingRate,
+        };
+      }
+    };
+    const freezeFinalKlineRiskEvidence = (
+      bar: Extract<BinanceMarketEvent, { kind: "kline" }>,
+      ingressSequence: number,
+    ): void => {
+      // The callback sequence is the causal receipt order. receivedAt remains
+      // telemetry only and cannot exclude evidence when the local clock rolls back.
+      const marks = Array.from(new Map(
+        Array.from(finalKlineRiskEvidence.values())
+          .flatMap((bucket) => [bucket.minimum, bucket.maximum, bucket.latest])
+          .filter((item) => (
+            item.ingressSequence < ingressSequence
+            && item.event.eventTime > bar.openTime
+          ))
+          .map((item) => [item.ingressSequence, item]),
+      ).values()).sort((left, right) => (
+        left.event.eventTime - right.event.eventTime
+        || left.ingressSequence - right.ingressSequence
+      ));
+      const fundingSettlements = canonicalFundingSettlements
+        .filter((settlement) => (
+          settlement.triggerIngressSequence < ingressSequence
+          && settlement.eventAt > bar.openTime
+        ))
+        .map((settlement) => ({
+          ...settlement,
+          triggerEvent: { ...settlement.triggerEvent },
+        }));
+      const markEvidenceComplete = markEvidenceEvictedThroughEventTime === undefined
+        || markEvidenceEvictedThroughEventTime <= bar.openTime;
+      const fundingEvidenceComplete = fundingEvidenceEvictedThroughEventAt === undefined
+        || fundingEvidenceEvictedThroughEventAt <= bar.openTime;
+      finalKlineRiskEvidenceSnapshots.set(bar, {
+        marks,
+        fundingSettlements,
+        complete: markEvidenceComplete && fundingEvidenceComplete,
+      });
+    };
     const ingressSequences = new WeakMap<object, number>();
     let streamQualificationState:
       | "initializing"
@@ -1160,6 +1408,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       states.set(lane, {
         lane,
         ledger,
+        riskGeneration: 0,
         dailyGate: updateDailyLossGate(undefined, request.initialCash, startedAt),
         attempts: 0,
         successes: 0,
@@ -1263,13 +1512,30 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const entryDataHealthy = (at = this.clock.now()): boolean => (
       klineDataHealthy && riskStreamFreshness(at).healthy
     );
+    const decisionLifecycleBlockReason = (
+      at = this.clock.now(),
+    ): string | undefined => {
+      if (closing) return "runtime_closing";
+      if (context.signal.aborted) return "runtime_cancelled";
+      if (streamDisconnected) return "stream_desync";
+      if (at >= expiresAt) return "runtime_expired";
+      return entryDataHealthy(at)
+        ? undefined
+        : entryBlockReason(at) ?? "market_data_unhealthy";
+    };
     const blockPendingOpens = (reason: string): void => {
       for (const state of states.values()) {
         if (state.pending?.action !== "open") continue;
         state.pending.decision.status = "blocked";
         state.pending.decision.reason = reason;
+        prospectivePendingOpenRisk.delete(state.lane);
         state.pending = undefined;
       }
+    };
+    const discardCoalescedInference = (): void => {
+      if (!coalescedInferenceBar) return;
+      coalescedFinalKlines += 1;
+      coalescedInferenceBar = undefined;
     };
     const enterReconnectSafety = (): void => {
       streamQualificationState = "reconnecting";
@@ -1277,7 +1543,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       klineDataBlockReason = "stream_reconnecting";
       lastBookTickerObservedAt = undefined;
       lastMarkPriceObservedAt = undefined;
+      lastBookTickerEventTime = undefined;
+      lastMarkPriceEventTime = undefined;
+      lastIngressBookTickerEventTime = undefined;
+      lastIngressMarkPriceEventTime = undefined;
+      finalKlineRiskEvidence.clear();
+      markEvidenceEvictedThroughEventTime = undefined;
       blockPendingOpens("stream_reconnecting");
+      discardCoalescedInference();
     };
     const requiresReconnectRecovery = (): boolean => (
       streamQualificationState === "reconnecting"
@@ -1424,6 +1697,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         decisionCadence: {
           trigger: "final_binance_1m_kline",
           triggeredEvents,
+          coalescedFinalKlines,
           ...(lastTriggeredAt ? { lastTriggeredAt } : {}),
           inFlight: inferenceInFlight,
         },
@@ -1535,12 +1809,24 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         // traded while model inference was still running.
         if (event.kind === "kline" && event.openTime <= pending.decisionAt) continue;
         const ledgerBefore = state.ledger.snapshot();
+        if (pending.action === "open" && event.kind === "kline") {
+          const evidenceSnapshot = finalKlineRiskEvidenceSnapshots.get(event);
+          if (evidenceSnapshot?.complete !== true) {
+            pending.decision.status = "blocked";
+            pending.decision.reason = "final_kline_risk_evidence_incomplete";
+            prospectivePendingOpenRisk.delete(state.lane);
+            state.pending = undefined;
+            continue;
+          }
+        }
+        const lifecycleBlockReason = decisionLifecycleBlockReason();
         if (pending.action === "open"
-          && (state.dailyGate.blocked || !entryDataHealthy(this.clock.now()))) {
+          && (state.dailyGate.blocked || lifecycleBlockReason !== undefined)) {
           pending.decision.status = "blocked";
           pending.decision.reason = state.dailyGate.blocked
             ? "daily_loss_gate"
-            : entryBlockReason(this.clock.now()) ?? "market_data_unhealthy";
+            : lifecycleBlockReason ?? "market_data_unhealthy";
+          prospectivePendingOpenRisk.delete(state.lane);
           state.pending = undefined;
           continue;
         }
@@ -1552,6 +1838,12 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               const expectedEntryPrice = side === "long"
                 ? ceilToStep(fillPrice * (1 + slippageRate), rules.tickSize)
                 : floorToStep(fillPrice * (1 - slippageRate), rules.tickSize);
+              const causalMarkPrice = event.kind === "kline"
+                ? fillPrice
+                : currentMarkPrice;
+              const causalSpreadBps = event.kind === "kline"
+                ? pending.spreadBps!
+                : Math.max(pending.spreadBps!, currentSpreadBps);
               const latest = state.ledger.snapshot();
               const revalidated = sizeFuturesPosition({
                 mode: "paper",
@@ -1562,7 +1854,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 price: expectedEntryPrice,
                 atr14: pending.atr14!,
                 adverseQuantileDistance: pending.adverseQuantileDistance!,
-                spreadBps: Math.max(pending.spreadBps!, currentSpreadBps),
+                spreadBps: causalSpreadBps,
                 slippageBpsPerSide: request.costs.slippageBpsPerSide,
                 // Revalidation may lower leverage or quantity, but it never
                 // upgrades the decision after seeing a later market event.
@@ -1571,8 +1863,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               });
               const feeRate = request.costs.commissionBpsPerSide / 10_000;
               const markPnlPerUnit = side === "long"
-                ? currentMarkPrice - expectedEntryPrice
-                : expectedEntryPrice - currentMarkPrice;
+                ? causalMarkPrice - expectedEntryPrice
+                : expectedEntryPrice - causalMarkPrice;
               const equitySlope = markPnlPerUnit - expectedEntryPrice * feeRate;
               const boundedQuantity = (
                 limitRate: number,
@@ -1588,7 +1880,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               const grossQuantityLimit = boundedQuantity(
                 1.5,
                 latest.grossExposure,
-                currentMarkPrice,
+                causalMarkPrice,
               );
               const marginQuantityLimit = boundedQuantity(
                 0.2,
@@ -1626,7 +1918,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                 side,
                 quantity,
                 observedPrice: fillPrice,
-                markPrice: currentMarkPrice,
+                markPrice: causalMarkPrice,
                 leverage: revalidated.leverage,
                 protectiveStopPrice: revalidated.protectiveStopPrice,
                 decisionAt: pending.decisionAt,
@@ -1652,6 +1944,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             pending.decision.status = "skipped";
             pending.decision.reason = "position_already_closed";
           } else {
+            state.riskGeneration += 1;
             pending.decision.status = "executed";
             pending.decision.fillId = fill.fillId;
             pending.decision.executedAt = iso(fill.executedAt);
@@ -1662,6 +1955,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           pending.decision.reason = `fill_rejected:${error instanceof Error ? error.message : "unknown"}`;
           warnings.push(`${state.lane}:${pending.decision.reason}`);
         } finally {
+          if (pending.action === "open") {
+            prospectivePendingOpenRisk.delete(state.lane);
+          }
           state.pending = undefined;
         }
       }
@@ -1685,7 +1981,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       if (state.pending?.action === "open") {
         state.pending.decision.status = "blocked";
         state.pending.decision.reason = reason;
+        prospectivePendingOpenRisk.delete(state.lane);
       }
+      state.riskGeneration += 1;
       const decision: RuntimeDecision = {
         id: decisionId(state.lane, at),
         lane: state.lane,
@@ -1709,7 +2007,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       };
     };
 
-    const enforceRisk = (event: BinanceMarketEvent): void => {
+    const enforceRisk = (
+      event: BinanceMarketEvent,
+      targetLanes?: ReadonlySet<SimulationModelLane>,
+    ): void => {
       // Daily-loss UTC boundaries use monotonic local observation time. A
       // delayed prior-day exchange event must never rewind/reset the gate.
       const at = monotonicCryptoRiskClock(
@@ -1720,8 +2021,16 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       lastRiskClockAt = at;
       const price = eventPrice(event);
       for (const state of states.values()) {
+        if (targetLanes && !targetLanes.has(state.lane)) continue;
         const position = state.ledger.snapshot().positions.find((item) => item.symbol === symbol);
-        if (position && at > position.openedAt) {
+        const eventIsAfterPosition = position !== undefined && (
+          event.kind === "kline"
+            ? event.openTime > position.openedAt
+            : event.kind === "agg_trade"
+              ? event.executedAt > position.openedAt
+              : event.eventTime > position.openedAt
+        );
+        if (position && eventIsAfterPosition) {
           const crossed = position.side === "long"
             ? event.kind === "kline" && event.final
               ? event.low <= position.protectiveStopPrice
@@ -1737,31 +2046,131 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
     };
 
+    const applyCanonicalFundingSettlement = (
+      state: LaneState,
+      settlement: CanonicalFundingSettlement,
+    ): boolean => {
+      const consumed = consumedFundingSettlements.get(state.lane)!;
+      if (consumed.has(settlement.eventId)) return false;
+      const beforeMark = state.ledger.snapshot();
+      const position = beforeMark.positions.find((candidate) => candidate.symbol === symbol);
+      if (!position || position.openedAt >= settlement.eventAt) return false;
+
+      // Funding is valued from the last accepted mark before the canonical
+      // funding boundary. Both ordinary positions and delayed finalized-kline
+      // opens consume this same immutable settlement.
+      state.ledger.mark(
+        symbol,
+        settlement.settlementMarkPrice,
+        settlement.eventAt,
+      );
+      const afterMark = state.ledger.snapshot();
+      if (afterMark.fills.length > beforeMark.fills.length) {
+        state.riskGeneration += afterMark.fills.length - beforeMark.fills.length;
+      }
+      consumed.add(settlement.eventId);
+      if (!afterMark.positions.some((candidate) => candidate.symbol === symbol)) {
+        return true;
+      }
+      try {
+        state.ledger.applyFunding({
+          eventId: settlement.eventId,
+          symbol,
+          rate: settlement.rate,
+          eventAt: settlement.eventAt,
+        });
+      } catch (error) {
+        warnings.push(
+          `${state.lane}:funding_rejected:`
+            + `${error instanceof Error ? error.message : "unknown"}`,
+        );
+      }
+      return true;
+    };
+
+    const applyCanonicalFundingSettlementsThrough = (
+      ingressSequence: number,
+    ): void => {
+      for (const settlement of canonicalFundingSettlements) {
+        if (settlement.triggerIngressSequence > ingressSequence) continue;
+        for (const state of states.values()) {
+          applyCanonicalFundingSettlement(state, settlement);
+        }
+      }
+    };
+
+    const replayFinalKlineOpenRiskEvidence = (
+      bar: Extract<BinanceMarketEvent, { kind: "kline" }>,
+      targetLanes: ReadonlySet<SimulationModelLane>,
+    ): void => {
+      finalKlineRiskEvidence.delete(bar.openTime);
+      const evidence = finalKlineRiskEvidenceSnapshots.get(bar);
+      finalKlineRiskEvidenceSnapshots.delete(bar);
+      if (targetLanes.size === 0 || !evidence?.complete) return;
+      const replayActions = [
+        ...evidence.marks.map((item) => ({
+          kind: "mark" as const,
+          causalAt: item.event.eventTime,
+          ingressSequence: item.ingressSequence,
+          item,
+        })),
+        ...evidence.fundingSettlements.map((settlement) => ({
+          kind: "funding" as const,
+          causalAt: settlement.eventAt,
+          ingressSequence: settlement.triggerIngressSequence,
+          settlement,
+        })),
+      ].sort((left, right) => (
+        left.causalAt - right.causalAt
+        || (left.kind === right.kind ? 0 : left.kind === "funding" ? -1 : 1)
+        || left.ingressSequence - right.ingressSequence
+      ));
+      for (const action of replayActions) {
+        if (action.kind === "mark") {
+          for (const state of states.values()) {
+            if (!targetLanes.has(state.lane)) continue;
+            const beforeMark = state.ledger.snapshot();
+            const position = beforeMark.positions.find((candidate) => candidate.symbol === symbol);
+            if (!position || action.item.event.eventTime <= position.openedAt) continue;
+            state.ledger.mark(
+              symbol,
+              action.item.event.markPrice,
+              action.item.event.eventTime,
+            );
+            const fillCountAfterMark = state.ledger.snapshot().fills.length;
+            if (fillCountAfterMark > beforeMark.fills.length) {
+              state.riskGeneration += fillCountAfterMark - beforeMark.fills.length;
+            }
+          }
+          enforceRisk(action.item.event, targetLanes);
+          continue;
+        }
+        for (const state of states.values()) {
+          if (!targetLanes.has(state.lane)) continue;
+          applyCanonicalFundingSettlement(state, action.settlement);
+        }
+        enforceRisk({
+          ...action.settlement.triggerEvent,
+          eventTime: action.settlement.eventAt,
+          markPrice: action.settlement.settlementMarkPrice,
+          indexPrice: action.settlement.settlementMarkPrice,
+        }, targetLanes);
+      }
+    };
+
     const applyMarkAndFunding = (event: BinanceMarketEvent): void => {
       if (event.kind !== "mark_price") return;
-      if (scheduledFunding && event.eventTime >= scheduledFunding.eventAt) {
-        for (const state of states.values()) {
-          const position = state.ledger.snapshot().positions.find((item) => item.symbol === symbol);
-          if (!position || position.openedAt >= scheduledFunding.eventAt) continue;
-          try {
-            state.ledger.applyFunding({
-              eventId: `funding:${symbol}:${scheduledFunding.eventAt}`,
-              symbol,
-              rate: scheduledFunding.rate,
-              eventAt: scheduledFunding.eventAt,
-            });
-          } catch (error) {
-            warnings.push(`${state.lane}:funding_rejected:${error instanceof Error ? error.message : "unknown"}`);
-          }
-        }
-        scheduledFunding = undefined;
-      }
       currentMarkPrice = event.markPrice;
       for (const state of states.values()) {
+        const beforeMark = state.ledger.snapshot();
+        const position = beforeMark.positions.find((item) => item.symbol === symbol);
+        if (position && event.eventTime <= position.openedAt) continue;
+        const fillCountBeforeMark = beforeMark.fills.length;
         state.ledger.mark(symbol, event.markPrice, event.eventTime);
-      }
-      if (event.nextFundingTime > event.eventTime) {
-        scheduledFunding = { eventAt: event.nextFundingTime, rate: event.fundingRate };
+        const fillCountAfterMark = state.ledger.snapshot().fills.length;
+        if (fillCountAfterMark > fillCountBeforeMark) {
+          state.riskGeneration += fillCountAfterMark - fillCountBeforeMark;
+        }
       }
     };
 
@@ -1794,18 +2203,37 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
     };
 
-    const infer = async (bar: BinanceKline): Promise<void> => {
+    const performInference = async (
+      bar: BinanceKline,
+      id: number,
+      inferenceStreamEpoch: number,
+    ): Promise<RuntimeInferenceCompletion> => {
       const bars = decisionStore.list(symbol).slice(-this.contextBars);
-      if (!bars.length || bars.at(-1)!.openTime !== bar.openTime) return;
-      if (bar.openTime <= lastInferredOpenTime) return;
+      if (!bars.length || bars.at(-1)!.openTime !== bar.openTime) {
+        throw new Error("inference_origin_not_latest_final_bar");
+      }
+      if (bar.openTime <= lastInferredOpenTime) {
+        throw new Error("inference_origin_already_processed");
+      }
       lastInferredOpenTime = bar.openTime;
       const canonicalRequest = aiRequest(context.runId, symbol, bars);
       const requestDigest = digest(canonicalRequest);
-      const outcomes = new Map<
-        SimulationModelLane,
-        { forecast?: NormalizedLaneForecast; error?: string }
-      >();
+      const decisionSpreadBps = currentSpreadBps;
+      const currentAtr = Math.max(
+        atr14(bars),
+        selected.atrPercent14 * bar.close,
+      );
+      const currentVolatility = Math.max(
+        realizedVolatility(bars),
+        selected.realizedVolatility60m,
+      );
+      const outcomes = new Map<SimulationModelLane, RuntimeLaneInferenceOutcome>();
+      const riskGenerations = new Map(selectedLanes.map((lane) => [
+        lane,
+        states.get(lane)!.riskGeneration,
+      ]));
       const inferenceController = new AbortController();
+      activeInferenceController = inferenceController;
       const onContextAbort = () => inferenceController.abort(context.signal.reason);
       context.signal.addEventListener("abort", onContextAbort, { once: true });
       const remainingRuntimeMs = Math.max(0, expiresAt - this.clock.now());
@@ -1824,24 +2252,25 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       try {
         for (const lane of selectedLanes) {
           const state = states.get(lane)!;
-          state.attempts += 1;
           const attemptAt = this.clock.now();
           if (state.circuitOpenUntil !== undefined && attemptAt < state.circuitOpenUntil) {
-            const error = "worker_circuit_open";
-            state.errors.push(error);
-            outcomes.set(lane, { error });
+            outcomes.set(lane, {
+              attemptAt,
+              error: "worker_circuit_open",
+              incrementsFailure: false,
+              timedOut: false,
+            });
             continue;
           }
-          state.circuitOpenUntil = undefined;
           const client = this.options.laneClients[lane];
           if (!client) {
-            const error = "worker_unavailable";
-            state.errors.push(error);
-            state.consecutiveFailures += 1;
-            if (state.consecutiveFailures >= this.circuitFailureThreshold) {
-              state.circuitOpenUntil = attemptAt + this.circuitCooldownMs;
-            }
-            outcomes.set(lane, { error });
+            outcomes.set(lane, {
+              attemptAt,
+              error: "worker_unavailable",
+              incrementsFailure: true,
+              timedOut: false,
+              failureObservedAt: attemptAt,
+            });
             continue;
           }
           const before = this.clock.now();
@@ -1863,197 +2292,361 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             await cancellationCheckpoint();
             const forecast = normalizeLaneForecast(lane, raw, canonicalRequest);
             const observedLatency = Math.max(0, this.clock.now() - before);
-            state.successes += 1;
-            state.consecutiveFailures = 0;
-            state.circuitOpenUntil = undefined;
-            state.latencies.push(forecast.latencyMs ?? observedLatency);
-            state.precision = forecast.precision;
-            state.modelId = forecast.modelId;
-            state.modelRevision = forecast.modelRevision;
-            state.peakVramMb = Math.max(state.peakVramMb ?? 0, forecast.peakVramMb ?? 0)
-              || undefined;
-            state.forecasts.push({
-              ...forecast,
-              originPrice: bar.close,
-              targetAt: bar.closeTime + SCALPING_AI_HORIZONS[0] * MINUTE_MS,
-              evaluated: false,
+            outcomes.set(lane, {
+              attemptAt,
+              forecast,
+              observedLatency,
+              incrementsFailure: false,
+              timedOut: false,
             });
-            outcomes.set(lane, { forecast });
           } catch (error) {
             await cancellationCheckpoint();
             const reason = error instanceof Error ? error.message : "model_call_failed";
-            state.errors.push(reason);
-            state.consecutiveFailures += 1;
-            if (state.consecutiveFailures >= this.circuitFailureThreshold) {
-              state.circuitOpenUntil = this.clock.now() + this.circuitCooldownMs;
-            }
-            if (isTimeout(error)) state.timeoutCount += 1;
-            outcomes.set(lane, { error: reason });
+            outcomes.set(lane, {
+              attemptAt,
+              error: reason,
+              incrementsFailure: true,
+              timedOut: isTimeout(error),
+              failureObservedAt: this.clock.now(),
+            });
           }
         }
+        return {
+          id,
+          streamEpoch: inferenceStreamEpoch,
+          bar,
+          bars,
+          requestDigest,
+          outcomes,
+          riskGenerations,
+          decisionSpreadBps,
+          currentAtr,
+          currentVolatility,
+        };
+      } finally {
+        clearTimeout(deadlineTimer);
+        context.signal.removeEventListener("abort", onContextAbort);
+        if (activeInferenceController === inferenceController) {
+          activeInferenceController = undefined;
+        }
+        inferenceInFlight = false;
+      }
+    };
 
-        const commonDecisionAt = Math.max(
-          bar.closeTime,
-          this.clock.now(),
-          ...Array.from(outcomes.values()).flatMap((item) => (
-            item.forecast ? [item.forecast.generatedAt] : []
-          )),
-        );
-        const observedCostRate = costRate(request, currentSpreadBps);
-        const currentAtr = Math.max(
-          atr14(bars),
-          selected.atrPercent14 * bar.close,
-        );
-        const currentVolatility = Math.max(
-          realizedVolatility(bars),
-          selected.realizedVolatility60m,
-        );
+    const commitInference = (
+      completion: RuntimeInferenceCompletion,
+      forcedBlockReason?: string,
+    ): void => {
+      const {
+        bar,
+        requestDigest,
+        outcomes,
+        riskGenerations,
+        decisionSpreadBps,
+        currentAtr,
+        currentVolatility,
+      } = completion;
+      const commonDecisionAt = Math.max(
+        bar.closeTime,
+        this.clock.now(),
+        ...Array.from(outcomes.values()).flatMap((item) => (
+          item.forecast ? [item.forecast.generatedAt] : []
+        )),
+      );
+      const decisionIngressWatermark = lastIngressSequence;
+      const epochInvalid = completion.streamEpoch !== streamEpoch;
+      const lifecycleBlockReason = forcedBlockReason
+        ?? (epochInvalid
+          ? decisionLifecycleBlockReason() ?? "stream_epoch_changed"
+          : decisionLifecycleBlockReason());
+
+      if (epochInvalid) {
         for (const lane of selectedLanes) {
-          const state = states.get(lane)!;
-          const outcome = outcomes.get(lane);
-          if (!outcome?.forecast) {
-            decisions.push({
-              id: decisionId(lane, commonDecisionAt),
-              lane,
-              symbol,
-              originAt: iso(bar.closeTime),
-              decisionAt: iso(commonDecisionAt),
-              fillEligibleAfter: iso(commonDecisionAt),
-              action: "none",
-              status: "unavailable",
-              reason: outcome?.error ?? "worker_unavailable",
-              requestDigest,
-            });
-            continue;
-          }
-          const signal: QuantileDirectionSignal = signalFromQuantileCdf({
-            quantiles: outcome.forecast.quantiles,
-            roundTripCostRate: observedCostRate,
-            realizedVolatilityRate: currentVolatility,
-            spreadBps: currentSpreadBps,
-            mode: "paper",
-          });
-          const baseDecision: RuntimeDecision = {
+          decisions.push({
             id: decisionId(lane, commonDecisionAt),
             lane,
             symbol,
             originAt: iso(bar.closeTime),
-            generatedAt: outcome.forecast.generatedAtIso,
             decisionAt: iso(commonDecisionAt),
             fillEligibleAfter: iso(commonDecisionAt),
             action: "none",
-            direction: signal.direction,
-            confidence: signal.confidence,
-            probabilityAboveCost: signal.probabilityAboveCost,
-            probabilityBelowNegativeCost: signal.probabilityBelowNegativeCost,
-            roundTripCostRate: observedCostRate,
-            status: "held",
-            reason: "flat_signal",
+            status: "blocked",
+            reason: lifecycleBlockReason ?? "stream_epoch_changed",
             requestDigest,
-          };
-          if (commonDecisionAt - bar.closeTime > MINUTE_MS) {
-            baseDecision.status = "blocked";
-            baseDecision.reason = "model_stale";
-            decisions.push(baseDecision);
-            continue;
-          }
-          if (!entryDataHealthy(this.clock.now())) {
-            baseDecision.status = "blocked";
-            baseDecision.reason = entryBlockReason(this.clock.now())
-              ?? "market_data_unhealthy";
-            decisions.push(baseDecision);
-            continue;
-          }
-          if (state.pending) {
-            baseDecision.status = "skipped";
-            baseDecision.reason = "pending_action_exists";
-            decisions.push(baseDecision);
-            continue;
-          }
-          const ledger = state.ledger.snapshot();
-          const position = ledger.positions.find((item) => item.symbol === symbol);
-          if (signal.direction === "flat") {
-            baseDecision.action = "hold";
-            decisions.push(baseDecision);
-            continue;
-          }
-          if (position) {
-            if (position.side === signal.direction) {
-              baseDecision.action = "hold";
-              baseDecision.reason = "same_side_no_averaging";
-              decisions.push(baseDecision);
-              continue;
-            }
-            baseDecision.action = "reduce";
-            baseDecision.status = "pending";
-            baseDecision.reason = "opposite_signal_reduce_only";
-            decisions.push(baseDecision);
-            state.pending = {
-              action: "reduce",
-              decision: baseDecision,
-              decisionAt: commonDecisionAt,
-              eligibleAfterIngressSequence: lastIngressSequence,
-              reason: "signal",
-            };
-            continue;
-          }
-          if (state.dailyGate.blocked || !entryDataHealthy(this.clock.now())) {
-            baseDecision.status = "blocked";
-            baseDecision.reason = state.dailyGate.blocked
-              ? "daily_loss_gate"
-              : entryBlockReason(this.clock.now()) ?? "market_data_unhealthy";
-            decisions.push(baseDecision);
-            continue;
-          }
-          const adverseQuantileDistance = signal.direction === "long"
-            ? Math.max(0, -outcome.forecast.quantiles[1]!.returnRate) * bar.close
-            : Math.max(0, outcome.forecast.quantiles.at(-2)!.returnRate) * bar.close;
-          const sizing = sizeFuturesPosition({
-            mode: "paper",
-            side: signal.direction,
-            equity: ledger.equity,
-            currentGrossExposure: ledger.grossExposure,
-            currentMargin: ledger.totalIsolatedMargin,
-            price: bar.close,
-            atr14: currentAtr,
-            adverseQuantileDistance,
-            spreadBps: currentSpreadBps,
-            slippageBpsPerSide: request.costs.slippageBpsPerSide,
-            requestedLeverage: signal.leverageTier,
-            rules,
           });
-          baseDecision.action = signal.direction === "long" ? "open_long" : "open_short";
-          baseDecision.leverage = sizing.leverage;
-          baseDecision.quantity = sizing.quantity;
-          baseDecision.notional = sizing.notional;
-          baseDecision.protectiveStopPrice = sizing.protectiveStopPrice;
-          if (!sizing.accepted) {
-            baseDecision.status = "blocked";
-            baseDecision.reason = `risk_${sizing.reason ?? "rejected"}`;
+        }
+        return;
+      }
+
+      const newlyAddedForecasts: RuntimeForecastObservation[] = [];
+      for (const lane of selectedLanes) {
+        const state = states.get(lane)!;
+        const outcome = outcomes.get(lane);
+        if (!outcome) continue;
+        state.attempts += 1;
+        if (outcome.forecast) {
+          const forecast = outcome.forecast;
+          state.successes += 1;
+          state.consecutiveFailures = 0;
+          state.circuitOpenUntil = undefined;
+          state.latencies.push(forecast.latencyMs ?? outcome.observedLatency ?? 0);
+          state.precision = forecast.precision;
+          state.modelId = forecast.modelId;
+          state.modelRevision = forecast.modelRevision;
+          state.peakVramMb = Math.max(state.peakVramMb ?? 0, forecast.peakVramMb ?? 0)
+            || undefined;
+          const observation: RuntimeForecastObservation = {
+            ...forecast,
+            originPrice: bar.close,
+            targetAt: bar.closeTime + SCALPING_AI_HORIZONS[0] * MINUTE_MS,
+            evaluated: false,
+          };
+          state.forecasts.push(observation);
+          newlyAddedForecasts.push(observation);
+        } else {
+          const reason = outcome.error ?? "worker_unavailable";
+          state.errors.push(reason);
+          if (outcome.incrementsFailure) {
+            state.consecutiveFailures += 1;
+            if (state.consecutiveFailures >= this.circuitFailureThreshold) {
+              state.circuitOpenUntil = (
+                outcome.failureObservedAt ?? outcome.attemptAt
+              ) + this.circuitCooldownMs;
+            }
+          }
+          if (outcome.timedOut) state.timeoutCount += 1;
+        }
+      }
+
+      if (newlyAddedForecasts.length) {
+        const observedFinalBars = decisionStore.list(symbol);
+        const earliestTarget = Math.min(...newlyAddedForecasts.map((item) => item.targetAt));
+        const targetBar = observedFinalBars.find((item) => item.closeTime >= earliestTarget);
+        if (targetBar) settleForecasts(targetBar);
+      }
+
+      const observedCostRate = costRate(request, decisionSpreadBps);
+      for (const lane of selectedLanes) {
+        const state = states.get(lane)!;
+        const outcome = outcomes.get(lane);
+        if (!outcome?.forecast) {
+          decisions.push({
+            id: decisionId(lane, commonDecisionAt),
+            lane,
+            symbol,
+            originAt: iso(bar.closeTime),
+            decisionAt: iso(commonDecisionAt),
+            fillEligibleAfter: iso(commonDecisionAt),
+            action: "none",
+            status: "unavailable",
+            reason: outcome?.error ?? "worker_unavailable",
+            requestDigest,
+          });
+          continue;
+        }
+        const signal: QuantileDirectionSignal = signalFromQuantileCdf({
+          quantiles: outcome.forecast.quantiles,
+          roundTripCostRate: observedCostRate,
+          realizedVolatilityRate: currentVolatility,
+          spreadBps: decisionSpreadBps,
+          mode: "paper",
+        });
+        const baseDecision: RuntimeDecision = {
+          id: decisionId(lane, commonDecisionAt),
+          lane,
+          symbol,
+          originAt: iso(bar.closeTime),
+          generatedAt: outcome.forecast.generatedAtIso,
+          decisionAt: iso(commonDecisionAt),
+          fillEligibleAfter: iso(commonDecisionAt),
+          action: "none",
+          direction: signal.direction,
+          confidence: signal.confidence,
+          probabilityAboveCost: signal.probabilityAboveCost,
+          probabilityBelowNegativeCost: signal.probabilityBelowNegativeCost,
+          roundTripCostRate: observedCostRate,
+          status: "held",
+          reason: "flat_signal",
+          requestDigest,
+        };
+        if (riskGenerations.get(lane) !== state.riskGeneration) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = "position_changed_during_inference";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (commonDecisionAt - bar.closeTime > MINUTE_MS) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = "model_stale";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (lifecycleBlockReason !== undefined) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = lifecycleBlockReason;
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (state.pending) {
+          baseDecision.status = "skipped";
+          baseDecision.reason = "pending_action_exists";
+          decisions.push(baseDecision);
+          continue;
+        }
+        const ledger = state.ledger.snapshot();
+        const position = ledger.positions.find((item) => item.symbol === symbol);
+        if (signal.direction === "flat") {
+          baseDecision.action = "hold";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (position) {
+          if (position.side === signal.direction) {
+            baseDecision.action = "hold";
+            baseDecision.reason = "same_side_no_averaging";
             decisions.push(baseDecision);
             continue;
           }
+          baseDecision.action = "reduce";
           baseDecision.status = "pending";
-          baseDecision.reason = "cost_exceeding_quantile_signal";
+          baseDecision.reason = "opposite_signal_reduce_only";
           decisions.push(baseDecision);
           state.pending = {
-            action: "open",
+            action: "reduce",
             decision: baseDecision,
             decisionAt: commonDecisionAt,
-            eligibleAfterIngressSequence: lastIngressSequence,
-            side: signal.direction,
-            quantity: sizing.quantity,
-            leverage: sizing.leverage,
-            protectiveStopPrice: sizing.protectiveStopPrice,
-            atr14: currentAtr,
-            adverseQuantileDistance,
-            spreadBps: currentSpreadBps,
+            eligibleAfterIngressSequence: decisionIngressWatermark,
+            reason: "signal",
           };
+          continue;
         }
-      } finally {
-        clearTimeout(deadlineTimer);
-        context.signal.removeEventListener("abort", onContextAbort);
-        inferenceInFlight = false;
+        if (state.dailyGate.blocked) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = "daily_loss_gate";
+          decisions.push(baseDecision);
+          continue;
+        }
+        const adverseQuantileDistance = signal.direction === "long"
+          ? Math.max(0, -outcome.forecast.quantiles[1]!.returnRate) * bar.close
+          : Math.max(0, outcome.forecast.quantiles.at(-2)!.returnRate) * bar.close;
+        const sizing = sizeFuturesPosition({
+          mode: "paper",
+          side: signal.direction,
+          equity: ledger.equity,
+          currentGrossExposure: ledger.grossExposure,
+          currentMargin: ledger.totalIsolatedMargin,
+          price: bar.close,
+          atr14: currentAtr,
+          adverseQuantileDistance,
+          spreadBps: decisionSpreadBps,
+          slippageBpsPerSide: request.costs.slippageBpsPerSide,
+          requestedLeverage: signal.leverageTier,
+          rules,
+        });
+        baseDecision.action = signal.direction === "long" ? "open_long" : "open_short";
+        baseDecision.leverage = sizing.leverage;
+        baseDecision.quantity = sizing.quantity;
+        baseDecision.notional = sizing.notional;
+        baseDecision.protectiveStopPrice = sizing.protectiveStopPrice;
+        if (!sizing.accepted) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = `risk_${sizing.reason ?? "rejected"}`;
+          decisions.push(baseDecision);
+          continue;
+        }
+        baseDecision.status = "pending";
+        baseDecision.reason = "cost_exceeding_quantile_signal";
+        decisions.push(baseDecision);
+        state.pending = {
+          action: "open",
+          decision: baseDecision,
+          decisionAt: commonDecisionAt,
+          eligibleAfterIngressSequence: decisionIngressWatermark,
+          side: signal.direction,
+          quantity: sizing.quantity,
+          leverage: sizing.leverage,
+          protectiveStopPrice: sizing.protectiveStopPrice,
+          atr14: currentAtr,
+          adverseQuantileDistance,
+          spreadBps: decisionSpreadBps,
+        };
+      }
+    };
+
+    const recordBlockedFinalDecision = (
+      bar: BinanceKline,
+      reason: string,
+    ): void => {
+      const bars = decisionStore.list(symbol)
+        .filter((candidateBar) => candidateBar.openTime <= bar.openTime)
+        .slice(-this.contextBars);
+      const requestDigest = bars.length ? digest(aiRequest(context.runId, symbol, bars)) : "";
+      const at = Math.max(bar.closeTime, this.clock.now());
+      triggeredEvents += 1;
+      lastTriggeredAt = iso(bar.closeTime);
+      for (const lane of selectedLanes) {
+        decisions.push({
+          id: decisionId(lane, at),
+          lane,
+          symbol,
+          originAt: iso(bar.closeTime),
+          decisionAt: iso(at),
+          fillEligibleAfter: iso(at),
+          action: "none",
+          status: "blocked",
+          reason,
+          requestDigest,
+        });
+      }
+    };
+
+    const launchInference = (bar: BinanceKline): void => {
+      if (inferenceTask) {
+        if (!coalescedInferenceBar || bar.openTime > coalescedInferenceBar.openTime) {
+          if (coalescedInferenceBar) coalescedFinalKlines += 1;
+          coalescedInferenceBar = bar;
+        } else {
+          coalescedFinalKlines += 1;
+        }
+        return;
+      }
+      const id = ++inferenceSequence;
+      const inferenceStreamEpoch = streamEpoch;
+      inferenceTask = performInference(bar, id, inferenceStreamEpoch)
+        .then((completion) => {
+          readyInferenceCompletion = completion;
+        })
+        .catch((error: unknown) => {
+          inferenceFailure = error;
+        })
+        .finally(() => {
+          if (!acceptInferenceCompletions || closing) return;
+          if (!queue.push({ kind: "inference_complete" })) {
+            const error = new Error("market_event_queue_overflow");
+            inferenceFailure = error;
+            streamDisconnected = { error };
+            streamEpoch += 1;
+            enterReconnectSafety();
+            queue.fail(error);
+          }
+        });
+    };
+    const yieldToImmediateInferenceCompletion = async (): Promise<void> => {
+      if (!inferenceTask) return;
+      // A resolved worker progresses through several promise continuations
+      // (request, abort race, normalization, and completion publication).
+      // Give those microtasks a bounded turn before a deterministic clock is
+      // allowed to advance to a later market event. A genuinely pending worker
+      // remains non-blocking and the consumer continues draining on this poll.
+      const maximumTurns = selectedLanes.length * 8 + 8;
+      for (let turn = 0; turn < maximumTurns && inferenceTask; turn += 1) {
+        await Promise.resolve();
+        if (readyInferenceCompletion !== undefined || inferenceFailure !== undefined) {
+          // The launch promise's finally handler publishes the reducer token
+          // in the following microtask.
+          await Promise.resolve();
+          break;
+        }
       }
     };
 
@@ -2070,6 +2663,30 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           const ingressSequence = ++lastIngressSequence;
           ingressSequences.set(event, ingressSequence);
           ingressStore.applyWebsocket(event);
+          let acceptedIngressMarkPrice = true;
+          if (event.kind === "book_ticker") {
+            const acceptedIngressBook = lastIngressBookTickerEventTime === undefined
+              || event.eventTime >= lastIngressBookTickerEventTime;
+            if (acceptedIngressBook) {
+              lastIngressBookTickerEventTime = event.eventTime;
+              const midpoint = (event.bidPrice + event.askPrice) / 2;
+              if (midpoint > 0) {
+                ingressSpreadBps = (event.askPrice - event.bidPrice) / midpoint * 10_000;
+              }
+            }
+          }
+          if (event.kind === "mark_price") {
+            acceptedIngressMarkPrice = lastIngressMarkPriceEventTime === undefined
+              || event.eventTime >= lastIngressMarkPriceEventTime;
+            if (acceptedIngressMarkPrice) {
+              lastIngressMarkPriceEventTime = event.eventTime;
+              bufferFinalKlineRiskEvidence(event, ingressSequence);
+              bufferCanonicalFundingSettlement(event, ingressSequence);
+            }
+          }
+          if (event.kind === "kline" && event.final) {
+            freezeFinalKlineRiskEvidence(event, ingressSequence);
+          }
           if (event.kind === "agg_trade") {
             const needed = Array.from(states.values()).some((state) => (
               Boolean(state.pending) || state.ledger.snapshot().positions.length > 0
@@ -2079,43 +2696,202 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               return;
             }
           }
-          const fillCandidate = event.kind === "agg_trade"
-            && Array.from(states.values()).some((state) => (
+          const fillObservation = event.kind === "agg_trade"
+            ? { price: event.price, causalAt: event.executedAt }
+            : event.kind === "kline" && event.final
+              ? { price: event.open, causalAt: event.openTime }
+              : undefined;
+          const fillCandidates = fillObservation
+            ? Array.from(states.values()).filter((state) => (
               state.pending !== undefined
               && ingressSequence > state.pending.eligibleAfterIngressSequence
-            ));
-          const preserveMarkRisk = event.kind === "mark_price"
-            && Array.from(states.values()).some((state) => (
-              state.ledger.snapshot().positions.some((position) => (
-                position.symbol === symbol
-                && (position.side === "long"
-                  ? event.markPrice <= Math.max(
-                    position.protectiveStopPrice,
-                    position.estimatedLiquidationPrice,
-                  )
-                  : event.markPrice >= Math.min(
-                    position.protectiveStopPrice,
-                    position.estimatedLiquidationPrice,
-                  ))
+              && event.receivedAt > state.pending.decisionAt
+              && fillObservation.causalAt > state.pending.decisionAt
+              && prospectivePendingOpenRisk.get(state.lane)?.pendingKey
+                !== `${state.pending.eligibleAfterIngressSequence}:${state.pending.side ?? ""}`
+            ))
+            : [];
+          const fillCandidate = fillCandidates.length > 0;
+          if (fillObservation) {
+            for (const state of fillCandidates) {
+              const pending = state.pending;
+              if (pending?.action !== "open"
+                || pending.side === undefined
+                || pending.leverage === undefined
+                || pending.protectiveStopPrice === undefined
+                || pending.atr14 === undefined
+                || pending.adverseQuantileDistance === undefined
+                || pending.spreadBps === undefined) continue;
+              const pendingKey = `${pending.eligibleAfterIngressSequence}:${pending.side}`;
+              if (prospectivePendingOpenRisk.get(state.lane)?.pendingKey === pendingKey) {
+                continue;
+              }
+              const slippageRate = request.costs.slippageBpsPerSide / 10_000;
+              const expectedEntryPrice = pending.side === "long"
+                ? ceilToStep(fillObservation.price * (1 + slippageRate), rules.tickSize)
+                : floorToStep(fillObservation.price * (1 - slippageRate), rules.tickSize);
+              const latest = state.ledger.snapshot();
+              const prospectiveSizing = sizeFuturesPosition({
+                mode: "paper",
+                side: pending.side,
+                equity: latest.equity,
+                currentGrossExposure: latest.grossExposure,
+                currentMargin: latest.totalIsolatedMargin,
+                price: expectedEntryPrice,
+                atr14: pending.atr14,
+                adverseQuantileDistance: pending.adverseQuantileDistance,
+                spreadBps: event.kind === "kline"
+                  ? pending.spreadBps
+                  : Math.max(pending.spreadBps, ingressSpreadBps),
+                slippageBpsPerSide: request.costs.slippageBpsPerSide,
+                requestedLeverage: pending.leverage,
+                rules,
+              });
+              const prospectiveProtectiveStop = prospectiveSizing.accepted
+                ? prospectiveSizing.protectiveStopPrice
+                : pending.protectiveStopPrice;
+              prospectivePendingOpenRisk.set(state.lane, {
+                pendingKey,
+                fillIngressSequence: ingressSequence,
+                fillCausalAt: fillObservation.causalAt,
+                protectiveStopPrice: pending.side === "long"
+                  ? Math.max(pending.protectiveStopPrice, prospectiveProtectiveStop)
+                  : Math.min(pending.protectiveStopPrice, prospectiveProtectiveStop),
+                estimatedLiquidationPrice: estimatedLiquidationPrice(
+                  pending.side,
+                  expectedEntryPrice,
+                  prospectiveSizing.accepted
+                    ? prospectiveSizing.leverage
+                    : pending.leverage,
+                  rules.maintenanceMarginRate,
+                ),
+              });
+            }
+          }
+          const fillBarrierKey = fillCandidate
+            ? fillCandidates
+              .map((state) => (
+                `${state.lane}:${state.pending!.action}:${state.pending!.eligibleAfterIngressSequence}`
               ))
-            ));
-          if (!queue.push(event, { ingressSequence, fillCandidate, preserveMarkRisk })) {
+              .sort()
+              .join("|")
+            : undefined;
+          const markRiskBarrierKey = event.kind === "mark_price" && acceptedIngressMarkPrice
+            ? Array.from(states.values()).flatMap((state) => {
+              const positionKeys = state.ledger.snapshot().positions.flatMap((position) => {
+                if (position.symbol !== symbol) return [];
+                const liquidationCrossed = position.side === "long"
+                  ? event.markPrice <= position.estimatedLiquidationPrice
+                  : event.markPrice >= position.estimatedLiquidationPrice;
+                const protectionCrossed = position.side === "long"
+                  ? event.markPrice <= position.protectiveStopPrice
+                  : event.markPrice >= position.protectiveStopPrice;
+                const tier = event.eventTime <= position.openedAt
+                  ? undefined
+                  : liquidationCrossed
+                    ? "liquidation"
+                    : protectionCrossed
+                      ? "protection"
+                      : undefined;
+                return tier
+                  ? [
+                    `${state.lane}:position:${position.openedAt}`
+                      + `:${position.side}:${tier}`,
+                  ]
+                  : [];
+              });
+              const pending = state.pending;
+              const pendingKey = pending?.action === "open" && pending.side !== undefined
+                ? `${pending.eligibleAfterIngressSequence}:${pending.side}`
+                : undefined;
+              const prospective = pendingKey
+                && prospectivePendingOpenRisk.get(state.lane)?.pendingKey === pendingKey
+                ? prospectivePendingOpenRisk.get(state.lane)
+                : undefined;
+              const pendingProtectionThreshold = pending?.action === "open"
+                && pending.side !== undefined
+                && pending.protectiveStopPrice !== undefined
+                ? pending.side === "long"
+                  ? Math.max(
+                    pending.protectiveStopPrice,
+                    prospective?.protectiveStopPrice ?? Number.NEGATIVE_INFINITY,
+                  )
+                  : Math.min(
+                    pending.protectiveStopPrice,
+                    prospective?.protectiveStopPrice ?? Number.POSITIVE_INFINITY,
+                  )
+                : undefined;
+              const pendingCausallyValid = pending?.action === "open"
+                && pending.side !== undefined
+                && (prospective === undefined
+                  || event.eventTime > prospective.fillCausalAt);
+              const pendingLiquidationCrossed = pendingCausallyValid
+                && prospective !== undefined
+                && (pending.side === "long"
+                  ? event.markPrice <= prospective.estimatedLiquidationPrice
+                  : event.markPrice >= prospective.estimatedLiquidationPrice);
+              const pendingProtectionCrossed = pendingCausallyValid
+                && pendingProtectionThreshold !== undefined
+                && (pending.side === "long"
+                  ? event.markPrice <= pendingProtectionThreshold
+                  : event.markPrice >= pendingProtectionThreshold);
+              const pendingTier = pendingLiquidationCrossed
+                ? "liquidation"
+                : pendingProtectionCrossed
+                  ? "protection"
+                  : undefined;
+              return [
+                ...positionKeys,
+                ...(pendingTier
+                  ? [
+                    `${state.lane}:pending:${pendingKey!}:`
+                      + `${prospective?.fillIngressSequence ?? "before_fill"}`
+                      + `:${pendingTier}`,
+                  ]
+                  : []),
+              ];
+            }).sort().join("|") || undefined
+            : undefined;
+          if (!queue.push(event, {
+            ingressSequence,
+            fillCandidate,
+            ...(fillBarrierKey ? { fillBarrierKey } : {}),
+            ...(markRiskBarrierKey ? { markRiskBarrierKey } : {}),
+          })) {
             const error = new Error("market_event_queue_overflow");
             streamDisconnected = { error };
+            streamEpoch += 1;
+            enterReconnectSafety();
+            activeInferenceController?.abort(error);
             queue.fail(error);
           }
         },
         (error) => {
           if (closing || streamDisconnected) return;
-          streamDisconnected = { error };
-          queue.push({ kind: "disconnect", ...(error !== undefined ? { error } : {}) });
+          const disconnectError = error instanceof Error
+            ? error
+            : new Error("public_stream_disconnected");
+          streamDisconnected = { error: disconnectError };
+          streamEpoch += 1;
+          enterReconnectSafety();
+          activeInferenceController?.abort(disconnectError);
+          if (!queue.push({ kind: "disconnect", error: disconnectError })) {
+            queue.fail(disconnectError);
+          }
         },
         (state) => {
           if (closing || streamDisconnected) return;
-          if (state.status === "reconnecting") enterReconnectSafety();
+          if (state.status === "reconnecting") {
+            streamEpoch += 1;
+            enterReconnectSafety();
+            activeInferenceController?.abort(new Error("public_stream_reconnecting"));
+          }
           if (!queue.push({ kind: "connection_state", state })) {
             const error = new Error("market_event_queue_overflow");
             streamDisconnected = { error };
+            streamEpoch += 1;
+            enterReconnectSafety();
+            activeInferenceController?.abort(error);
             queue.fail(error);
           }
         },
@@ -2160,6 +2936,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
 
       while (this.clock.now() < expiresAt) {
         await cancellationCheckpoint();
+        await yieldToImmediateInferenceCompletion();
         const waitMs = Math.min(this.pollIntervalMs, Math.max(0, expiresAt - this.clock.now()));
         const queued = await queue.next(waitMs, this.clock, context.signal);
         if (!queued) {
@@ -2235,21 +3012,65 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           }
           continue;
         }
+        if (queued.kind === "inference_complete") {
+          const completedTask = inferenceTask;
+          if (completedTask) await completedTask;
+          inferenceTask = undefined;
+          const failure = inferenceFailure;
+          inferenceFailure = undefined;
+          const completion = readyInferenceCompletion;
+          readyInferenceCompletion = undefined;
+          if (failure !== undefined) throw failure;
+          if (completion) commitInference(completion);
+
+          const nextBar = coalescedInferenceBar;
+          coalescedInferenceBar = undefined;
+          if (nextBar && this.clock.now() < expiresAt) {
+            const latestFinalOpenTime = decisionStore.list(symbol).at(-1)?.openTime;
+            if (latestFinalOpenTime !== nextBar.openTime) {
+              coalescedFinalKlines += 1;
+              recordBlockedFinalDecision(nextBar, "inference_origin_superseded");
+            } else {
+              const reason = decisionLifecycleBlockReason();
+              if (reason) recordBlockedFinalDecision(nextBar, reason);
+              else launchInference(nextBar);
+            }
+          }
+          recordEquity(this.clock.now());
+          await updateProgress();
+          await publishSnapshot("running", true, this.clock.now());
+          continue;
+        }
         const event = queued;
         let filled = false;
+        let riskEventAccepted = true;
+        const eventIngressSequence = ingressSequences.get(event);
+        if (eventIngressSequence !== undefined) {
+          applyCanonicalFundingSettlementsThrough(eventIngressSequence);
+        }
 
         if (event.kind === "book_ticker") {
-          lastBookTickerObservedAt = event.receivedAt;
-          const midpoint = (event.bidPrice + event.askPrice) / 2;
-          currentSpreadBps = midpoint > 0
-            ? (event.askPrice - event.bidPrice) / midpoint * 10_000
-            : currentSpreadBps;
+          riskEventAccepted = lastBookTickerEventTime === undefined
+            || event.eventTime >= lastBookTickerEventTime;
+          if (riskEventAccepted) {
+            lastBookTickerEventTime = event.eventTime;
+            lastBookTickerObservedAt = event.receivedAt;
+            const midpoint = (event.bidPrice + event.askPrice) / 2;
+            currentSpreadBps = midpoint > 0
+              ? (event.askPrice - event.bidPrice) / midpoint * 10_000
+              : currentSpreadBps;
+          }
         }
         if (event.kind === "mark_price") {
-          lastMarkPriceObservedAt = event.receivedAt;
+          riskEventAccepted = lastMarkPriceEventTime === undefined
+            || event.eventTime >= lastMarkPriceEventTime;
+          if (riskEventAccepted) {
+            lastMarkPriceEventTime = event.eventTime;
+            lastMarkPriceObservedAt = event.receivedAt;
+          }
         }
         maybeCompleteStreamRequalification();
-        applyMarkAndFunding(event);
+        if (riskEventAccepted) applyMarkAndFunding(event);
         if (event.kind === "kline") {
           const previousFinal = decisionStore.list(symbol).at(-1);
           decisionStore.applyWebsocket(event);
@@ -2300,36 +3121,36 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             }
           }
         }
+        const positionedBeforeFinalFill = event.kind === "kline" && event.final
+          ? new Set(Array.from(states.values()).flatMap((state) => (
+            state.ledger.snapshot().positions.some((position) => position.symbol === symbol)
+              ? [state.lane]
+              : []
+          )))
+          : undefined;
         filled = executePending(event);
-        enforceRisk(event);
+        if (event.kind === "kline" && event.final) {
+          const newlyOpenedLanes = new Set(Array.from(states.values()).flatMap((state) => {
+            if (positionedBeforeFinalFill?.has(state.lane)) return [];
+            const position = state.ledger.snapshot().positions.find(
+              (candidatePosition) => candidatePosition.symbol === symbol,
+            );
+            return position?.openedAt === event.openTime ? [state.lane] : [];
+          }));
+          replayFinalKlineOpenRiskEvidence(event, newlyOpenedLanes);
+        }
+        if (riskEventAccepted) enforceRisk(event);
         if (event.kind === "kline" && event.final) {
           settleForecasts(event);
           if (event.receivedAt >= liveDecisionStartAt
             && event.openTime > lastProcessedFinalOpenTime) {
             lastProcessedFinalOpenTime = event.openTime;
-            if (entryDataHealthy(this.clock.now())) {
-              await infer(event);
-            } else {
-              const bars = decisionStore.list(symbol).slice(-this.contextBars);
-              const requestDigest = bars.length ? digest(aiRequest(context.runId, symbol, bars)) : "";
-              const at = Math.max(event.closeTime, this.clock.now());
-              triggeredEvents += 1;
-              lastTriggeredAt = iso(event.closeTime);
-              for (const lane of selectedLanes) {
-                decisions.push({
-                  id: decisionId(lane, at),
-                  lane,
-                  symbol,
-                  originAt: iso(event.closeTime),
-                  decisionAt: iso(at),
-                  fillEligibleAfter: iso(at),
-                  action: "none",
-                  status: "blocked",
-                  reason: entryBlockReason(this.clock.now()) ?? "market_data_unhealthy",
-                  requestDigest,
-                });
-              }
+            const reason = decisionLifecycleBlockReason();
+            if (reason) {
+              discardCoalescedInference();
+              recordBlockedFinalDecision(event, reason);
             }
+            else launchInference(event);
           }
         }
         recordEquity(this.clock.now());
@@ -2338,6 +3159,18 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         await publishSnapshot("running", forceSnapshot, this.clock.now());
       }
 
+      acceptInferenceCompletions = false;
+      coalescedInferenceBar = undefined;
+      activeInferenceController?.abort(new Error("crypto_runtime_expiry_deadline_exceeded"));
+      if (inferenceTask) {
+        await inferenceTask;
+        inferenceTask = undefined;
+      }
+      if (inferenceFailure !== undefined) throw inferenceFailure;
+      if (readyInferenceCompletion) {
+        commitInference(readyInferenceCompletion, "runtime_expired");
+        readyInferenceCompletion = undefined;
+      }
       await cancellationCheckpoint();
       await updateProgress(true, true);
       const terminalSnapshot = await publishSnapshot("completed", true, expiresAt);
@@ -2509,6 +3342,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       };
     } finally {
       closing = true;
+      acceptInferenceCompletions = false;
+      coalescedInferenceBar = undefined;
+      streamEpoch += 1;
+      activeInferenceController?.abort(
+        context.signal.aborted
+          ? abortReason(context.signal, "Crypto paper runtime was aborted.")
+          : new Error("crypto_runtime_closing"),
+      );
       if (subscription) {
         try {
           await subscription.close();
@@ -2516,6 +3357,12 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           warnings.push(`stream_close_failed:${error instanceof Error ? error.message : "unknown"}`);
         }
       }
+      if (inferenceTask) {
+        await inferenceTask;
+        inferenceTask = undefined;
+      }
+      readyInferenceCompletion = undefined;
+      inferenceFailure = undefined;
     }
   }
 

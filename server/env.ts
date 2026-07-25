@@ -146,6 +146,10 @@ export type CryptoAiConfig = {
   };
 };
 
+export type CryptoSimulationConfig = {
+  maximumActiveSessions: number;
+};
+
 export type AiTradingSimulationConfig = {
   maximumDurationMinutes: number;
   maximumActiveSessions: number;
@@ -223,6 +227,7 @@ export type AppConfig = TossApiAuthConfig & {
   kisExchangeRate?: KisExchangeRateConfig;
   scalping: ScalpingConfig;
   cryptoAi: CryptoAiConfig;
+  cryptoSimulation: CryptoSimulationConfig;
 };
 
 function optional(name: string): string | undefined {
@@ -888,6 +893,17 @@ function readReportStorage(): ReportStorageConfig {
   };
 }
 
+function readCryptoSimulationConfig(): CryptoSimulationConfig {
+  return {
+    maximumActiveSessions: readBoundedInteger(
+      "CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS",
+      1,
+      1,
+      20,
+    ),
+  };
+}
+
 function readKisExchangeRateConfig(): KisExchangeRateConfig | undefined {
   const appKey = optional("KI_APP_KEY");
   const appSecret = optional("KI_APP_SECRET");
@@ -1414,5 +1430,6 @@ export function loadConfig(): AppConfig {
     kisExchangeRate: readKisExchangeRateConfig(),
     scalping: readScalpingConfig(),
     cryptoAi: readCryptoAiConfig(),
+    cryptoSimulation: readCryptoSimulationConfig(),
   };
 }

@@ -376,7 +376,9 @@ function harness(input: {
     artifacts: artifacts as unknown as ArtifactService,
     runtime: input.runtime,
     runtimeSnapshots,
-    maximumActiveSessions: input.maximumActiveSessions ?? 2,
+    ...(input.maximumActiveSessions !== undefined
+      ? { maximumActiveSessions: input.maximumActiveSessions }
+      : {}),
     credentials: { configured: true, signedReadSucceeded: true },
     maintenanceMarginState: input.maintenanceMarginState,
     prepareRiskData: input.prepareRiskData,
@@ -393,6 +395,20 @@ function harness(input: {
 }
 
 describe("CryptoSimulationCoordinator lifecycle", () => {
+  it("defaults to one active crypto session when no override is supplied", async () => {
+    const test = harness({ runtime: abortingRuntime() });
+    const first = await test.coordinator.start(request(), "owner-a") as {
+      run: PortfolioRunRecord;
+    };
+
+    await expect(test.coordinator.start(request(), "owner-b")).rejects.toThrow(
+      "session limit",
+    );
+
+    await test.coordinator.cancel(first.run.id, "owner-a");
+    await eventually(() => test.coordinator.status().activeSessions === 0);
+  });
+
   it("retries signed maintenance-margin preflight before creating a run", async () => {
     const runtime: CryptoSimulationRuntime = {
       run: vi.fn(),
