@@ -15,6 +15,11 @@ export type BinanceAggregateTrade = {
 
 export type FinCastMicroCandleSeconds = 15 | 30;
 
+const AGGREGATE_TRADE_PAGE_SIZE = 1_000;
+const AGGREGATE_TRADE_MAX_DATA_PAGES_PER_WINDOW = 256;
+const AGGREGATE_TRADE_INITIAL_WINDOW_MS = 15 * 60_000;
+const AGGREGATE_TRADE_PAGE_DELAY_MS = 550;
+
 function record(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as UnknownRecord
@@ -268,72 +273,176 @@ export async function loadFinCastMicroContext(input: {
   const duration = intervalMs(input.intervalSeconds);
   const finalBucketOpen = Math.floor((input.endTime - 1) / duration) * duration;
   const startTime = finalBucketOpen - (input.contextBars - 1) * duration;
-  const trades: BinanceAggregateTrade[] = [];
-  const maximumWindowMs = 59 * 60_000;
-  for (let windowStart = startTime; windowStart <= input.endTime; windowStart += maximumWindowMs) {
-    const windowEnd = Math.min(input.endTime, windowStart + maximumWindowMs - 1);
-    let fromId: number | undefined;
-    for (let page = 0; page < 256; page += 1) {
-      if (input.signal?.aborted) {
-        throw input.signal.reason instanceof Error
-          ? input.signal.reason
-          : new Error("FinCast micro-candle recovery was aborted.");
+  const contextEndTime = finalBucketOpen + duration - 1;
+  const buckets = new Map<number, BinanceKline>();
+  let aggregateTradeRequestStarted = false;
+
+  const abortError = (): Error => (
+    input.signal?.reason instanceof Error
+      ? input.signal.reason
+      : new Error("FinCast micro-candle recovery was aborted.")
+  );
+  const cancellationCheckpoint = (): void => {
+    if (input.signal?.aborted) throw abortError();
+  };
+  const waitForRequestBudget = async (): Promise<void> => {
+    cancellationCheckpoint();
+    if (!aggregateTradeRequestStarted) {
+      aggregateTradeRequestStarted = true;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = () => {
+        clearTimeout(timer);
+        input.signal?.removeEventListener("abort", onAbort);
+        reject(abortError());
+      };
+      timer = setTimeout(() => {
+        input.signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, AGGREGATE_TRADE_PAGE_DELAY_MS);
+      input.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    cancellationCheckpoint();
+  };
+  const fetchPage = async (
+    request: BinanceRestAggregateTradeRequest,
+  ): Promise<BinanceAggregateTrade[]> => {
+    await waitForRequestBudget();
+    cancellationCheckpoint();
+    return normalizeBinanceAggregateTrades(await input.aggregateTrades(request));
+  };
+  const mergeWindowTrades = (trades: readonly BinanceAggregateTrade[]): void => {
+    for (const trade of trades) {
+      if (trade.executedAt < startTime || trade.executedAt > contextEndTime) continue;
+      const openTime = Math.floor(trade.executedAt / duration) * duration;
+      const existing = buckets.get(openTime);
+      if (existing) {
+        existing.high = Math.max(existing.high, trade.price);
+        existing.low = Math.min(existing.low, trade.price);
+        existing.close = trade.price;
+        existing.volume += trade.quantity;
+        existing.quoteVolume += trade.price * trade.quantity;
+        existing.tradeCount += 1;
+        continue;
       }
-      const raw = await input.aggregateTrades({
+      buckets.set(openTime, {
+        symbol: input.symbol.trim().toUpperCase(),
+        interval: `${input.intervalSeconds}s`,
+        openTime,
+        closeTime: openTime + duration - 1,
+        open: trade.price,
+        high: trade.price,
+        low: trade.price,
+        close: trade.price,
+        volume: trade.quantity,
+        quoteVolume: trade.price * trade.quantity,
+        tradeCount: 1,
+        final: true,
+      });
+    }
+  };
+
+  type WindowResult =
+    | { kind: "complete"; trades: BinanceAggregateTrade[] }
+    | { kind: "split_required" };
+  const fetchBoundedWindow = async (
+    windowStart: number,
+    windowEnd: number,
+  ): Promise<WindowResult> => {
+    const windowTrades: BinanceAggregateTrade[] = [];
+    let fromId: number | undefined;
+    for (let page = 0; ; page += 1) {
+      cancellationCheckpoint();
+      const normalized = await fetchPage({
         symbol: input.symbol,
         ...(fromId === undefined
           ? { startTime: windowStart, endTime: windowEnd }
           : { fromId }),
-        limit: 1_000,
+        limit: AGGREGATE_TRADE_PAGE_SIZE,
       });
-      const normalized = normalizeBinanceAggregateTrades(raw);
       const withinWindow = normalized.filter(
         (trade) => trade.executedAt >= windowStart && trade.executedAt <= windowEnd,
       );
-      trades.push(...withinWindow);
-      if (normalized.length < 1_000) break;
+
+      // A look-ahead page distinguishes an exact 256-page range from a
+      // genuinely denser range. Dense ranges are bisected and retried instead
+      // of raising a false safety-limit failure or growing raw-trade memory.
+      if (page >= AGGREGATE_TRADE_MAX_DATA_PAGES_PER_WINDOW) {
+        return withinWindow.length
+          ? { kind: "split_required" }
+          : { kind: "complete", trades: windowTrades };
+      }
+      windowTrades.push(...withinWindow);
+      if (normalized.length < AGGREGATE_TRADE_PAGE_SIZE) {
+        return { kind: "complete", trades: windowTrades };
+      }
       const last = normalized.at(-1)!;
-      if (last.executedAt > windowEnd) break;
+      if (last.executedAt > windowEnd) {
+        return { kind: "complete", trades: windowTrades };
+      }
       const nextId = last.aggregateTradeId + 1;
       if (fromId !== undefined && nextId <= fromId) {
         throw new Error("Binance aggregate-trade pagination did not advance.");
       }
       fromId = nextId;
-      // The endpoint costs 20 request-weight units. Pace dense-symbol paging
-      // below 120 calls/minute instead of bursting through Binance's public
-      // market-data budget during the one-time context recovery.
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          clearTimeout(timer);
-          reject(input.signal?.reason instanceof Error
-            ? input.signal.reason
-            : new Error("FinCast micro-candle recovery was aborted."));
-        };
-        const timer = setTimeout(() => {
-          input.signal?.removeEventListener("abort", onAbort);
-          resolve();
-        }, 550);
-        input.signal?.addEventListener("abort", onAbort, { once: true });
-      });
-      if (page === 255) {
-        throw new Error("Binance aggregate-trade pagination exceeded the safety limit.");
-      }
+    }
+  };
+  const loadAdaptiveWindow = async (
+    windowStart: number,
+    windowEnd: number,
+  ): Promise<void> => {
+    const result = await fetchBoundedWindow(windowStart, windowEnd);
+    if (result.kind === "complete") {
+      mergeWindowTrades(result.trades);
+      return;
+    }
+    if (windowStart >= windowEnd) {
+      throw new Error(
+        "Binance aggregate-trade density exceeds the minimum adaptive window.",
+      );
+    }
+    const midpoint = windowStart + Math.floor((windowEnd - windowStart) / 2);
+    await loadAdaptiveWindow(windowStart, midpoint);
+    await loadAdaptiveWindow(midpoint + 1, windowEnd);
+  };
+
+  // Fifteen-minute initial slices keep ordinary high-volume symbols well below
+  // the bounded page buffer. Exceptionally dense slices are recursively split
+  // without changing timestamp ordering or the causal context boundary.
+  for (
+    let windowStart = startTime;
+    windowStart <= contextEndTime;
+    windowStart += AGGREGATE_TRADE_INITIAL_WINDOW_MS
+  ) {
+    const windowEnd = Math.min(
+      contextEndTime,
+      windowStart + AGGREGATE_TRADE_INITIAL_WINDOW_MS - 1,
+    );
+    await loadAdaptiveWindow(windowStart, windowEnd);
+  }
+
+  const bars: BinanceKline[] = [];
+  let previousClose = input.initialPrice;
+  for (
+    let openTime = startTime;
+    openTime <= finalBucketOpen;
+    openTime += duration
+  ) {
+    const populated = buckets.get(openTime);
+    if (populated) {
+      bars.push(populated);
+      previousClose = populated.close;
+    } else if (previousClose !== undefined && previousClose > 0) {
+      bars.push(emptyBar(
+        input.symbol.trim().toUpperCase(),
+        openTime,
+        input.intervalSeconds,
+        previousClose,
+      ));
     }
   }
-  const normalized = [...new Map(
-    trades.map((trade) => [trade.aggregateTradeId, trade]),
-  ).values()].sort((left, right) => (
-    left.executedAt - right.executedAt
-    || left.aggregateTradeId - right.aggregateTradeId
-  ));
-  const bars = aggregateTradesToMicroBars({
-    symbol: input.symbol,
-    trades: normalized,
-    intervalSeconds: input.intervalSeconds,
-    startTime,
-    endTime: finalBucketOpen + duration - 1,
-    initialPrice: input.initialPrice,
-  }).slice(-input.contextBars);
   if (bars.length !== input.contextBars) {
     throw new Error(`FinCast ${input.intervalSeconds}s context is incomplete.`);
   }
