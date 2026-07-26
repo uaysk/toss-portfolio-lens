@@ -87,16 +87,28 @@ docker compose \
 FinCast는 위 파일 목록 뒤에 `compose.ai-remote-fincast.yaml`과
 `compose.harbor-fincast.yaml`을 순서대로 추가하고 `--profile fincast`로 `fincast-worker`만 pull·기동한다.
 
-## Local cache cleanup
+## Local cache retention and bounded cleanup
 
-운영 및 rollback digest의 원격 pull을 검증한 뒤에만 다음 정리를 수행한다.
+반복 release build가 CUDA·Python·Rust 의존성을 다시 내려받지 않도록 운영 호스트와 GPU worker는 저장소별
+최신 release image를 최소 한 개 보존하고 최근 BuildKit cache도 유지한다. routine cleanup에서
+`docker image prune -a -f`와 `docker builder prune -a -f`를 사용하지 않는다. 특히 `builder prune -a`는
+`uv` download cache를 포함한 재사용 가능한 build cache까지 제거할 수 있다.
+
+정리는 디스크 압박이 실제로 확인된 경우에만 수행한다. 먼저 `docker system df`, `docker buildx du`와
+`docker ps -a`를 확인하고, 현재 release의 `git-<full-sha>` tag가 web, Rust, Kronos, FinCast 각 저장소에
+남아 있는지 검증한다. 그 뒤에도 정리가 필요하면 tagged latest release를 보존하는 기본 image prune과
+30일보다 오래된 builder cache만 대상으로 하는 제한 명령을 사용한다.
 
 ```bash
-docker image prune -a -f
-docker builder prune -a -f
+docker image prune -f --filter "until=720h"
+docker buildx prune -f --filter "until=720h" --reserved-space 20GB
 ```
 
-실행 중인 컨테이너가 참조하는 레이어는 로컬에 남는 것이 정상이다. 데이터 volume은 이미지 cache가 아니므로
-중지 컨테이너도 이미지를 고정하므로 먼저 `docker ps -a`로 확인하고, 정확히 식별한 폐기 가능한 컨테이너만
-별도 승인 아래 제거한다. `docker buildx ls`로 다른 builder가 없는지도 확인한다. 데이터 volume에는
-`docker system prune --volumes`, `docker volume prune`, `docker compose down -v`를 사용하지 않는다.
+`--reserved-space` 값은 호스트 여유 공간에 맞게 늘릴 수 있지만 줄이기 전에 다음 release 한 번을 cold build할
+수 있는 공간을 별도로 확인한다. 명시적 `-a` 정리는 사용자가 해당 호스트의 cold-build 비용을 이해하고
+별도로 승인한 경우에만 허용한다.
+
+실행 중인 컨테이너가 참조하는 레이어는 로컬에 남는 것이 정상이다. 중지 컨테이너도 이미지를 고정하므로
+정확히 식별한 폐기 가능한 컨테이너만 별도 승인 아래 제거한다. `docker buildx ls`로 다른 builder가
+없는지도 확인한다. 데이터 volume은 이미지 cache가 아니므로 `docker system prune --volumes`,
+`docker volume prune`, `docker compose down -v`를 사용하지 않는다.
