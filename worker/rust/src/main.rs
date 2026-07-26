@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 
 const MAX_SOCKET_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const SOCKET_PEER_CHECK_INTERVAL: usize = 32;
+const SOCKET_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn peak_process_rss_bytes() -> Option<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -319,6 +320,55 @@ fn serve(socket_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn socket_path_arg<'a>(args: &'a [String], command: &str) -> Result<&'a str> {
+    let index = args
+        .iter()
+        .position(|value| value == "--socket")
+        .with_context(|| format!("{command} requires --socket <path>"))?;
+    let socket_path = args
+        .get(index + 1)
+        .with_context(|| format!("{command} requires --socket <path>"))?;
+    if socket_path.starts_with("--") {
+        bail!("{command} requires --socket <path>");
+    }
+    Ok(socket_path)
+}
+
+fn socket_health_with_timeout(socket_path: &str, timeout: Duration) -> Result<()> {
+    let path = Path::new(socket_path).to_owned();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect Unix socket {}", path.display()))?;
+            if !metadata.file_type().is_socket() {
+                bail!("health target is not a Unix socket: {}", path.display());
+            }
+            UnixStream::connect(&path)
+                .with_context(|| format!("connect Unix socket {}", path.display()))?;
+            Ok(())
+        })();
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            bail!(
+                "Unix socket health check timed out after {} ms: {socket_path}",
+                timeout.as_millis()
+            )
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("Unix socket health check worker disconnected: {socket_path}")
+        }
+    }
+}
+
+fn socket_health(socket_path: &str) -> Result<()> {
+    socket_health_with_timeout(socket_path, SOCKET_HEALTH_TIMEOUT)
+}
+
 struct LeaseState {
     stop: AtomicBool,
     lost: AtomicBool,
@@ -497,7 +547,7 @@ fn durable(once: bool) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "portfolio-lens-worker commands:\n  backtest-json\n  optimize-json\n  monte-carlo-json\n  compute-json <job-kind>\n  serve --socket <path>\n  run\n  once"
+        "portfolio-lens-worker commands:\n  backtest-json\n  optimize-json\n  monte-carlo-json\n  compute-json <job-kind>\n  serve --socket <path>\n  health --socket <path>\n  run\n  once"
     );
 }
 
@@ -511,16 +561,8 @@ fn main() -> Result<()> {
             job_kind(args.get(1).context("compute-json requires a job kind")?)?,
             false,
         ),
-        Some("serve") => {
-            let index = args
-                .iter()
-                .position(|value| value == "--socket")
-                .context("serve requires --socket <path>")?;
-            serve(
-                args.get(index + 1)
-                    .context("serve requires --socket <path>")?,
-            )
-        }
+        Some("serve") => serve(socket_path_arg(&args, "serve")?),
+        Some("health") => socket_health(socket_path_arg(&args, "health")?),
         Some("run") => durable(false),
         Some("once") => durable(true),
         _ => {
@@ -533,6 +575,91 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_socket_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "portfolio-lens-worker-{label}-{}-{}.sock",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn socket_path_argument_requires_a_value_and_accepts_a_path() {
+        let missing_flag = vec!["health".to_string()];
+        assert!(
+            socket_path_arg(&missing_flag, "health")
+                .unwrap_err()
+                .to_string()
+                .contains("health requires --socket <path>")
+        );
+
+        let missing_value = vec!["health".to_string(), "--socket".to_string()];
+        assert!(
+            socket_path_arg(&missing_value, "health")
+                .unwrap_err()
+                .to_string()
+                .contains("health requires --socket <path>")
+        );
+
+        let option_instead_of_value = vec![
+            "health".to_string(),
+            "--socket".to_string(),
+            "--other".to_string(),
+        ];
+        assert!(
+            socket_path_arg(&option_instead_of_value, "health")
+                .unwrap_err()
+                .to_string()
+                .contains("health requires --socket <path>")
+        );
+
+        let valid = vec![
+            "health".to_string(),
+            "--socket".to_string(),
+            "/app/run/compute.sock".to_string(),
+        ];
+        assert_eq!(
+            socket_path_arg(&valid, "health").unwrap(),
+            "/app/run/compute.sock"
+        );
+    }
+
+    #[test]
+    fn socket_health_rejects_missing_and_regular_file_targets() {
+        let missing = test_socket_path("missing-health");
+        let missing_error =
+            socket_health_with_timeout(missing.to_str().unwrap(), Duration::from_secs(1))
+                .unwrap_err();
+        assert!(missing_error.to_string().contains("inspect Unix socket"));
+
+        let regular = test_socket_path("regular-health");
+        fs::write(&regular, b"not a socket").unwrap();
+        let regular_error =
+            socket_health_with_timeout(regular.to_str().unwrap(), Duration::from_secs(1))
+                .unwrap_err();
+        assert!(
+            regular_error
+                .to_string()
+                .contains("health target is not a Unix socket")
+        );
+        fs::remove_file(regular).unwrap();
+    }
+
+    #[test]
+    fn socket_health_connects_to_a_live_socket() {
+        let socket_path = test_socket_path("live-health");
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("bind health test Unix socket: {error}"),
+        };
+        let accept_thread = thread::spawn(move || listener.accept().map(|_| ()));
+
+        socket_health_with_timeout(socket_path.to_str().unwrap(), Duration::from_secs(1)).unwrap();
+        accept_thread.join().unwrap().unwrap();
+        fs::remove_file(socket_path).unwrap();
+    }
 
     #[test]
     fn socket_control_detects_disconnect_without_consuming_pipelined_data() {

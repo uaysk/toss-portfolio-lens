@@ -186,11 +186,19 @@ Compose healthcheck는 listener liveness만 검사하므로 모델 qualification
 FinCast lane이 `available`인지 확인한다.
 
 고정 fixture는 credential 없이 Binance USD-M의 16개 USDT 무기한 계약에서 캡처한 완결 1분봉
-`128 samples × 512 bars`이며 content SHA-256도 manifest에 고정한다. qualification은 NaN/Inf, quantile 단조성,
-Node와 같은 cost-exceeding quantile CDF 방향(0.55 threshold) 99%, FP32 IQR 대비 q50 중앙/p95 오차 5%/15%,
-`max(cuda allocated, cuda reserved)` peak VRAM 25% 절감을 모두 검사한다. 하나라도 실패하면 original FP32
-safetensors를 선택한다. validation file이나 artifact SHA가 없으면 runtime은 시작 시 다운로드하지 않고
-unavailable이다.
+`128 source contexts × 512 bars`이며 content SHA-256도 manifest에 고정한다. v4 qualification은 여기에 첫
+context 전체를 마지막 close가 각각 `131072`, `0.00001`이 되도록 비례 조정한 2개 scale-stress context를
+추가한다. 이렇게 만든 130개 context 각각을 decoder의 native `15초 × 240 steps`,
+`30초 × 120 steps`, `60초 × 60 steps` horizon shape로 실행하므로 총 390 cases,
+54,600 quantile rows를 FP32와 mixed FP16 양쪽에서 평가한다. 입력 fixture 자체는 1분 close context이며,
+15/30/60초 값은 이 qualification에서 decoder output shape와 각 row의 비용 초과 방향 채점에 결합된다.
+
+validation v4는 실행 환경도 `torch 2.6.0`, CUDA runtime `12.4`, `Tesla P40`, compute capability `6.1`로
+고정한다. qualification 및 이후 runtime이 이 네 값을 모두 정확히 재현하지 않으면 validation을 거부한다.
+수치 gate는 NaN/Inf, quantile 단조성, Node와 같은 cost-exceeding quantile CDF 방향(0.55 threshold) 99%,
+FP32 IQR 대비 q50 중앙/p95 오차 5%/15%, `max(cuda allocated, cuda reserved)` peak VRAM 25% 절감을
+모두 검사한다. 하나라도 실패하면 original FP32 safetensors를 선택한다. validation file이나 artifact SHA가
+없으면 runtime은 시작 시 다운로드하지 않고 unavailable이다.
 
 mixed lane은 weights/일반 activation을 FP16으로 두되 공식 decoder의 attention softmax와 RMSNorm FP32 계산을
 유지하고, MoE RMSNorm/router logits는 reviewed hook으로 FP32 계산 후 activation dtype으로 복귀한다. 최종

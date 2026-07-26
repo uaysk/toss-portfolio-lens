@@ -118,7 +118,7 @@ services:
     volumes:
       - compute_socket:/app/run
     healthcheck:
-      test: ["CMD", "test", "-S", "/app/run/compute.sock"]
+      test: ["CMD", "/usr/local/bin/portfolio-lens-worker", "health", "--socket", "/app/run/compute.sock"]
       interval: 5s
       timeout: 2s
       retries: 12

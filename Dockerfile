@@ -18,6 +18,7 @@ ARG APP_GIT_SHA=unknown
 LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
 ENV NODE_ENV=production
 WORKDIR /app
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 RUN addgroup -g 10001 -S portfolio && adduser -u 10001 -S portfolio -G portfolio
 RUN mkdir -p /app/data /app/run && chown portfolio:portfolio /app/data /app/run
 COPY --from=build --chown=portfolio:portfolio /app/package.json ./package.json
