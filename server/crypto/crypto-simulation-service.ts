@@ -424,6 +424,7 @@ export class CryptoSimulationCoordinator {
           selectedSymbols: selected.map((candidate) => candidate.symbol),
           selected,
           modelLanes: input.modelLanes,
+          fincastCandleSeconds: input.fincastCandleSeconds,
           executionMode: "paper",
           execution: { mode: "paper", realOrder: false },
         },
@@ -775,6 +776,7 @@ export class CryptoSimulationCoordinator {
       strategy: snapshot.strategy ?? input.strategy,
       costs: input.costs,
       modelLanes: Array.isArray(input.modelLanes) ? input.modelLanes : [],
+      fincastCandleSeconds: finiteNumber(input.fincastCandleSeconds) ?? 60,
       execution: input.execution ?? { mode: "paper" },
     };
     return {

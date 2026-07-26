@@ -617,9 +617,44 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
 }
 
 export function simulationDecisionCadenceLabel(trigger?: string): string {
-  return trigger === "finalized_one_minute_bar"
+  if (trigger === "final_fincast_15s_aggtrade_bar") return "FinCast 새 확정 15초봉 즉시";
+  if (trigger === "final_fincast_30s_aggtrade_bar") return "FinCast 새 확정 30초봉 즉시";
+  return trigger === "finalized_one_minute_bar" || trigger === "final_binance_1m_kline"
     ? "새 확정 1분봉 즉시"
     : "확정봉 이벤트 즉시";
+}
+
+export function aiSimulationChartLayout(
+  snapshot: Pick<AiSimulationSnapshot, "market" | "strategy" | "charts" | "decisions">,
+  modelForecasts: readonly { signalSymbol: string }[],
+): {
+  primarySymbol?: string;
+  layout: "crypto-full-width" | "pair-primary-full-width" | "standard";
+  charts: AiSimulationSnapshot["charts"];
+} {
+  const cryptoFutures = snapshot.market?.kind === "crypto_futures";
+  const primarySymbol = snapshot.strategy?.mode === "pair"
+    ? (
+      modelForecasts.find((forecast) => forecast.signalSymbol)?.signalSymbol
+      ?? snapshot.decisions.find((decision) => decision.signalSymbol)?.signalSymbol
+      ?? snapshot.strategy.pairId.split("-")[0]
+    )?.toUpperCase()
+    : undefined;
+  const charts = primarySymbol
+    ? [...snapshot.charts].sort((left, right) => (
+      Number(right.symbol.toUpperCase() === primarySymbol)
+      - Number(left.symbol.toUpperCase() === primarySymbol)
+    ))
+    : snapshot.charts;
+  return {
+    primarySymbol,
+    layout: cryptoFutures
+      ? "crypto-full-width"
+      : primarySymbol
+        ? "pair-primary-full-width"
+        : "standard",
+    charts,
+  };
 }
 
 function RunPanel({
@@ -648,6 +683,9 @@ function RunPanel({
       ...forecast,
       lane: "kronos_base" as const,
     }));
+  const chartLayout = aiSimulationChartLayout(snapshot, modelForecasts);
+  const pairPrimarySymbol = chartLayout.primarySymbol;
+  const orderedCharts = chartLayout.charts;
 
   return (
     <div className="space-y-3" data-simulation-run={run.runId ?? "unknown"}>
@@ -733,8 +771,15 @@ function RunPanel({
         </div>
       )}
       {snapshot.charts.length ? (
-        <div className="grid gap-3 xl:grid-cols-2" data-simulation-charts>
-          {snapshot.charts.map((chart) => (
+        <div
+          className={cn(
+            "grid gap-3",
+            !cryptoFutures && orderedCharts.length > 1 && "xl:grid-cols-2",
+          )}
+          data-simulation-charts
+          data-simulation-chart-layout={chartLayout.layout}
+        >
+          {orderedCharts.map((chart) => (
             <AiSimulationChart
               key={chart.symbol}
               symbol={chart.symbol}
@@ -759,6 +804,11 @@ function RunPanel({
                   positionSide: trade.positionSide,
                 }];
               })}
+              className={cn(
+                pairPrimarySymbol
+                  && chart.symbol.toUpperCase() === pairPrimarySymbol
+                  && "xl:col-span-2",
+              )}
             />
           ))}
         </div>

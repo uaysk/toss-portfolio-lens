@@ -6,6 +6,7 @@ import {
   SimulationDisclosure,
   TradesAndDecisions,
   aiSimulationRequestWithStrategy,
+  aiSimulationChartLayout,
   simulationDecisionCadenceLabel,
 } from "./ai-simulation";
 import { AiSimulationComparisonPanel } from "./ai-simulation-comparison-panel";
@@ -28,6 +29,55 @@ describe("AiSimulation", () => {
   it("describes finalized-bar event cadence without inventing a fixed interval", () => {
     expect(simulationDecisionCadenceLabel(undefined)).toBe("확정봉 이벤트 즉시");
     expect(simulationDecisionCadenceLabel("finalized_one_minute_bar")).toBe("새 확정 1분봉 즉시");
+    expect(simulationDecisionCadenceLabel("final_fincast_30s_aggtrade_bar"))
+      .toBe("FinCast 새 확정 30초봉 즉시");
+    expect(simulationDecisionCadenceLabel("final_fincast_15s_aggtrade_bar"))
+      .toBe("FinCast 새 확정 15초봉 즉시");
+  });
+
+  it.each([
+    ["qqq-tqqq-sqqq", "QQQ", ["TQQQ", "SQQQ"]],
+    ["smh-soxl-soxs", "SMH", ["SOXL", "SOXS"]],
+  ] as const)("places the %s signal chart first and full-width", (pairId, primary, leveraged) => {
+    const symbols = [leveraged[0], primary, leveraged[1]];
+    const layout = aiSimulationChartLayout({
+      market: { kind: "stock", country: "US" },
+      strategy: { mode: "pair", pairId, allowDegradedMode: false },
+      decisions: [],
+      charts: symbols.map((symbol) => ({
+        symbol,
+        currency: "USD",
+        bars: [],
+        indicators: [],
+        patterns: [],
+      })),
+    }, [{ signalSymbol: primary }]);
+
+    expect(layout.layout).toBe("pair-primary-full-width");
+    expect(layout.primarySymbol).toBe(primary);
+    expect(layout.charts.map((chart) => chart.symbol)).toEqual([primary, ...leveraged]);
+  });
+
+  it("keeps crypto charts in a full-width vertical layout", () => {
+    const layout = aiSimulationChartLayout({
+      market: {
+        kind: "crypto_futures",
+        venue: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        contractType: "PERPETUAL",
+      },
+      decisions: [],
+      charts: [{
+        symbol: "BTCUSDT",
+        currency: "USDT",
+        bars: [],
+        indicators: [],
+        patterns: [],
+      }],
+    }, []);
+
+    expect(layout.layout).toBe("crypto-full-width");
+    expect(layout.charts).toHaveLength(1);
   });
 
   it("renders cash-only setup, selection mode, preset, and risk controls", () => {

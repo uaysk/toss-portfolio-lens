@@ -1,9 +1,12 @@
 export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast"] as const;
+export const AI_SIMULATION_FINCAST_CANDLE_SECONDS = [60, 30, 15] as const;
 export const AI_SIMULATION_EXECUTION_MODES = ["paper", "testnet", "live"] as const;
 export const AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH = 100;
 export const AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH = 100_000_000;
 
 export type AiSimulationModelLane = (typeof AI_SIMULATION_MODEL_LANES)[number];
+export type AiSimulationFinCastCandleSeconds =
+  (typeof AI_SIMULATION_FINCAST_CANDLE_SECONDS)[number];
 export type AiSimulationExecutionMode = (typeof AI_SIMULATION_EXECUTION_MODES)[number];
 export type AiSimulationCriterion = "trading_amount" | "volume" | "volatility";
 
@@ -70,6 +73,7 @@ export type AiSimulationCryptoRequest = {
   };
   riskLimits: AiSimulationCryptoRiskLimits;
   modelLanes: [AiSimulationModelLane] | [AiSimulationModelLane, AiSimulationModelLane];
+  fincastCandleSeconds: AiSimulationFinCastCandleSeconds;
   execution: { mode: "paper" };
 };
 
@@ -93,6 +97,7 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
   },
   riskLimits: { ...DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS },
   modelLanes: ["kronos_base"],
+  fincastCandleSeconds: 60,
   execution: { mode: "paper" },
 };
 
@@ -805,6 +810,17 @@ export function validateAiSimulationCryptoRequest(
     || request.modelLanes.length > 2
     || new Set(request.modelLanes).size !== request.modelLanes.length) {
     issues.push("모델 lane을 하나 이상 중복 없이 선택해 주세요.");
+  }
+  if (!AI_SIMULATION_FINCAST_CANDLE_SECONDS.includes(request.fincastCandleSeconds)) {
+    issues.push("FinCast 모델 봉은 1분, 30초, 15초 중 하나여야 합니다.");
+  } else if (
+    request.fincastCandleSeconds < 60
+    && (
+      request.modelLanes.length !== 1
+      || request.modelLanes[0] !== "fincast"
+    )
+  ) {
+    issues.push("15초·30초 모델 봉은 FinCast 단독 lane에서만 사용할 수 있습니다.");
   }
   if (request.execution.mode !== "paper") issues.push("현재 운영에서는 paper 실행만 허용됩니다.");
   if (!["trend", "breakout", "mean_reversion", "risk_management"].includes(request.preset)) {

@@ -375,6 +375,7 @@ function pairRequest(): SimulationStartRequest {
       slippageBpsPerSide: 2,
     },
     modelLanes: ["kronos_base"],
+    fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };
 }

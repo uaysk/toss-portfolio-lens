@@ -13,7 +13,7 @@ type UnknownRecord = Record<string, unknown>;
 
 export type BinanceKline = {
   symbol: string;
-  interval: "1m";
+  interval: "1m" | "30s" | "15s";
   openTime: number;
   closeTime: number;
   open: number;
@@ -77,9 +77,18 @@ export type BinanceRestKlineRequest = {
   limit?: number;
 };
 
+export type BinanceRestAggregateTradeRequest = {
+  symbol: string;
+  fromId?: number;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+};
+
 export interface BinanceRestMarketData {
   exchangeInformation(): Promise<unknown>;
   klines(input: BinanceRestKlineRequest): Promise<unknown>;
+  aggregateTrades?(input: BinanceRestAggregateTradeRequest): Promise<unknown>;
   tickers24h(): Promise<unknown>;
   bookTickers(): Promise<unknown>;
 }
@@ -315,6 +324,19 @@ export class OfficialBinanceUsdmRestMarketData implements BinanceRestMarketData 
       interval: DerivativesTradingUsdsFuturesRestAPI
         .KlineCandlestickDataIntervalEnum.INTERVAL_1m,
       limit,
+      ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
+      ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
+    }));
+  }
+
+  aggregateTrades(input: BinanceRestAggregateTradeRequest): Promise<unknown> {
+    const symbol = upper(input.symbol);
+    if (!symbol) throw new Error("Binance aggregate-trade symbol is required.");
+    const limit = Math.max(1, Math.min(1_000, Math.trunc(input.limit ?? 1_000)));
+    return this.data(this.client.restAPI.compressedAggregateTradesList({
+      symbol,
+      limit,
+      ...(input.fromId !== undefined ? { fromId: input.fromId } : {}),
       ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
       ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
     }));

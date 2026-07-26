@@ -16,6 +16,7 @@ export type AiSimulationKronosForecast = {
   signalSymbol: string;
   status: "available" | "unavailable";
   origin?: string;
+  originPrice?: number;
   generatedAt?: string;
   modelId?: string;
   modelRevision?: string;
@@ -420,6 +421,7 @@ function normalizeDirectModelForecast(value: unknown): AiSimulationModelForecast
   const modelId = text(first(source, "modelId", "model_id"));
   const lane = directForecastLane(first(source, "lane", "modelLane", "model_lane"), modelId);
   const origin = timestamp(first(source, "origin", "inputEndAt", "input_end_at"));
+  const originPrice = finite(first(source, "originPrice", "origin_price"));
   const generatedAt = timestamp(first(source, "generatedAt", "generated_at"));
   const rawStatus = text(source.status)?.toLowerCase();
   const rawPoints = first(source, "points", "horizons");
@@ -444,6 +446,7 @@ function normalizeDirectModelForecast(value: unknown): AiSimulationModelForecast
     signalSymbol,
     status: available ? "available" : "unavailable",
     ...(origin ? { origin } : {}),
+    ...(originPrice !== undefined && originPrice > 0 ? { originPrice } : {}),
     ...(generatedAt ? { generatedAt } : {}),
     ...(modelId ? { modelId } : {}),
     ...(text(first(source, "modelRevision", "model_revision", "revision"))

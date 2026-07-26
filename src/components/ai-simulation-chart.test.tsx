@@ -6,6 +6,7 @@ import {
   aiSimulationChartCoordinateRows,
   aiSimulationCombinedChartRows,
   aiSimulationCurrentModelForecasts,
+  aiSimulationNearestChartRow,
   aiSimulationTradeMarkerColor,
   type AiSimulationChartBar,
 } from "./ai-simulation-chart";
@@ -190,6 +191,67 @@ describe("AiSimulationChart", () => {
       && row.time < kronosTargetTime
       && row.time !== Date.parse("2026-07-24T09:03:00+09:00")
     ))).toBe(false);
+  });
+
+  it("anchors a sub-minute FinCast origin by its observed price while keeping minute horizons", () => {
+    const forecast: AiSimulationModelForecast = {
+      lane: "fincast",
+      signalSymbol: "BTCUSDT",
+      status: "available",
+      origin: "2026-07-24T09:02:29.999+09:00",
+      originPrice: 101.5,
+      points: [{
+        horizonMinutes: 5,
+        targetTimestamp: "2026-07-24T09:07:29.999+09:00",
+        q10Price: 99,
+        medianPrice: 103,
+        q90Price: 106,
+      }],
+    };
+    const current = aiSimulationCurrentModelForecasts(bars, [forecast]);
+    const rows = aiSimulationCombinedChartRows(bars, current);
+    const origin = rows.find((row) => row.time === Date.parse(forecast.origin!));
+
+    expect(current).toEqual([forecast]);
+    expect(origin).toMatchObject({
+      "forecast:fincast:range": [101.5, 101.5],
+      "forecast:fincast:median": 101.5,
+    });
+    expect(forecast.points[0]!.horizonMinutes).toBe(5);
+    expect(Date.parse(forecast.points[0]!.targetTimestamp) - Date.parse(forecast.origin!))
+      .toBe(5 * 60_000);
+  });
+
+  it("selects the nearest cursor row for the fixed metrics panel", () => {
+    const rows = aiSimulationChartCoordinateRows(
+      aiSimulationCombinedChartRows(bars),
+      true,
+    );
+    const wanted = rows[1]!;
+
+    expect(aiSimulationNearestChartRow(rows, (wanted.chartTime ?? wanted.time) + 1)?.time)
+      .toBe(wanted.time);
+  });
+
+  it("renders an outside cursor metrics panel and an accessible fullscreen control", () => {
+    const markup = renderToStaticMarkup(
+      <AiSimulationChart
+        symbol="BTCUSDT"
+        currency="USDT"
+        bars={bars.map((bar) => ({
+          ...bar,
+          indicatorValues: { rsi: 55.5 },
+        }))}
+        trades={[]}
+        indicators={[]}
+        patterns={[]}
+      />,
+    );
+
+    expect(markup).toContain("data-ai-simulation-hover-metrics");
+    expect(markup).toContain("rsi 55.5");
+    expect(markup).toContain('aria-label="BTCUSDT 차트 전체화면 확대"');
+    expect(markup).toContain('data-ai-simulation-chart-expanded="false"');
   });
 
   it("compresses stock session gaps but preserves the future horizon scale", () => {

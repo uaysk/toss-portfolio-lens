@@ -38,6 +38,12 @@ export const DEFAULT_CRYPTO_FUTURES_MARKET: CryptoFuturesSimulationMarket = Obje
 
 export const SimulationModelLaneSchema = z.enum(["kronos_base", "fincast"]);
 export type SimulationModelLane = z.infer<typeof SimulationModelLaneSchema>;
+export const FinCastCandleSecondsSchema = z.union([
+  z.literal(15),
+  z.literal(30),
+  z.literal(60),
+]);
+export type FinCastCandleSeconds = z.infer<typeof FinCastCandleSecondsSchema>;
 export const SimulationModelLanesSchema = z.union([
   z.tuple([z.literal("kronos_base")]),
   z.tuple([z.literal("fincast")]),
@@ -197,6 +203,7 @@ export type SimulationStartRequest = {
   costs: SimulationCosts;
   riskLimits?: CryptoFuturesRiskLimits;
   modelLanes: SimulationModelLanes;
+  fincastCandleSeconds: FinCastCandleSeconds;
   execution: SimulationExecution;
 };
 
@@ -219,6 +226,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     costs: SimulationCostOverridesSchema.optional(),
     riskLimits: CryptoFuturesRiskLimitsSchema.optional(),
     modelLanes: SimulationModelLanesSchema,
+    fincastCandleSeconds: FinCastCandleSecondsSchema.default(60),
     execution: SimulationExecutionSchema,
   }).strict().superRefine((input, context) => {
     const market = input.market
@@ -255,6 +263,19 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
           message: "암호화폐 선물은 단일 종목 전략만 지원합니다.",
         });
       }
+      if (
+        input.fincastCandleSeconds < 60
+        && (
+          input.modelLanes.length !== 1
+          || input.modelLanes[0] !== "fincast"
+        )
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["fincastCandleSeconds"],
+          message: "15초·30초 모델 봉은 FinCast 단독 lane에서만 사용할 수 있습니다.",
+        });
+      }
     } else {
       if (input.initialCash < 100_000) {
         context.addIssue({
@@ -268,6 +289,13 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
           code: "custom",
           path: ["riskLimits"],
           message: "선물 위험 한도는 암호화폐 선물 요청에서만 사용할 수 있습니다.",
+        });
+      }
+      if (input.fincastCandleSeconds !== 60) {
+        context.addIssue({
+          code: "custom",
+          path: ["fincastCandleSeconds"],
+          message: "FinCast sub-minute 모델 봉은 암호화폐 선물 요청에서만 사용할 수 있습니다.",
         });
       }
     }

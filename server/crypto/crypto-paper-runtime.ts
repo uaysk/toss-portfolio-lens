@@ -24,6 +24,12 @@ import {
   type BinanceRestMarketData,
   type BinanceWebsocketSubscription,
 } from "./binance-market-data.js";
+import {
+  FinCastMicroCandleAggregator,
+  loadFinCastMicroContext,
+  type BinanceAggregateTrade,
+  type FinCastMicroCandleSeconds,
+} from "./fincast-micro-candles.js";
 import type {
   BinanceInstrumentRules,
   BinanceScannerCandidate,
@@ -240,7 +246,8 @@ export type CryptoPaperRuntimeSnapshotObserver = (
 ) => void | Promise<void>;
 
 export type CryptoPaperRuntimeOptions = {
-  rest: Pick<BinanceRestMarketData, "klines">;
+  rest: Pick<BinanceRestMarketData, "klines">
+    & Partial<Pick<BinanceRestMarketData, "aggregateTrades">>;
   streams: CryptoPublicStreams;
   laneClients: Partial<Record<SimulationModelLane, CryptoAiLaneClient>>;
   instrumentRules:
@@ -1024,7 +1031,10 @@ export type CryptoPaperRuntimeSnapshot = {
   modelComparison: unknown;
   terminalSettlement?: TerminalSettlementEvidence;
   decisionCadence: {
-    trigger: "final_binance_1m_kline";
+    trigger: "final_binance_1m_kline"
+      | "final_fincast_30s_aggtrade_bar"
+      | "final_fincast_15s_aggtrade_bar";
+    modelCandleSeconds: 15 | 30 | 60;
     triggeredEvents: number;
     coalescedFinalKlines: number;
     lastTriggeredAt?: string;
@@ -1294,6 +1304,7 @@ const systemClock: CryptoRuntimeClock = {
 
 type QueuedMarketEvent =
   | BinanceMarketEvent
+  | { kind: "model_bar"; bar: BinanceKline }
   | { kind: "disconnect"; error?: unknown }
   | { kind: "connection_state"; state: BinancePublicStreamConnectionState }
   | { kind: "inference_complete" }
@@ -2399,11 +2410,12 @@ function cryptoTechnicalObservation(
 function hasContinuousFinalContext(
   bars: readonly BinanceKline[],
   requiredBars: number,
+  expectedIntervalMs = MINUTE_MS,
 ): boolean {
   const context = bars.slice(-requiredBars);
   if (context.length !== requiredBars || context.some((bar) => !bar.final)) return false;
   for (let index = 1; index < context.length; index += 1) {
-    if (context[index]!.openTime - context[index - 1]!.openTime !== MINUTE_MS) {
+    if (context[index]!.openTime - context[index - 1]!.openTime !== expectedIntervalMs) {
       return false;
     }
   }
@@ -2907,6 +2919,28 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       rawPayloadRetained: false,
     } as const;
     const selectedLanes = [...request.modelLanes];
+    const modelCandleSeconds = request.fincastCandleSeconds ?? 60;
+    const subminuteFinCast = modelCandleSeconds < 60;
+    if (
+      subminuteFinCast
+      && (
+        selectedLanes.length !== 1
+        || selectedLanes[0] !== "fincast"
+        || (modelCandleSeconds !== 15 && modelCandleSeconds !== 30)
+        || !this.options.rest.aggregateTrades
+      )
+    ) {
+      throw new CryptoPaperRuntimeError(
+        "invalid_runtime_input",
+        "FinCast 15s/30s mode requires the FinCast-only lane and Binance aggregate-trade REST data.",
+      );
+    }
+    const modelIntervalMs = modelCandleSeconds * 1_000;
+    const decisionTrigger = modelCandleSeconds === 15
+      ? "final_fincast_15s_aggtrade_bar" as const
+      : modelCandleSeconds === 30
+        ? "final_fincast_30s_aggtrade_bar" as const
+        : "final_binance_1m_kline" as const;
     const policyProfile = cryptoFuturesPolicyProfile(request);
     const executionLane = selectedLanes.includes(this.options.executionLane ?? "kronos_base")
       ? this.options.executionLane ?? "kronos_base"
@@ -2914,6 +2948,26 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const queue = new AsyncMarketEventQueue();
     const ingressStore = new CausalBinanceKlineStore();
     const decisionStore = new CausalBinanceKlineStore();
+    let fincastMicroBars: BinanceKline[] = [];
+    let fincastMicroAggregator: FinCastMicroCandleAggregator | undefined;
+    const bufferedSetupAggregateTrades: BinanceAggregateTrade[] = [];
+    const appendFinCastMicroBar = (bar: BinanceKline): void => {
+      const existing = fincastMicroBars.findIndex(
+        (candidate) => candidate.openTime === bar.openTime,
+      );
+      if (existing >= 0) fincastMicroBars[existing] = { ...bar };
+      else fincastMicroBars.push({ ...bar });
+      fincastMicroBars.sort((left, right) => left.openTime - right.openTime);
+      if (fincastMicroBars.length > MAXIMUM_RESTORED_BARS) {
+        fincastMicroBars = fincastMicroBars.slice(-MAXIMUM_RESTORED_BARS);
+      }
+    };
+    const modelContext = (): BinanceKline[] => (
+      subminuteFinCast
+        ? fincastMicroBars.slice(-this.contextBars)
+        : decisionStore.list(symbol).slice(-this.contextBars)
+    );
+    const latestModelBar = (): BinanceKline | undefined => modelContext().at(-1);
     const warnings: string[] = [];
     const decisions: RuntimeDecision[] = [];
     const states = new Map<SimulationModelLane, LaneState>();
@@ -3328,7 +3382,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       cryptoModelForecastIsFresh({
         inputEndAt: forecast.inputEndAt,
         targetTimestamps: forecast.displayPoints.map((point) => point.targetTimestamp),
-        latestFinalCandleCloseTime: decisionStore.list(symbol).at(-1)?.closeTime,
+        latestFinalCandleCloseTime: latestModelBar()?.closeTime,
       })
     );
 
@@ -3345,6 +3399,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           status: "unavailable" as const,
           ...(latest ? {
             origin: latest.inputEndAt,
+            originPrice: latest.originPrice,
             generatedAt: latest.generatedAtIso,
             modelId: latest.modelId,
             modelRevision: latest.modelRevision,
@@ -3362,6 +3417,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         signalSymbol: symbol,
         status: "available" as const,
         origin: latest.inputEndAt,
+        originPrice: latest.originPrice,
         generatedAt: latest.generatedAtIso,
         modelId: latest.modelId,
         modelRevision: latest.modelRevision,
@@ -3547,6 +3603,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           oneWayPosition: true,
           maximumPaperLeverage: riskLimits.maximumLeverage,
           executionLane,
+          modelCandleSeconds,
+          chartCandleSeconds: 60,
         },
         modelLanes: selectedLanes,
         executionMode: "paper",
@@ -3556,7 +3614,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           ? { terminalSettlement: structuredClone(terminalSettlement) }
           : {}),
         decisionCadence: {
-          trigger: "final_binance_1m_kline",
+          trigger: decisionTrigger,
+          modelCandleSeconds,
           triggeredEvents,
           coalescedFinalKlines,
           ...(lastTriggeredAt ? { lastTriggeredAt } : {}),
@@ -4404,7 +4463,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       id: number,
       inferenceStreamEpoch: number,
     ): Promise<RuntimeInferenceCompletion> => {
-      const bars = decisionStore.list(symbol).slice(-this.contextBars);
+      const bars = modelContext();
       if (!bars.length || bars.at(-1)!.openTime !== bar.openTime) {
         throw new Error("inference_origin_not_latest_final_bar");
       }
@@ -4712,7 +4771,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisions.push(baseDecision);
           continue;
         }
-        if (commonDecisionAt - bar.closeTime > MINUTE_MS) {
+        if (commonDecisionAt - bar.closeTime > modelIntervalMs) {
           baseDecision.status = "blocked";
           baseDecision.reason = "model_stale";
           decisions.push(baseDecision);
@@ -4840,7 +4899,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       bar: BinanceKline,
       reason: string,
     ): void => {
-      const bars = decisionStore.list(symbol)
+      const bars = modelContext()
         .filter((candidateBar) => candidateBar.openTime <= bar.openTime)
         .slice(-this.contextBars);
       const requestDigest = bars.length ? digest(aiRequest(context.runId, symbol, bars)) : "";
@@ -4950,6 +5009,40 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             }
           }
           ingressStore.applyWebsocket(event);
+          if (subminuteFinCast && event.kind === "agg_trade") {
+            const aggregateTrade: BinanceAggregateTrade = {
+              aggregateTradeId: Number(event.aggregateTradeId),
+              price: event.price,
+              quantity: event.quantity,
+              executedAt: event.executedAt,
+              buyerWasMaker: event.buyerWasMaker,
+            };
+            if (fincastMicroAggregator) {
+              for (const completedBar of fincastMicroAggregator.accept(aggregateTrade)) {
+                appendFinCastMicroBar(completedBar);
+                if (liveWindowStarted && !queue.push({
+                  kind: "model_bar",
+                  bar: completedBar,
+                })) {
+                  const error = new Error("market_event_queue_overflow");
+                  streamDisconnected = { error };
+                  streamEpoch += 1;
+                  enterReconnectSafety();
+                  activeInferenceController?.abort(error);
+                  queue.fail(error);
+                  return;
+                }
+              }
+            } else {
+              bufferedSetupAggregateTrades.push(aggregateTrade);
+              if (bufferedSetupAggregateTrades.length > 10_000) {
+                bufferedSetupAggregateTrades.splice(
+                  0,
+                  bufferedSetupAggregateTrades.length - 10_000,
+                );
+              }
+            }
+          }
           let acceptedIngressMarkPrice = true;
           if (event.kind === "book_ticker") {
             const acceptedIngressBook = lastIngressBookTickerEventTime === undefined
@@ -5173,6 +5266,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           if (state.status === "reconnecting") {
             streamEpoch += 1;
             enterReconnectSafety();
+            if (subminuteFinCast) {
+              fincastMicroAggregator = undefined;
+              bufferedSetupAggregateTrades.length = 0;
+            }
             activeInferenceController?.abort(new Error("public_stream_reconnecting"));
           }
           if (!queue.push({ kind: "connection_state", state })) {
@@ -5201,6 +5298,47 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           "invalid_runtime_input",
           `Binance REST recovery did not return ${this.contextBars} continuous final one-minute bars.`,
         );
+      }
+      if (subminuteFinCast) {
+        const completedThrough = (
+          Math.floor(this.clock.now() / modelIntervalMs) * modelIntervalMs
+        ) - 1;
+        fincastMicroBars = await loadFinCastMicroContext({
+          symbol,
+          intervalSeconds: modelCandleSeconds as FinCastMicroCandleSeconds,
+          contextBars: this.contextBars,
+          endTime: completedThrough,
+          signal: context.signal,
+          aggregateTrades: (aggregateInput) => (
+            this.options.rest.aggregateTrades!(aggregateInput)
+          ),
+        });
+        if (!hasContinuousFinalContext(
+          fincastMicroBars,
+          this.contextBars,
+          modelIntervalMs,
+        )) {
+          throw new CryptoPaperRuntimeError(
+            "invalid_runtime_input",
+            `Binance aggregate-trade recovery did not return ${this.contextBars} continuous final ${modelCandleSeconds}-second bars.`,
+          );
+        }
+        fincastMicroAggregator = new FinCastMicroCandleAggregator(
+          symbol,
+          modelCandleSeconds as FinCastMicroCandleSeconds,
+          fincastMicroBars.at(-1),
+        );
+        for (const aggregateTrade of bufferedSetupAggregateTrades
+          .filter((trade) => trade.executedAt > fincastMicroBars.at(-1)!.closeTime)
+          .sort((left, right) => (
+            left.executedAt - right.executedAt
+            || left.aggregateTradeId - right.aggregateTradeId
+          ))) {
+          for (const completedBar of fincastMicroAggregator.accept(aggregateTrade)) {
+            appendFinCastMicroBar(completedBar);
+          }
+        }
+        bufferedSetupAggregateTrades.length = 0;
       }
       startedAt = this.clock.now();
       expiresAt = startedAt + request.durationMinutes * MINUTE_MS;
@@ -5285,6 +5423,42 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               decisionStore.applyRest(symbol, recoveryBars, observedAt);
               const recovered = decisionStore.list(symbol);
               klineDataHealthy = hasContinuousFinalContext(recovered, this.contextBars);
+              if (klineDataHealthy && subminuteFinCast) {
+                const completedThrough = (
+                  Math.floor(observedAt / modelIntervalMs) * modelIntervalMs
+                ) - 1;
+                fincastMicroBars = await loadFinCastMicroContext({
+                  symbol,
+                  intervalSeconds: modelCandleSeconds as FinCastMicroCandleSeconds,
+                  contextBars: this.contextBars,
+                  endTime: completedThrough,
+                  signal: context.signal,
+                  aggregateTrades: (aggregateInput) => (
+                    this.options.rest.aggregateTrades!(aggregateInput)
+                  ),
+                });
+                klineDataHealthy = hasContinuousFinalContext(
+                  fincastMicroBars,
+                  this.contextBars,
+                  modelIntervalMs,
+                );
+                fincastMicroAggregator = new FinCastMicroCandleAggregator(
+                  symbol,
+                  modelCandleSeconds as FinCastMicroCandleSeconds,
+                  fincastMicroBars.at(-1),
+                );
+                for (const aggregateTrade of bufferedSetupAggregateTrades
+                  .filter((trade) => trade.executedAt > fincastMicroBars.at(-1)!.closeTime)
+                  .sort((left, right) => (
+                    left.executedAt - right.executedAt
+                    || left.aggregateTradeId - right.aggregateTradeId
+                  ))) {
+                  for (const completedBar of fincastMicroAggregator.accept(aggregateTrade)) {
+                    appendFinCastMicroBar(completedBar);
+                  }
+                }
+                bufferedSetupAggregateTrades.length = 0;
+              }
               if (!klineDataHealthy) {
                 klineDataBlockReason = "stream_rest_recovery_gap";
                 streamQualificationState = "rest_recovery";
@@ -5330,7 +5504,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           const nextBar = coalescedInferenceBar;
           coalescedInferenceBar = undefined;
           if (nextBar && this.clock.now() < expiresAt) {
-            const latestFinalOpenTime = decisionStore.list(symbol).at(-1)?.openTime;
+            const latestFinalOpenTime = latestModelBar()?.openTime;
             if (latestFinalOpenTime !== nextBar.openTime) {
               coalescedFinalKlines += 1;
               recordBlockedFinalDecision(nextBar, "inference_origin_superseded");
@@ -5351,6 +5525,26 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             queued.eligibleAfterIngressSequence,
             queued.boundaryEvent,
           );
+          continue;
+        }
+        if (queued.kind === "model_bar") {
+          const bar = queued.bar;
+          if (
+            subminuteFinCast
+            && bar.final
+            && bar.openTime > lastProcessedFinalOpenTime
+          ) {
+            lastProcessedFinalOpenTime = bar.openTime;
+            const reason = decisionLifecycleBlockReason();
+            if (reason) {
+              discardCoalescedInference();
+              recordBlockedFinalDecision(bar, reason);
+            } else {
+              launchInference(bar);
+            }
+          }
+          await updateProgress();
+          await publishSnapshot("running", false, this.clock.now());
           continue;
         }
         const event = queued;
@@ -5444,7 +5638,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           )))
           : undefined;
         filled = executePending(event);
-        if (event.kind === "kline" && event.final) {
+        if (!subminuteFinCast && event.kind === "kline" && event.final) {
           const newlyOpenedLanes = new Set(Array.from(states.values()).flatMap((state) => {
             if (positionedBeforeFinalFill?.has(state.lane)) return [];
             const position = state.ledger.snapshot().positions.find(
@@ -5539,6 +5733,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         if (queued.kind === "inference_complete") continue;
         if (queued.kind === "expiry_boundary") continue;
+        if (queued.kind === "model_bar") continue;
         if (streamEpoch !== settlement.decisionStreamEpoch) {
           settlementFailureDetail = "terminal_settlement_stream_epoch_changed";
           break;
@@ -6094,7 +6289,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         lanes,
       },
       decisionCadence: {
-        trigger: "final_binance_1m_kline",
+        trigger: firstSnapshot.decisionCadence.trigger,
+        modelCandleSeconds: firstSnapshot.decisionCadence.modelCandleSeconds,
         triggeredEvents: snapshots.reduce(
           (sum, snapshot) => sum + snapshot.decisionCadence.triggeredEvents,
           0,

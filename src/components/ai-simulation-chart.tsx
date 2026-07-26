@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import {
   Area,
   Bar,
@@ -241,13 +242,22 @@ export function aiSimulationCombinedChartRows(
     if (forecast.status !== "available" || !forecast.origin) continue;
     const originTime = Date.parse(forecast.origin);
     if (!Number.isFinite(originTime)) continue;
-    const originClose = exactFinalClose.get(originTime);
+    const originClose = exactFinalClose.get(originTime)
+      ?? (forecast.lane === "fincast" && finite(forecast.originPrice)
+        && forecast.originPrice > 0
+        ? forecast.originPrice
+        : undefined);
     if (originClose !== undefined) {
-      const originRow = byTime.get(originTime)!;
+      const originRow = byTime.get(originTime) ?? {
+        timestamp: new Date(originTime).toISOString(),
+        time: originTime,
+        indicatorValues: {},
+      };
       originRow[forecastKey(forecast.lane, "range")] = [originClose, originClose];
       originRow[forecastKey(forecast.lane, "q10")] = originClose;
       originRow[forecastKey(forecast.lane, "median")] = originClose;
       originRow[forecastKey(forecast.lane, "q90")] = originClose;
+      byTime.set(originTime, originRow);
     }
     for (const point of forecast.points) {
       const time = Date.parse(point.targetTimestamp);
@@ -291,12 +301,38 @@ export function aiSimulationCurrentModelForecasts(
   return forecasts.filter((forecast) => (
     forecast.status === "available"
     && forecast.origin !== undefined
-    && Date.parse(forecast.origin) === latestFinalTime
+    && (
+      Date.parse(forecast.origin) === latestFinalTime
+      || (
+        forecast.lane === "fincast"
+        && finite(forecast.originPrice)
+        && forecast.originPrice > 0
+        && Date.parse(forecast.origin) > latestFinalTime
+        && Date.parse(forecast.origin) - latestFinalTime <= 60_000
+      )
+    )
     && forecast.points.length > 0
     && forecast.points.every((point) => (
       Date.parse(point.targetTimestamp) > latestFinalTime
     ))
   ));
+}
+
+export function aiSimulationNearestChartRow(
+  rows: readonly AiSimulationCombinedChartRow[],
+  coordinate: number,
+): AiSimulationCombinedChartRow | undefined {
+  if (!Number.isFinite(coordinate)) return undefined;
+  return rows.reduce<AiSimulationCombinedChartRow | undefined>(
+    (selected, row) => (
+      !selected
+      || Math.abs((row.chartTime ?? row.time) - coordinate)
+        < Math.abs((selected.chartTime ?? selected.time) - coordinate)
+        ? row
+        : selected
+    ),
+    undefined,
+  );
 }
 
 /**
@@ -618,6 +654,8 @@ export function AiSimulationChart({
   forecasts = [],
   className,
 }: AiSimulationChartProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedTime, setSelectedTime] = useState<number>();
   const actualRows = useMemo(() => chartRows(bars), [bars]);
   const currentForecasts = useMemo(
     () => aiSimulationCurrentModelForecasts(bars, forecasts),
@@ -636,16 +674,7 @@ export function AiSimulationChart({
     [coordinateRows],
   );
   const timestampAtCoordinate = (coordinate: number): string => {
-    const nearest = coordinateRows.reduce<AiSimulationCombinedChartRow | undefined>(
-      (selected, row) => (
-        !selected
-        || Math.abs((row.chartTime ?? row.time) - coordinate)
-          < Math.abs((selected.chartTime ?? selected.time) - coordinate)
-          ? row
-          : selected
-      ),
-      undefined,
-    );
+    const nearest = aiSimulationNearestChartRow(coordinateRows, coordinate);
     return nearest?.timestamp ?? new Date(coordinate).toISOString();
   };
   const overlays = useMemo(
@@ -657,15 +686,25 @@ export function AiSimulationChart({
     [bars, trades],
   );
   const latestBar = actualRows.at(-1);
+  const selectedRow = coordinateRows.find((row) => row.time === selectedTime)
+    ?? latestBar
+    ?? coordinateRows.at(-1);
   const availableForecasts = currentForecasts;
   const forecastOriginAvailability = new Map(availableForecasts.map((forecast) => [
     forecast.lane,
     Boolean(
       forecast.origin
-      && actualRows.some((row) => (
-        row.status === "final"
-        && row.time === Date.parse(forecast.origin!)
-      )),
+      && (
+        actualRows.some((row) => (
+          row.status === "final"
+          && row.time === Date.parse(forecast.origin!)
+        ))
+        || (
+          forecast.lane === "fincast"
+          && finite(forecast.originPrice)
+          && forecast.originPrice > 0
+        )
+      ),
     ),
   ]));
   const recentPatterns = useMemo(
@@ -675,11 +714,29 @@ export function AiSimulationChart({
       .slice(0, AI_SIMULATION_CHART_MAX_PATTERN_BADGES),
     [patterns],
   );
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [expanded]);
 
   return (
     <Card
-      className={cn("min-w-0 overflow-hidden p-4 sm:p-5", className)}
+      className={cn(
+        "min-w-0 overflow-hidden p-4 sm:p-5",
+        expanded && "fixed inset-2 z-[100] overflow-y-auto bg-background shadow-2xl sm:inset-4",
+        className,
+      )}
       data-ai-simulation-chart={symbol}
+      data-ai-simulation-chart-expanded={expanded}
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -689,8 +746,9 @@ export function AiSimulationChart({
             {availableForecasts.length ? ` · 예측 ${availableForecasts.length}개 lane 연속 표시` : ""}
           </p>
         </div>
+        <div className="flex shrink-0 items-start gap-2">
         {latestBar ? (
-          <dl className="flex shrink-0 flex-wrap justify-end gap-x-3 gap-y-1 text-[9px]">
+          <dl className="flex flex-wrap justify-end gap-x-3 gap-y-1 text-[9px]">
             <div>
               <dt className="inline text-muted-foreground">
                 {latestBar.status === "forming" ? "현재가 " : "종가 "}
@@ -723,14 +781,81 @@ export function AiSimulationChart({
             </div>
           </dl>
         ) : null}
+          <button
+            type="button"
+            className="grid size-9 shrink-0 place-items-center rounded-xl bg-secondary text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => setExpanded((value) => !value)}
+            aria-label={expanded ? `${symbol} 차트 축소` : `${symbol} 차트 전체화면 확대`}
+            title={expanded ? "차트 축소 (Esc)" : "차트 전체화면 확대"}
+          >
+            {expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+          </button>
+        </div>
       </div>
 
       {actualRows.length ? (
+        <>
+        {selectedRow ? (
+          <section
+            className="mt-3 min-w-0 rounded-[20px] bg-secondary px-3 py-2.5"
+            data-ai-simulation-hover-metrics
+            aria-live="polite"
+            aria-label="차트 커서 시점 지표"
+          >
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px]">
+              <span className="font-black">{formatTimestamp(selectedRow.timestamp)}</span>
+              {finite(selectedRow.open) ? <span>시 {formatMoney(selectedRow.open, currency)}</span> : null}
+              {finite(selectedRow.high) ? <span>고 {formatMoney(selectedRow.high, currency)}</span> : null}
+              {finite(selectedRow.low) ? <span>저 {formatMoney(selectedRow.low, currency)}</span> : null}
+              {finite(selectedRow.close) ? <span>종 {formatMoney(selectedRow.close, currency)}</span> : null}
+              {finite(selectedRow.volume) ? <span>거래량 {formatQuantity(selectedRow.volume)}</span> : null}
+            </div>
+            <div className="mt-1.5 flex max-w-full flex-wrap gap-x-3 gap-y-1 text-[8px] text-muted-foreground">
+              {Object.entries(selectedRow.indicatorValues).map(([key, value]) => (
+                <span key={key}>{key} {formatIndicatorValue(value)}</span>
+              ))}
+              {availableForecasts.flatMap((forecast) => {
+                const style = MODEL_FORECAST_STYLE[forecast.lane];
+                const median = selectedRow[forecastKey(forecast.lane, "median")];
+                const q10 = selectedRow[forecastKey(forecast.lane, "q10")];
+                const q90 = selectedRow[forecastKey(forecast.lane, "q90")];
+                return finite(median) ? [(
+                  <span key={forecast.lane} style={{ color: style.stroke }}>
+                    {style.label} Q10 {finite(q10) ? formatMoney(q10, currency) : "–"}
+                    {" · "}중앙 {formatMoney(median, currency)}
+                    {" · "}Q90 {finite(q90) ? formatMoney(q90, currency) : "–"}
+                  </span>
+                )] : [];
+              })}
+            </div>
+          </section>
+        ) : null}
         <div
-          className="mt-3 h-[300px] min-w-0 max-w-full rounded-[20px] bg-secondary p-2"
+          className={cn(
+            "mt-3 h-[300px] min-w-0 max-w-full rounded-[20px] bg-secondary p-2",
+            expanded && "h-[62vh] min-h-[420px]",
+          )}
           data-ai-simulation-price-chart
           role="img"
           aria-label={`${name ?? symbol} 시뮬레이션 캔들 차트`}
+          onMouseMove={(event) => {
+            if (!coordinateRows.length) return;
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const plotLeft = bounds.left + 8;
+            const plotRight = Math.max(plotLeft + 1, bounds.right - 66);
+            const ratio = Math.max(
+              0,
+              Math.min(1, (event.clientX - plotLeft) / (plotRight - plotLeft)),
+            );
+            const firstCoordinate = coordinateRows[0]!.chartTime ?? coordinateRows[0]!.time;
+            const lastCoordinate = coordinateRows.at(-1)!.chartTime
+              ?? coordinateRows.at(-1)!.time;
+            const nearest = aiSimulationNearestChartRow(
+              coordinateRows,
+              firstCoordinate + (lastCoordinate - firstCoordinate) * ratio,
+            );
+            if (nearest) setSelectedTime(nearest.time);
+          }}
         >
           <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
             <ComposedChart
@@ -738,6 +863,22 @@ export function AiSimulationChart({
               syncId={AI_SIMULATION_CHART_SYNC_ID}
               syncMethod="value"
               margin={{ top: 12, right: 5, bottom: 0, left: 0 }}
+              onMouseMove={(state: unknown) => {
+                const interaction = state as {
+                  activeLabel?: string | number;
+                  activeTooltipIndex?: string | number;
+                  activePayload?: Array<{ payload?: AiSimulationCombinedChartRow }>;
+                } | undefined;
+                const payloadRow = interaction?.activePayload?.[0]?.payload;
+                const tooltipIndex = Number(interaction?.activeTooltipIndex);
+                const indexedRow = Number.isSafeInteger(tooltipIndex)
+                  ? coordinateRows[tooltipIndex]
+                  : undefined;
+                const activeLabel = Number(interaction?.activeLabel);
+                const nearest = aiSimulationNearestChartRow(coordinateRows, activeLabel);
+                const selected = payloadRow ?? indexedRow ?? nearest;
+                if (selected && Number.isFinite(selected.time)) setSelectedTime(selected.time);
+              }}
             >
               <CartesianGrid
                 stroke="hsl(var(--border))"
@@ -765,19 +906,9 @@ export function AiSimulationChart({
                 domain={["auto", "auto"]}
               />
               <Tooltip
-                labelFormatter={(label) => formatTimestamp(
-                  timestampAtCoordinate(Number(label)),
-                )}
-                formatter={(value, label) => [
-                  Array.isArray(value)
-                    ? value.map((entry) => formatMoney(Number(entry), currency)).join(" – ")
-                    : typeof value === "number"
-                      ? formatMoney(value, currency)
-                      : String(value),
-                  String(label),
-                ]}
+                content={() => null}
                 cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
-                wrapperStyle={{ zIndex: 30 }}
+                wrapperStyle={{ display: "none" }}
               />
               <Bar
                 dataKey="candleRange"
@@ -887,6 +1018,7 @@ export function AiSimulationChart({
             </ComposedChart>
           </ResponsiveContainer>
         </div>
+        </>
       ) : (
         <div
           className="mt-3 grid h-[300px] place-items-center rounded-[20px] bg-secondary px-4 text-center text-xs font-bold text-muted-foreground"

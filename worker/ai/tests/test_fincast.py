@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
 import importlib.util
@@ -20,6 +21,7 @@ from portfolio_ai_worker.fincast import (
     _remember_input_dtype,
     _restore_output_dtype,
     _restore_router_outputs,
+    fincast_interval_seconds,
     import_decoder_from_source,
     is_fincast_fp32_island_key,
     observe_fincast_decode_output_dtypes,
@@ -29,6 +31,8 @@ from portfolio_ai_worker.fincast import (
     validate_fincast_mixed_model_dtypes,
     verify_pinned_attention_softmax_structure,
 )
+from portfolio_ai_worker.adapters import InferenceSeries
+from portfolio_ai_worker.contracts import PriceBar
 from portfolio_ai_worker.precision_validation import (
     FinCastPrecisionValidation,
     MixedPrecisionMetrics,
@@ -168,6 +172,66 @@ def test_native_quantiles_use_deterministic_rearrangement_and_documented_tail_cl
     assert rearrange_native_quantiles(crossing) == (10, 20, 30, 40, 50, 60, 70, 80, 90)
     assert rearrange_native_quantiles(crossing) == rearrange_native_quantiles(crossing)
     assert project_native_quantiles(crossing) == projected
+
+
+@pytest.mark.parametrize("seconds", (15, 30, 60))
+def test_fincast_interval_seconds_accepts_supported_continuous_contexts(seconds: int) -> None:
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    bars = tuple(
+        PriceBar(
+            timestamp=start + timedelta(seconds=index * seconds),
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            volume=1,
+            amount=100,
+            complete=True,
+        )
+        for index in range(16)
+    )
+    series = InferenceSeries(
+        instrument_key="BTCUSDT",
+        bars=bars,
+        future_timestamps=tuple(
+            start + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+    )
+
+    assert fincast_interval_seconds(series) == seconds
+
+
+def test_fincast_interval_seconds_rejects_non_continuous_context() -> None:
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    timestamps = [
+        start + timedelta(seconds=index * 15)
+        for index in range(16)
+    ]
+    timestamps[-1] += timedelta(seconds=15)
+    series = InferenceSeries(
+        instrument_key="BTCUSDT",
+        bars=tuple(
+            PriceBar(
+                timestamp=timestamp,
+                open=100,
+                high=101,
+                low=99,
+                close=100,
+                volume=1,
+                amount=100,
+                complete=True,
+            )
+            for timestamp in timestamps
+        ),
+        future_timestamps=tuple(
+            start + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="continuous"):
+        fincast_interval_seconds(series)
 
 
 def test_native_quantile_rearrangement_leaves_monotonic_values_unchanged() -> None:

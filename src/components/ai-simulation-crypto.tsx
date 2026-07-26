@@ -18,6 +18,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  AI_SIMULATION_FINCAST_CANDLE_SECONDS,
   AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
 } from "@/lib/ai-simulation";
@@ -490,6 +491,11 @@ export function AiSimulationCryptoSetup({
     onRequestChange({
       ...request,
       modelLanes: next,
+      fincastCandleSeconds: (
+        next.length === 1 && next[0] === "fincast"
+          ? request.fincastCandleSeconds
+          : 60
+      ),
     });
   };
   const toggleManualSymbol = (symbol: string) => {
@@ -541,7 +547,7 @@ export function AiSimulationCryptoSetup({
         </section>
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <div className="rounded-2xl bg-secondary p-3">
           <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
           <p className="rounded-xl bg-card px-3 py-2.5 text-xs font-black" aria-label="암호화폐 대상 시장">
@@ -614,6 +620,33 @@ export function AiSimulationCryptoSetup({
             })}
           </div>
         </fieldset>
+        <label className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">
+            FinCast 모델 봉
+          </span>
+          <Select
+            value={String(request.fincastCandleSeconds)}
+            disabled={disabled || request.modelLanes.length !== 1 || request.modelLanes[0] !== "fincast"}
+            onValueChange={(value) => onRequestChange({
+              ...request,
+              fincastCandleSeconds: Number(value) as AiSimulationCryptoRequest["fincastCandleSeconds"],
+            })}
+          >
+            <SelectTrigger className="w-full bg-card" aria-label="FinCast 모델 입력 봉 간격">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AI_SIMULATION_FINCAST_CANDLE_SECONDS.map((seconds) => (
+                <SelectItem key={seconds} value={String(seconds)}>
+                  {seconds === 60 ? "1분봉" : `${seconds}초봉`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="mt-2 text-[8px] leading-4 text-muted-foreground">
+            15초·30초는 FinCast 단독 실행만 지원하며 화면 차트는 1분봉으로 유지됩니다.
+          </p>
+        </label>
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">

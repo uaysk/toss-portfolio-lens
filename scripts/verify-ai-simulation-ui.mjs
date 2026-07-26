@@ -392,12 +392,22 @@ function snapshot({
   if (request.market?.kind === "crypto_futures") {
     return cryptoSnapshot({ phase, request, cancelled });
   }
-  const symbols = request.selection.mode === "manual"
-    ? request.selection.symbols
-    : Array.from(
-        { length: request.selection.symbolCount },
-        (_, index) => index === 0 ? "SIM1" : "SIM2",
-      );
+  const pairSymbols = {
+    "qqq-tqqq-sqqq": ["QQQ", "TQQQ", "SQQQ"],
+    "smh-soxl-soxs": ["SMH", "SOXL", "SOXS"],
+  };
+  const symbols = request.strategy?.mode === "pair"
+    ? pairSymbols[request.strategy.pairId] ?? [
+      request.strategy.pairId.split("-")[0].toUpperCase(),
+      request.strategy.pairId.split("-")[1].toUpperCase(),
+      request.strategy.pairId.split("-")[2].toUpperCase(),
+    ]
+    : request.selection.mode === "manual"
+      ? request.selection.symbols
+      : Array.from(
+          { length: request.selection.symbolCount },
+          (_, index) => index === 0 ? "SIM1" : "SIM2",
+        );
   const selected = symbols.map((symbol, index) => ({
     symbol,
     name: index === 0 ? "가상 성장주" : "가상 모멘텀주",
@@ -553,6 +563,7 @@ function snapshot({
     equity: cancelled ? 2_525_000 : 2_536_000,
     progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
     selection: request.selection,
+    strategy: request.strategy,
     criterion: request.selection.mode === "auto" ? request.selection.criterion : "trading_amount",
     preset: request.preset,
     riskTolerance: request.riskTolerance,
@@ -1093,6 +1104,7 @@ async function verify(browser, baseUrl, viewport, theme) {
   let cryptoSetupScreenshot;
   let cryptoResultScreenshot;
   let inlineForecastScreenshot;
+  let pairLayoutScreenshot;
   try {
     await page.goto(`${baseUrl}/?simulation-ui=${viewport.width}#simulation`, {
       waitUntil: "domcontentloaded",
@@ -1173,6 +1185,20 @@ async function verify(browser, baseUrl, viewport, theme) {
       .waitFor({ timeout: 10_000 });
     await page.locator('[data-model-lane-toggle="fincast"]').click();
     await page.locator('[data-model-lane-toggle="fincast"][aria-pressed="true"]').waitFor();
+    const fincastCandleSelect = page.getByRole("combobox", {
+      name: "FinCast 모델 입력 봉 간격",
+    });
+    check(await fincastCandleSelect.isDisabled(), "모델 비교 중 FinCast 서브분봉 선택이 열려 있습니다.");
+    await page.locator('[data-model-lane-toggle="kronos_base"]').click();
+    await page.locator('[data-model-lane-toggle="kronos_base"][aria-pressed="false"]').waitFor();
+    check(await fincastCandleSelect.isEnabled(), "FinCast 단독 실행에서 서브분봉 선택이 비활성입니다.");
+    await fincastCandleSelect.click();
+    await page.getByRole("option", { name: "30초봉", exact: true }).click();
+    check(await fincastCandleSelect.textContent() === "30초봉", "FinCast 30초봉 선택이 반영되지 않았습니다.");
+    await page.locator('[data-model-lane-toggle="kronos_base"]').click();
+    await page.locator('[data-model-lane-toggle="kronos_base"][aria-pressed="true"]').waitFor();
+    check(await fincastCandleSelect.isDisabled(), "Kronos 비교 복귀 후 FinCast 서브분봉이 열려 있습니다.");
+    check(await fincastCandleSelect.textContent() === "1분봉", "Kronos 비교 복귀 시 공통 1분봉으로 재설정되지 않았습니다.");
     await cryptoRiskPerTrade.fill("0.4");
     await cryptoMaximumLeverage.fill("12");
     check(
@@ -1270,6 +1296,58 @@ async function verify(browser, baseUrl, viewport, theme) {
     ).first().waitFor();
     const cryptoCharts = cryptoRunPanel.locator("[data-simulation-charts] [data-ai-simulation-chart]");
     check(await cryptoCharts.count() === 2, "암호화폐 BTC·ETH 분봉 차트가 각각 표시되지 않았습니다.");
+    await cryptoRunPanel.locator(
+      '[data-simulation-charts][data-simulation-chart-layout="crypto-full-width"]',
+    ).waitFor();
+    const cryptoChartWidths = await cryptoRunPanel.locator("[data-simulation-charts]")
+      .evaluate((grid) => {
+        const gridWidth = grid.getBoundingClientRect().width;
+        return Array.from(grid.querySelectorAll("[data-ai-simulation-chart]")).map(
+          (chart) => chart.getBoundingClientRect().width / gridWidth,
+        );
+      });
+    check(
+      cryptoChartWidths.every((ratio) => ratio > 0.98),
+      `암호화폐 차트가 전체 폭을 사용하지 않습니다: ${JSON.stringify(cryptoChartWidths)}`,
+    );
+    await cryptoCharts.first().locator("[data-ai-simulation-hover-metrics]").waitFor();
+    const hoverMetrics = cryptoCharts.first().locator("[data-ai-simulation-hover-metrics]");
+    const hoverBefore = await hoverMetrics.textContent();
+    const priceChartBox = await cryptoCharts.first().locator("[data-ai-simulation-price-chart]")
+      .boundingBox();
+    check(Boolean(priceChartBox), "암호화폐 차트 hover 검증 좌표를 계산하지 못했습니다.");
+    await cryptoCharts.first().locator("[data-ai-simulation-price-chart]").evaluate((chart) => {
+      const bounds = chart.getBoundingClientRect();
+      chart.dispatchEvent(new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: bounds.left + bounds.width * 0.15,
+        clientY: bounds.top + bounds.height * 0.5,
+      }));
+    });
+    await page.waitForFunction((previous) => (
+      document.querySelector('[data-ai-simulation-chart="BTCUSDT"] [data-ai-simulation-hover-metrics]')
+        ?.textContent !== previous
+    ), hoverBefore);
+    check(
+      await cryptoCharts.first().locator(".recharts-tooltip-wrapper").evaluate(
+        (element) => getComputedStyle(element).display === "none",
+      ),
+      "마우스 추적 tooltip이 차트 내부에 남아 있습니다.",
+    );
+    const expandButton = cryptoCharts.first().getByRole("button", {
+      name: "BTCUSDT 차트 전체화면 확대",
+    });
+    await expandButton.click();
+    await page.waitForFunction(() => (
+      document.querySelector('[data-ai-simulation-chart="BTCUSDT"]')
+        ?.getAttribute("data-ai-simulation-chart-expanded") === "true"
+    ));
+    await cryptoCharts.first().locator('[data-ai-simulation-indicator-badge="rsi"]').waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => (
+      document.querySelector('[data-ai-simulation-chart="BTCUSDT"]')
+        ?.getAttribute("data-ai-simulation-chart-expanded") === "false"
+    ));
     for (const lane of ["kronos_base", "fincast"]) {
       await cryptoCharts.first().locator(
         `[data-ai-simulation-model-forecast="${lane}"][data-ai-simulation-model-forecast-origin="exact-final"]`,
@@ -1355,8 +1433,6 @@ async function verify(browser, baseUrl, viewport, theme) {
     await cryptoHistoryReport.getByText("ETHUSDT · 숏 진입", { exact: true }).waitFor();
     await cryptoHistoryReport.getByText("Kronos-base · FinCast lane·판단 주기", { exact: true }).waitFor();
 
-    const startsBeforeStock = state.starts.length;
-    const cancelsBeforeStock = state.cancels.length;
     await assetClassControl.getByRole("radio", { name: /주식/ }).click();
     await page.locator('[data-simulation-asset-class="stock"]').waitFor();
 
@@ -1379,6 +1455,42 @@ async function verify(browser, baseUrl, viewport, theme) {
       await page.getByRole("spinbutton", { name: "매도 거래세 bps" }).inputValue() === "0",
       "페어 모드 전환 시 미국 매도 거래세 기본값 0bps가 적용되지 않았습니다.",
     );
+    const pairStartButton = page.getByRole("button", { name: "AI 시뮬레이션 시작", exact: true });
+    await pairStartButton.click();
+    await page.locator("[data-simulation-run]")
+      .getByText("시뮬레이션 진행", { exact: true })
+      .waitFor({ timeout: 10_000 });
+    const pairChartGrid = page.locator(
+      '[data-simulation-charts][data-simulation-chart-layout="pair-primary-full-width"]',
+    );
+    await pairChartGrid.waitFor();
+    const pairCharts = pairChartGrid.locator("[data-ai-simulation-chart]");
+    check(await pairCharts.count() === 3, "SNDK 페어 차트 3개가 표시되지 않았습니다.");
+    check(
+      JSON.stringify(await pairCharts.evaluateAll((charts) => charts.map(
+        (chart) => chart.getAttribute("data-ai-simulation-chart"),
+      ))) === JSON.stringify(["SNDK", "SNXX", "SNDQ"]),
+      "SNDK가 상단 첫 차트로 배치되지 않았습니다.",
+    );
+    const pairWidths = await pairChartGrid.evaluate((grid) => {
+      const width = grid.getBoundingClientRect().width;
+      return Array.from(grid.querySelectorAll("[data-ai-simulation-chart]")).map(
+        (chart) => chart.getBoundingClientRect().width / width,
+      );
+    });
+    check(pairWidths[0] > 0.98, `SNDK 상단 차트가 전체 폭이 아닙니다: ${JSON.stringify(pairWidths)}`);
+    pairLayoutScreenshot = path.join(
+      screenshotDirectory,
+      `${viewport.width}x${viewport.height}-${theme}-pair-layout.png`,
+    );
+    await pairChartGrid.screenshot({ path: pairLayoutScreenshot, animations: "disabled" });
+    await page.getByRole("button", { name: "테스트 중단", exact: true }).click();
+    await page.locator("[data-simulation-run]")
+      .getByText("취소됨", { exact: true })
+      .waitFor({ timeout: 10_000 });
+
+    const startsBeforeStock = state.starts.length;
+    const cancelsBeforeStock = state.cancels.length;
     await strategyGroup.getByRole("radio", { name: "단일", exact: true }).click();
     await page.getByRole("combobox", { name: "시뮬레이션 대상 시장" }).click();
     await page.getByRole("option", { name: "국내", exact: true }).click();
@@ -1652,6 +1764,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       errors,
       cryptoSetupScreenshot,
       cryptoResultScreenshot,
+      pairLayoutScreenshot,
       inlineForecastScreenshot,
       screenshot,
     };

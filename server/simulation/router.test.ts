@@ -147,6 +147,7 @@ describe("AI paper simulation session-only router", () => {
         slippageBpsPerSide: 2,
       },
       modelLanes: ["kronos_base"],
+      fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     }, "owner");
     expect(response.status).toHaveBeenCalledWith(202);

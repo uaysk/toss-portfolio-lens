@@ -146,6 +146,7 @@ function simulationRequest(
       slippageBpsPerSide: 1,
     },
     modelLanes: lanes,
+    fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };
 }
@@ -1662,6 +1663,80 @@ describe("CryptoPaperRuntime", () => {
     expect(result.terminalFailure?.code).toBe(
       "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
     );
+  });
+
+  it("uses finalized 15-second aggTrade bars only for FinCast input while keeping the chart at one minute", async () => {
+    const clock = new ScheduledClock();
+    const observed: AiForecastRequest[] = [];
+    const client = laneClient("fincast", START + 15_002, flatReturns, observed);
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(START + 14_980),
+      { at: START + 1, event: aggTrade(START + 1) },
+      { at: START + 15_001, event: aggTrade(START + 15_001, 101) },
+    ]);
+    const historicalTrades = Array.from({ length: 64 }, (_, index) => {
+      const executedAt = START - (64 - index) * 15_000 + 1;
+      return {
+        a: index + 1,
+        p: String(100 + index / 1_000),
+        q: "1",
+        T: executedAt,
+        m: false,
+      };
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: {
+        ...rest(),
+        aggregateTrades: vi.fn().mockResolvedValue(historicalTrades),
+      },
+      streams,
+      laneClients: { fincast: client },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const taskContext = context();
+    const request = {
+      ...simulationRequest(["fincast"]),
+      fincastCandleSeconds: 15 as const,
+    };
+    const result = await runtime.run({
+      request,
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: taskContext.value,
+    });
+
+    expect(observed).toHaveLength(1);
+    const sentBars = observed[0]!.series[0]!.bars;
+    expect(sentBars).toHaveLength(64);
+    expect(sentBars.slice(1).every((bar, index) => (
+      Date.parse(bar.timestamp) - Date.parse(sentBars[index]!.timestamp) === 15_000
+    ))).toBe(true);
+    expect(Date.parse(observed[0]!.series[0]!.input_end_at)).toBe(START + 14_999);
+    expect(observed[0]!.series[0]!.future_timestamps.slice(1).every(
+      (timestamp, index) => (
+        Date.parse(timestamp)
+        - Date.parse(observed[0]!.series[0]!.future_timestamps[index]!)
+        === 60_000
+      ),
+    )).toBe(true);
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.decisionCadence).toMatchObject({
+      trigger: "final_fincast_15s_aggtrade_bar",
+      modelCandleSeconds: 15,
+      triggeredEvents: 1,
+    });
+    expect(terminal.capabilities).toMatchObject({
+      modelCandleSeconds: 15,
+      chartCandleSeconds: 60,
+      realOrder: false,
+    });
+    expect((terminal.charts as Array<{ bars: Array<{ timestamp: string }> }>)[0]!.bars
+      .every((bar, index, values) => (
+        index === 0
+        || Date.parse(bar.timestamp) - Date.parse(values[index - 1]!.timestamp) === 60_000
+      ))).toBe(true);
   });
 
   it("drains risk streams during deferred inference and fills only after the completion watermark", async () => {

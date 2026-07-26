@@ -127,6 +127,7 @@ function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
       slippageBpsPerSide: 10,
     },
     modelLanes: ["kronos_base"],
+    fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };
 }

@@ -582,6 +582,18 @@ def project_native_quantiles(values: Sequence[float]) -> dict[float, float]:
     return projected
 
 
+def fincast_interval_seconds(item: InferenceSeries) -> int:
+    if len(item.bars) < 2:
+        raise ValueError("FinCast requires at least two timestamped context bars")
+    deltas = tuple(
+        int((right.timestamp - left.timestamp).total_seconds())
+        for left, right in zip(item.bars[-16:-1], item.bars[-15:], strict=True)
+    )
+    if not deltas or len(set(deltas)) != 1 or deltas[0] not in (15, 30, 60):
+        raise ValueError("FinCast context bars must use a continuous 15s, 30s, or 60s interval")
+    return deltas[0]
+
+
 class FinCastAdapter:
     def __init__(
         self,
@@ -648,6 +660,11 @@ class FinCastAdapter:
             return []
         if any(len(item.bars) < self._context_bars for item in series):
             raise ValueError("FinCast requires 512 complete context bars")
+        intervals = tuple(fincast_interval_seconds(item) for item in series)
+        if len(set(intervals)) != 1:
+            raise ValueError("FinCast batch series must use the same candle interval")
+        interval_seconds = intervals[0]
+        native_horizon_steps = max(FIXED_HORIZONS) * 60 // interval_seconds
         torch = self._runtime.torch
         dtype = torch.float16 if self._precision == "mixed_float16" else torch.float32
         torch.manual_seed(seed)
@@ -658,7 +675,7 @@ class FinCastAdapter:
         ]
         input_ts = torch.tensor(contexts, dtype=dtype, device=self._runtime.name)
         paddings = torch.zeros(
-            (len(series), self._context_bars + max(FIXED_HORIZONS)),
+            (len(series), self._context_bars + native_horizon_steps),
             dtype=dtype,
             device=self._runtime.name,
         )
@@ -668,7 +685,7 @@ class FinCastAdapter:
                 input_ts=input_ts,
                 paddings=paddings,
                 freq=frequency,
-                horizon_len=max(FIXED_HORIZONS),
+                horizon_len=native_horizon_steps,
                 output_patch_len=128,
                 max_len=self._context_bars,
                 return_forecast_on_context=False,
@@ -680,7 +697,8 @@ class FinCastAdapter:
         for item, forecast in zip(series, values, strict=True):
             close_quantiles: dict[int, dict[float, float]] = {}
             for horizon in FIXED_HORIZONS:
-                row = forecast[horizon - 1]
+                native_step = horizon * 60 // interval_seconds
+                row = forecast[native_step - 1]
                 if len(row) != 1 + len(NATIVE_QUANTILES) or not all(math.isfinite(float(value)) for value in row):
                     raise ValueError("FinCast returned an invalid forecast tensor")
                 close_quantiles[horizon] = project_native_quantiles(row[1:])

@@ -38,6 +38,7 @@ describe("AI paper simulation contracts", () => {
       riskTolerance: 50,
       costs: DEFAULT_SIMULATION_COSTS,
       modelLanes: ["kronos_base"],
+      fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     });
   });
@@ -60,6 +61,24 @@ describe("AI paper simulation contracts", () => {
     });
     expect(parsed.riskLimits).toEqual(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS);
     expect(JSON.parse(JSON.stringify(parsed))).not.toHaveProperty("marketCountry");
+    expect(schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      modelLanes: ["fincast"],
+      fincastCandleSeconds: 15,
+      execution: { mode: "paper" },
+    }).fincastCandleSeconds).toBe(15);
+    expect(() => schema.parse({
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 120,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      modelLanes: ["kronos_base", "fincast"],
+      fincastCandleSeconds: 30,
+      execution: { mode: "paper" },
+    })).toThrow("FinCast 단독 lane");
     expect(schema.parse({
       market: cryptoMarket,
       initialCash: 10_000,
