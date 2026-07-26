@@ -4,6 +4,7 @@ import {
   AiForecastRequestSchema,
   AiHorizonForecastSchema,
   AiResponseSchema,
+  AiSeriesCadenceSchema,
   AiTargetStopBoundsSchema,
   aiRequestBase,
   type AiResponse,
@@ -196,6 +197,40 @@ function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed
 }
 
 describe("AI worker response contract", () => {
+  it("forecast/evaluate series의 명시적 입력 cadence를 strict하게 검증한다", () => {
+    expect(AiSeriesCadenceSchema.parse({
+      candle_seconds: 15,
+      gap_policy: "continuous",
+    })).toEqual({
+      candle_seconds: 15,
+      gap_policy: "continuous",
+    });
+    expect(AiSeriesCadenceSchema.parse({
+      candle_seconds: 30,
+      gap_policy: "continuous",
+    })).toEqual({
+      candle_seconds: 30,
+      gap_policy: "continuous",
+    });
+    expect(AiSeriesCadenceSchema.parse({
+      candle_seconds: 60,
+      gap_policy: "market_session_prevalidated",
+    })).toEqual({
+      candle_seconds: 60,
+      gap_policy: "market_session_prevalidated",
+    });
+
+    expect(() => AiSeriesCadenceSchema.parse({
+      candle_seconds: 30,
+      gap_policy: "market_session_prevalidated",
+    })).toThrow(/one-minute candles/);
+    expect(() => AiSeriesCadenceSchema.parse({
+      candle_seconds: 60,
+      gap_policy: "continuous",
+      inferred: true,
+    })).toThrow();
+  });
+
   it("target/stop path bounds의 완전성과 확률 항등식을 엄격히 검증한다", () => {
     expect(AiTargetStopBoundsSchema.parse({
       status: "available",
@@ -339,6 +374,10 @@ describe("AI worker response contract", () => {
       series: [{
         instrument_key: "005930",
         timezone: "Asia/Seoul",
+        input_cadence: {
+          candle_seconds: 60 as const,
+          gap_policy: "market_session_prevalidated" as const,
+        },
         bars,
         origins: [{
           origin: time(1),
@@ -352,7 +391,13 @@ describe("AI worker response contract", () => {
         slippage_bps_per_side: 2,
       },
     };
-    expect(AiEvaluateRequestSchema.parse(request).series[0]?.origins).toHaveLength(1);
+    expect(AiEvaluateRequestSchema.parse(request).series[0]).toMatchObject({
+      input_cadence: {
+        candle_seconds: 60,
+        gap_policy: "market_session_prevalidated",
+      },
+      origins: expect.any(Array),
+    });
     request.series[0]!.origins[0]!.future_timestamps[12] = time(61);
     expect(() => AiEvaluateRequestSchema.parse(request)).toThrow(/next 60 bars exactly/);
   });
@@ -381,6 +426,10 @@ describe("AI worker response contract", () => {
     const at = "2026-07-21T00:00:00.000Z";
     const series = {
       instrument_key: "005930", timezone: "Asia/Seoul", input_end_at: at,
+      input_cadence: {
+        candle_seconds: 30 as const,
+        gap_policy: "continuous" as const,
+      },
       bars: [{ timestamp: at, open: 100, high: 101, low: 99, close: 100, complete: true as const }],
       future_timestamps: Array.from({ length: 60 }, (_, index) => (
         new Date(Date.parse(at) + (index + 1) * 60_000).toISOString()
@@ -389,6 +438,12 @@ describe("AI worker response contract", () => {
     expect(() => AiForecastRequestSchema.parse({
       ...aiRequestBase("duplicate-series"), mode: "forecast", series: [series, series],
     })).toThrow(/must be unique/);
+    expect(AiForecastRequestSchema.parse({
+      ...aiRequestBase("cadence-series"), mode: "forecast", series: [series],
+    }).series[0]?.input_cadence).toEqual({
+      candle_seconds: 30,
+      gap_policy: "continuous",
+    });
   });
 
   it("model loaded 상태와 runtime provenance 불일치를 거부한다", () => {

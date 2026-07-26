@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -10,9 +11,14 @@ from portfolio_ai_worker.contracts import (
     ForecastSeries,
     HorizonForecast,
     PriceBar,
+    SeriesCadence,
     TargetStopSpec,
 )
-from portfolio_ai_worker.postprocess import first_passage_outcome, postprocess_prediction
+from portfolio_ai_worker.postprocess import (
+    first_passage_outcome,
+    input_quality,
+    postprocess_prediction,
+)
 
 from .helpers import bars, future
 
@@ -20,6 +26,35 @@ from .helpers import bars, future
 def _constant_path(base: float, first: PredictedBar) -> tuple[PredictedBar, ...]:
     rest = PredictedBar(open=base, high=base, low=base, close=base)
     return (first, *(rest for _ in range(59)))
+
+
+def test_prevalidated_market_session_gap_does_not_degrade_input_quality() -> None:
+    history = bars(80)
+    session_history = tuple(
+        bar
+        if index < 40
+        else bar.model_copy(update={"timestamp": bar.timestamp + timedelta(hours=16)})
+        for index, bar in enumerate(history)
+    )
+    market_session = SeriesCadence(
+        candle_seconds=60,
+        gap_policy="market_session_prevalidated",
+    )
+
+    approved = input_quality(session_history, market_session)
+    legacy = input_quality(session_history)
+    continuous = input_quality(
+        session_history,
+        SeriesCadence(candle_seconds=60, gap_policy="continuous"),
+    )
+
+    assert approved.status == "good"
+    assert approved.irregular_interval_count == 0
+    assert approved.warnings == ()
+    assert legacy.status == "partial"
+    assert legacy.irregular_interval_count == 1
+    assert continuous.status == "partial"
+    assert continuous.irregular_interval_count == 1
 
 
 def test_sample_paths_return_quantiles_and_first_passage_bounds() -> None:

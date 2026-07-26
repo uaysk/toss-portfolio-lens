@@ -45,6 +45,20 @@ export const AiTargetStopSchema = z.object({
   stop_price: positive,
 }).strict().refine((item) => item.target_price !== item.stop_price, "target and stop must differ");
 
+export const AiSeriesCadenceSchema = z.object({
+  candle_seconds: z.union([z.literal(15), z.literal(30), z.literal(60)]),
+  gap_policy: z.enum(["continuous", "market_session_prevalidated"]),
+}).strict().superRefine((cadence, context) => {
+  if (cadence.gap_policy === "market_session_prevalidated" && cadence.candle_seconds !== 60) {
+    context.addIssue({
+      code: "custom",
+      path: ["candle_seconds"],
+      message: "market-session FinCast inputs must use one-minute candles",
+    });
+  }
+});
+export type AiSeriesCadence = z.infer<typeof AiSeriesCadenceSchema>;
+
 const futureTimestamps = z.array(timestamp).length(60).superRefine((items, context) => {
   for (let index = 1; index < items.length; index += 1) {
     if (timestampMillis(items[index]!) <= timestampMillis(items[index - 1]!)) {
@@ -100,6 +114,7 @@ const ForecastSeriesSchema = z.object({
   future_timestamps: futureTimestamps,
   bars: z.array(AiPriceBarSchema).min(1).max(20_000),
   target_stop: AiTargetStopSchema.nullable().optional(),
+  input_cadence: AiSeriesCadenceSchema.nullable().optional(),
 }).strict().superRefine((series, context) => {
   validateChronologicalBars(series.bars, context);
   const last = series.bars.at(-1);
@@ -131,6 +146,7 @@ const EvaluationSeriesSchema = z.object({
   timezone: z.string().min(1).max(64),
   bars: z.array(AiPriceBarSchema).min(1).max(100_000),
   origins: z.array(EvaluationOriginSchema).min(1).max(10_000),
+  input_cadence: AiSeriesCadenceSchema.nullable().optional(),
 }).strict().superRefine((series, context) => {
   validateChronologicalBars(series.bars, context);
   const barIndexByInstant = new Map<number, number>();
@@ -298,7 +314,7 @@ export type QuantileRearrangementObservations = z.infer<
   typeof QuantileRearrangementObservationsSchema
 >;
 
-const ModelProvenanceSchema = z.object({
+export const AiModelProvenanceSchema = z.object({
   model_id: z.string().min(1).max(256),
   model_revision: z.string().min(1).max(256),
   tokenizer_id: z.string().min(1).max(256).nullable().optional(),
@@ -460,6 +476,7 @@ const ModelProvenanceSchema = z.object({
     }
   }
 });
+export type AiModelProvenance = z.infer<typeof AiModelProvenanceSchema>;
 
 const UnavailableSchema = z.object({
   code: z.string().min(1).max(64),
@@ -623,7 +640,7 @@ const ModelRunSchema = z.object({
   role: z.enum(["kronos_base", "fincast"]),
   expected_model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID]),
   status: z.enum(["available", "partial", "unavailable"]),
-  model: ModelProvenanceSchema,
+  model: AiModelProvenanceSchema,
   generated_at: timestamp,
   latency_ms: nonnegative,
   degraded: z.boolean(),
@@ -847,7 +864,7 @@ export const AiResponseSchema = z.object({
   request_id: requestId,
   mode: z.enum(["forecast", "evaluate"]),
   status: z.enum(["available", "partial", "unavailable"]),
-  model: ModelProvenanceSchema,
+  model: AiModelProvenanceSchema,
   generated_at: timestamp,
   series: z.array(SeriesForecastResultSchema).max(10_000),
   model_runs: z.array(ModelRunSchema).length(1).nullable().optional(),

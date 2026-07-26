@@ -279,12 +279,18 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     } else {
       if (
         input.modelLanes.length !== 1
-        || input.modelLanes[0] !== "kronos_base"
       ) {
         context.addIssue({
           code: "custom",
           path: ["modelLanes"],
-          message: "주식 시뮬레이션은 검증된 Kronos-base lane만 지원합니다.",
+          message: "주식 시뮬레이션은 독립 원장을 보장하기 위해 한 번에 하나의 모델 lane만 지원합니다.",
+        });
+      }
+      if (input.strategy?.mode === "pair" && input.modelLanes[0] !== "kronos_base") {
+        context.addIssue({
+          code: "custom",
+          path: ["modelLanes"],
+          message: "주식 페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.",
         });
       }
       if (input.initialCash < 100_000) {

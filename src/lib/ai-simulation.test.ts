@@ -15,6 +15,8 @@ import {
 describe("AI simulation request validation", () => {
   it("defaults to the backward-compatible single strategy", () => {
     expect(DEFAULT_AI_SIMULATION_REQUEST.strategy).toEqual({ mode: "single" });
+    expect(DEFAULT_AI_SIMULATION_REQUEST.modelLanes).toEqual(["kronos_base"]);
+    expect(DEFAULT_AI_SIMULATION_REQUEST.execution).toEqual({ mode: "paper" });
     expect(AI_SIMULATION_PAIR_CATALOG.map(({ id, label }) => ({ id, label }))).toEqual([
       { id: "sndk-snxx-sndq", label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)" },
       { id: "soxx-soxl-soxs", label: "SOXX · SOXL · SOXS" },
@@ -56,6 +58,29 @@ describe("AI simulation request validation", () => {
       ...DEFAULT_AI_SIMULATION_REQUEST,
       selection: { mode: "manual", symbols: ["NVDA", "nvda"] },
     })).toContain("직접 선택 종목은 중복될 수 없습니다.");
+  });
+
+  it("accepts one FinCast stock lane and rejects FinCast pair or dual-lane execution", () => {
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      modelLanes: ["fincast"],
+    })).toEqual([]);
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      marketCountry: "US",
+      modelLanes: ["fincast"],
+      strategy: {
+        mode: "pair",
+        pairId: "qqq-tqqq-sqqq",
+        allowDegradedMode: false,
+      },
+    })).toContain("페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.");
+    expect(validateAiSimulationRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      modelLanes: ["kronos_base", "fincast"],
+    } as unknown as AiSimulationRequest)).toContain(
+      "주식 시뮬레이션 모델은 Kronos-base 또는 FinCast 중 하나여야 합니다.",
+    );
   });
 
   it("applies server-provided cash and duration limits without inventing values", () => {

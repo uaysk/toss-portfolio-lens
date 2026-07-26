@@ -87,6 +87,12 @@ import {
   CandidateUniverseService,
   type CandidateUniverseSelector,
 } from "./candidate-universe-service.js";
+import {
+  FINCAST_MAX_CALENDAR_DAYS_PER_OPERATION,
+  validateFincastFutureTimestamps,
+  validateFincastMarketSequence,
+  type FincastMarketCadenceUnavailableCode,
+} from "./fincast-market-cadence.js";
 
 export {
   SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
@@ -101,6 +107,7 @@ export type {
 } from "./api-contracts.js";
 
 const MINUTE_MS = 60_000;
+const FINCAST_CONTEXT_BARS = 512;
 const MARKET_CALENDAR_LOOKAHEAD_DAYS = 14;
 const DEFAULT_WORKSPACE_CONTEXT_TTL_MS = 5 * 60_000;
 const DEFAULT_WORKSPACE_CONTEXT_MAXIMUM_ENTRIES = 64;
@@ -609,12 +616,27 @@ type BarLoadOptions = {
   maximumBars?: number;
   forceLatestRefresh?: boolean;
   skipAutomaticRefresh?: boolean;
+  allowBeyondWorkspaceLimit?: boolean;
 };
 
 type ScalpingComputationOptions = {
   signal?: AbortSignal;
   skipAutomaticRefresh?: boolean;
   maximumInputEndAt?: string;
+};
+
+export type ScalpingForecastModelLane = "kronos_base" | "fincast";
+
+type ScalpingForecastOptions = ScalpingComputationOptions & {
+  /**
+   * Selects one independent worker. A missing worker is reported unavailable;
+   * the service never substitutes the other model as a fallback.
+   */
+  modelLane?: ScalpingForecastModelLane;
+};
+
+type ScalpingEvaluationOptions = {
+  modelLane?: ScalpingForecastModelLane;
 };
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -757,6 +779,7 @@ export class ScalpingService {
     private readonly tradeMarkers: TradeMarkerSource | undefined,
     private readonly config: ScalpingServiceConfig,
     candidateUniverse?: CandidateUniverseSelector,
+    private readonly fincastAi?: AiService,
   ) {
     if (!Number.isInteger(config.maximumSubscriptions)
       || config.maximumSubscriptions < config.maximumTopCount * 3) {
@@ -1103,17 +1126,36 @@ export class ScalpingService {
 
   async forecast(
     input: ScalpingForecastRequest,
-    options: ScalpingComputationOptions = {},
+    options: ScalpingForecastOptions = {},
   ): Promise<ScalpingForecastResult> {
     throwIfAborted(options.signal);
     const request = this.forecastRequestSchema.parse(input);
-    if (!this.ai || !this.rust) {
-      return { forecast: { status: "unavailable", code: !this.ai ? "ai_worker_unavailable" : "rust_worker_unavailable" }, predictions: [] };
+    const modelLane = options.modelLane ?? "kronos_base";
+    const forecastAi = modelLane === "fincast" ? this.fincastAi : this.ai;
+    if (!forecastAi || !this.rust) {
+      return {
+        forecast: {
+          status: "unavailable",
+          code: !forecastAi
+            ? modelLane === "fincast"
+              ? "fincast_worker_unavailable"
+              : "ai_worker_unavailable"
+            : "rust_worker_unavailable",
+        },
+        predictions: [],
+      };
     }
-    const forecastHistoryLimit = this.forecastHistoryBarLimit(request.marketCountry);
+    const contextBarCount = modelLane === "fincast"
+      ? FINCAST_CONTEXT_BARS
+      : this.config.forecastMaximumBars;
+    const forecastHistoryLimit = this.forecastHistoryBarLimit(
+      request.marketCountry,
+      contextBarCount,
+    );
     let barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry, {
       maximumBars: forecastHistoryLimit,
       skipAutomaticRefresh: true,
+      allowBeyondWorkspaceLimit: modelLane === "fincast",
     });
     throwIfAborted(options.signal);
     const refreshCutoff = this.now();
@@ -1129,6 +1171,7 @@ export class ScalpingService {
       const refreshed = await this.loadBars(refreshSymbols, 1, request.marketCountry, {
         maximumBars: forecastHistoryLimit,
         forceLatestRefresh: true,
+        allowBeyondWorkspaceLimit: modelLane === "fincast",
       });
       barsBySymbol = new Map(barsBySymbol);
       for (const symbol of refreshSymbols) {
@@ -1157,25 +1200,34 @@ export class ScalpingService {
     const forecastCutoff = this.now();
     const unavailable: Array<{ symbol: string; code: string }> = [];
     const series: AiForecastRequest["series"] = [];
-    const calendarByMarketDate = new Map<string, Promise<TossMarketCalendarDay | undefined>>();
-    const loadMarketCalendar = (marketCountry: MarketCountry, sessionDate: string) => {
-      const key = `${marketCountry}:${sessionDate}`;
-      const existing = calendarByMarketDate.get(key);
-      if (existing) return existing;
-      const pending = this.safe(
-        () => this.toss.getMarketCalendar(marketCountry, sessionDate),
-        "toss_market_calendar",
-      ).then(({ value }) => value);
-      calendarByMarketDate.set(key, pending);
-      return pending;
-    };
+    const loadMarketCalendar = this.boundedMarketCalendarLoader();
     for (const symbol of request.symbols) {
       throwIfAborted(options.signal);
       const session = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
-      const finalBars = session.bars.slice(-this.config.forecastMaximumBars);
-      if (finalBars.length < this.config.forecastMinimumBars) {
-        unavailable.push({ symbol, code: "insufficient_history" });
+      const finalBars = session.bars.slice(-contextBarCount);
+      const minimumContextBars = modelLane === "fincast"
+        ? FINCAST_CONTEXT_BARS
+        : this.config.forecastMinimumBars;
+      if (finalBars.length < minimumContextBars) {
+        unavailable.push({
+          symbol,
+          code: modelLane === "fincast"
+            ? "insufficient_fincast_context"
+            : "insufficient_history",
+        });
         continue;
+      }
+      if (modelLane === "fincast") {
+        const cadence = await validateFincastMarketSequence({
+          bars: finalBars,
+          marketCountry: request.marketCountry,
+          loadCalendar: (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+          krWindows: session.windows,
+        });
+        if (cadence.status === "unavailable") {
+          unavailable.push({ symbol, code: cadence.code });
+          continue;
+        }
       }
       let usSchedule: ConfirmedUsSessionSchedule | undefined;
       if (request.marketCountry === "US") {
@@ -1199,6 +1251,20 @@ export class ScalpingService {
         unavailable.push({ symbol, code: future.code });
         continue;
       }
+      if (modelLane === "fincast") {
+        const cadence = await validateFincastFutureTimestamps({
+          last: finalBars.at(-1)!,
+          futureTimestamps: future.timestamps,
+          marketCountry: request.marketCountry,
+          loadCalendar: (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+          krWindows: session.windows,
+          lookaheadDays: MARKET_CALENDAR_LOOKAHEAD_DAYS,
+        });
+        if (cadence.status === "unavailable") {
+          unavailable.push({ symbol, code: cadence.code });
+          continue;
+        }
+      }
       series.push({
         instrument_key: symbol,
         timezone: marketTimeZone(request.marketCountry),
@@ -1206,6 +1272,12 @@ export class ScalpingService {
         future_timestamps: future.timestamps,
         bars: finalBars.map((bar) => this.aiBar(bar)),
         target_stop: targetStopFromAnalysis(analysis, symbol) ?? null,
+        ...(modelLane === "fincast" ? {
+          input_cadence: {
+            candle_seconds: 60 as const,
+            gap_policy: "market_session_prevalidated" as const,
+          },
+        } : {}),
       });
     }
     const dispatchCutoff = this.now();
@@ -1223,7 +1295,7 @@ export class ScalpingService {
       })),
     };
     throwIfAborted(options.signal);
-    const output = await this.ai.forecast({
+    const output = await forecastAi.forecast({
       schema_version: SCALPING_AI_SCHEMA_VERSION,
       request_id: `forecast:${randomUUID()}`,
       mode: "forecast",
@@ -1364,33 +1436,116 @@ export class ScalpingService {
     }
   }
 
-  async evaluate(input: ScalpingEvaluationRequest, ownerSubject = "owner") {
+  async evaluate(
+    input: ScalpingEvaluationRequest,
+    ownerSubject = "owner",
+    options: ScalpingEvaluationOptions = {},
+  ) {
     const request = this.evaluationRequestSchema.parse(input);
-    if (!this.ai || !this.rust) throw new Error(!this.ai ? "AI worker is unavailable." : "Rust worker is unavailable.");
-    const barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry);
+    const modelLane = options.modelLane ?? "kronos_base";
+    const evaluationAi = modelLane === "fincast" ? this.fincastAi : this.ai;
+    if (!evaluationAi || !this.rust) {
+      throw new Error(!evaluationAi
+        ? `${modelLane === "fincast" ? "FinCast" : "AI"} worker is unavailable.`
+        : "Rust worker is unavailable.");
+    }
+    const evaluationHistoryLimit = modelLane === "fincast"
+      ? Math.max(
+          this.forecastHistoryBarLimit(request.marketCountry, FINCAST_CONTEXT_BARS),
+          FINCAST_CONTEXT_BARS
+            + 60
+            + Math.max(0, this.config.evaluationMaximumOrigins - 1)
+              * this.config.evaluationOriginStrideBars,
+        )
+      : undefined;
+    const barsBySymbol = await this.loadBars(
+      request.symbols,
+      1,
+      request.marketCountry,
+      evaluationHistoryLimit === undefined
+        ? {}
+        : {
+            maximumBars: evaluationHistoryLimit,
+            allowBeyondWorkspaceLimit: true,
+          },
+    );
     const metadata = await this.instrumentMetadata(request.symbols);
     const baseOriginQuota = Math.floor(this.config.evaluationMaximumOrigins / request.symbols.length);
     const originRemainder = this.config.evaluationMaximumOrigins % request.symbols.length;
     const originIndexesBySymbol = new Map<string, number[]>();
     const signalSnapshotTimestamps = new Map<string, string[]>();
+    const fincastSeriesRangeBySymbol = new Map<string, { start: number; end: number }>();
+    const fincastExclusionBySymbol = new Map<string, FincastMarketCadenceUnavailableCode>();
+    const loadMarketCalendar = this.boundedMarketCalendarLoader();
     for (const [symbolIndex, symbol] of request.symbols.entries()) {
       const session = this.instrumentSessionBars(barsBySymbol.get(symbol) ?? [], request.marketCountry);
       const finalBars = session.bars;
       const candidateIndexes: number[] = [];
-      for (let index = this.config.forecastMinimumBars - 1; index + 60 < finalBars.length; index += this.config.evaluationOriginStrideBars) {
+      const firstContextEndIndex = modelLane === "fincast"
+        ? FINCAST_CONTEXT_BARS - 1
+        : this.config.forecastMinimumBars - 1;
+      for (let index = firstContextEndIndex; index + 60 < finalBars.length; index += this.config.evaluationOriginStrideBars) {
         const window = finalBars.slice(index, index + 61);
-        if (window.length === 61 && window.every((bar, offset) => (
-          bar.sessionDate === window[0]!.sessionDate
-          && (offset === 0 || adjacentActiveMinuteBars(
-            window[offset - 1]!,
-            bar,
-            request.marketCountry,
-            session.windows,
+        if (window.length === 61 && (
+          modelLane === "fincast"
+          || window.every((bar, offset) => (
+            bar.sessionDate === window[0]!.sessionDate
+            && (offset === 0 || adjacentActiveMinuteBars(
+              window[offset - 1]!,
+              bar,
+              request.marketCountry,
+              session.windows,
+            ))
           ))
-        ))) candidateIndexes.push(index);
+        )) candidateIndexes.push(index);
       }
       const quota = baseOriginQuota + (symbolIndex < originRemainder ? 1 : 0);
-      const indexes = quota > 0 ? candidateIndexes.slice(-quota) : [];
+      let indexes = quota > 0 ? candidateIndexes.slice(-quota) : [];
+      if (modelLane === "fincast" && indexes.length) {
+        const acceptedNewestFirst: number[] = [];
+        let latestRejection: FincastMarketCadenceUnavailableCode | undefined;
+        let clusterStarted = false;
+        for (const index of [...indexes].reverse()) {
+          const cadence = await validateFincastMarketSequence({
+            bars: finalBars.slice(index - FINCAST_CONTEXT_BARS + 1, index + 61),
+            marketCountry: request.marketCountry,
+            loadCalendar: (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+            krWindows: session.windows,
+          });
+          if (cadence.status === "available") {
+            clusterStarted = true;
+            acceptedNewestFirst.push(index);
+            continue;
+          }
+          latestRejection ??= cadence.code;
+          if (clusterStarted) break;
+        }
+        indexes = acceptedNewestFirst.reverse();
+        while (indexes.length) {
+          const start = indexes[0]! - FINCAST_CONTEXT_BARS + 1;
+          const end = indexes.at(-1)! + 60;
+          const cadence = await validateFincastMarketSequence({
+            bars: finalBars.slice(start, end + 1),
+            marketCountry: request.marketCountry,
+            loadCalendar: (sessionDate) => loadMarketCalendar(request.marketCountry, sessionDate),
+            krWindows: session.windows,
+          });
+          if (cadence.status === "available") {
+            fincastSeriesRangeBySymbol.set(symbol, { start, end });
+            break;
+          }
+          latestRejection = cadence.code;
+          indexes = indexes.slice(1);
+        }
+        if (!indexes.length) {
+          fincastExclusionBySymbol.set(
+            symbol,
+            latestRejection ?? "fincast_market_cadence_invalid",
+          );
+        }
+      } else if (modelLane === "fincast" && quota > 0) {
+        fincastExclusionBySymbol.set(symbol, "fincast_market_cadence_invalid");
+      }
       originIndexesBySymbol.set(symbol, indexes);
       if (indexes.length) {
         signalSnapshotTimestamps.set(
@@ -1417,6 +1572,18 @@ export class ScalpingService {
     }> = [];
     const series: AiEvaluateRequest["series"] = [];
     for (const symbol of request.symbols) {
+      const fincastExclusion = fincastExclusionBySymbol.get(symbol);
+      if (fincastExclusion) {
+        excluded.push({
+          symbol,
+          status: "unavailable",
+          code: fincastExclusion,
+          reason: fincastExclusion === "fincast_market_calendar_unavailable"
+            ? "calendar_unavailable_or_call_limit_reached"
+            : "context_or_outcome_is_not_a_contiguous_calendar_confirmed_minute_sequence",
+        });
+        continue;
+      }
       const technicalInstrument = technicalInstruments.get(symbol);
       const technicalAvailability = record(technicalInstrument?.availability);
       const technicalPoints = technicalInstrument?.signals?.points;
@@ -1445,10 +1612,25 @@ export class ScalpingService {
       const targetStops = targetStopsByTimestamp(analysis, symbol);
       const indexes = originIndexesBySymbol.get(symbol) ?? [];
       if (!indexes.length) continue;
+      const fincastRange = modelLane === "fincast"
+        ? fincastSeriesRangeBySymbol.get(symbol)
+        : undefined;
+      if (modelLane === "fincast" && !fincastRange) {
+        excluded.push({
+          symbol,
+          status: "unavailable",
+          code: "fincast_market_cadence_invalid",
+          reason: "validated_fincast_series_range_is_missing",
+        });
+        continue;
+      }
+      const modelBars = fincastRange
+        ? finalBars.slice(fincastRange.start, fincastRange.end + 1)
+        : finalBars;
       series.push({
         instrument_key: symbol,
         timezone: marketTimeZone(request.marketCountry),
-        bars: finalBars.map((bar) => this.aiBar(bar)),
+        bars: modelBars.map((bar) => this.aiBar(bar)),
         origins: indexes.map((index) => ({
           origin: finalBars[index]!.closeTime,
           future_timestamps: finalBars.slice(index + 1, index + 61).map((bar) => bar.closeTime) as AiEvaluateRequest["series"][number]["origins"][number]["future_timestamps"],
@@ -1456,12 +1638,20 @@ export class ScalpingService {
           regime: regimes.get(timestampKey(finalBars[index]!.closeTime)!) ?? null,
           target_stop: targetStops.get(timestampKey(finalBars[index]!.closeTime)!) ?? null,
         })),
+        ...(modelLane === "fincast" ? {
+          input_cadence: {
+            candle_seconds: 60 as const,
+            gap_policy: "market_session_prevalidated" as const,
+          },
+        } : {}),
       });
     }
     if (!series.length) {
       if (excluded.length) return {
         status: "unavailable" as const,
-        code: "technical_analysis_unavailable",
+        code: excluded.every(({ code }) => code.startsWith("fincast_market_"))
+          ? "fincast_market_cadence_unavailable"
+          : "technical_analysis_unavailable",
         excluded,
         retrospective: true as const,
         walkForward: true as const,
@@ -1469,7 +1659,7 @@ export class ScalpingService {
       };
       throw new ValidationError("시간 순서 평가에 필요한 과거 분봉이 부족합니다.");
     }
-    const queued = await this.ai.evaluate({
+    const queued = await evaluationAi.evaluate({
       schema_version: SCALPING_AI_SCHEMA_VERSION,
       request_id: `evaluation:${randomUUID()}`,
       mode: "evaluate",
@@ -1626,16 +1816,28 @@ export class ScalpingService {
     return (await this.loadBarsWithDiagnostics(symbols, interval, marketCountry, options)).barsBySymbol;
   }
 
-  private historyBarLimit(marketCountry: MarketCountry, maximumBars?: number): number {
+  private historyBarLimit(
+    marketCountry: MarketCountry,
+    maximumBars?: number,
+    allowBeyondConfigured = false,
+  ): number {
     const configured = marketCountry === "US" ? this.config.usWorkspaceBarLimit : this.config.workspaceBarLimit;
-    return maximumBars === undefined ? configured : Math.max(1, Math.min(configured, maximumBars));
+    return maximumBars === undefined
+      ? configured
+      : Math.max(1, Math.min(
+          allowBeyondConfigured ? 50_000 : configured,
+          maximumBars,
+        ));
   }
 
-  private forecastHistoryBarLimit(marketCountry: MarketCountry): number {
-    if (marketCountry === "US") return this.config.forecastMaximumBars;
+  private forecastHistoryBarLimit(
+    marketCountry: MarketCountry,
+    contextBars = this.config.forecastMaximumBars,
+  ): number {
+    if (marketCountry === "US") return contextBars;
     const sessionEvidenceBars = configuredKrSessionWindows(this.config)
       .reduce((sum, window) => sum + Math.max(0, window.closeMinute - window.openMinute), 0);
-    return Math.max(this.config.forecastMaximumBars, sessionEvidenceBars);
+    return Math.max(contextBars, sessionEvidenceBars);
   }
 
   private async loadBarsWithDiagnostics(
@@ -1666,7 +1868,11 @@ export class ScalpingService {
     options: BarLoadOptions = {},
   ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
     const errors: string[] = [];
-    const historyBarLimit = this.historyBarLimit(marketCountry, options.maximumBars);
+    const historyBarLimit = this.historyBarLimit(
+      marketCountry,
+      options.maximumBars,
+      options.allowBeyondWorkspaceLimit,
+    );
     const queryLimit = options.maximumBars === undefined
       ? historyBarLimit
       : Math.min(50_000, historyBarLimit + Math.min(32, historyBarLimit));
@@ -1691,6 +1897,7 @@ export class ScalpingService {
         marketCountry,
         historyBarLimit,
         options.forceLatestRefresh === true,
+        options.allowBeyondWorkspaceLimit,
       );
       errors.push(...history.errors);
       if (history.bars.length) {
@@ -1763,12 +1970,15 @@ export class ScalpingService {
     existing: readonly IntradayBarRecord[],
     marketCountry: MarketCountry = "KR",
     maximumBars?: number,
+    allowBeyondWorkspaceLimit = false,
   ): Promise<IntradayBarRecord[]> {
     return (await this.fetchMinuteHistoryWithDiagnostics(
       symbol,
       existing,
       marketCountry,
       maximumBars,
+      false,
+      allowBeyondWorkspaceLimit,
     )).bars;
   }
 
@@ -1776,11 +1986,16 @@ export class ScalpingService {
     bars: readonly IntradayBarRecord[],
     marketCountry: MarketCountry,
     maximumBars?: number,
+    allowBeyondWorkspaceLimit = false,
   ): boolean {
     // Before the raw window reaches the target it cannot possibly contain the
     // required number of canonical one-minute bars. Avoid repeatedly sorting
     // and timezone-normalizing the growing history after every provider page.
-    const historyBarLimit = this.historyBarLimit(marketCountry, maximumBars);
+    const historyBarLimit = this.historyBarLimit(
+      marketCountry,
+      maximumBars,
+      allowBeyondWorkspaceLimit,
+    );
     if (bars.length < historyBarLimit) return false;
     const sessionWindows = marketSessionWindows(
       marketCountry,
@@ -1813,8 +2028,13 @@ export class ScalpingService {
     marketCountry: MarketCountry = "KR",
     maximumBars?: number,
     bypassLatestCache = false,
+    allowBeyondWorkspaceLimit = false,
   ): Promise<{ bars: IntradayBarRecord[]; errors: string[] }> {
-    const historyBarLimit = this.historyBarLimit(marketCountry, maximumBars);
+    const historyBarLimit = this.historyBarLimit(
+      marketCountry,
+      maximumBars,
+      allowBeyondWorkspaceLimit,
+    );
     const sessionWindows = marketSessionWindows(
       marketCountry,
       configuredKrSessionWindows(this.config),
@@ -1862,7 +2082,12 @@ export class ScalpingService {
       if (!oldest || providerTimestampsAdded === 0) break;
       before = new Date(Date.parse(oldest) - 1).toISOString();
       if (isSeededWorkspace) break;
-      if (this.minuteCoverageIsSufficient([...known.values()], marketCountry, historyBarLimit)) break;
+      if (this.minuteCoverageIsSufficient(
+        [...known.values()],
+        marketCountry,
+        historyBarLimit,
+        allowBeyondWorkspaceLimit,
+      )) break;
       if (fetched.size >= historyBarLimit) break;
     }
     return {
@@ -2326,6 +2551,27 @@ export class ScalpingService {
     return {
       status: "available",
       timestamps: output as AiForecastRequest["series"][number]["future_timestamps"],
+    };
+  }
+
+  private boundedMarketCalendarLoader(): (
+    marketCountry: MarketCountry,
+    sessionDate: string,
+  ) => Promise<TossMarketCalendarDay | undefined> {
+    const cache = new Map<string, Promise<TossMarketCalendarDay | undefined>>();
+    return (marketCountry, sessionDate) => {
+      const key = `${marketCountry}:${sessionDate}`;
+      const existing = cache.get(key);
+      if (existing) return existing;
+      if (cache.size >= FINCAST_MAX_CALENDAR_DAYS_PER_OPERATION) {
+        return Promise.resolve(undefined);
+      }
+      const pending = this.safe(
+        () => this.toss.getMarketCalendar(marketCountry, sessionDate),
+        "toss_market_calendar",
+      ).then(({ value }) => value);
+      cache.set(key, pending);
+      return pending;
     };
   }
 

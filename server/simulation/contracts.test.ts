@@ -41,13 +41,32 @@ describe("AI paper simulation contracts", () => {
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     });
-    expect(() => schema.parse({
+    expect(schema.parse({
       market: { kind: "stock", country: "US" },
       initialCash: 100_000,
       durationMinutes: 60,
       selection: { mode: "manual", symbols: ["AAPL"] },
       modelLanes: ["fincast"],
-    })).toThrow("검증된 Kronos-base lane");
+    }).modelLanes).toEqual(["fincast"]);
+    expect(() => schema.parse({
+      market: { kind: "stock", country: "US" },
+      initialCash: 100_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["AAPL"] },
+      modelLanes: ["kronos_base", "fincast"],
+    })).toThrow("한 번에 하나");
+    expect(() => schema.parse({
+      market: { kind: "stock", country: "US" },
+      initialCash: 100_000,
+      durationMinutes: 60,
+      selection: { mode: "auto", symbolCount: 1 },
+      strategy: {
+        mode: "pair",
+        pairId: "qqq-tqqq-sqqq",
+        allowDegradedMode: false,
+      },
+      modelLanes: ["fincast"],
+    })).toThrow("페어 전략은 현재 Kronos-base");
   });
 
   it("normalizes Binance USDT perpetual requests and keeps legacy stock state off the wire", () => {

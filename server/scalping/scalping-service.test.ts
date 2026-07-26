@@ -129,6 +129,28 @@ function krBarsFromClose(firstClose: string, count: number): IntradayBarRecord[]
   });
 }
 
+function krIntegratedBars(sessionDate: string, count: number): IntradayBarRecord[] {
+  return [
+    ...krBarsFromClose(`${sessionDate}T08:01:00+09:00`, 50),
+    ...krBarsFromClose(`${sessionDate}T09:01:00+09:00`, 390),
+    ...krBarsFromClose(`${sessionDate}T15:41:00+09:00`, 260),
+  ].slice(0, count);
+}
+
+function fullKrCalendar(sessionDate: string) {
+  return {
+    marketCountry: "KR" as const,
+    sessionDate,
+    dayMarket: null,
+    preMarket: null,
+    regularMarket: {
+      startAt: `${sessionDate}T00:00:00.000Z`,
+      endAt: `${sessionDate}T06:30:00.000Z`,
+    },
+    afterMarket: null,
+  };
+}
+
 function config(): ScalpingServiceConfig {
   return {
     minimumTopCount: 1,
@@ -247,7 +269,20 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     forecast: vi.fn().mockResolvedValue({ response: { status: "available" }, predictions: [] }),
     evaluate: vi.fn().mockResolvedValue({ run: { id: "run-1", status: "queued" }, reused: false }),
   };
-  return { toss, kis, repository, scanner, live, rust, ai, analysis, series, ...overrides };
+  const fincastAi = undefined as typeof ai | undefined;
+  return {
+    toss,
+    kis,
+    repository,
+    scanner,
+    live,
+    rust,
+    ai,
+    fincastAi,
+    analysis,
+    series,
+    ...overrides,
+  };
 }
 
 function service(parts: ReturnType<typeof dependencies>, overrides: Partial<ScalpingServiceConfig> = {}) {
@@ -262,6 +297,8 @@ function service(parts: ReturnType<typeof dependencies>, overrides: Partial<Scal
     undefined,
     undefined,
     { ...config(), ...overrides },
+    undefined,
+    parts.fincastAi as never,
   );
 }
 
@@ -1462,6 +1499,98 @@ describe("ScalpingService", () => {
     expect(output.forecast).toEqual({ status: "available" });
   });
 
+  it("routes FinCast without fallback and preserves the Kronos canonical bars and origin", async () => {
+    const fincastAi = {
+      forecast: vi.fn().mockResolvedValue({
+        response: { status: "available", model: { model_id: "Vincent05R/FinCast" } },
+        predictions: [],
+      }),
+      evaluate: vi.fn(),
+    };
+    const parts = dependencies({ fincastAi });
+    parts.repository.listBars.mockResolvedValue(krIntegratedBars("2026-07-21", 640));
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => (
+      fullKrCalendar(sessionDate)
+    ));
+    const subject = service(parts, {
+      now: () => Date.parse("2026-07-21T19:00:30+09:00"),
+    });
+
+    await subject.forecast(
+      { symbols: ["005930"], interval: "1m" },
+      { modelLane: "kronos_base" },
+    );
+    await subject.forecast(
+      { symbols: ["005930"], interval: "1m" },
+      { modelLane: "fincast" },
+    );
+
+    const kronosRequest = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    const fincastRequest = fincastAi.forecast.mock.calls[0]![0] as Record<string, any>;
+    expect(parts.ai.forecast).toHaveBeenCalledTimes(1);
+    expect(fincastAi.forecast).toHaveBeenCalledTimes(1);
+    expect(fincastRequest.series[0].bars).toHaveLength(512);
+    expect(fincastRequest.series[0]).toMatchObject({
+      instrument_key: kronosRequest.series[0].instrument_key,
+      timezone: kronosRequest.series[0].timezone,
+      input_end_at: kronosRequest.series[0].input_end_at,
+      future_timestamps: kronosRequest.series[0].future_timestamps,
+      target_stop: kronosRequest.series[0].target_stop,
+      input_cadence: {
+        candle_seconds: 60,
+        gap_policy: "market_session_prevalidated",
+      },
+    });
+    expect(fincastRequest.series[0].bars.slice(-kronosRequest.series[0].bars.length))
+      .toEqual(kronosRequest.series[0].bars);
+    expect(kronosRequest.series[0]).not.toHaveProperty("input_cadence");
+
+    const withoutFinCast = dependencies();
+    const unavailable = await service(withoutFinCast).forecast(
+      { symbols: ["005930"], interval: "1m" },
+      { modelLane: "fincast" },
+    );
+    expect(unavailable).toEqual({
+      forecast: { status: "unavailable", code: "fincast_worker_unavailable" },
+      predictions: [],
+    });
+    expect(withoutFinCast.ai.forecast).not.toHaveBeenCalled();
+  });
+
+  it("does not label a stock FinCast request prevalidated when its 512-bar context misses an active minute", async () => {
+    const fincastAi = {
+      forecast: vi.fn(),
+      evaluate: vi.fn(),
+    };
+    const parts = dependencies({ fincastAi });
+    const history = krIntegratedBars("2026-07-21", 640);
+    parts.repository.listBars.mockResolvedValue([
+      ...history.slice(0, 300),
+      ...history.slice(301),
+    ]);
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => (
+      fullKrCalendar(sessionDate)
+    ));
+
+    const result = await service(parts, {
+      now: () => Date.parse("2026-07-21T19:00:30+09:00"),
+    }).forecast(
+      { symbols: ["005930"], interval: "1m" },
+      { modelLane: "fincast" },
+    );
+
+    expect(fincastAi.forecast).not.toHaveBeenCalled();
+    expect(result.predictions).toEqual([
+      expect.objectContaining({
+        symbol: "005930",
+        unavailable: {
+          code: "fincast_market_cadence_invalid",
+          message: "fincast_market_cadence_invalid",
+        },
+      }),
+    ]);
+  });
+
   it("excludes a provider-labeled final candle whose close is still in the future", async () => {
     const parts = dependencies();
     const last = parts.series.at(-1)!;
@@ -1984,6 +2113,85 @@ describe("ScalpingService", () => {
       slippage_bps_per_side: 3,
     });
     expect(result).toMatchObject({ retrospective: true, walkForward: true, randomSplit: false });
+  });
+
+  it("adds the explicit one-minute market-session cadence to FinCast evaluation only", async () => {
+    const fincastAi = {
+      forecast: vi.fn(),
+      evaluate: vi.fn().mockResolvedValue({
+        run: { id: "fincast-evaluation", status: "queued" },
+        reused: false,
+      }),
+    };
+    const parts = dependencies({ fincastAi });
+    parts.repository.listBars.mockResolvedValue(krIntegratedBars("2026-07-21", 660));
+    parts.toss.getMarketCalendar.mockImplementation(async (_market: string, sessionDate: string) => (
+      fullKrCalendar(sessionDate)
+    ));
+    await service(parts).evaluate({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "breakout",
+      evaluation: {
+        walkForward: true,
+        retrospective: true,
+        commissionBpsPerSide: 1.5,
+        taxBpsOnExit: 18,
+        spreadBpsRoundTrip: 8,
+        slippageBpsPerSide: 3,
+      },
+    }, "owner", { modelLane: "fincast" });
+
+    const request = fincastAi.evaluate.mock.calls[0]![0] as Record<string, any>;
+    expect(request.series[0].input_cadence).toEqual({
+      candle_seconds: 60,
+      gap_policy: "market_session_prevalidated",
+    });
+    for (const origin of request.series[0].origins as Array<{ origin: string }>) {
+      const originIndex = request.series[0].bars.findIndex(
+        (bar: { timestamp: string }) => bar.timestamp === origin.origin,
+      );
+      expect(originIndex).toBeGreaterThanOrEqual(511);
+      expect(request.series[0].bars.slice(originIndex - 511, originIndex + 1))
+        .toHaveLength(512);
+    }
+    expect(parts.ai.evaluate).not.toHaveBeenCalled();
+  });
+
+  it("excludes FinCast evaluation instead of asserting prevalidated cadence when the calendar is unavailable", async () => {
+    const fincastAi = {
+      forecast: vi.fn(),
+      evaluate: vi.fn(),
+    };
+    const parts = dependencies({ fincastAi });
+    parts.repository.listBars.mockResolvedValue(krIntegratedBars("2026-07-21", 660));
+    parts.toss.getMarketCalendar.mockRejectedValue(new Error("calendar offline"));
+
+    const result = await service(parts).evaluate({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "breakout",
+      evaluation: {
+        walkForward: true,
+        retrospective: true,
+        commissionBpsPerSide: 1.5,
+        taxBpsOnExit: 18,
+        spreadBpsRoundTrip: 8,
+        slippageBpsPerSide: 3,
+      },
+    }, "owner", { modelLane: "fincast" });
+
+    expect(fincastAi.evaluate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "unavailable",
+      code: "fincast_market_cadence_unavailable",
+      excluded: [{
+        symbol: "005930",
+        status: "unavailable",
+        code: "fincast_market_calendar_unavailable",
+      }],
+    });
+    expect(parts.toss.getMarketCalendar).toHaveBeenCalledTimes(1);
   });
 
   it("uses bounded Rust signal snapshots instead of full technical series for evaluation", async () => {

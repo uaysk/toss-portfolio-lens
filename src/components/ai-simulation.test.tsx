@@ -209,6 +209,7 @@ describe("AiSimulation", () => {
         pairId: "qqq-tqqq-sqqq",
         allowDegradedMode: false,
       },
+      modelLanes: ["kronos_base"],
       costs: { commissionBpsPerSide: 10, taxBpsOnExit: 0 },
     });
   });

@@ -13,6 +13,7 @@ from portfolio_ai_worker.contracts import (
     EvaluationRecord,
     EvaluationSeries,
     PriceBar,
+    SeriesCadence,
     TargetStopBounds,
     TargetStopSpec,
 )
@@ -38,6 +39,10 @@ def _request(
                 instrument_key="KRX:005930",
                 timezone="Asia/Seoul",
                 bars=history,
+                input_cadence=SeriesCadence(
+                    candle_seconds=60,
+                    gap_policy="market_session_prevalidated",
+                ),
                 origins=(
                     EvaluationOrigin(
                         origin=origin_bar.timestamp,
@@ -58,6 +63,101 @@ def _request(
     )
 
 
+def _native_request(
+    candle_seconds: int,
+    history: tuple[PriceBar, ...],
+    request_id: str,
+) -> EvaluateRequest:
+    steps_per_minute = 60 // candle_seconds
+    origin_index = 511
+    origin = history[origin_index]
+    return EvaluateRequest(
+        schema_version="scalping-ai/v1",
+        request_id=request_id,
+        mode="evaluate",
+        series=(
+            EvaluationSeries(
+                instrument_key=f"BINANCE_USDM:NATIVE-{candle_seconds}",
+                timezone="UTC",
+                bars=history,
+                input_cadence=SeriesCadence(
+                    candle_seconds=candle_seconds,
+                    gap_policy="continuous",
+                ),
+                origins=(
+                    EvaluationOrigin(
+                        origin=origin.timestamp,
+                        future_timestamps=tuple(
+                            history[origin_index + minute * steps_per_minute].timestamp
+                            for minute in range(1, 61)
+                        ),
+                        technical_signal=1,
+                    ),
+                ),
+            ),
+        ),
+        cost_assumptions=CostAssumptions(),
+    )
+
+
+@pytest.mark.parametrize("candle_seconds", [15, 30])
+def test_native_fincast_evaluation_uses_causal_context_and_one_minute_outcomes(
+    tmp_path,
+    candle_seconds: int,
+) -> None:
+    steps_per_minute = 60 // candle_seconds
+    count = 512 + 60 * steps_per_minute
+    native_history = tuple(
+        bar.model_copy(
+            update={
+                "timestamp": datetime(2025, 1, 2, tzinfo=timezone.utc)
+                + timedelta(seconds=index * candle_seconds)
+            }
+        )
+        for index, bar in enumerate(bars(count, drift=0.0001))
+    )
+    changed_history = tuple(
+        bar
+        if index <= 511
+        else bar.model_copy(
+            update={
+                "open": bar.open * 1.2,
+                "high": bar.high * 1.2,
+                "low": bar.low * 1.2,
+                "close": bar.close * 1.2,
+            }
+        )
+        for index, bar in enumerate(native_history)
+    )
+    configured = settings(
+        tmp_path,
+        model_lane="fincast",
+        min_context_bars=512,
+        max_context_bars=512,
+    )
+    first_adapter = DeterministicAdapter()
+    second_adapter = DeterministicAdapter()
+    first = AIService(configured, first_adapter).handle(
+        _native_request(candle_seconds, native_history, f"native-{candle_seconds}-a")
+    )
+    second = AIService(configured, second_adapter).handle(
+        _native_request(candle_seconds, changed_history, f"native-{candle_seconds}-b")
+    )
+
+    origin = native_history[511]
+    model_input = first_adapter.calls[0][0]
+    assert len(model_input.bars) == 512
+    assert model_input.bars[-1].timestamp == origin.timestamp
+    assert all(bar.timestamp <= origin.timestamp for bar in model_input.bars)
+    assert model_input.future_timestamps == tuple(
+        origin.timestamp + timedelta(minutes=minute) for minute in range(1, 61)
+    )
+    assert first.series[0].horizons == second.series[0].horizons
+    assert first.evaluation is not None and second.evaluation is not None
+    assert first.evaluation.records[0].target_timestamp == origin.timestamp + timedelta(minutes=5)
+    assert first.evaluation.records[0].actual_return != second.evaluation.records[0].actual_return
+
+
 def test_walk_forward_evaluation_is_causal_and_charges_next_bar_execution_costs(tmp_path) -> None:
     history = bars(160, drift=0.001)
     adapter = DeterministicAdapter()
@@ -68,6 +168,15 @@ def test_walk_forward_evaluation_is_causal_and_charges_next_bar_execution_costs(
     assert len(response.evaluation.records) == 4
     assert all(record.status == "available" for record in response.evaluation.records)
     assert all(item.bars[-1].timestamp <= history[79].timestamp for call in adapter.calls for item in call)
+    assert all(
+        item.input_cadence
+        == SeriesCadence(
+            candle_seconds=60,
+            gap_policy="market_session_prevalidated",
+        )
+        for call in adapter.calls
+        for item in call
+    )
     metric = response.evaluation.metrics[0]
     assert metric.overall.count == 1
     assert metric.by_symbol["KRX:005930"].count == 1

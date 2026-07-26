@@ -19,6 +19,7 @@ from .contracts import (
     EvaluateRequest,
     EvaluationOrigin,
     EvaluationSeries,
+    FINCAST_MODEL_ID,
     FIXED_HORIZONS,
     ForecastRequest,
     ForecastSeries,
@@ -53,6 +54,34 @@ def _response_status(results: Sequence[SeriesForecastResult]) -> str:
 
 def _effective_context_bars(bars: Sequence[PriceBar], maximum: int) -> tuple[PriceBar, ...]:
     return tuple(bars[-maximum:])
+
+
+def _inference_series(item: ForecastSeries) -> InferenceSeries:
+    return InferenceSeries(
+        instrument_key=item.instrument_key,
+        timezone=item.timezone,
+        bars=item.bars,
+        future_timestamps=item.future_timestamps,
+        input_cadence=item.input_cadence,
+    )
+
+
+def _fincast_microbatch_key(item: ForecastSeries) -> tuple[int, str, int, str]:
+    """Group valid FinCast inputs by cadence and isolate malformed series.
+
+    FinCast rejects a whole batch when even one series has a different or
+    invalid cadence. Reusing its canonical validator here keeps that failure
+    local to the offending instrument instead of making another cadence
+    unavailable.
+    """
+
+    from .fincast import fincast_interval_seconds
+
+    try:
+        interval_seconds = fincast_interval_seconds(_inference_series(item))
+    except (TypeError, ValueError):
+        return (len(item.bars), "invalid", 0, item.instrument_key)
+    return (len(item.bars), "valid", interval_seconds, "")
 
 
 def _canonical_input_digest(bars: Sequence[PriceBar]) -> str:
@@ -229,29 +258,31 @@ class AIService:
                     item.bars,
                     "INSUFFICIENT_HISTORY",
                     f"At least {self.settings.min_context_bars} complete bars are required.",
+                    item.input_cadence,
                 )
                 continue
             eligible.append(
                 item.model_copy(update={"bars": _effective_context_bars(item.bars, self.settings.max_context_bars)})
             )
 
-        groups: dict[int, list[ForecastSeries]] = {}
+        is_fincast = (
+            self.settings.model_lane == "fincast"
+            or selected_adapter.provenance.model_id == FINCAST_MODEL_ID
+        )
+        groups: dict[tuple[int, str, int, str], list[ForecastSeries]] = {}
         for item in eligible:
-            groups.setdefault(len(item.bars), []).append(item)
+            key = (
+                _fincast_microbatch_key(item)
+                if is_fincast
+                else (len(item.bars), "shared", 0, "")
+            )
+            groups.setdefault(key, []).append(item)
 
         batch_ordinal = count()
-        for _context_length, group in sorted(groups.items()):
+        for _group_key, group in sorted(groups.items()):
             for offset in range(0, len(group), self.settings.microbatch_size):
                 chunk = group[offset : offset + self.settings.microbatch_size]
-                inputs = [
-                    InferenceSeries(
-                        instrument_key=item.instrument_key,
-                        timezone=item.timezone,
-                        bars=item.bars,
-                        future_timestamps=item.future_timestamps,
-                    )
-                    for item in chunk
-                ]
+                inputs = [_inference_series(item) for item in chunk]
                 ordinal = next(batch_ordinal)
                 try:
                     with self._model_lock:
@@ -348,6 +379,7 @@ class AIService:
                         future_timestamps=origin.future_timestamps,
                         bars=context,
                         target_stop=origin.target_stop,
+                        input_cadence=source.input_cadence,
                     )
                 except ValidationError:
                     reference = bars_by_time[origin.origin]
@@ -361,6 +393,7 @@ class AIService:
                                 context or (reference,),
                                 "INVALID_EVALUATION_POINT",
                                 "The evaluation target/stop or causal input window is invalid at this origin.",
+                                source.input_cadence,
                             ),
                         )
                     )

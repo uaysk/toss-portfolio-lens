@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -87,6 +87,22 @@ class TargetStopSpec(StrictModel):
         return self
 
 
+class SeriesCadence(StrictModel):
+    candle_seconds: Literal[15, 30, 60]
+    gap_policy: Literal["continuous", "market_session_prevalidated"]
+
+    @model_validator(mode="after")
+    def market_sessions_are_one_minute(self) -> "SeriesCadence":
+        if (
+            self.gap_policy == "market_session_prevalidated"
+            and self.candle_seconds != 60
+        ):
+            raise ValueError(
+                "market-session FinCast inputs must use one-minute candles"
+            )
+        return self
+
+
 class RequestBase(StrictModel):
     schema_version: Literal["scalping-ai/v1"]
     request_id: str
@@ -126,6 +142,7 @@ class ForecastSeries(StrictModel):
     future_timestamps: tuple[datetime, ...] = Field(min_length=FORECAST_STEPS, max_length=FORECAST_STEPS)
     bars: tuple[PriceBar, ...] = Field(min_length=1)
     target_stop: TargetStopSpec | None = None
+    input_cadence: SeriesCadence | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -212,6 +229,7 @@ class EvaluationSeries(StrictModel):
     timezone: str = Field(min_length=1, max_length=64)
     bars: tuple[PriceBar, ...] = Field(min_length=1)
     origins: tuple[EvaluationOrigin, ...] = Field(min_length=1)
+    input_cadence: SeriesCadence | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -233,16 +251,43 @@ class EvaluationSeries(StrictModel):
             index = bar_index.get(item.origin)
             if index is None:
                 raise ValueError("every evaluation origin must identify a complete input bar")
-            # A caller must not be able to cherry-pick later targets or skip the
-            # next executable bar. A retrospective point is accepted only when
-            # all 60 realized bars are present in their original order.
-            known_future = bar_times[index + 1 : index + 1 + FORECAST_STEPS]
-            if len(known_future) != FORECAST_STEPS:
-                raise ValueError("every evaluation origin must have 60 subsequent complete bars")
-            if item.future_timestamps != known_future:
-                raise ValueError(
-                    "evaluation future_timestamps must match the consecutive bars immediately after origin"
+            if self.input_cadence is None or self.input_cadence.gap_policy == "market_session_prevalidated":
+                # Preserve the original one-bar-per-horizon contract for legacy
+                # callers and prevalidated stock sessions. Session gaps may span
+                # wall-clock time, but each result still maps to the next active
+                # one-minute bar.
+                known_future = bar_times[index + 1 : index + 1 + FORECAST_STEPS]
+                if len(known_future) != FORECAST_STEPS:
+                    raise ValueError("every evaluation origin must have 60 subsequent complete bars")
+                if item.future_timestamps != known_future:
+                    raise ValueError(
+                        "evaluation future_timestamps must match the consecutive bars immediately after origin"
+                    )
+            else:
+                candle_seconds = self.input_cadence.candle_seconds
+                native_steps_per_minute = 60 // candle_seconds
+                native_step_count = FORECAST_STEPS * native_steps_per_minute
+                known_native = bar_times[index + 1 : index + 1 + native_step_count]
+                if len(known_native) != native_step_count:
+                    raise ValueError(
+                        "every continuous evaluation origin must have 60 minutes of subsequent native bars"
+                    )
+                expected_native = tuple(
+                    item.origin + timedelta(seconds=candle_seconds * step)
+                    for step in range(1, native_step_count + 1)
                 )
+                if known_native != expected_native:
+                    raise ValueError(
+                        "continuous evaluation bars must match the declared native cadence "
+                        "through the 60-minute outcome window"
+                    )
+                known_future = known_native[
+                    native_steps_per_minute - 1 :: native_steps_per_minute
+                ]
+                if item.future_timestamps != known_future:
+                    raise ValueError(
+                        "evaluation future_timestamps must map to exact one-minute outcomes after origin"
+                    )
             if item.target_stop:
                 reference = self.bars[index].close
                 if item.target_stop.side == "long" and not (

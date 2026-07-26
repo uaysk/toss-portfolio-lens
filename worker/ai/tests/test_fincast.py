@@ -9,6 +9,7 @@ import json
 import math
 import sys
 from types import ModuleType, SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -40,6 +41,7 @@ from portfolio_ai_worker.contracts import (
     FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
     FINCAST_QUALIFICATION_ROW_COUNT,
     PriceBar,
+    SeriesCadence,
 )
 from portfolio_ai_worker.precision_validation import (
     FinCastPrecisionValidation,
@@ -222,7 +224,7 @@ def test_fincast_interval_seconds_accepts_supported_continuous_contexts(seconds:
         timezone="UTC",
         bars=bars,
         future_timestamps=tuple(
-            start + timedelta(minutes=index + 1)
+            bars[-1].timestamp + timedelta(minutes=index + 1)
             for index in range(60)
         ),
     )
@@ -254,7 +256,7 @@ def test_fincast_interval_seconds_rejects_non_continuous_context() -> None:
             for timestamp in timestamps
         ),
         future_timestamps=tuple(
-            start + timedelta(minutes=index + 1)
+            timestamps[-1] + timedelta(minutes=index + 1)
             for index in range(60)
         ),
     )
@@ -292,6 +294,140 @@ def test_fincast_interval_seconds_rejects_gap_before_the_last_sixteen_bars() -> 
     )
 
     with pytest.raises(ValueError, match="continuous"):
+        fincast_interval_seconds(series)
+
+
+def _stock_session_series(
+    instrument_key: str,
+    timezone_name: str,
+    *,
+    input_cadence: SeriesCadence | None,
+    next_session_offset_seconds: int = 0,
+) -> InferenceSeries:
+    local_timezone = ZoneInfo(timezone_name)
+    first_session = datetime(2026, 7, 20, 9, 1, tzinfo=local_timezone)
+    second_session = datetime(
+        2026,
+        7,
+        21,
+        9,
+        1,
+        tzinfo=local_timezone,
+    ) + timedelta(seconds=next_session_offset_seconds)
+    timestamps = tuple(
+        first_session + timedelta(minutes=index)
+        for index in range(300)
+    ) + tuple(
+        second_session + timedelta(minutes=index)
+        for index in range(212)
+    )
+    bars = tuple(
+        PriceBar(
+            timestamp=timestamp.astimezone(timezone.utc),
+            open=100 + index * 0.01,
+            high=101 + index * 0.01,
+            low=99 + index * 0.01,
+            close=100.5 + index * 0.01,
+            volume=1_000 + index,
+            amount=(1_000 + index) * (100.5 + index * 0.01),
+            complete=True,
+        )
+        for index, timestamp in enumerate(timestamps)
+    )
+    return InferenceSeries(
+        instrument_key=instrument_key,
+        timezone=timezone_name,
+        bars=bars,
+        future_timestamps=tuple(
+            bars[-1].timestamp + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+        input_cadence=input_cadence,
+    )
+
+
+@pytest.mark.parametrize(
+    ("instrument_key", "timezone_name"),
+    (
+        ("005930", "Asia/Seoul"),
+        ("AAPL", "America/New_York"),
+    ),
+)
+def test_fincast_accepts_prevalidated_kr_us_trading_minute_session_gaps(
+    instrument_key: str,
+    timezone_name: str,
+) -> None:
+    series = _stock_session_series(
+        instrument_key,
+        timezone_name,
+        input_cadence=SeriesCadence(
+            candle_seconds=60,
+            gap_policy="market_session_prevalidated",
+        ),
+    )
+
+    assert len(series.bars) == 512
+    assert fincast_interval_seconds(series) == 60
+
+
+def test_fincast_stock_session_gaps_require_explicit_prevalidated_policy() -> None:
+    series = _stock_session_series(
+        "AAPL",
+        "America/New_York",
+        input_cadence=None,
+    )
+
+    with pytest.raises(ValueError, match="undeclared context bars must be continuous"):
+        fincast_interval_seconds(series)
+
+
+def test_fincast_stock_session_gaps_remain_minute_aligned_and_timezone_bounded() -> None:
+    cadence = SeriesCadence(
+        candle_seconds=60,
+        gap_policy="market_session_prevalidated",
+    )
+    unaligned = _stock_session_series(
+        "005930",
+        "Asia/Seoul",
+        input_cadence=cadence,
+        next_session_offset_seconds=30,
+    )
+    unsupported_timezone = _stock_session_series(
+        "LSE:VOD",
+        "Europe/London",
+        input_cadence=cadence,
+    )
+
+    with pytest.raises(ValueError, match="minute-aligned"):
+        fincast_interval_seconds(unaligned)
+    with pytest.raises(ValueError, match="only KR or US"):
+        fincast_interval_seconds(unsupported_timezone)
+
+
+def test_fincast_rejects_more_than_512_context_bars_instead_of_slicing() -> None:
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    bars = tuple(
+        PriceBar(
+            timestamp=start + timedelta(minutes=index),
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            complete=True,
+        )
+        for index in range(513)
+    )
+    series = InferenceSeries(
+        instrument_key="BINANCE_USDM:BTCUSDT",
+        timezone="UTC",
+        bars=bars,
+        future_timestamps=tuple(
+            bars[-1].timestamp + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exactly 512"):
         fincast_interval_seconds(series)
 
 

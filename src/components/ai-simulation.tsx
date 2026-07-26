@@ -51,6 +51,7 @@ import {
   type AiSimulationCriterion,
   type AiSimulationCryptoRequest,
   type AiSimulationMarketCountry,
+  type AiSimulationModelLane,
   type AiSimulationPairCatalogItem,
   type AiSimulationPairId,
   type AiSimulationPreset,
@@ -174,6 +175,10 @@ function selectionModeLabel(request: AiSimulationRequest): string {
   return request.selection.mode === "manual" ? "직접 선택" : "자동 선정";
 }
 
+function stockModelLaneLabel(lane: AiSimulationModelLane): string {
+  return lane === "fincast" ? "FinCast" : "Kronos-base";
+}
+
 export function aiSimulationRequestWithStrategy(
   current: AiSimulationRequest,
   strategy: { mode: "single" } | { mode: "pair"; pairId: AiSimulationPairId },
@@ -195,6 +200,7 @@ export function aiSimulationRequestWithStrategy(
       pairId: strategy.pairId,
       allowDegradedMode: false,
     },
+    modelLanes: ["kronos_base"],
     costs: usingDefaultCosts ? defaultAiSimulationCosts("US") : current.costs,
   };
 }
@@ -764,6 +770,11 @@ function RunPanel({
           <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
             {cryptoFutures ? "isolated · 단방향 · paper only" : "보유 0주 · 현금 100% 시작"}
           </span>
+          {!cryptoFutures && snapshot.modelLanes?.[0] ? (
+            <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
+              {stockModelLaneLabel(snapshot.modelLanes[0])} · Rust causal fusion
+            </span>
+          ) : null}
           {snapshot.preset ? <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">{PRESET_DETAILS[snapshot.preset].label}</span> : null}
           {snapshot.riskTolerance !== undefined ? (
             <span className="rounded-full bg-primary-foreground/10 px-3 py-1.5">
@@ -1308,12 +1319,13 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             {request.strategy.mode === "pair"
               ? `페어 비교 · ${selectedPair?.label ?? request.strategy.pairId}`
               : `${selectionModeLabel(request)} · ${requestedSymbolCount(request)}종목`}
+            {" · "}{stockModelLaneLabel(request.modelLanes[0])}
             {" · "}{request.durationMinutes}분 · {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance} · {currency}
           </span>
         </div>
 
         <form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); void startSimulation(); }}>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
               <Select value={request.marketCountry} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive || request.strategy.mode === "pair"}>
@@ -1323,6 +1335,30 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
                   <SelectItem value="US">미국</SelectItem>
                 </SelectContent>
               </Select>
+            </label>
+            <label className="min-w-0 rounded-2xl bg-secondary p-3">
+              <span className="mb-2 block text-[10px] font-black text-muted-foreground">예측 모델</span>
+              <Select
+                value={request.modelLanes[0]}
+                onValueChange={(value) => setRequest((current) => ({
+                  ...current,
+                  modelLanes: [value as AiSimulationModelLane],
+                }))}
+                disabled={runActive || request.strategy.mode === "pair"}
+              >
+                <SelectTrigger aria-label="주식 시뮬레이션 예측 모델" className="w-full min-w-0 bg-card">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="kronos_base">Kronos-base</SelectItem>
+                  <SelectItem value="fincast">FinCast</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="mt-2 block text-[9px] leading-4 text-muted-foreground">
+                {request.strategy.mode === "pair"
+                  ? "페어는 Kronos-base + Rust 결합으로 고정됩니다."
+                  : "선택한 한 모델만 실행하며 다른 모델로 대체하지 않습니다."}
+              </span>
             </label>
             {request.strategy.mode === "single" ? (
               <label className="min-w-0 rounded-2xl bg-secondary p-3">

@@ -625,17 +625,82 @@ def project_native_quantiles(values: Sequence[float]) -> dict[float, float]:
     return projected
 
 
+def _fincast_timestamp_deltas(timestamps: Sequence[Any], label: str) -> tuple[int, ...]:
+    deltas: list[int] = []
+    for left, right in zip(timestamps, timestamps[1:], strict=False):
+        seconds = (right - left).total_seconds()
+        if not float(seconds).is_integer() or seconds <= 0:
+            raise ValueError(f"FinCast {label} timestamps must increase on whole-second boundaries")
+        deltas.append(int(seconds))
+    return tuple(deltas)
+
+
+def _validate_fincast_timestamp_cadence(
+    timestamps: Sequence[Any],
+    *,
+    candle_seconds: int,
+    gap_policy: str,
+    label: str,
+) -> None:
+    deltas = _fincast_timestamp_deltas(timestamps, label)
+    if not deltas:
+        raise ValueError(f"FinCast {label} requires at least two timestamps")
+    if gap_policy == "continuous":
+        if any(delta != candle_seconds for delta in deltas):
+            raise ValueError(
+                f"FinCast {label} must be continuous at the declared candle cadence"
+            )
+        return
+    if gap_policy != "market_session_prevalidated" or candle_seconds != 60:
+        raise ValueError("FinCast input cadence policy is unsupported")
+    if any(delta < candle_seconds or delta % candle_seconds != 0 for delta in deltas):
+        raise ValueError(
+            f"FinCast {label} market-session gaps must remain minute-aligned"
+        )
+
+
 def fincast_interval_seconds(item: InferenceSeries) -> int:
-    context = item.bars[-_FINCAST_CONTEXT_BARS:]
-    if len(context) != _FINCAST_CONTEXT_BARS:
+    if len(item.bars) != _FINCAST_CONTEXT_BARS:
         raise ValueError("FinCast requires exactly 512 timestamped context bars")
-    deltas = tuple(
-        (right.timestamp - left.timestamp).total_seconds()
-        for left, right in zip(context[:-1], context[1:], strict=True)
+    context_timestamps = tuple(bar.timestamp for bar in item.bars)
+    cadence = item.input_cadence
+    if cadence is None:
+        deltas = _fincast_timestamp_deltas(context_timestamps, "context")
+        if (
+            len(deltas) != _FINCAST_CONTEXT_BARS - 1
+            or len(set(deltas)) != 1
+            or deltas[0] not in (15, 30, 60)
+        ):
+            raise ValueError(
+                "FinCast undeclared context bars must be continuous at 15s, 30s, or 60s"
+            )
+        candle_seconds = deltas[0]
+        gap_policy = "continuous"
+    else:
+        candle_seconds = cadence.candle_seconds
+        gap_policy = cadence.gap_policy
+        if (
+            gap_policy == "market_session_prevalidated"
+            and item.timezone not in {"Asia/Seoul", "America/New_York"}
+        ):
+            raise ValueError(
+                "FinCast market-session inputs support only KR or US exchange timezones"
+            )
+        _validate_fincast_timestamp_cadence(
+            context_timestamps,
+            candle_seconds=candle_seconds,
+            gap_policy=gap_policy,
+            label="context",
+        )
+    if len(item.future_timestamps) != max(FIXED_HORIZONS):
+        raise ValueError("FinCast requires exactly 60 one-minute result timestamps")
+    _validate_fincast_timestamp_cadence(
+        (context_timestamps[-1], *item.future_timestamps),
+        candle_seconds=60,
+        gap_policy=gap_policy,
+        label="result",
     )
-    if len(deltas) != _FINCAST_CONTEXT_BARS - 1 or len(set(deltas)) != 1 or deltas[0] not in (15, 30, 60):
-        raise ValueError("FinCast context bars must use a continuous 15s, 30s, or 60s interval")
-    return int(deltas[0])
+    return candle_seconds
 
 
 class FinCastAdapter:
@@ -702,8 +767,8 @@ class FinCastAdapter:
     def predict_batch(self, series: Sequence[InferenceSeries], *, seed: int) -> list[RawPrediction]:
         if not series:
             return []
-        if any(len(item.bars) < self._context_bars for item in series):
-            raise ValueError("FinCast requires 512 complete context bars")
+        if any(len(item.bars) != self._context_bars for item in series):
+            raise ValueError("FinCast requires exactly 512 complete context bars")
         intervals = tuple(fincast_interval_seconds(item) for item in series)
         if len(set(intervals)) != 1:
             raise ValueError("FinCast batch series must use the same candle interval")
@@ -743,6 +808,8 @@ class FinCastAdapter:
             raise ValueError("FinCast returned a misaligned batch")
         output: list[RawPrediction] = []
         for item, forecast in zip(series, values, strict=True):
+            if len(forecast) != native_horizon_steps:
+                raise ValueError("FinCast returned an invalid native horizon length")
             close_quantiles: dict[int, dict[float, float]] = {}
             for horizon in FIXED_HORIZONS:
                 native_step = horizon * 60 // interval_seconds

@@ -17,6 +17,7 @@ from .contracts import (
     ModelProvenance,
     PriceBar,
     QuantileRearrangementObservations,
+    SeriesCadence,
 )
 from .settings import AISettings
 
@@ -27,6 +28,7 @@ class InferenceSeries:
     timezone: str
     bars: tuple[PriceBar, ...]
     future_timestamps: tuple[datetime, ...]
+    input_cadence: SeriesCadence | None = None
 
 
 @dataclass(frozen=True, slots=True)

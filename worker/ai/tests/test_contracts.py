@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -16,6 +16,7 @@ from portfolio_ai_worker.contracts import (
     ModelProvenance,
     PriceBar,
     QuantileRearrangementObservations,
+    SeriesCadence,
     TargetStopSpec,
 )
 
@@ -44,6 +45,35 @@ def test_versioned_request_round_trips_through_strict_json_contract() -> None:
     assert parsed == request
     assert parsed.horizons_minutes == (5, 15, 30, 60)
     assert parsed.quantiles == (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+
+
+def test_stock_fincast_cadence_round_trips_as_explicit_prevalidated_policy() -> None:
+    series = valid_series().model_copy(
+        update={
+            "input_cadence": SeriesCadence(
+                candle_seconds=60,
+                gap_policy="market_session_prevalidated",
+            )
+        }
+    )
+    request = ForecastRequest(
+        schema_version="scalping-ai/v1",
+        request_id="stock-fincast-cadence",
+        mode="forecast",
+        series=(series,),
+    )
+
+    parsed = AI_REQUEST_ADAPTER.validate_json(request.model_dump_json())
+
+    assert parsed.series[0].input_cadence == SeriesCadence(
+        candle_seconds=60,
+        gap_policy="market_session_prevalidated",
+    )
+    with pytest.raises(ValidationError, match="one-minute candles"):
+        SeriesCadence(
+            candle_seconds=30,
+            gap_policy="market_session_prevalidated",
+        )
 
 
 @pytest.mark.parametrize(
@@ -235,6 +265,100 @@ def test_evaluation_rejects_cherry_picked_or_skipped_future_bars() -> None:
                     origin=origin.timestamp,
                     future_timestamps=skipped_next_bar,
                     technical_signal=1,
+                ),
+            ),
+        )
+
+
+def _native_bars(candle_seconds: int, count: int) -> tuple[PriceBar, ...]:
+    start = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    return tuple(
+        PriceBar(
+            timestamp=start + timedelta(seconds=candle_seconds * index),
+            open=100 + index / 1_000,
+            high=101 + index / 1_000,
+            low=99 + index / 1_000,
+            close=100.5 + index / 1_000,
+            volume=1_000 + index,
+            amount=(1_000 + index) * (100.5 + index / 1_000),
+            complete=True,
+        )
+        for index in range(count)
+    )
+
+
+@pytest.mark.parametrize("candle_seconds", [15, 30])
+def test_native_evaluation_maps_exact_one_minute_outcomes(candle_seconds: int) -> None:
+    steps_per_minute = 60 // candle_seconds
+    history = _native_bars(candle_seconds, 512 + 60 * steps_per_minute)
+    origin_index = 511
+    origin = history[origin_index]
+    future_timestamps = tuple(
+        history[origin_index + minute * steps_per_minute].timestamp
+        for minute in range(1, 61)
+    )
+
+    series = EvaluationSeries(
+        instrument_key=f"BINANCE_USDM:NATIVE-{candle_seconds}",
+        timezone="UTC",
+        bars=history,
+        input_cadence=SeriesCadence(
+            candle_seconds=candle_seconds,
+            gap_policy="continuous",
+        ),
+        origins=(
+            EvaluationOrigin(
+                origin=origin.timestamp,
+                future_timestamps=future_timestamps,
+            ),
+        ),
+    )
+
+    assert series.origins[0].future_timestamps == tuple(
+        origin.timestamp + timedelta(minutes=minute) for minute in range(1, 61)
+    )
+
+    consecutive_native = tuple(
+        bar.timestamp for bar in history[origin_index + 1 : origin_index + 61]
+    )
+    payload = series.model_dump(mode="python")
+    payload["origins"] = (
+        EvaluationOrigin(
+            origin=origin.timestamp,
+            future_timestamps=consecutive_native,
+        ),
+    )
+    with pytest.raises(ValidationError, match="exact one-minute outcomes"):
+        EvaluationSeries.model_validate(payload)
+
+
+@pytest.mark.parametrize("candle_seconds", [15, 30, 60])
+def test_continuous_evaluation_rejects_missing_native_outcome_bar(
+    candle_seconds: int,
+) -> None:
+    steps_per_minute = 60 // candle_seconds
+    history = _native_bars(candle_seconds, 512 + 60 * steps_per_minute + 1)
+    origin_index = 511
+    origin = history[origin_index]
+    future_timestamps = tuple(
+        history[origin_index + minute * steps_per_minute].timestamp
+        for minute in range(1, 61)
+    )
+    missing_native = (*history[: origin_index + 5], *history[origin_index + 6 :])
+
+    with pytest.raises(ValidationError, match="declared native cadence"):
+        EvaluationSeries(
+            instrument_key=f"BINANCE_USDM:GAPPED-{candle_seconds}",
+            timezone="UTC",
+            bars=missing_native,
+            input_cadence=SeriesCadence(
+                candle_seconds=candle_seconds,
+                gap_policy="continuous",
+            ),
+            origins=(
+                EvaluationOrigin(
+                    origin=origin.timestamp,
+                    future_timestamps=future_timestamps,
                 ),
             ),
         )

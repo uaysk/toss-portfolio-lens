@@ -164,4 +164,105 @@ describe("ScalpingAiService", () => {
     expect(first.dataRevision).not.toBe(second.dataRevision);
     expect(first.config.instruments[0].origins_checksum).not.toBe(second.config.instruments[0].origins_checksum);
   });
+
+  it("FinCast cadence를 Kronos와 다른 evaluation provenance 및 재사용 키로 보존한다", async () => {
+    const enqueue = vi.fn(async (input) => ({
+      run: { id: `run-${enqueue.mock.calls.length}`, kind: input.kind },
+      reused: false,
+    }));
+    const service = new ScalpingAiService(
+      { request: vi.fn() } as never,
+      { putPrediction: vi.fn() } as never,
+      { enqueue } as never,
+      20,
+    );
+    const baseRequest: AiEvaluateRequest = {
+      ...requestBase("evaluate-model-lane"),
+      mode: "evaluate",
+      series: [{
+        instrument_key: "005930",
+        timezone: "Asia/Seoul",
+        bars,
+        origins: [{ origin: time(4), future_timestamps: future(4) }],
+      }],
+      cost_assumptions: {
+        commission_bps_per_side: 1,
+        tax_bps_on_exit: 2,
+        spread_bps_round_trip: 3,
+        slippage_bps_per_side: 4,
+      },
+    };
+    await service.evaluate(baseRequest);
+    await service.evaluate({
+      ...baseRequest,
+      series: baseRequest.series.map((series) => ({
+        ...series,
+        input_cadence: {
+          candle_seconds: 60 as const,
+          gap_policy: "market_session_prevalidated" as const,
+        },
+      })),
+    });
+
+    const kronos = enqueue.mock.calls[0]![0];
+    const fincast = enqueue.mock.calls[1]![0];
+    expect(kronos.config).toMatchObject({
+      model_lane: "kronos_base",
+      instruments: [{ input_cadence: null }],
+    });
+    expect(fincast.config).toMatchObject({
+      model_lane: "fincast",
+      instruments: [{
+        input_cadence: {
+          candle_seconds: 60,
+          gap_policy: "market_session_prevalidated",
+        },
+      }],
+    });
+    expect(kronos.dataRevision).not.toBe(fincast.dataRevision);
+  });
+
+  it("fails closed before progress or artifacts when evaluation model identity drifts from the requested lane", async () => {
+    const request: AiEvaluateRequest = {
+      ...requestBase("evaluate-model-identity"),
+      mode: "evaluate",
+      series: [{
+        instrument_key: "005930",
+        timezone: "Asia/Seoul",
+        bars,
+        origins: [{ origin: time(4), future_timestamps: future(4) }],
+        input_cadence: {
+          candle_seconds: 60,
+          gap_policy: "market_session_prevalidated",
+        },
+      }],
+      cost_assumptions: {
+        commission_bps_per_side: 1,
+        tax_bps_on_exit: 2,
+        spread_bps_round_trip: 3,
+        slippage_bps_per_side: 4,
+      },
+    };
+    const response = unavailable("evaluate", request.request_id);
+    const updateProgress = vi.fn();
+    const enqueue = vi.fn(async (input) => {
+      await input.task({
+        signal: new AbortController().signal,
+        throwIfCancelled: vi.fn(),
+        updateProgress,
+      });
+      return { run: { id: "should-not-complete", kind: input.kind }, reused: false };
+    });
+    const service = new ScalpingAiService(
+      { request: vi.fn(async () => response) } as never,
+      { putPrediction: vi.fn() } as never,
+      { enqueue } as never,
+      20,
+    );
+
+    await expect(service.evaluate(request)).rejects.toThrow(
+      /응답 모델이 요청 lane과 일치하지 않습니다/,
+    );
+    expect(updateProgress).not.toHaveBeenCalled();
+  });
 });

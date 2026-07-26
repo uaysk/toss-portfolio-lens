@@ -15,6 +15,7 @@ from .contracts import (
     InputQuality,
     PriceBar,
     QuantileValue,
+    SeriesCadence,
     SeriesForecastResult,
     TargetStopBounds,
     TargetStopSpec,
@@ -24,24 +25,44 @@ from .contracts import (
 _NORMAL_90 = 1.2815515655446004
 
 
-def input_quality(bars: Sequence[PriceBar]) -> InputQuality:
+def input_quality(
+    bars: Sequence[PriceBar],
+    input_cadence: SeriesCadence | None = None,
+) -> InputQuality:
     count = len(bars)
     missing_volume = sum(bar.volume is None for bar in bars)
     missing_amount = sum(bar.amount is None for bar in bars)
-    deltas = [
-        int((current.timestamp - previous.timestamp).total_seconds())
+    raw_deltas = [
+        (current.timestamp - previous.timestamp).total_seconds()
         for previous, current in zip(bars, bars[1:], strict=False)
     ]
-    positive = [delta for delta in deltas if delta > 0]
-    expected = Counter(positive).most_common(1)[0][0] if positive else None
-    irregular = sum(delta != expected for delta in deltas) if expected is not None else 0
+    if input_cadence is None:
+        deltas = [int(delta) for delta in raw_deltas]
+        positive = [delta for delta in deltas if delta > 0]
+        expected = Counter(positive).most_common(1)[0][0] if positive else None
+        irregular = sum(delta != expected for delta in deltas) if expected is not None else 0
+    elif input_cadence.gap_policy == "continuous":
+        irregular = sum(
+            not float(delta).is_integer() or int(delta) != input_cadence.candle_seconds
+            for delta in raw_deltas
+        )
+    else:
+        # The upstream market-session validator has already rejected missing
+        # active-session bars. Overnight, weekend, and scheduled closure gaps
+        # are valid here as long as the remaining timestamps stay minute-aligned.
+        irregular = sum(
+            not float(delta).is_integer()
+            or int(delta) < input_cadence.candle_seconds
+            or int(delta) % input_cadence.candle_seconds != 0
+            for delta in raw_deltas
+        )
     warnings: list[str] = []
     if missing_volume:
         warnings.append("volume is missing from one or more input bars")
     if missing_amount:
         warnings.append("amount is missing from one or more input bars")
     if irregular:
-        warnings.append("input timestamps contain irregular intervals or market-session gaps")
+        warnings.append("input timestamps violate the expected candle cadence")
     return InputQuality(
         status="partial" if warnings else "good",
         bar_count=count,
@@ -58,12 +79,13 @@ def unavailable_series(
     bars: Sequence[PriceBar],
     code: str,
     message: str,
+    input_cadence: SeriesCadence | None = None,
 ) -> SeriesForecastResult:
     return SeriesForecastResult(
         instrument_key=instrument_key,
         status="unavailable",
         input_end_at=input_end_at,
-        input_quality=input_quality(bars),
+        input_quality=input_quality(bars, input_cadence),
         distribution_shift=DistributionShift(
             status="unavailable",
             reason="reference_statistics_not_published",
@@ -268,6 +290,7 @@ def postprocess_prediction(series: ForecastSeries, raw: RawPrediction) -> Series
             series.bars,
             "MODEL_PROTOCOL_ERROR",
             "The model returned a result for a different instrument.",
+            series.input_cadence,
         )
     if raw.unavailable_code:
         return unavailable_series(
@@ -276,6 +299,7 @@ def postprocess_prediction(series: ForecastSeries, raw: RawPrediction) -> Series
             series.bars,
             raw.unavailable_code,
             raw.unavailable_message or "The model did not provide a forecast.",
+            series.input_cadence,
         )
     if (raw.paths is None) == (raw.close_quantiles is None):
         return unavailable_series(
@@ -284,6 +308,7 @@ def postprocess_prediction(series: ForecastSeries, raw: RawPrediction) -> Series
             series.bars,
             "MODEL_PROTOCOL_ERROR",
             "The model must return exactly one supported forecast representation.",
+            series.input_cadence,
         )
     horizons = _path_horizons(series, raw) if raw.paths is not None else _direct_horizons(series, raw)
     if horizons is None:
@@ -293,13 +318,14 @@ def postprocess_prediction(series: ForecastSeries, raw: RawPrediction) -> Series
             series.bars,
             "INVALID_MODEL_OUTPUT",
             "The model output was incomplete, non-finite, non-positive, or internally inconsistent.",
+            series.input_cadence,
         )
     return SeriesForecastResult(
         instrument_key=series.instrument_key,
         status="available",
         input_end_at=series.input_end_at,
         horizons=horizons,
-        input_quality=input_quality(series.bars),
+        input_quality=input_quality(series.bars, series.input_cadence),
         distribution_shift=DistributionShift(
             status="unavailable",
             reason="reference_statistics_not_published",

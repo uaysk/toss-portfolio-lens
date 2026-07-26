@@ -12,6 +12,7 @@ import {
   type SimulationStartRequest,
 } from "./contracts.js";
 import { AiTradingSimulationService } from "./simulation-service.js";
+import { FINCAST_QUALIFICATION_QUANTILE_ROWS } from "../worker/ai-contract.js";
 
 const RUN_ID = "550e8400-e29b-41d4-a716-446655440000";
 const CREATED_AT = "2026-07-24T00:00:00.000Z";
@@ -27,7 +28,50 @@ type StoredArtifact = {
   dataRevision: string;
 };
 
-function model(loaded = true) {
+function fincastQuantileObservations() {
+  return {
+    row_count: FINCAST_QUALIFICATION_QUANTILE_ROWS,
+    non_finite_value_count: 0,
+    crossing_row_count: 0,
+    crossing_adjacent_pair_count: 0,
+    adjusted_row_count: 0,
+    q50_adjustment_iqr_ratio_median: 0,
+    q50_adjustment_iqr_ratio_p95: 0,
+    q50_adjustment_iqr_ratio_max: 0,
+    postprocessed_monotonic: true,
+  };
+}
+
+function model(
+  loaded = true,
+  lane: "kronos_base" | "fincast" = "kronos_base",
+) {
+  if (lane === "fincast") {
+    return {
+      model_id: "Vincent05R/FinCast",
+      model_revision: "fincast-revision-a",
+      tokenizer_id: null,
+      tokenizer_revision: null,
+      source_revision: "fincast-source-revision-a",
+      loader_version: "fincast-source-revision-a",
+      license: "Apache-2.0",
+      device: loaded ? "cuda" : "unavailable",
+      dtype: loaded ? "mixed_float16" : "float32",
+      attention_backend: loaded ? "math" : "unavailable",
+      loaded,
+      precision_validation: loaded ? "passed" : "unavailable",
+      peak_vram_bytes: loaded ? 1_024 : null,
+      peak_vram_measurement: loaded ? "cuda_allocated_or_reserved" : null,
+      memory_status: loaded ? "ok" : "unavailable",
+      quantile_monotonicity_policy: loaded
+        ? "fp32_monotone_rearrangement_v1"
+        : "unavailable",
+      fp32_quantile_observations: loaded ? fincastQuantileObservations() : null,
+      mixed_quantile_observations: loaded ? fincastQuantileObservations() : null,
+      quantile_tail_policy: loaded ? "tail_clamped_q10_q90" : "unavailable",
+      precision_failure_reasons: [],
+    };
+  }
   return {
     model_id: "NeoQuasar/Kronos-base",
     model_revision: "revision-a",
@@ -71,14 +115,17 @@ function forecastSeries(
   };
 }
 
-function forecast(loaded = true) {
+function forecast(
+  loaded = true,
+  lane: "kronos_base" | "fincast" = "kronos_base",
+) {
   return {
     forecast: {
       schema_version: "scalping-ai/v1",
       request_id: "simulation-forecast",
       mode: "forecast",
       status: loaded ? "available" : "unavailable",
-      model: model(loaded),
+      model: model(loaded, lane),
       generated_at: GENERATED_AT,
       series: [
         forecastSeries("AAA", 0.03, 0.01, 0.05),
@@ -316,6 +363,7 @@ async function eventually<T>(
 
 function harness(options: {
   aiAvailable?: boolean;
+  modelLane?: "kronos_base" | "fincast";
   artifactFailureAfter?: number;
   artifactGate?: Promise<void>;
   createGate?: Promise<void>;
@@ -345,7 +393,10 @@ function harness(options: {
         ? { workspace: { candidates: workspaceCandidates() } }
         : fullWorkspace(input.symbols ?? [], workspaceCandidates()),
     )),
-    forecast: vi.fn().mockResolvedValue(forecast(options.aiAvailable !== false)),
+    forecast: vi.fn().mockResolvedValue(forecast(
+      options.aiAvailable !== false,
+      options.modelLane,
+    )),
     realtimeAnalysis: vi.fn().mockResolvedValue({
       generatedAt: TECHNICAL_AT,
       technical: {
@@ -600,6 +651,8 @@ describe("AI trading simulation service", () => {
       orderApiDependency: false,
       mcp: false,
       autonomousPaperTrading: true,
+      stockModelLanes: "kronos_base,fincast",
+      stockModelLaneConcurrency: "single_lane_only",
     });
     expect(status.limitations.join(" ")).toContain("실제 주문 API를 호출하지 않는");
     expect(status.pairStrategy.pairs).toEqual(expect.arrayContaining([
@@ -634,6 +687,74 @@ describe("AI trading simulation service", () => {
     expect(methods.filter((name) => /order/i.test(name))).toEqual([]);
     await setup.service.close("test_complete");
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs one FinCast stock lane with the same causal Rust cutoff and no Kronos fallback", async () => {
+    const setup = harness({ modelLane: "fincast" });
+    const input: SimulationStartRequest = {
+      ...request(1),
+      modelLanes: ["fincast"],
+    };
+    const started = await setup.service.start(input, "owner");
+    const running = await waitForPhase(setup, started.runId, "running") as unknown as {
+      snapshot: {
+        modelLanes: string[];
+        executionMode: string;
+        selected: Array<{ model: { modelId: string; dtype: string } }>;
+        decisions: Array<{
+          model: { modelId: string; dtype: string };
+          provenance?: string[];
+        }>;
+      };
+    };
+
+    expect(running.snapshot).toMatchObject({
+      modelLanes: ["fincast"],
+      executionMode: "paper",
+      selected: [{
+        model: {
+          modelId: "Vincent05R/FinCast",
+          dtype: "mixed_float16",
+        },
+      }],
+    });
+    expect(running.snapshot.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        model: expect.objectContaining({
+          modelId: "Vincent05R/FinCast",
+          dtype: "mixed_float16",
+        }),
+        provenance: ["forecast-technical-fusion/v1"],
+      }),
+    ]));
+    expect(setup.market.forecast).toHaveBeenCalledWith(
+      expect.objectContaining({ symbols: ["AAA", "BBB", "CCC"] }),
+      expect.objectContaining({ modelLane: "fincast" }),
+    );
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        skipAutomaticRefresh: true,
+        maximumInputEndAt: INPUT_END_AT,
+      }),
+    );
+    expect(setup.market.forecast.mock.calls.every((call) => (
+      (call[1] as { modelLane?: string } | undefined)?.modelLane === "fincast"
+    ))).toBe(true);
+    expect(setup.runService.create).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        model_lanes: ["fincast"],
+        execution: { mode: "paper" },
+        real_order_api: false,
+      }),
+    }));
+    expect(setup.latestArtifact("simulation-selection")?.content).toMatchObject({
+      modelLanes: ["fincast"],
+      selection: {
+        model: { modelId: "Vincent05R/FinCast" },
+      },
+    });
+    await setup.service.close("test_complete");
   });
 
   it("normalizes a legacy stock request across v7 storage, live reads, history, reports, and artifacts", async () => {
@@ -942,6 +1063,7 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, {
       signal: expect.any(AbortSignal),
+      modelLane: "kronos_base",
       maximumInputEndAt: "2026-07-24T00:04:00.000Z",
     });
 
@@ -1244,7 +1366,10 @@ describe("AI trading simulation service", () => {
       marketCountry: "KR",
       symbols: ["AAA", "BBB", "CCC"],
       interval: "1m",
-    }, { signal: expect.any(AbortSignal) });
+    }, {
+      signal: expect.any(AbortSignal),
+      modelLane: "kronos_base",
+    });
     expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(selected);
     expect(running.snapshot.charts.map(({ symbol }) => symbol)).toEqual(selected);
     expect(running.snapshot.charts.every(({ bars }) => bars.length === 2)).toBe(true);
@@ -1302,7 +1427,10 @@ describe("AI trading simulation service", () => {
       marketCountry: "KR",
       symbols: ["AAA", "CCC"],
       interval: "1m",
-    }, { signal: expect.any(AbortSignal) });
+    }, {
+      signal: expect.any(AbortSignal),
+      modelLane: "kronos_base",
+    });
     expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
       symbols: ["AAA", "CCC"],
       scanOnly: false,
@@ -1352,7 +1480,10 @@ describe("AI trading simulation service", () => {
       marketCountry: "US",
       symbols: ["AAA", "BBB", "CCC"],
       interval: "1m",
-    }, { signal: expect.any(AbortSignal) });
+    }, {
+      signal: expect.any(AbortSignal),
+      modelLane: "kronos_base",
+    });
     expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
       marketCountry: "US",
       symbols: ["BBB"],

@@ -1,7 +1,14 @@
 import {
   SimulationPresetSchema,
+  type SimulationModelLane,
   type SimulationPreset,
 } from "./contracts.js";
+import {
+  AiModelProvenanceSchema,
+  FINCAST_MODEL_ID,
+  KRONOS_BASE_MODEL_ID,
+  type QuantileRearrangementObservations,
+} from "../worker/ai-contract.js";
 import {
   calculateBrokerExecutionCharges,
   type TossSimulationCostProfile,
@@ -150,9 +157,23 @@ export type AiPaperModelProvenance = {
   loaderVersion: string;
   license: string;
   device: "cuda" | "cpu" | "unavailable";
-  dtype: "float32";
+  deviceName?: string;
+  cudaCapability?: string;
+  dtype: "float32" | "mixed_float16";
   attentionBackend: "math" | "unavailable";
   loaded: boolean;
+  precisionValidation?: "not_required" | "passed" | "fallback_fp32" | "unavailable";
+  peakVramBytes?: number;
+  peakVramMeasurement?: "cuda_allocated_or_reserved";
+  memoryStatus?: "ok" | "memory_pressure" | "unavailable";
+  quantileMonotonicityPolicy?:
+    | "native"
+    | "fp32_monotone_rearrangement_v1"
+    | "unavailable";
+  fp32QuantileObservations?: QuantileRearrangementObservations | null;
+  mixedQuantileObservations?: QuantileRearrangementObservations | null;
+  quantileTailPolicy?: "native" | "tail_clamped_q10_q90" | "unavailable";
+  precisionFailureReasons?: string[];
   fallbackFrom?: string;
   fallbackReason?: string;
 };
@@ -354,47 +375,59 @@ function validatedRiskPenalty(value: number): number {
   return value;
 }
 
-function parseModel(value: unknown): AiPaperModelProvenance | undefined {
-  const source = record(value);
-  if (!source) return undefined;
-  const modelId = nonemptyString(source.model_id);
-  const modelRevision = nonemptyString(source.model_revision);
-  const sourceRevision = nonemptyString(source.source_revision);
-  const loaderVersion = nonemptyString(source.loader_version, 128);
-  const license = nonemptyString(source.license, 64);
-  const tokenizerId = optionalString(source.tokenizer_id);
-  const tokenizerRevision = optionalString(source.tokenizer_revision);
-  const fallbackFrom = optionalString(source.fallback_from);
-  const fallbackReason = optionalString(source.fallback_reason, 500);
-  const device = source.device;
-  const attentionBackend = source.attention_backend;
-  const loaded = source.loaded;
-  if (!modelId || !modelRevision || !sourceRevision || !loaderVersion || !license
-    || tokenizerId === null || tokenizerRevision === null || fallbackFrom === null || fallbackReason === null
-    || !["cuda", "cpu", "unavailable"].includes(String(device))
-    || source.dtype !== "float32"
-    || !["math", "unavailable"].includes(String(attentionBackend))
-    || typeof loaded !== "boolean") {
-    return undefined;
-  }
-  if ((loaded && (device === "unavailable" || attentionBackend !== "math"))
-    || (!loaded && (device !== "unavailable" || attentionBackend !== "unavailable"))) {
+function parseModel(
+  value: unknown,
+  expectedLane?: SimulationModelLane,
+): AiPaperModelProvenance | undefined {
+  const parsed = AiModelProvenanceSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const source = parsed.data;
+  const expectedModelId = expectedLane === "fincast"
+    ? FINCAST_MODEL_ID
+    : expectedLane === "kronos_base" ? KRONOS_BASE_MODEL_ID : undefined;
+  if (
+    (
+      source.model_id !== KRONOS_BASE_MODEL_ID
+      && source.model_id !== FINCAST_MODEL_ID
+    )
+    || (expectedModelId !== undefined && source.model_id !== expectedModelId)
+    || (source.fallback_from ?? null) !== null
+    || (source.fallback_reason ?? null) !== null
+  ) {
     return undefined;
   }
   return {
-    modelId,
-    modelRevision,
-    ...(tokenizerId ? { tokenizerId } : {}),
-    ...(tokenizerRevision ? { tokenizerRevision } : {}),
-    sourceRevision,
-    loaderVersion,
-    license,
-    device: device as AiPaperModelProvenance["device"],
-    dtype: "float32",
-    attentionBackend: attentionBackend as AiPaperModelProvenance["attentionBackend"],
-    loaded,
-    ...(fallbackFrom ? { fallbackFrom } : {}),
-    ...(fallbackReason ? { fallbackReason } : {}),
+    modelId: source.model_id,
+    modelRevision: source.model_revision,
+    ...(source.tokenizer_id ? { tokenizerId: source.tokenizer_id } : {}),
+    ...(source.tokenizer_revision
+      ? { tokenizerRevision: source.tokenizer_revision } : {}),
+    sourceRevision: source.source_revision,
+    loaderVersion: source.loader_version,
+    license: source.license,
+    device: source.device,
+    ...(source.device_name ? { deviceName: source.device_name } : {}),
+    ...(source.cuda_capability ? { cudaCapability: source.cuda_capability } : {}),
+    dtype: source.dtype,
+    attentionBackend: source.attention_backend,
+    loaded: source.loaded,
+    ...(source.precision_validation
+      ? { precisionValidation: source.precision_validation } : {}),
+    ...(source.peak_vram_bytes === undefined || source.peak_vram_bytes === null
+      ? {} : { peakVramBytes: source.peak_vram_bytes }),
+    ...(source.peak_vram_measurement
+      ? { peakVramMeasurement: source.peak_vram_measurement } : {}),
+    ...(source.memory_status ? { memoryStatus: source.memory_status } : {}),
+    ...(source.quantile_monotonicity_policy
+      ? { quantileMonotonicityPolicy: source.quantile_monotonicity_policy } : {}),
+    ...(source.fp32_quantile_observations === undefined
+      ? {} : { fp32QuantileObservations: source.fp32_quantile_observations }),
+    ...(source.mixed_quantile_observations === undefined
+      ? {} : { mixedQuantileObservations: source.mixed_quantile_observations }),
+    ...(source.quantile_tail_policy
+      ? { quantileTailPolicy: source.quantile_tail_policy } : {}),
+    ...(source.precision_failure_reasons
+      ? { precisionFailureReasons: [...source.precision_failure_reasons] } : {}),
   };
 }
 
@@ -578,6 +611,7 @@ export function selectAiForecastSeries(
     roundTripCostRate: number;
     riskPenalty: number;
     notBeforeMs?: number;
+    modelLane?: SimulationModelLane;
   },
 ): AiPaperSelection {
   if (config.symbolCount !== 1 && config.symbolCount !== 2) {
@@ -589,7 +623,7 @@ export function selectAiForecastSeries(
     throw new RangeError("notBeforeMs must be a finite epoch timestamp.");
   }
   const response = record(input);
-  const model = parseModel(response?.model);
+  const model = parseModel(response?.model, config.modelLane);
   const generatedAt = isoTimestamp(response?.generated_at);
   const base = {
     policyVersion: AI_PAPER_POLICY_VERSION,
@@ -868,6 +902,7 @@ export function decidePaperActions(input: {
   profile: ResolvedPaperPolicyProfile;
   technicalStates?: Readonly<Record<string, unknown>>;
   heldSymbols?: readonly string[];
+  modelLane?: SimulationModelLane;
 }): PaperPolicyAction[] {
   if (input.selection.status !== "available") return [];
   const held = new Set(input.heldSymbols ?? []);
@@ -889,8 +924,10 @@ export function decidePaperActions(input: {
       || observation.indicators
       || observation.chartPatternBias && observation.chartPatternBias !== "neutral",
     );
-    const fusion = fuseForecastWithTechnical({
-      lane: "kronos_base",
+    const baseFusion = fuseForecastWithTechnical({
+      lane: input.modelLane ?? (
+        candidate.model.modelId === FINCAST_MODEL_ID ? "fincast" : "kronos_base"
+      ),
       modelDirection: "long",
       modelConfidence: candidate.upProbability,
       modelOriginAt: candidate.inputEndAt,
@@ -913,8 +950,17 @@ export function decidePaperActions(input: {
       } : {}),
       maximumTechnicalAgeMs: AI_PAPER_FORECAST_HORIZON_MINUTES * 2 * 60_000,
     });
+    const fusion: ForecastTechnicalFusionResult = hasTechnicalEvidence
+      ? baseFusion
+      : {
+          ...baseFusion,
+          admitted: false,
+          exposureScale: 0,
+          reasonCodes: ["technical_evidence_missing"],
+        };
     const model = modelEvidence(candidate);
     const exitReasons = [
+      ...(!hasTechnicalEvidence ? ["technical_evidence_missing"] : []),
       ...(candidate.score < 0 ? ["negative_risk_adjusted_score"] : []),
       ...(candidate.upProbability <= input.profile.exitUpProbability
         ? ["low_up_probability"] : []),
@@ -992,8 +1038,10 @@ export function decidePaperActions(input: {
         ...model.components,
       },
       targetAllocationRate: rounded(
-        input.profile.targetAllocationRate
-          * (action === "buy" ? fusion.exposureScale * model.scale : 1),
+        hasTechnicalEvidence
+          ? input.profile.targetAllocationRate
+            * (action === "buy" ? fusion.exposureScale * model.scale : 1)
+          : 0,
       ),
       reasons: action === "buy"
         ? [...reasons, ...fusion.reasonCodes, ...model.reasons]

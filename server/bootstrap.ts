@@ -375,6 +375,14 @@ if (config.scalping.enabled && scalpingRepository) {
     runService,
     config.scalping.ai.maximumBatchSize,
   );
+  const stockFincastAi = cryptoFincastClient
+    ? new ScalpingAiService(
+        cryptoFincastClient,
+        scalpingRepository,
+        runService,
+        config.scalping.ai.maximumBatchSize,
+      )
+    : undefined;
   scalpingService = new ScalpingService(
     tossScalping,
     kisScalpingRest,
@@ -386,6 +394,8 @@ if (config.scalping.enabled && scalpingRepository) {
     toss,
     technicalTradeMarkerService,
     config.scalping.service,
+    undefined,
+    stockFincastAi,
   );
   if (config.scalping.recorder.enabled) {
     marketDataRecorder = new MarketDataRecorder(

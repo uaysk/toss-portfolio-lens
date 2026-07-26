@@ -10,6 +10,9 @@ import { canonicalJson } from "../worker/contracts.js";
 import {
   AiEvaluateRequestSchema,
   AiForecastRequestSchema,
+  AiResponseSchema,
+  FINCAST_MODEL_ID,
+  KRONOS_BASE_MODEL_ID,
   type AiEvaluateRequest,
   type AiForecastRequest,
   type AiResponse,
@@ -32,6 +35,7 @@ function dataRevision(request: AiEvaluateRequest, marketCountry: MarketCountry):
     bar_count: series.bars.length,
     origins_checksum: createHash("sha256").update(canonicalJson(series.origins)).digest("hex"),
     bar_checksum: createHash("sha256").update(canonicalJson(series.bars)).digest("hex"),
+    input_cadence: series.input_cadence ?? null,
   }));
   return `scalping-bars:${createHash("sha256").update(canonicalJson(source)).digest("hex")}`;
 }
@@ -119,6 +123,18 @@ export class ScalpingAiService {
       throw new Error(`AI 예측 검증은 한 번에 ${this.maximumBatchSize}종목 이하여야 합니다.`);
     }
     const totalOrigins = request.series.reduce((sum, series) => sum + series.origins.length, 0);
+    const fincastSeriesCount = request.series.filter(
+      (series) => series.input_cadence !== undefined && series.input_cadence !== null,
+    ).length;
+    if (fincastSeriesCount !== 0 && fincastSeriesCount !== request.series.length) {
+      throw new Error("AI 예측 검증 batch는 하나의 모델 cadence만 포함해야 합니다.");
+    }
+    const modelLane = fincastSeriesCount === request.series.length
+      ? "fincast"
+      : "kronos_base";
+    const expectedModelId = modelLane === "fincast"
+      ? FINCAST_MODEL_ID
+      : KRONOS_BASE_MODEL_ID;
     const revision = dataRevision(request, marketCountry);
     const queued = await this.runs.enqueue({
       ownerSubject,
@@ -130,11 +146,13 @@ export class ScalpingAiService {
         horizons_minutes: request.horizons_minutes,
         quantiles: request.quantiles,
         seed: request.seed,
+        model_lane: modelLane,
         instruments: request.series.map((series) => ({
           instrument_key: series.instrument_key,
           bar_count: series.bars.length,
           origin_count: series.origins.length,
           origins_checksum: createHash("sha256").update(canonicalJson(series.origins)).digest("hex"),
+          input_cadence: series.input_cadence ?? null,
         })),
         cost_assumptions: request.cost_assumptions,
         retrospective: true,
@@ -145,8 +163,16 @@ export class ScalpingAiService {
       allowInlineInExternal: true,
       task: async (context) => {
         await context.throwIfCancelled();
-        const response = await this.client.request(request, context.signal);
+        const response = AiResponseSchema.parse(
+          await this.client.request(request, context.signal),
+        );
         await context.throwIfCancelled();
+        if (response.model.model_id !== expectedModelId) {
+          throw new Error(
+            `AI 예측 검증 응답 모델이 요청 lane과 일치하지 않습니다: `
+            + `lane=${modelLane}, expected=${expectedModelId}, actual=${response.model.model_id}`,
+          );
+        }
         if (!response.evaluation) throw new Error("AI worker가 예측 검증 결과를 반환하지 않았습니다.");
         await context.updateProgress(1, {
           completedCandidates: totalOrigins,

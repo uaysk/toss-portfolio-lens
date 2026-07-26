@@ -24,6 +24,7 @@ import type { ScalpingService } from "../scalping/scalping-service.js";
 import type {
   SimulationMarket,
   SimulationCosts,
+  SimulationModelLane,
   SimulationPreset,
   SimulationStartRequest,
   SimulationStrategy,
@@ -427,6 +428,14 @@ function manuallySelectedSymbols(request: SimulationStartRequest): string[] {
   return request.selection.mode === "manual" ? [...request.selection.symbols] : [];
 }
 
+function stockModelLane(request: SimulationStartRequest): SimulationModelLane {
+  const lane = request.modelLanes[0];
+  if (!lane || request.modelLanes.length !== 1) {
+    throw new Error("주식 시뮬레이션은 정확히 하나의 모델 lane이 필요합니다.");
+  }
+  return lane;
+}
+
 type SimulationMarketSource = {
   status: ScalpingService["status"];
   workspace(input: {
@@ -447,6 +456,7 @@ type SimulationMarketSource = {
   }, options?: {
     signal?: AbortSignal;
     maximumInputEndAt?: string;
+    modelLane?: SimulationModelLane;
   }): Promise<ScalpingForecastResult>;
   realtimeAnalysis(input: {
     marketCountry: MarketCountry;
@@ -1828,7 +1838,8 @@ export class AiTradingSimulationService {
         deterministicChartPatterns: true,
         eventDrivenDecisions: true,
         gpuForecastWorker: "provenance_reported_per_run",
-        stockModelLanes: "kronos_base",
+        stockModelLanes: "kronos_base,fincast",
+        stockModelLaneConcurrency: "single_lane_only",
         nextObservedExecutionOnly: true,
         pairStrategy: true,
         kronosRustEnsemble: true,
@@ -1877,8 +1888,9 @@ export class AiTradingSimulationService {
         "진행 중인 봉을 미래정보처럼 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "페어 전략은 기초자산 신호와 실행 ETF를 분리하며 bull·bear·cash 중 하나만 활성화합니다.",
-        "주식 시뮬레이션은 검증된 Kronos-base lane만 사용하며 FinCast lane은 암호화폐 선물에서만 실행합니다.",
-        "Kronos-base 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
+        "주식 단일 종목 전략은 Kronos-base 또는 FinCast 중 정확히 한 lane을 실행하며 다른 모델로 대체하지 않습니다.",
+        "주식 페어 전략은 독립 FinCast 원장이 추가되기 전까지 Kronos-base와 Rust 결합만 허용합니다.",
+        "선택한 모델 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
         "서버 재시작 중이던 forward session은 이어서 체결하지 않고 fail-closed 처리합니다.",
@@ -1956,6 +1968,8 @@ export class AiTradingSimulationService {
       risk_tolerance: input.riskTolerance,
       resolved_policy_profile: policyProfile,
       costs: input.costs,
+      model_lanes: input.modelLanes,
+      execution: input.execution,
       candidate_pool_size: this.config.candidatePoolSize,
       decision_cadence: "event_driven_finalized_one_minute_bar",
       selection_maximum_attempts: this.selectionMaximumAttempts,
@@ -1990,6 +2004,7 @@ export class AiTradingSimulationService {
             ]
           : manuallySelectedSymbols(input),
         strategy,
+        model_lanes: input.modelLanes,
         real_order_api: false,
       }, createdAtMs);
     } catch (error) {
@@ -2480,6 +2495,7 @@ export class AiTradingSimulationService {
         interval: "1m",
       }, {
         signal: session.decisionAbort.signal,
+        modelLane: stockModelLane(session.request),
       });
       if (session.phase !== "selecting") return;
       selection = selectAiForecastSeries(forecastResult.forecast, {
@@ -2493,6 +2509,7 @@ export class AiTradingSimulationService {
           session.request.riskTolerance,
         ).riskPenalty,
         notBeforeMs: this.now(),
+        modelLane: stockModelLane(session.request),
       });
       if (selection.status === "available") break;
       const unavailable = forecastUnavailableCodes(forecastResult);
@@ -2578,7 +2595,7 @@ export class AiTradingSimulationService {
     }
     const maximumInputEndAt = sharedSelectionOrigin(selection);
     if (!maximumInputEndAt) {
-      throw new Error("선정된 Kronos-base 예측의 입력 origin이 종목 간 일치하지 않습니다.");
+      throw new Error("선정된 모델 예측의 입력 origin이 종목 간 일치하지 않습니다.");
     }
     const initialTechnical = await this.market.realtimeAnalysis({
       marketCountry: session.request.marketCountry,
@@ -2746,6 +2763,7 @@ export class AiTradingSimulationService {
       interval: "1m",
     }, {
       signal,
+      modelLane: stockModelLane(session.request),
       ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
     });
     if (signal.aborted || session.phase !== "selecting") return;
@@ -2773,6 +2791,7 @@ export class AiTradingSimulationService {
         session.request.riskTolerance,
       ).riskPenalty,
       notBeforeMs: this.now(),
+      modelLane: stockModelLane(session.request),
     });
     if (displaySelection.status === "available"
       && displaySelection.selected.every(({ symbol }) => symbol === pair.signalSymbol)) {
@@ -2849,6 +2868,7 @@ export class AiTradingSimulationService {
         session.request.preset,
         session.request.riskTolerance,
       ),
+      modelLane: stockModelLane(session.request),
     });
     for (const action of actions) {
       const eligibleAfter = latestTimestamp([action.eligibleAfter, recordedAt]) ?? action.eligibleAfter;
@@ -3636,6 +3656,7 @@ export class AiTradingSimulationService {
       interval: "1m",
     }, {
       signal,
+      modelLane: stockModelLane(session.request),
       maximumInputEndAt,
     });
     if (signal.aborted || session.phase !== "running") return;
@@ -3671,6 +3692,7 @@ export class AiTradingSimulationService {
       ),
       riskPenalty: profile.riskPenalty,
       notBeforeMs: this.now(),
+      modelLane: stockModelLane(session.request),
     });
     if (selection.status !== "available") {
       this.warn(session, `AI 판단 unavailable: ${selection.reason ?? "unknown"}`);
@@ -3720,6 +3742,7 @@ export class AiTradingSimulationService {
       interval: "1m",
     }, {
       signal,
+      modelLane: stockModelLane(session.request),
       ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
     });
     if (signal.aborted || session.phase !== "running") return;
@@ -3761,6 +3784,7 @@ export class AiTradingSimulationService {
         session.request.riskTolerance,
       ).riskPenalty,
       notBeforeMs: this.now(),
+      modelLane: stockModelLane(session.request),
     });
     if (displaySelection.status === "available"
       && displaySelection.selected.every(({ symbol }) => symbol === signalSymbol)) {
@@ -4195,6 +4219,8 @@ export class AiTradingSimulationService {
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       market,
       marketCountry: session.request.marketCountry,
+      modelLanes: [...session.request.modelLanes],
+      executionMode: session.request.execution.mode,
       currency: session.request.marketCountry === "US" ? "USD" : "KRW",
       costs: session.request.costs,
       costProfile: getTossSimulationCostProfile(session.request.marketCountry),
@@ -4342,6 +4368,7 @@ export class AiTradingSimulationService {
             : AI_PAPER_POLICY_VERSION,
           selection: session.selection,
           strategy: simulationStrategy(session.request),
+          modelLanes: [...session.request.modelLanes],
           ...(session.pair ? { pair: session.pair.catalog } : {}),
           metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
         },
@@ -4410,6 +4437,8 @@ export class AiTradingSimulationService {
           initial_portfolio: "cash_only_zero_holdings",
           selected_symbol_limit: selectionSymbolCount(session.request),
           selection_mode: session.request.selection.mode,
+          model_lanes: session.request.modelLanes,
+          execution_mode: session.request.execution.mode,
           strategy: simulationStrategy(session.request),
           ...(session.pair ? {
             pair_catalog_version: session.pair.catalog.catalogVersion,

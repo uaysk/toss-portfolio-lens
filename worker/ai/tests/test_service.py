@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from typing import Sequence
+
 import pytest
 from pydantic import ValidationError
 
-from portfolio_ai_worker.adapters import ProductionModelBinding, UnavailableAdapter
+from portfolio_ai_worker.adapters import (
+    InferenceSeries,
+    ProductionModelBinding,
+    RawPrediction,
+    UnavailableAdapter,
+)
 from portfolio_ai_worker.contracts import (
     ForecastRequest,
     ForecastSeries,
     ModelProvenance,
     ModelRun,
+    PriceBar,
     QuantileRearrangementObservations,
+    SeriesCadence,
 )
 from portfolio_ai_worker.service import AIService, _canonical_input_digest
 
@@ -25,6 +35,60 @@ def _series(key: str, count: int = 80) -> ForecastSeries:
         future_timestamps=future(history[-1].timestamp),
         bars=history,
     )
+
+
+def _native_series(
+    key: str,
+    candle_seconds: int,
+    *,
+    input_cadence: SeriesCadence | None = None,
+) -> ForecastSeries:
+    start = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    history = tuple(
+        PriceBar(
+            timestamp=start + timedelta(seconds=candle_seconds * index),
+            open=100 + index / 1_000,
+            high=101 + index / 1_000,
+            low=99 + index / 1_000,
+            close=100.5 + index / 1_000,
+            volume=1_000 + index,
+            amount=(1_000 + index) * (100.5 + index / 1_000),
+            complete=True,
+        )
+        for index in range(512)
+    )
+    return ForecastSeries(
+        instrument_key=key,
+        timezone="UTC",
+        input_end_at=history[-1].timestamp,
+        future_timestamps=future(history[-1].timestamp),
+        bars=history,
+        input_cadence=input_cadence,
+    )
+
+
+class _CadenceFailingAdapter(DeterministicAdapter):
+    def __init__(self, failing_candle_seconds: int) -> None:
+        super().__init__()
+        self.failing_candle_seconds = failing_candle_seconds
+        self.attempts: list[tuple[InferenceSeries, ...]] = []
+
+    def predict_batch(
+        self,
+        series: Sequence[InferenceSeries],
+        *,
+        seed: int,
+    ) -> list[RawPrediction]:
+        self.attempts.append(tuple(series))
+        intervals = {
+            int((item.bars[1].timestamp - item.bars[0].timestamp).total_seconds())
+            for item in series
+        }
+        if len(intervals) != 1:
+            raise RuntimeError("mixed cadence reached the adapter")
+        if next(iter(intervals)) == self.failing_candle_seconds:
+            raise RuntimeError("simulated cadence-specific failure")
+        return super().predict_batch(series, seed=seed)
 
 
 def _model(*, loaded: bool = True) -> ModelProvenance:
@@ -65,6 +129,90 @@ def test_service_microbatches_and_returns_partial_unavailable_without_fabricatio
     assert response.series[-1].status == "unavailable"
     assert response.series[-1].unavailable is not None
     assert response.series[-1].unavailable.code == "INSUFFICIENT_HISTORY"
+
+
+def test_kronos_microbatching_remains_cadence_agnostic(tmp_path) -> None:
+    adapter = DeterministicAdapter()
+    service = AIService(
+        settings(
+            tmp_path,
+            model_lane="kronos_base",
+            min_context_bars=64,
+            max_context_bars=128,
+            microbatch_size=2,
+        ),
+        adapter,
+    )
+    requested = (
+        _native_series("BINANCE_USDM:FAST", 15),
+        _native_series("BINANCE_USDM:SLOW", 60),
+    )
+
+    response = service.handle(
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="kronos-monolithic-cadence-regression",
+            mode="forecast",
+            series=requested,
+        )
+    )
+
+    assert response.status == "available"
+    assert len(adapter.calls) == 1
+    assert tuple(item.instrument_key for item in adapter.calls[0]) == (
+        "BINANCE_USDM:FAST",
+        "BINANCE_USDM:SLOW",
+    )
+
+
+def test_fincast_mixed_cadences_are_isolated_before_inference(tmp_path) -> None:
+    adapter = _CadenceFailingAdapter(failing_candle_seconds=30)
+    service = AIService(
+        settings(
+            tmp_path,
+            model_lane="fincast",
+            min_context_bars=512,
+            max_context_bars=512,
+            microbatch_size=10,
+        ),
+        adapter,
+    )
+    requested = (
+        _native_series("BINANCE_USDM:FAST-A", 15),
+        _native_series("BINANCE_USDM:FAIL", 30),
+        _native_series("BINANCE_USDM:SLOW", 60),
+        _native_series("BINANCE_USDM:FAST-B", 15),
+    )
+
+    response = service.handle(
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="fincast-mixed-cadence-isolation",
+            mode="forecast",
+            series=requested,
+        )
+    )
+
+    assert response.status == "partial"
+    assert [
+        tuple(
+            int((item.bars[1].timestamp - item.bars[0].timestamp).total_seconds())
+            for item in attempt
+        )
+        for attempt in adapter.attempts
+    ] == [(15, 15), (30,), (60,)]
+    by_key = {item.instrument_key: item for item in response.series}
+    assert by_key["BINANCE_USDM:FAIL"].status == "unavailable"
+    assert by_key["BINANCE_USDM:FAIL"].unavailable is not None
+    assert by_key["BINANCE_USDM:FAIL"].unavailable.code == "INFERENCE_FAILED"
+    assert all(
+        by_key[key].status == "available"
+        for key in (
+            "BINANCE_USDM:FAST-A",
+            "BINANCE_USDM:FAST-B",
+            "BINANCE_USDM:SLOW",
+        )
+    )
 
 
 def test_service_enforces_environment_backed_series_limit(tmp_path) -> None:
@@ -191,7 +339,9 @@ def test_response_rejects_multiple_or_wrong_model_roles(tmp_path) -> None:
         type(response).model_validate(payload)
 
 
-def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
+def test_stock_fincast_lane_preserves_cadence_and_same_512_bar_origin_digest(
+    tmp_path,
+) -> None:
     quantile_observations = QuantileRearrangementObservations(
         row_count=54_600,
         non_finite_value_count=0,
@@ -237,7 +387,15 @@ def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
         fincast,
         (ProductionModelBinding("fincast", "Vincent05R/FinCast", fincast),),
     )
-    requested = _series("BINANCE_USDM:BTCUSDT", 512)
+    requested = _series("AAPL", 512).model_copy(
+        update={
+            "timezone": "America/New_York",
+            "input_cadence": SeriesCadence(
+                candle_seconds=60,
+                gap_policy="market_session_prevalidated",
+            ),
+        }
+    )
     response = service.handle(
         ForecastRequest(
             schema_version="scalping-ai/v1",
@@ -254,3 +412,5 @@ def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
     assert run.input_origins[0].bar_count == 512
     assert run.input_origins[0].input_digest == _canonical_input_digest(requested.bars)
     assert fincast.calls[0][0].bars == requested.bars
+    assert fincast.calls[0][0].timezone == "America/New_York"
+    assert fincast.calls[0][0].input_cadence == requested.input_cadence

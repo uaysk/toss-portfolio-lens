@@ -197,6 +197,9 @@ export type AiSimulationRequest = {
   selection: AiSimulationSelectionRequest;
   strategy: AiSimulationStrategyRequest;
   costs: AiSimulationCosts;
+  modelLanes: [AiSimulationModelLane];
+  fincastCandleSeconds: 60;
+  execution: { mode: "paper" };
 };
 
 export type AiSimulationLimits = {
@@ -564,6 +567,9 @@ export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
   },
   strategy: { mode: "single" },
   costs: defaultAiSimulationCosts("KR"),
+  modelLanes: ["kronos_base"],
+  fincastCandleSeconds: 60,
+  execution: { mode: "paper" },
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -2334,6 +2340,19 @@ export function validateAiSimulationRequest(
     issues.push("전략 실행 방식이 올바르지 않습니다.");
   }
   if (!AI_SIMULATION_PRESETS.includes(request.preset)) issues.push("AI 전략 프리셋이 올바르지 않습니다.");
+  if (request.modelLanes.length !== 1
+    || !AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])) {
+    issues.push("주식 시뮬레이션 모델은 Kronos-base 또는 FinCast 중 하나여야 합니다.");
+  }
+  if (strategyMode === "pair" && request.modelLanes[0] !== "kronos_base") {
+    issues.push("페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.");
+  }
+  if (request.fincastCandleSeconds !== 60) {
+    issues.push("주식 FinCast 입력 주기는 1분봉만 지원합니다.");
+  }
+  if (request.execution.mode !== "paper") {
+    issues.push("현재 주식 시뮬레이션은 paper 실행만 지원합니다.");
+  }
   if (!Number.isInteger(request.riskTolerance)
     || request.riskTolerance < 0
     || request.riskTolerance > 100) {

@@ -16,6 +16,7 @@ import {
   defaultSimulationCostsForMarket,
   getTossSimulationCostProfile,
 } from "./cost-profile.js";
+import { FINCAST_QUALIFICATION_QUANTILE_ROWS } from "../worker/ai-contract.js";
 
 const generatedAt = "2026-07-24T00:05:02.000Z";
 const inputEndAt = "2026-07-24T00:05:00.000Z";
@@ -94,6 +95,46 @@ function response(values: unknown[], loaded = true) {
     generated_at: generatedAt,
     series: values,
     retrospective_future_outcome: { winner: "MALICIOUS" },
+  };
+}
+
+function quantileObservations(overrides: Record<string, unknown> = {}) {
+  return {
+    row_count: FINCAST_QUALIFICATION_QUANTILE_ROWS,
+    non_finite_value_count: 0,
+    crossing_row_count: 0,
+    crossing_adjacent_pair_count: 0,
+    adjusted_row_count: 0,
+    q50_adjustment_iqr_ratio_median: 0,
+    q50_adjustment_iqr_ratio_p95: 0,
+    q50_adjustment_iqr_ratio_max: 0,
+    postprocessed_monotonic: true,
+    ...overrides,
+  };
+}
+
+function fincastModel() {
+  return {
+    model_id: "Vincent05R/FinCast",
+    model_revision: "fincast-revision-a",
+    tokenizer_id: null,
+    tokenizer_revision: null,
+    source_revision: "fincast-source-revision-a",
+    loader_version: "fincast-source-revision-a",
+    license: "Apache-2.0",
+    device: "cuda",
+    dtype: "mixed_float16",
+    attention_backend: "math",
+    loaded: true,
+    precision_validation: "passed",
+    peak_vram_bytes: 1_024,
+    peak_vram_measurement: "cuda_allocated_or_reserved",
+    memory_status: "ok",
+    quantile_monotonicity_policy: "fp32_monotone_rearrangement_v1",
+    fp32_quantile_observations: quantileObservations(),
+    mixed_quantile_observations: quantileObservations(),
+    quantile_tail_policy: "tail_clamped_q10_q90",
+    precision_failure_reasons: [],
   };
 }
 
@@ -238,6 +279,83 @@ describe("AI paper policy selection", () => {
     });
     expect(one.selected[0]?.score).toBeCloseTo(0.0215);
     expect(one.policyVersion).toBe(AI_PAPER_POLICY_VERSION);
+  });
+
+  it("accepts validated FinCast provenance only for the explicit FinCast lane", () => {
+    const fincast = {
+      ...response([series("AAA", 0.03)]),
+      model: fincastModel(),
+    };
+    const config = {
+      symbolCount: 1 as const,
+      roundTripCostRate: 0.001,
+      riskPenalty: 0.25,
+    };
+    expect(selectAiForecastSeries(fincast, {
+      ...config,
+      modelLane: "fincast",
+    })).toMatchObject({
+      status: "available",
+      model: {
+        modelId: "Vincent05R/FinCast",
+        dtype: "mixed_float16",
+        precisionValidation: "passed",
+        peakVramBytes: 1_024,
+        peakVramMeasurement: "cuda_allocated_or_reserved",
+        quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
+        quantileTailPolicy: "tail_clamped_q10_q90",
+      },
+    });
+    expect(selectAiForecastSeries(fincast, {
+      ...config,
+      modelLane: "kronos_base",
+    })).toMatchObject({
+      status: "unavailable",
+      reason: "invalid_forecast_response",
+    });
+    expect(selectAiForecastSeries({
+      ...fincast,
+      model: { ...fincast.model, fallback_from: "NeoQuasar/Kronos-base" },
+    }, {
+      ...config,
+      modelLane: "fincast",
+    })).toMatchObject({
+      status: "unavailable",
+      reason: "invalid_forecast_response",
+    });
+  });
+
+  it.each([
+    ["peak VRAM measurement", (model: Record<string, unknown>) => {
+      delete model.peak_vram_measurement;
+    }],
+    ["FP32 quantile observations", (model: Record<string, unknown>) => {
+      delete model.fp32_quantile_observations;
+    }],
+    ["qualification row count", (model: Record<string, unknown>) => {
+      model.mixed_quantile_observations = quantileObservations({ row_count: 1 });
+    }],
+    ["approved precision failures", (model: Record<string, unknown>) => {
+      model.precision_failure_reasons = ["unapproved_failure"];
+    }],
+    ["quantile monotonicity policy", (model: Record<string, unknown>) => {
+      model.quantile_monotonicity_policy = "native";
+    }],
+  ])("rejects FinCast policy provenance with invalid %s", (_label, mutate) => {
+    const provenance = fincastModel() as Record<string, unknown>;
+    mutate(provenance);
+    expect(selectAiForecastSeries({
+      ...response([series("AAA", 0.03)]),
+      model: provenance,
+    }, {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+      riskPenalty: 0.25,
+      modelLane: "fincast",
+    })).toMatchObject({
+      status: "unavailable",
+      reason: "invalid_forecast_response",
+    });
   });
 
   it("makes defensive uncertainty reduce score more than aggressive uncertainty", () => {
@@ -433,6 +551,29 @@ describe("AI paper policy selection", () => {
 });
 
 describe("AI paper policy actions", () => {
+  it("fails closed to cash when causal Rust technical evidence is completely absent", () => {
+    const selection = availableSelection(0.05, 0.9, aggressiveProfile);
+    expect(decidePaperActions({
+      selection,
+      profile: aggressiveProfile,
+    })[0]).toMatchObject({
+      action: "watch",
+      exposureScale: 0,
+      targetAllocationRate: 0,
+      reasons: expect.arrayContaining(["technical_evidence_missing"]),
+    });
+    expect(decidePaperActions({
+      selection,
+      profile: aggressiveProfile,
+      heldSymbols: ["AAA"],
+    })[0]).toMatchObject({
+      action: "sell",
+      exposureScale: 0,
+      targetAllocationRate: 0,
+      reasons: expect.arrayContaining(["technical_evidence_missing"]),
+    });
+  });
+
   it("fuses exact-origin Rust indicators, honors their fill barrier, and only scales down", () => {
     const action = decide(aggressiveProfile, {
       technical: {
