@@ -185,7 +185,7 @@ services:
       - ${AI_AUTH_SECRET_SOURCE:-ai_auth}:/app/ai-auth
       - ${AI_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
     healthcheck:
-      test: ["CMD", "uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker", "healthcheck"]
+      test: ["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 12

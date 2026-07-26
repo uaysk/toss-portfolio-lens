@@ -66,6 +66,11 @@ assert(
     === JSON.stringify(["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]),
   "FinCast runtime healthcheck must execute the installed offline worker directly",
 );
+assert(
+  JSON.stringify(rendered.services?.["ai-worker"]?.healthcheck?.test)
+    === JSON.stringify(["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]),
+  "Kronos runtime healthcheck must execute the installed offline worker directly",
+);
 
 const fincastProfileServices = new Set(compose([
   "--profile",

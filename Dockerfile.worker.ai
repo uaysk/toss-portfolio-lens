@@ -37,6 +37,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     UV_NO_CACHE=0 uv sync --frozen --no-dev --extra model
 USER portfolio
 HEALTHCHECK --interval=30s --timeout=3s --start-period=120s --retries=3 \
-  CMD ["uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker", "healthcheck"]
-ENTRYPOINT ["uv", "run", "--frozen", "--no-dev", "--extra", "model", "portfolio-ai-worker"]
+  CMD ["/app/.venv/bin/portfolio-ai-worker", "healthcheck"]
+ENTRYPOINT ["/app/.venv/bin/portfolio-ai-worker"]
 CMD ["serve"]
