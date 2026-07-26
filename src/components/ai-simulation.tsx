@@ -29,6 +29,7 @@ import {
 import { AiSimulationHistory } from "@/components/ai-simulation-history";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -1062,14 +1063,16 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError("");
         setRun({ ...next, runId: next.runId ?? runId });
-        if (ACTIVE_RUN_STATUSES.has(next.status)) timer = window.setTimeout(() => void poll(), 500);
+        if (ACTIVE_RUN_STATUSES.has(next.status)) {
+          timer = window.setTimeout(() => void poll(), CHART_UPDATE_INTERVAL_MS);
+        }
       } catch (caught) {
         if (controller.signal.aborted || generation !== pollingGeneration.current) return;
         setError(caught instanceof Error ? caught.message : "시뮬레이션 상태를 불러오지 못했습니다.");
-        timer = window.setTimeout(() => void poll(), 1_500);
+        timer = window.setTimeout(() => void poll(), CHART_UPDATE_INTERVAL_MS);
       }
     };
-    timer = window.setTimeout(() => void poll(), 300);
+    void poll();
     return () => {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);

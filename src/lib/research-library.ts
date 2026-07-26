@@ -1,3 +1,5 @@
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
+
 export type RunLibraryItem = {
   id: string;
   kind: string;
@@ -323,7 +325,7 @@ export async function generateLibraryResearchReport(
       const timer = globalThis.setTimeout(() => {
         options?.signal?.removeEventListener("abort", onAbort);
         resolve();
-      }, options?.pollIntervalMs ?? 500);
+      }, options?.pollIntervalMs ?? CHART_UPDATE_INTERVAL_MS);
       if (options?.signal?.aborted) {
         onAbort();
         return;

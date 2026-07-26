@@ -1,0 +1,1 @@
+export const CHART_UPDATE_INTERVAL_MS = 1_000;

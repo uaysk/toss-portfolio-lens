@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import {
   isValidCalendarRange,
   presetCalendarRange,
@@ -178,10 +179,9 @@ export function AllocationHistoryChart({
           setRetryKey((value) => value + 1);
         }
         previousStatus = payload.status;
-        const delay = payload.status === "running" || payload.status === "idle" ? 1_500 : 30_000;
-        timer = window.setTimeout(loadStatus, delay);
+        timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
       } catch {
-        if (active) timer = window.setTimeout(loadStatus, 10_000);
+        if (active) timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
       }
     };
 

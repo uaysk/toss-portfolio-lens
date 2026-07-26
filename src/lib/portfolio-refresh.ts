@@ -1,4 +1,6 @@
-export const PORTFOLIO_REFRESH_INTERVAL_MS = 5_000;
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
+
+export const PORTFOLIO_REFRESH_INTERVAL_MS = CHART_UPDATE_INTERVAL_MS;
 
 export function shouldRefreshPortfolioInBackground(
   visibilityState: DocumentVisibilityState,

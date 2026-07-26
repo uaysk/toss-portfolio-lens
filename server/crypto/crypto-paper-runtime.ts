@@ -2320,8 +2320,8 @@ function normalizeLaneForecast(
       || precisionValidation !== "not_required"
       || memoryStatus !== "ok"
       || quantileMonotonicityPolicy !== "native"
-      || fp32QuantileObservations !== undefined
-      || mixedQuantileObservations !== undefined
+      || (fp32QuantileObservations !== undefined && fp32QuantileObservations !== null)
+      || (mixedQuantileObservations !== undefined && mixedQuantileObservations !== null)
       || quantileTailPolicy !== "native"
       || precisionFailureReasons.length > 0) {
       throw new Error("model_precision_provenance_invalid");
@@ -2398,7 +2398,7 @@ function normalizeLaneForecast(
     precisionValidation,
     memoryStatus,
     quantileMonotonicityPolicy,
-    fp32QuantileObservations,
+    fp32QuantileObservations: fp32QuantileObservations ?? undefined,
     mixedQuantileObservations,
     quantileTailPolicy,
     precisionFailureReasons,

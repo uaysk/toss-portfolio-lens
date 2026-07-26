@@ -1,3 +1,4 @@
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import type { AdvancedRunSnapshot } from "@/types";
 
 export type AdvancedAnalysisOperation =
@@ -275,7 +276,7 @@ export async function runAdvancedAnalysis(input: {
   }
   input.onProgress?.(run);
   while (["queued", "running", "cancel_requested"].includes(run.status)) {
-    await wait(input.pollIntervalMs ?? 800, input.signal);
+    await wait(input.pollIntervalMs ?? CHART_UPDATE_INTERVAL_MS, input.signal);
     run = await checkedFetch(`/api/portfolio/advanced/runs/${encodeURIComponent(run.runId)}`, {
       headers: { Accept: "application/json" },
       signal: input.signal,

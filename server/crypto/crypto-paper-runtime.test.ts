@@ -1181,6 +1181,30 @@ describe("CryptoPaperRuntime", () => {
     });
   });
 
+  it("accepts explicit null Kronos quantile observations from the Python wire response", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "kronos_base",
+      modelOverrides: () => ({
+        fp32_quantile_observations: null,
+        mixed_quantile_observations: null,
+      }),
+    });
+    const comparisonLane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    expect(comparisonLane).toMatchObject({
+      id: "kronos_base",
+      status: "completed",
+    });
+    expect((
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      errors: [],
+    });
+  });
+
   it("keeps matching child provenance in the portfolio lane and marks drift partial", async () => {
     const { result, runtime } = await runProvenanceSimulation({ lane: "kronos_base" });
     const firstSnapshot = (result.result as {

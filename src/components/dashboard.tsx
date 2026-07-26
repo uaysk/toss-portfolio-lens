@@ -296,7 +296,7 @@ function PortfolioHero({ portfolio }: { portfolio: Portfolio }) {
               </p>
             ) : null}
           </div>
-          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">LIVE · 5초</span>
+          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">LIVE · 1초</span>
         </div>
 
         <div className="mt-auto grid grid-cols-2 gap-x-5 gap-y-5 pt-12 lg:grid-cols-4 lg:gap-8">

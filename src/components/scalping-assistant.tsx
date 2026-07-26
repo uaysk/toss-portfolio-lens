@@ -33,6 +33,7 @@ import {
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatMoney, formatQuantity } from "@/lib/format";
@@ -758,7 +759,7 @@ function EvaluationPanel({
           progress: snapshot.progress,
         } : current);
         if (["queued", "running", "cancel_requested"].includes(snapshot.status)) {
-          timer = window.setTimeout(() => void poll(), 800);
+          timer = window.setTimeout(() => void poll(), CHART_UPDATE_INTERVAL_MS);
           return;
         }
         if (snapshot.status !== "completed") {

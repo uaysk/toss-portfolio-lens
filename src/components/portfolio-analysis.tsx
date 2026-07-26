@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import { StockSwatch } from "@/components/stock-swatch";
 import {
@@ -237,7 +238,10 @@ export function PortfolioAnalysisView({
 
   useEffect(() => {
     if (!analysis || analysis.ohlcBackfillComplete) return;
-    const timer = window.setTimeout(() => setRetryKey((value) => value + 1), 10_000);
+    const timer = window.setTimeout(
+      () => setRetryKey((value) => value + 1),
+      CHART_UPDATE_INTERVAL_MS,
+    );
     return () => window.clearTimeout(timer);
   }, [analysis]);
 
