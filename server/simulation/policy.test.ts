@@ -7,6 +7,7 @@ import {
   resolvePaperPolicyProfile,
   selectAiForecastSeries,
   type AiPaperSelection,
+  type PaperLedger,
   type PaperPolicyAction,
   type ResolvedPaperPolicyProfile,
 } from "./policy.js";
@@ -119,6 +120,11 @@ function decide(
     technical?: unknown;
   } = {},
 ) {
+  const technical = options.technical ?? {
+    status: "entry_candidate",
+    chartPatternBias: "bullish",
+    chartPatterns: ["bullish_engulfing"],
+  };
   return decidePaperActions({
     selection: availableSelection(
       options.median ?? 0.02,
@@ -128,11 +134,9 @@ function decide(
     profile,
     heldSymbols: options.held ? ["AAA"] : [],
     technicalStates: {
-      AAA: options.technical ?? {
-        status: "entry_candidate",
-        chartPatternBias: "bullish",
-        chartPatterns: ["bullish_engulfing"],
-      },
+      AAA: technical !== null && typeof technical === "object" && !Array.isArray(technical)
+        ? { technicalEvidenceAt: inputEndAt, ...technical }
+        : technical,
     },
   })[0]!;
 }
@@ -315,6 +319,84 @@ describe("AI paper policy selection", () => {
     expect(selectAiForecastSeries(forged, config)).toEqual(selectAiForecastSeries(clean, config));
   });
 
+  it("preserves calibrated direction, volatility, path quality, and target-stop bounds", () => {
+    const input = response([series("AAA", 0.03, 0.75)]);
+    const horizon = (input.series[0] as ReturnType<typeof series>).horizons[0] as
+      ReturnType<typeof series>["horizons"][number] & Record<string, unknown>;
+    Object.assign(horizon, {
+      down_probability: 0.15,
+      flat_probability: 0.1,
+      expected_volatility: 0.03,
+      uncertainty_interval_width: 0.06,
+      valid_path_count: 18,
+      invalid_path_count: 2,
+      target_stop: {
+        status: "available",
+        target_first_probability_lower: 0.6,
+        target_first_probability_upper: 0.7,
+        stop_first_probability_lower: 0.2,
+        stop_first_probability_upper: 0.3,
+        ambiguous_probability: 0.1,
+        neither_probability: 0.1,
+      },
+    });
+    const selection = selectAiForecastSeries(input, {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+      riskPenalty: 0.25,
+    });
+    expect(selection.selected[0]).toMatchObject({
+      downProbability: 0.15,
+      flatProbability: 0.1,
+      expectedVolatility: 0.03,
+      uncertaintyIntervalWidth: 0.06,
+      validPathCount: 18,
+      invalidPathCount: 2,
+      targetStop: {
+        status: "available",
+        targetFirstProbabilityLower: 0.6,
+        stopFirstProbabilityUpper: 0.3,
+      },
+    });
+  });
+
+  it("fails closed when reported target-stop probabilities are incomplete or inconsistent", () => {
+    const input = response([series("AAA", 0.03, 0.75)]);
+    const horizon = (input.series[0] as ReturnType<typeof series>).horizons[0] as
+      ReturnType<typeof series>["horizons"][number] & Record<string, unknown>;
+    horizon.target_stop = {
+      status: "available",
+      target_first_probability_lower: 0.6,
+      target_first_probability_upper: 0.75,
+      stop_first_probability_lower: 0.15,
+      stop_first_probability_upper: 0.25,
+    };
+    expect(selectAiForecastSeries(input, {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+      riskPenalty: 0.25,
+    })).toMatchObject({
+      status: "unavailable",
+      selected: [],
+    });
+  });
+
+  it("fails closed when reported up/down/flat probabilities do not sum to one", () => {
+    const input = response([series("AAA", 0.03, 0.75)]);
+    const horizon = (input.series[0] as ReturnType<typeof series>).horizons[0] as
+      ReturnType<typeof series>["horizons"][number] & Record<string, unknown>;
+    horizon.down_probability = 0.3;
+    horizon.flat_probability = 0.1;
+    expect(selectAiForecastSeries(input, {
+      symbolCount: 1,
+      roundTripCostRate: 0.001,
+      riskPenalty: 0.25,
+    })).toMatchObject({
+      status: "unavailable",
+      selected: [],
+    });
+  });
+
   it("rejects stale horizons and invalid scoring configuration", () => {
     const expiredAtGeneration = response([series("AAA", 0.02)]);
     expiredAtGeneration.generated_at = "2026-07-24T00:10:00.000Z";
@@ -351,6 +433,117 @@ describe("AI paper policy selection", () => {
 });
 
 describe("AI paper policy actions", () => {
+  it("fuses exact-origin Rust indicators, honors their fill barrier, and only scales down", () => {
+    const action = decide(aggressiveProfile, {
+      technical: {
+        status: "entry_candidate",
+        technicalSignal: 1,
+        signalOriginAt: inputEndAt,
+        calculationAt: inputEndAt,
+        earliestEligibleAt: "2026-07-24T00:06:00.000Z",
+        confidence: 1,
+        multiTimeframeAgreement: "aligned_bullish",
+        signalDataQuality: { status: "available" },
+        instrumentDataQuality: { status: "available" },
+        chartPatternBias: "bullish",
+        chartPatternStrength: 0.8,
+        indicatorEvidence: {
+          schemaVersion: "rust-indicator-evidence/v1",
+          directionalScore: 0.7,
+          riskScale: 0.75,
+          availableIndicatorCount: 12,
+          usedDirectionalIndicatorCount: 8,
+          usedRiskIndicatorCount: 3,
+          components: { "group:trend": 0.8 },
+        },
+      },
+    });
+    expect(action).toMatchObject({
+      action: "buy",
+      eligibleAfter: "2026-07-24T00:06:00.000Z",
+      fusionPolicyVersion: "forecast-technical-fusion/v1",
+      technicalDirection: "long",
+      chartPatternStrength: 0.8,
+    });
+    expect(action.technicalScore).toBeGreaterThan(0);
+    expect(action.exposureScale).toBeGreaterThan(0);
+    expect(action.exposureScale).toBeLessThanOrEqual(0.75);
+    expect(action.targetAllocationRate).toBeLessThan(aggressiveProfile.targetAllocationRate);
+  });
+
+  it("uses optional Kronos path and volatility evidence to reduce stock allocation", () => {
+    const selection = availableSelection();
+    selection.selected[0] = {
+      ...selection.selected[0]!,
+      downProbability: 0.1,
+      flatProbability: 0.15,
+      expectedVolatility: 0.04,
+      uncertaintyIntervalWidth: 0.08,
+      validPathCount: 8,
+      invalidPathCount: 2,
+      targetStop: {
+        status: "available",
+        targetFirstProbabilityLower: 0.55,
+        targetFirstProbabilityUpper: 0.7,
+        stopFirstProbabilityLower: 0.2,
+        stopFirstProbabilityUpper: 0.35,
+        ambiguousProbability: 0.15,
+        neitherProbability: 0.1,
+      },
+    };
+    const action = decidePaperActions({
+      selection,
+      profile: aggressiveProfile,
+      technicalStates: {
+        AAA: {
+          status: "entry_candidate",
+          technicalEvidenceAt: inputEndAt,
+          chartPatternBias: "bullish",
+        },
+      },
+    })[0]!;
+    expect(action.action).toBe("buy");
+    expect(action.modelEvidenceScale).toBeLessThan(1);
+    expect(action.targetAllocationRate).toBeLessThan(aggressiveProfile.targetAllocationRate);
+    expect(action.technicalComponents).toMatchObject({
+      modelDirectionalEdge: 0.6,
+      modelExpectedVolatility: 0.04,
+      modelValidPathRatio: 0.8,
+      targetFirstProbabilityLower: 0.55,
+    });
+  });
+
+  it("blocks an entry when Rust evidence conflicts or comes from the future", () => {
+    const conflict = decide(aggressiveProfile, {
+      technical: {
+        status: "entry_candidate",
+        signalOriginAt: inputEndAt,
+        calculationAt: inputEndAt,
+        chartPatternBias: "bullish",
+        indicatorEvidence: {
+          schemaVersion: "rust-indicator-evidence/v1",
+          directionalScore: -1,
+          riskScale: 1,
+          availableIndicatorCount: 5,
+          usedDirectionalIndicatorCount: 5,
+          usedRiskIndicatorCount: 0,
+          components: {},
+        },
+      },
+    });
+    expect(conflict.action).toBe("watch");
+    expect(conflict.reasons).toContain("technical_direction_conflict");
+    const future = decide(aggressiveProfile, {
+      technical: {
+        status: "entry_candidate",
+        signalOriginAt: "2026-07-24T00:05:00.001Z",
+        chartPatternBias: "bullish",
+      },
+    });
+    expect(future.action).toBe("watch");
+    expect(future.reasons).toContain("technical_evidence_after_model_origin");
+  });
+
   it("allows every preset to enter from an empty ledger when its confirmations pass", () => {
     for (const preset of presets) {
       const profile = resolvePaperPolicyProfile(preset, 50);
@@ -469,6 +662,7 @@ describe("AI paper policy actions", () => {
         AAA: {
           technicalState: "entry_candidate",
           observed_at: technicalObservedAt,
+          technicalEvidenceAt: inputEndAt,
           chartPatternBias: "neutral",
         },
       },
@@ -482,6 +676,20 @@ describe("AI paper policy actions", () => {
 });
 
 describe("whole-share paper ledger", () => {
+  it("rejects a legacy v2 ledger instead of mixing it with v3 fusion decisions", () => {
+    const legacy = {
+      ...createPaperLedger(1_000),
+      policyVersion: "ai-paper-policy/v2",
+    } as unknown as PaperLedger;
+    expect(fillPaperAction(legacy, action("buy"), {
+      timestamp: "2026-07-24T00:06:00.000Z",
+      price: 100,
+    }, { symbolCount: 1, targetAllocationRate: 1, costs })).toMatchObject({
+      status: "rejected",
+      reason: "invalid_ledger",
+    });
+  });
+
   it("rejects same-time execution and applies only a later whole-share buy", () => {
     const ledger = createPaperLedger(1_000);
     const buy = action("buy");

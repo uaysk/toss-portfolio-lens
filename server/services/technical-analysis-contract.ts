@@ -183,6 +183,7 @@ export type TechnicalIndicatorParameterRule =
   | { type: "iso_date"; required?: boolean };
 
 const period = { type: "integer", minimum: 1, maximum: 10_000 } as const;
+const annualization = { type: "integer", minimum: 1, maximum: 525_600 } as const;
 const source = { type: "enum", values: ["open", "high", "low", "close", "typical_price"] } as const;
 const multiplier = { type: "number", minimum: 0.1, maximum: 20 } as const;
 
@@ -212,7 +213,7 @@ export const TECHNICAL_INDICATOR_PARAMETER_RULES = {
   keltner_channel: { atr_period: period, ema_period: period, multiplier },
   supertrend: { atr_period: period, multiplier },
   historical_volatility: {
-    annualization: period,
+    annualization,
     period,
     return_type: { type: "enum", values: ["simple", "log"] },
   },

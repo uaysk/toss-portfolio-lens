@@ -60,6 +60,7 @@ def test_service_microbatches_and_returns_partial_unavailable_without_fabricatio
     assert [item.instrument_key for item in response.series] == [item.instrument_key for item in requested]
     assert len(adapter.calls) == 3
     assert all(len(call) <= 2 for call in adapter.calls)
+    assert all(item.timezone == "Asia/Seoul" for call in adapter.calls for item in call)
     assert all(len(item.bars) == 80 for call in adapter.calls for item in call)
     assert response.series[-1].status == "unavailable"
     assert response.series[-1].unavailable is not None
@@ -192,7 +193,7 @@ def test_response_rejects_multiple_or_wrong_model_roles(tmp_path) -> None:
 
 def test_fincast_lane_preserves_same_512_bar_origin_digest(tmp_path) -> None:
     quantile_observations = QuantileRearrangementObservations(
-        row_count=7_680,
+        row_count=54_600,
         non_finite_value_count=0,
         crossing_row_count=1,
         crossing_adjacent_pair_count=1,

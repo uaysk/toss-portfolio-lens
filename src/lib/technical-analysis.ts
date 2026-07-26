@@ -146,7 +146,7 @@ export type TechnicalPriceSeries = {
   symbol: string;
   market: string;
   currency: string;
-  instrument_type: "stock" | "etf" | "index" | "fund" | "other";
+  instrument_type: "stock" | "etf" | "crypto" | "index" | "fund" | "other";
   bars: TechnicalAnalysisBar[];
 };
 

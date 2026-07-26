@@ -37,6 +37,7 @@ pub enum AdjustmentPolicy {
 pub enum InstrumentType {
     Stock,
     Etf,
+    Crypto,
     Index,
     Fund,
     Other,
@@ -611,7 +612,11 @@ pub fn catalog_entry(kind: IndicatorKind) -> IndicatorCatalogEntry {
             vec![Input::Close],
             strings(&["value"]),
             parameter_map([
-                ("annualization", integer(Some(252), 1, 10_000, false)),
+                // 24/7 one-minute markets contain 525,600 observations in a
+                // non-leap year. Keep this bound separate from lookback
+                // periods so crypto volatility can be annualized without
+                // widening every rolling-window allocation.
+                ("annualization", integer(Some(252), 1, 525_600, false)),
                 ("period", period(20)),
                 (
                     "return_type",
@@ -1225,7 +1230,10 @@ fn volume_indicator_supported(kind: IndicatorKind) -> bool {
 }
 
 fn instrument_supports_volume_indicators(instrument_type: InstrumentType) -> bool {
-    matches!(instrument_type, InstrumentType::Stock | InstrumentType::Etf)
+    matches!(
+        instrument_type,
+        InstrumentType::Stock | InstrumentType::Etf | InstrumentType::Crypto
+    )
 }
 
 #[inline]
@@ -3236,7 +3244,7 @@ pub fn analyze(
                                 AvailabilityStatus::Unavailable
                             },
                             reason: if volume_indicator_supported(definition.kind) {
-                                "volume_indicators_support_stock_and_etf_only".into()
+                                "volume_indicators_support_stock_etf_and_crypto_only".into()
                             } else {
                                 "indicator_not_implemented".into()
                             },
@@ -4729,6 +4737,27 @@ mod tests {
             50.0 * 1.1_f64.ln(),
             epsilon = 1e-12
         );
+
+        let minute_annualized = calculate_full_with_latest_parity(
+            vec![instrument_from_closes("asset", &[100.0, 110.0, 110.0])],
+            with_parameters(
+                definition(
+                    "minute-volatility",
+                    IndicatorKind::HistoricalVolatility,
+                    "asset",
+                ),
+                [
+                    ("period", json!(2)),
+                    ("annualization", json!(525_600)),
+                    ("return_type", json!("simple")),
+                ],
+            ),
+        );
+        assert_abs_diff_eq!(
+            point_value(&minute_annualized.points.unwrap()[2], "value"),
+            5.0 * 525_600_f64.sqrt(),
+            epsilon = 1e-9
+        );
     }
 
     #[test]
@@ -5341,7 +5370,7 @@ mod tests {
                 );
                 assert_eq!(
                     calculation.availability.reason,
-                    "volume_indicators_support_stock_and_etf_only"
+                    "volume_indicators_support_stock_etf_and_crypto_only"
                 );
             }
         }
@@ -5349,6 +5378,20 @@ mod tests {
         let mut etf = instrument_from_closes("asset", &[10.0, 11.0, 12.0]);
         etf.instrument_type = InstrumentType::Etf;
         let calculation = calculate_full_with_latest_parity(vec![etf], volume_sma);
+        assert_eq!(
+            calculation.availability.status,
+            AvailabilityStatus::Available
+        );
+
+        let mut crypto = instrument_from_closes("asset", &[10.0, 11.0, 12.0]);
+        crypto.instrument_type = InstrumentType::Crypto;
+        let calculation = calculate_full_with_latest_parity(
+            vec![crypto],
+            with_parameters(
+                definition("crypto-volume-sma", IndicatorKind::VolumeSma, "asset"),
+                [("period", json!(2))],
+            ),
+        );
         assert_eq!(
             calculation.availability.status,
             AvailabilityStatus::Available

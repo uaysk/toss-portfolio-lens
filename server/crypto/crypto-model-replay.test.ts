@@ -37,7 +37,7 @@ const COSTS = {
 
 function qualificationObservations(overrides: Record<string, unknown> = {}) {
   return {
-    row_count: 7_680,
+    row_count: 54_600,
     non_finite_value_count: 0,
     crossing_row_count: 65,
     crossing_adjacent_pair_count: 74,
@@ -404,7 +404,7 @@ describe("CryptoModelComparisonReplay", () => {
         precisionFallbackUsed: false,
         quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
         fp32QuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 65,
           crossingAdjacentPairCount: 74,
           adjustedRowCount: 65,
@@ -412,7 +412,7 @@ describe("CryptoModelComparisonReplay", () => {
           postprocessedMonotonic: true,
         },
         mixedQuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 67,
           crossingAdjacentPairCount: 79,
           adjustedRowCount: 67,
@@ -663,7 +663,7 @@ describe("CryptoModelComparisonReplay", () => {
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
-          raw.model.mixed_quantile_observations!.crossing_row_count = 7_681;
+          raw.model.mixed_quantile_observations!.crossing_row_count = 54_601;
           return raw;
         },
       },
@@ -676,7 +676,7 @@ describe("CryptoModelComparisonReplay", () => {
       identityVerified: false,
       error: { code: "INVALID_RESPONSE_CONTRACT" },
     });
-  });
+  }, 15_000);
 
   it("persists null mixed observations only for a bounded mixed runtime failure", async () => {
     const fixture = restWith();
@@ -703,7 +703,7 @@ describe("CryptoModelComparisonReplay", () => {
         precision: "fp32",
         precisionValidation: "fallback_fp32",
         fp32QuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 65,
         },
         mixedQuantileObservations: null,

@@ -11,15 +11,32 @@ type UnknownRecord = Record<string, unknown>;
 
 export type SimulationChartPatternBias = "bullish" | "bearish" | "neutral";
 
+export type SimulationChartPatternName =
+  | "bullish_engulfing"
+  | "bearish_engulfing"
+  | "hammer"
+  | "shooting_star"
+  | "inside_bar"
+  | "bullish_outside_bar"
+  | "bearish_outside_bar"
+  | "bullish_flag"
+  | "bearish_flag"
+  | "bullish_pennant"
+  | "bearish_pennant"
+  | "rising_wedge"
+  | "falling_wedge"
+  | "symmetric_triangle"
+  | "ascending_triangle"
+  | "descending_triangle"
+  | "double_top"
+  | "double_bottom"
+  | "head_and_shoulders"
+  | "inverse_head_and_shoulders"
+  | "bullish_channel_breakout"
+  | "bearish_channel_breakout";
+
 export type SimulationChartPattern = {
-  name:
-    | "bullish_engulfing"
-    | "bearish_engulfing"
-    | "hammer"
-    | "shooting_star"
-    | "inside_bar"
-    | "bullish_outside_bar"
-    | "bearish_outside_bar";
+  name: SimulationChartPatternName;
   bias: SimulationChartPatternBias;
   strength: number;
   detectedAt: string;
@@ -94,10 +111,641 @@ function candleParts(bar: SimulationChartBar) {
   };
 }
 
+type RegressionLine = {
+  slope: number;
+  intercept: number;
+  rmse: number;
+};
+
+type IndexedPrice = {
+  index: number;
+  price: number;
+};
+
+type StructuralBoundaries = {
+  upper: RegressionLine;
+  lower: RegressionLine;
+  startWidth: number;
+  endWidth: number;
+  fitQuality: number;
+  containment: number;
+};
+
+const STRUCTURAL_WINDOWS = [9, 12, 16, 20, 24, 30, 36, 42] as const;
+const CHANNEL_WINDOWS = [12, 20, 30] as const;
+const PIVOT_LOOKBACK = 72;
+const ONE_MINUTE_MS = 60_000;
+
+function average(values: readonly number[]): number {
+  return values.length
+    ? values.reduce((total, value) => total + value, 0) / values.length
+    : 0;
+}
+
+function averageTrueRange(bars: readonly SimulationChartBar[]): number {
+  if (!bars.length) return 0;
+  return average(bars.map((bar, index) => {
+    const previousClose = bars[index - 1]?.close ?? bar.open;
+    return Math.max(
+      bar.high - bar.low,
+      Math.abs(bar.high - previousClose),
+      Math.abs(bar.low - previousClose),
+    );
+  }));
+}
+
+function regression(points: readonly IndexedPrice[]): RegressionLine {
+  if (!points.length) return { slope: 0, intercept: 0, rmse: Number.POSITIVE_INFINITY };
+  const meanIndex = average(points.map((point) => point.index));
+  const meanPrice = average(points.map((point) => point.price));
+  const denominator = points.reduce(
+    (total, point) => total + (point.index - meanIndex) ** 2,
+    0,
+  );
+  const slope = denominator <= Number.EPSILON
+    ? 0
+    : points.reduce(
+      (total, point) => total + (point.index - meanIndex) * (point.price - meanPrice),
+      0,
+    ) / denominator;
+  const intercept = meanPrice - slope * meanIndex;
+  const rmse = Math.sqrt(average(points.map(
+    (point) => (point.price - (intercept + slope * point.index)) ** 2,
+  )));
+  return { slope, intercept, rmse };
+}
+
+function lineValue(line: RegressionLine, index: number): number {
+  return line.intercept + line.slope * index;
+}
+
+function segmentedExtrema(
+  bars: readonly SimulationChartBar[],
+  field: "high" | "low",
+): IndexedPrice[] {
+  const segmentCount = Math.min(4, Math.max(3, Math.floor(bars.length / 3)));
+  const points: IndexedPrice[] = [];
+  for (let segment = 0; segment < segmentCount; segment += 1) {
+    const start = Math.floor(segment * bars.length / segmentCount);
+    const end = Math.max(start + 1, Math.floor((segment + 1) * bars.length / segmentCount));
+    let selectedIndex = start;
+    for (let index = start + 1; index < end; index += 1) {
+      const selected = bars[selectedIndex]!;
+      const candidate = bars[index]!;
+      if ((field === "high" && candidate.high > selected.high)
+        || (field === "low" && candidate.low < selected.low)) {
+        selectedIndex = index;
+      }
+    }
+    points.push({ index: selectedIndex, price: bars[selectedIndex]![field] });
+  }
+  return points;
+}
+
+function structuralBoundaries(
+  bars: readonly SimulationChartBar[],
+  atr: number,
+): StructuralBoundaries | undefined {
+  if (bars.length < 6) return undefined;
+  const upper = regression(segmentedExtrema(bars, "high"));
+  const lower = regression(segmentedExtrema(bars, "low"));
+  const startWidth = lineValue(upper, 0) - lineValue(lower, 0);
+  const endWidth = lineValue(upper, bars.length - 1) - lineValue(lower, bars.length - 1);
+  if (!(startWidth > 0) || !(endWidth > 0)) return undefined;
+  const scale = Math.max(startWidth, endWidth, atr, Number.EPSILON);
+  const fitQuality = boundedStrength(1 - (upper.rmse + lower.rmse) / (scale * 0.7));
+  const allowance = Math.max(atr * 0.35, scale * 0.08);
+  const contained = bars.filter((bar, index) => (
+    bar.high <= lineValue(upper, index) + allowance
+    && bar.low >= lineValue(lower, index) - allowance
+  )).length / bars.length;
+  return {
+    upper,
+    lower,
+    startWidth,
+    endWidth,
+    fitQuality,
+    containment: contained,
+  };
+}
+
+function contiguousFinalBarSegments(
+  bars: readonly SimulationChartBar[],
+): SimulationChartBar[][] {
+  const segments: SimulationChartBar[][] = [];
+  let segment: SimulationChartBar[] = [];
+  for (const bar of bars) {
+    if (bar.status !== "final") continue;
+    const previous = segment.at(-1);
+    if (previous
+      && Date.parse(bar.timestamp) - Date.parse(previous.timestamp) !== ONE_MINUTE_MS) {
+      segments.push(segment);
+      segment = [];
+    }
+    segment.push(bar);
+  }
+  if (segment.length) segments.push(segment);
+  return segments;
+}
+
+function boundaryTouchEvidence(
+  bars: readonly SimulationChartBar[],
+  boundaries: StructuralBoundaries,
+  atr: number,
+): {
+  upperTouches: number;
+  lowerTouches: number;
+  distributed: boolean;
+} {
+  const scale = Math.max(boundaries.startWidth, boundaries.endWidth, atr, Number.EPSILON);
+  const tolerance = Math.max(atr * 0.25, scale * 0.06);
+  const splitAt = Math.ceil(bars.length / 2);
+  const upper = bars.flatMap((bar, index) => (
+    Math.abs(bar.high - lineValue(boundaries.upper, index)) <= tolerance ? [index] : []
+  ));
+  const lower = bars.flatMap((bar, index) => (
+    Math.abs(bar.low - lineValue(boundaries.lower, index)) <= tolerance ? [index] : []
+  ));
+  const spansBothHalves = (touches: readonly number[]) => (
+    touches.some((index) => index < splitAt)
+    && touches.some((index) => index >= splitAt)
+  );
+  return {
+    upperTouches: upper.length,
+    lowerTouches: lower.length,
+    distributed: spansBothHalves(upper) && spansBothHalves(lower),
+  };
+}
+
+function volumeConfirmation(
+  formation: readonly SimulationChartBar[],
+  breakout: SimulationChartBar,
+): number {
+  const historical = formation
+    .map((bar) => bar.volume)
+    .filter((volume): volume is number => volume !== undefined && volume > 0);
+  if (breakout.volume === undefined || breakout.volume <= 0 || historical.length < 3) return 0.5;
+  return boundedStrength(breakout.volume / Math.max(average(historical) * 1.5, Number.EPSILON));
+}
+
+function structuralStrength(
+  geometry: number,
+  breakoutDistance: number,
+  atr: number,
+  formation: readonly SimulationChartBar[],
+  breakout: SimulationChartBar,
+): number {
+  const breakoutQuality = boundedStrength(breakoutDistance / Math.max(atr, Number.EPSILON));
+  return boundedStrength(
+    geometry * 0.6
+    + breakoutQuality * 0.25
+    + volumeConfirmation(formation, breakout) * 0.15,
+  );
+}
+
+function appendPattern(
+  patterns: Map<string, SimulationChartPattern>,
+  pattern: SimulationChartPattern,
+): void {
+  const key = `${pattern.detectedAt}\u0000${pattern.name}`;
+  const existing = patterns.get(key);
+  if (!existing || pattern.strength > existing.strength) patterns.set(key, pattern);
+}
+
+function detectBoundaryStructuresAt(
+  finalized: readonly SimulationChartBar[],
+  currentIndex: number,
+  patterns: Map<string, SimulationChartPattern>,
+): void {
+  const current = finalized[currentIndex]!;
+  const previous = finalized[currentIndex - 1];
+  if (!previous) return;
+
+  for (const window of STRUCTURAL_WINDOWS) {
+    if (currentIndex < window) continue;
+    const formation = finalized.slice(currentIndex - window, currentIndex);
+    const atr = averageTrueRange(formation.slice(-14));
+    if (!(atr > 0)) continue;
+    const boundaries = structuralBoundaries(formation, atr);
+    if (!boundaries || boundaries.fitQuality < 0.42 || boundaries.containment < 0.68) continue;
+
+    const lastIndex = formation.length - 1;
+    const nextIndex = formation.length;
+    const upperMove = lineValue(boundaries.upper, lastIndex) - lineValue(boundaries.upper, 0);
+    const lowerMove = lineValue(boundaries.lower, lastIndex) - lineValue(boundaries.lower, 0);
+    const flatThreshold = Math.max(atr * 0.55, boundaries.startWidth * 0.13);
+    const directionalThreshold = Math.max(atr * 0.35, boundaries.startWidth * 0.08);
+    const contraction = 1 - boundaries.endWidth / boundaries.startWidth;
+    const tolerance = Math.max(atr * 0.08, current.close * 0.00015);
+    const upperNow = lineValue(boundaries.upper, nextIndex);
+    const upperPrevious = lineValue(boundaries.upper, lastIndex);
+    const lowerNow = lineValue(boundaries.lower, nextIndex);
+    const lowerPrevious = lineValue(boundaries.lower, lastIndex);
+    const breaksAbove = current.close > upperNow + tolerance
+      && previous.close <= upperPrevious + tolerance;
+    const breaksBelow = current.close < lowerNow - tolerance
+      && previous.close >= lowerPrevious - tolerance;
+    if (!breaksAbove && !breaksBelow) continue;
+
+    const geometry = boundedStrength(
+      boundaries.fitQuality * 0.55
+      + boundaries.containment * 0.25
+      + boundedStrength(contraction / 0.5) * 0.2,
+    );
+
+    const upperFlat = Math.abs(upperMove) <= flatThreshold;
+    const lowerFlat = Math.abs(lowerMove) <= flatThreshold;
+    const upperFalling = upperMove < -directionalThreshold;
+    const upperRising = upperMove > directionalThreshold;
+    const lowerFalling = lowerMove < -directionalThreshold;
+    const lowerRising = lowerMove > directionalThreshold;
+
+    if (contraction >= 0.18) {
+      if (upperFalling && lowerRising) {
+        const distance = breaksAbove ? current.close - upperNow : lowerNow - current.close;
+        appendPattern(patterns, {
+          name: "symmetric_triangle",
+          bias: breaksAbove ? "bullish" : "bearish",
+          strength: structuralStrength(geometry, distance, atr, formation, current),
+          detectedAt: current.timestamp,
+        });
+      } else if (upperFlat && lowerRising && breaksAbove) {
+        appendPattern(patterns, {
+          name: "ascending_triangle",
+          bias: "bullish",
+          strength: structuralStrength(geometry, current.close - upperNow, atr, formation, current),
+          detectedAt: current.timestamp,
+        });
+      } else if (lowerFlat && upperFalling && breaksBelow) {
+        appendPattern(patterns, {
+          name: "descending_triangle",
+          bias: "bearish",
+          strength: structuralStrength(geometry, lowerNow - current.close, atr, formation, current),
+          detectedAt: current.timestamp,
+        });
+      } else if (upperRising && lowerRising && lowerMove > upperMove + directionalThreshold * 0.35
+        && breaksBelow) {
+        appendPattern(patterns, {
+          name: "rising_wedge",
+          bias: "bearish",
+          strength: structuralStrength(geometry, lowerNow - current.close, atr, formation, current),
+          detectedAt: current.timestamp,
+        });
+      } else if (upperFalling && lowerFalling && upperMove < lowerMove - directionalThreshold * 0.35
+        && breaksAbove) {
+        appendPattern(patterns, {
+          name: "falling_wedge",
+          bias: "bullish",
+          strength: structuralStrength(geometry, current.close - upperNow, atr, formation, current),
+          detectedAt: current.timestamp,
+        });
+      }
+    }
+  }
+}
+
+function detectChannelBreakoutAt(
+  finalized: readonly SimulationChartBar[],
+  currentIndex: number,
+  patterns: Map<string, SimulationChartPattern>,
+): void {
+  const current = finalized[currentIndex]!;
+  for (const window of CHANNEL_WINDOWS) {
+    if (currentIndex < window) continue;
+    const formation = finalized.slice(currentIndex - window, currentIndex);
+    const atr = averageTrueRange(formation.slice(-14));
+    if (!(atr > 0)) continue;
+    const boundaries = structuralBoundaries(formation, atr);
+    if (!boundaries || boundaries.fitQuality < 0.5 || boundaries.containment < 0.75) continue;
+    const touchEvidence = boundaryTouchEvidence(formation, boundaries, atr);
+    if (touchEvidence.upperTouches < 2
+      || touchEvidence.lowerTouches < 2
+      || !touchEvidence.distributed) continue;
+
+    const lastIndex = formation.length - 1;
+    const nextIndex = formation.length;
+    const upperMove = lineValue(boundaries.upper, lastIndex) - lineValue(boundaries.upper, 0);
+    const lowerMove = lineValue(boundaries.lower, lastIndex) - lineValue(boundaries.lower, 0);
+    const parallelTolerance = Math.max(atr * 0.6, boundaries.startWidth * 0.2);
+    const widthRatio = boundaries.endWidth / boundaries.startWidth;
+    if (Math.abs(upperMove - lowerMove) > parallelTolerance
+      || widthRatio < 0.75
+      || widthRatio > 1.25) continue;
+
+    const tolerance = Math.max(atr * 0.05, current.close * 0.0001);
+    const upperNow = lineValue(boundaries.upper, nextIndex);
+    const upperPrevious = lineValue(boundaries.upper, lastIndex);
+    const lowerNow = lineValue(boundaries.lower, nextIndex);
+    const lowerPrevious = lineValue(boundaries.lower, lastIndex);
+    const channelQuality = boundedStrength(
+      boundaries.fitQuality * 0.45
+      + boundaries.containment * 0.3
+      + boundedStrength(1 - Math.abs(1 - widthRatio)) * 0.15
+      + boundedStrength(
+        Math.min(touchEvidence.upperTouches, touchEvidence.lowerTouches) / 4,
+      ) * 0.1,
+    );
+    if (current.close > upperNow + tolerance
+      && finalized[currentIndex - 1]!.close <= upperPrevious + tolerance) {
+      appendPattern(patterns, {
+        name: "bullish_channel_breakout",
+        bias: "bullish",
+        strength: structuralStrength(
+          channelQuality,
+          current.close - upperNow,
+          atr,
+          formation,
+          current,
+        ),
+        detectedAt: current.timestamp,
+      });
+    } else if (current.close < lowerNow - tolerance
+      && finalized[currentIndex - 1]!.close >= lowerPrevious - tolerance) {
+      appendPattern(patterns, {
+        name: "bearish_channel_breakout",
+        bias: "bearish",
+        strength: structuralStrength(
+          channelQuality,
+          lowerNow - current.close,
+          atr,
+          formation,
+          current,
+        ),
+        detectedAt: current.timestamp,
+      });
+    }
+  }
+}
+
+function consolidationBoundaryMoves(bars: readonly SimulationChartBar[]): {
+  upperMove: number;
+  lowerMove: number;
+  contraction: number;
+} | undefined {
+  const atr = averageTrueRange(bars);
+  const boundaries = structuralBoundaries(bars, atr);
+  if (!boundaries) return undefined;
+  const lastIndex = bars.length - 1;
+  return {
+    upperMove: lineValue(boundaries.upper, lastIndex) - lineValue(boundaries.upper, 0),
+    lowerMove: lineValue(boundaries.lower, lastIndex) - lineValue(boundaries.lower, 0),
+    contraction: 1 - boundaries.endWidth / boundaries.startWidth,
+  };
+}
+
+function detectContinuationAt(
+  finalized: readonly SimulationChartBar[],
+  currentIndex: number,
+  patterns: Map<string, SimulationChartPattern>,
+): void {
+  const current = finalized[currentIndex]!;
+  for (const consolidationLength of [6, 8, 10, 12] as const) {
+    for (const poleLength of [3, 4, 5, 6] as const) {
+      if (currentIndex < consolidationLength + poleLength) continue;
+      const consolidation = finalized.slice(
+        currentIndex - consolidationLength,
+        currentIndex,
+      );
+      const pole = finalized.slice(
+        currentIndex - consolidationLength - poleLength,
+        currentIndex - consolidationLength,
+      );
+      const combined = [...pole, ...consolidation];
+      const atr = averageTrueRange(combined);
+      if (!(atr > 0)) continue;
+      const poleMove = pole.at(-1)!.close - pole[0]!.open;
+      const poleMagnitude = Math.abs(poleMove);
+      const price = Math.max(Math.abs(pole[0]!.open), Number.EPSILON);
+      if (poleMagnitude < atr * 2.4 || poleMagnitude / price < 0.004) continue;
+
+      const high = Math.max(...consolidation.map((bar) => bar.high));
+      const low = Math.min(...consolidation.map((bar) => bar.low));
+      const tolerance = Math.max(atr * 0.06, current.close * 0.0001);
+      const bullish = poleMove > 0;
+      const breakout = bullish ? current.close - high : low - current.close;
+      if (breakout <= tolerance) continue;
+
+      const poleEnd = pole.at(-1)!.close;
+      const retained = bullish
+        ? low >= poleEnd - poleMagnitude * 0.68
+        : high <= poleEnd + poleMagnitude * 0.68;
+      if (!retained || high - low > poleMagnitude * 0.82) continue;
+
+      const moves = consolidationBoundaryMoves(consolidation);
+      if (!moves) continue;
+      const parallelTolerance = Math.max(atr * 0.8, poleMagnitude * 0.16);
+      const isPennant = moves.contraction >= 0.22
+        && moves.upperMove < parallelTolerance * 0.35
+        && moves.lowerMove > -parallelTolerance * 0.35;
+      const isFlag = !isPennant
+        && Math.abs(moves.upperMove - moves.lowerMove) <= parallelTolerance
+        && (bullish
+          ? moves.upperMove <= parallelTolerance * 0.5
+          : moves.lowerMove >= -parallelTolerance * 0.5);
+      if (!isPennant && !isFlag) continue;
+
+      const retracement = bullish
+        ? Math.max(0, poleEnd - low) / poleMagnitude
+        : Math.max(0, high - poleEnd) / poleMagnitude;
+      const geometry = boundedStrength(
+        0.55
+        + boundedStrength(1 - retracement / 0.68) * 0.25
+        + (isPennant ? boundedStrength(moves.contraction / 0.6) : 0.5) * 0.2,
+      );
+      appendPattern(patterns, {
+        name: isPennant
+          ? bullish ? "bullish_pennant" : "bearish_pennant"
+          : bullish ? "bullish_flag" : "bearish_flag",
+        bias: bullish ? "bullish" : "bearish",
+        strength: structuralStrength(geometry, breakout, atr, consolidation, current),
+        detectedAt: current.timestamp,
+      });
+    }
+  }
+}
+
+function confirmedPivots(
+  bars: readonly SimulationChartBar[],
+  field: "high" | "low",
+): IndexedPrice[] {
+  const pivots: IndexedPrice[] = [];
+  for (let index = 1; index < bars.length - 1; index += 1) {
+    const value = bars[index]![field];
+    const previous = bars[index - 1]![field];
+    const next = bars[index + 1]![field];
+    if ((field === "high" && value > previous && value >= next)
+      || (field === "low" && value < previous && value <= next)) {
+      pivots.push({ index, price: value });
+    }
+  }
+  return pivots;
+}
+
+function crossedBelow(
+  current: SimulationChartBar,
+  previous: SimulationChartBar,
+  currentLevel: number,
+  previousLevel: number,
+  tolerance: number,
+): boolean {
+  return current.close < currentLevel - tolerance && previous.close >= previousLevel - tolerance;
+}
+
+function crossedAbove(
+  current: SimulationChartBar,
+  previous: SimulationChartBar,
+  currentLevel: number,
+  previousLevel: number,
+  tolerance: number,
+): boolean {
+  return current.close > currentLevel + tolerance && previous.close <= previousLevel + tolerance;
+}
+
+function detectReversalStructuresAt(
+  finalized: readonly SimulationChartBar[],
+  currentIndex: number,
+  patterns: Map<string, SimulationChartPattern>,
+): void {
+  if (currentIndex < 7) return;
+  const start = Math.max(0, currentIndex - PIVOT_LOOKBACK);
+  const formation = finalized.slice(start, currentIndex);
+  const current = finalized[currentIndex]!;
+  const previous = finalized[currentIndex - 1]!;
+  const atr = averageTrueRange(formation.slice(-14));
+  if (!(atr > 0)) return;
+  const tolerance = Math.max(atr * 0.22, current.close * 0.001);
+  const highs = confirmedPivots(formation, "high");
+  const lows = confirmedPivots(formation, "low");
+
+  for (let rightIndex = 1; rightIndex < highs.length; rightIndex += 1) {
+    const left = highs[rightIndex - 1]!;
+    const right = highs[rightIndex]!;
+    const valley = lows
+      .filter((pivot) => pivot.index > left.index && pivot.index < right.index)
+      .sort((a, b) => a.price - b.price)[0];
+    if (!valley || right.index - left.index < 3 || formation.length - right.index > 24) continue;
+    const topDifference = Math.abs(left.price - right.price);
+    const height = Math.min(left.price, right.price) - valley.price;
+    if (topDifference > Math.max(atr * 1.2, height * 0.3) || height < atr * 1.25) continue;
+    if (!crossedBelow(current, previous, valley.price, valley.price, tolerance)) continue;
+    const geometry = boundedStrength(
+      (1 - topDifference / Math.max(height, atr)) * 0.6
+      + boundedStrength(height / (atr * 4)) * 0.4,
+    );
+    appendPattern(patterns, {
+      name: "double_top",
+      bias: "bearish",
+      strength: structuralStrength(geometry, valley.price - current.close, atr, formation, current),
+      detectedAt: current.timestamp,
+    });
+  }
+
+  for (let rightIndex = 1; rightIndex < lows.length; rightIndex += 1) {
+    const left = lows[rightIndex - 1]!;
+    const right = lows[rightIndex]!;
+    const peak = highs
+      .filter((pivot) => pivot.index > left.index && pivot.index < right.index)
+      .sort((a, b) => b.price - a.price)[0];
+    if (!peak || right.index - left.index < 3 || formation.length - right.index > 24) continue;
+    const bottomDifference = Math.abs(left.price - right.price);
+    const height = peak.price - Math.max(left.price, right.price);
+    if (bottomDifference > Math.max(atr * 1.2, height * 0.3) || height < atr * 1.25) continue;
+    if (!crossedAbove(current, previous, peak.price, peak.price, tolerance)) continue;
+    const geometry = boundedStrength(
+      (1 - bottomDifference / Math.max(height, atr)) * 0.6
+      + boundedStrength(height / (atr * 4)) * 0.4,
+    );
+    appendPattern(patterns, {
+      name: "double_bottom",
+      bias: "bullish",
+      strength: structuralStrength(geometry, current.close - peak.price, atr, formation, current),
+      detectedAt: current.timestamp,
+    });
+  }
+
+  for (let rightIndex = 2; rightIndex < highs.length; rightIndex += 1) {
+    const left = highs[rightIndex - 2]!;
+    const head = highs[rightIndex - 1]!;
+    const right = highs[rightIndex]!;
+    const leftValley = lows
+      .filter((pivot) => pivot.index > left.index && pivot.index < head.index)
+      .sort((a, b) => a.price - b.price)[0];
+    const rightValley = lows
+      .filter((pivot) => pivot.index > head.index && pivot.index < right.index)
+      .sort((a, b) => a.price - b.price)[0];
+    if (!leftValley || !rightValley || formation.length - right.index > 24) continue;
+    const shoulderDifference = Math.abs(left.price - right.price);
+    const necklineHeight = average([leftValley.price, rightValley.price]);
+    const patternHeight = head.price - necklineHeight;
+    if (head.price - Math.max(left.price, right.price) < Math.max(atr * 0.45, patternHeight * 0.12)
+      || shoulderDifference > Math.max(atr * 1.25, patternHeight * 0.32)
+      || patternHeight < atr * 1.6) continue;
+    const neckline = regression([leftValley, rightValley]);
+    const currentLevel = lineValue(neckline, formation.length);
+    const previousLevel = lineValue(neckline, formation.length - 1);
+    if (!crossedBelow(current, previous, currentLevel, previousLevel, tolerance)) continue;
+    const geometry = boundedStrength(
+      (1 - shoulderDifference / Math.max(patternHeight, atr)) * 0.55
+      + boundedStrength((head.price - Math.max(left.price, right.price)) / atr) * 0.45,
+    );
+    appendPattern(patterns, {
+      name: "head_and_shoulders",
+      bias: "bearish",
+      strength: structuralStrength(
+        geometry,
+        currentLevel - current.close,
+        atr,
+        formation,
+        current,
+      ),
+      detectedAt: current.timestamp,
+    });
+  }
+
+  for (let rightIndex = 2; rightIndex < lows.length; rightIndex += 1) {
+    const left = lows[rightIndex - 2]!;
+    const head = lows[rightIndex - 1]!;
+    const right = lows[rightIndex]!;
+    const leftPeak = highs
+      .filter((pivot) => pivot.index > left.index && pivot.index < head.index)
+      .sort((a, b) => b.price - a.price)[0];
+    const rightPeak = highs
+      .filter((pivot) => pivot.index > head.index && pivot.index < right.index)
+      .sort((a, b) => b.price - a.price)[0];
+    if (!leftPeak || !rightPeak || formation.length - right.index > 24) continue;
+    const shoulderDifference = Math.abs(left.price - right.price);
+    const necklineHeight = average([leftPeak.price, rightPeak.price]);
+    const patternHeight = necklineHeight - head.price;
+    if (Math.min(left.price, right.price) - head.price < Math.max(atr * 0.45, patternHeight * 0.12)
+      || shoulderDifference > Math.max(atr * 1.25, patternHeight * 0.32)
+      || patternHeight < atr * 1.6) continue;
+    const neckline = regression([leftPeak, rightPeak]);
+    const currentLevel = lineValue(neckline, formation.length);
+    const previousLevel = lineValue(neckline, formation.length - 1);
+    if (!crossedAbove(current, previous, currentLevel, previousLevel, tolerance)) continue;
+    const geometry = boundedStrength(
+      (1 - shoulderDifference / Math.max(patternHeight, atr)) * 0.55
+      + boundedStrength((Math.min(left.price, right.price) - head.price) / atr) * 0.45,
+    );
+    appendPattern(patterns, {
+      name: "inverse_head_and_shoulders",
+      bias: "bullish",
+      strength: structuralStrength(
+        geometry,
+        current.close - currentLevel,
+        atr,
+        formation,
+        current,
+      ),
+      detectedAt: current.timestamp,
+    });
+  }
+}
+
 export function detectSimulationChartPatterns(
   bars: readonly SimulationChartBar[],
 ): SimulationChartPattern[] {
-  const patterns: SimulationChartPattern[] = [];
+  const patterns = new Map<string, SimulationChartPattern>();
   for (let index = 0; index < bars.length; index += 1) {
     const current = bars[index]!;
     if (current.status !== "final") continue;
@@ -108,7 +756,7 @@ export function detectSimulationChartPatterns(
     if (currentParts.lowerWick >= effectiveBody * 2
       && currentParts.upperWick <= effectiveBody
       && Math.max(current.open, current.close) >= current.low + currentParts.range * 0.6) {
-      patterns.push({
+      appendPattern(patterns, {
         name: "hammer",
         bias: "bullish",
         strength: boundedStrength(currentParts.lowerWick / currentParts.range),
@@ -118,7 +766,7 @@ export function detectSimulationChartPatterns(
     if (currentParts.upperWick >= effectiveBody * 2
       && currentParts.lowerWick <= effectiveBody
       && Math.min(current.open, current.close) <= current.low + currentParts.range * 0.4) {
-      patterns.push({
+      appendPattern(patterns, {
         name: "shooting_star",
         bias: "bearish",
         strength: boundedStrength(currentParts.upperWick / currentParts.range),
@@ -136,7 +784,7 @@ export function detectSimulationChartPatterns(
     if (previousParts.bearish && currentParts.bullish
       && currentBodyLow <= previousBodyLow
       && currentBodyHigh >= previousBodyHigh) {
-      patterns.push({
+      appendPattern(patterns, {
         name: "bullish_engulfing",
         bias: "bullish",
         strength: boundedStrength(currentParts.body / Math.max(previousParts.body, minimumBody)),
@@ -146,7 +794,7 @@ export function detectSimulationChartPatterns(
     if (previousParts.bullish && currentParts.bearish
       && currentBodyLow <= previousBodyLow
       && currentBodyHigh >= previousBodyHigh) {
-      patterns.push({
+      appendPattern(patterns, {
         name: "bearish_engulfing",
         bias: "bearish",
         strength: boundedStrength(currentParts.body / Math.max(previousParts.body, minimumBody)),
@@ -154,14 +802,14 @@ export function detectSimulationChartPatterns(
       });
     }
     if (current.high < previous.high && current.low > previous.low) {
-      patterns.push({
+      appendPattern(patterns, {
         name: "inside_bar",
         bias: "neutral",
         strength: boundedStrength(1 - currentParts.range / Math.max(previousParts.range, Number.EPSILON)),
         detectedAt: current.timestamp,
       });
     } else if (current.high > previous.high && current.low < previous.low) {
-      patterns.push({
+      appendPattern(patterns, {
         name: currentParts.bullish ? "bullish_outside_bar" : "bearish_outside_bar",
         bias: currentParts.bullish ? "bullish" : "bearish",
         strength: boundedStrength(currentParts.range / Math.max(previousParts.range, currentParts.range) - 0.05),
@@ -169,7 +817,24 @@ export function detectSimulationChartPatterns(
       });
     }
   }
-  return patterns.slice(-MAX_CHART_PATTERNS);
+
+  // Structural patterns are evaluated only from the finalized prefix preceding each
+  // candidate breakout. A forming candle can therefore neither confirm a pattern nor
+  // move a historical detection timestamp when it is updated.
+  for (const finalized of contiguousFinalBarSegments(bars)) {
+    for (let index = 0; index < finalized.length; index += 1) {
+      detectBoundaryStructuresAt(finalized, index, patterns);
+      detectContinuationAt(finalized, index, patterns);
+      detectReversalStructuresAt(finalized, index, patterns);
+      detectChannelBreakoutAt(finalized, index, patterns);
+    }
+  }
+  return [...patterns.values()]
+    .sort((left, right) => (
+      left.detectedAt.localeCompare(right.detectedAt)
+      || left.name.localeCompare(right.name)
+    ))
+    .slice(-MAX_CHART_PATTERNS);
 }
 
 function normalizeBar(value: unknown): SimulationChartBar | undefined {
@@ -380,12 +1045,17 @@ export function latestSimulationPatternObservation(
 ): {
   chartPatternBias: SimulationChartPatternBias;
   chartPatterns: string[];
+  chartPatternStrength: number;
   patternObservedAt?: string;
 } {
   const latestAt = chart?.bars.filter((bar) => bar.status === "final").at(-1)?.timestamp;
-  if (!chart || !latestAt) return { chartPatternBias: "neutral", chartPatterns: [] };
+  if (!chart || !latestAt) {
+    return { chartPatternBias: "neutral", chartPatterns: [], chartPatternStrength: 0 };
+  }
   const latest = chart.patterns.filter((pattern) => pattern.detectedAt === latestAt);
-  if (!latest.length) return { chartPatternBias: "neutral", chartPatterns: [] };
+  if (!latest.length) {
+    return { chartPatternBias: "neutral", chartPatterns: [], chartPatternStrength: 0 };
+  }
   const directional = latest.filter((pattern) => pattern.bias !== "neutral");
   const bullish = directional.filter((pattern) => pattern.bias === "bullish")
     .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
@@ -394,6 +1064,7 @@ export function latestSimulationPatternObservation(
   return {
     chartPatternBias: bullish === bearish ? "neutral" : bullish > bearish ? "bullish" : "bearish",
     chartPatterns: latest.map((pattern) => pattern.name),
+    chartPatternStrength: Math.max(bullish, bearish),
     patternObservedAt: latestAt,
   };
 }

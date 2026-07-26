@@ -46,7 +46,7 @@ const PINNED_MODELS = {
 
 function quantileObservations(overrides = {}) {
   return {
-    rowCount: 7_680,
+    rowCount: 54_600,
     nonFiniteValueCount: 0,
     crossingRowCount: 65,
     crossingAdjacentPairCount: 74,

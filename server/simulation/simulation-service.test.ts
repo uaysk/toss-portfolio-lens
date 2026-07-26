@@ -193,7 +193,9 @@ function fullWorkspace(
           signals: {
             latest: {
               status: symbol === "CCC" ? "watch" : "entry_candidate",
-              calculation_timestamp: TECHNICAL_AT,
+              calculation_timestamp: INPUT_END_AT,
+              signal_timestamp: INPUT_END_AT,
+              earliest_eligible_timestamp: TECHNICAL_AT,
             },
           },
         },
@@ -348,9 +350,39 @@ function harness(options: {
       generatedAt: TECHNICAL_AT,
       technical: {
         instruments: [
-          { instrument_key: "AAA", signals: { latest: { status: "entry_candidate", calculation_timestamp: TECHNICAL_AT } } },
-          { instrument_key: "BBB", signals: { latest: { status: "entry_candidate", calculation_timestamp: TECHNICAL_AT } } },
-          { instrument_key: "CCC", signals: { latest: { status: "watch", calculation_timestamp: TECHNICAL_AT } } },
+          {
+            instrument_key: "AAA",
+            signals: {
+              latest: {
+                status: "entry_candidate",
+                calculation_timestamp: INPUT_END_AT,
+                signal_timestamp: INPUT_END_AT,
+                earliest_eligible_timestamp: TECHNICAL_AT,
+              },
+            },
+          },
+          {
+            instrument_key: "BBB",
+            signals: {
+              latest: {
+                status: "entry_candidate",
+                calculation_timestamp: INPUT_END_AT,
+                signal_timestamp: INPUT_END_AT,
+                earliest_eligible_timestamp: TECHNICAL_AT,
+              },
+            },
+          },
+          {
+            instrument_key: "CCC",
+            signals: {
+              latest: {
+                status: "watch",
+                calculation_timestamp: INPUT_END_AT,
+                signal_timestamp: INPUT_END_AT,
+                earliest_eligible_timestamp: TECHNICAL_AT,
+              },
+            },
+          },
         ],
       },
     }),
@@ -908,7 +940,10 @@ describe("AI trading simulation service", () => {
       marketCountry: "KR",
       symbols: ["BBB", "AAA"],
       interval: "1m",
-    }, { signal: expect.any(AbortSignal) });
+    }, {
+      signal: expect.any(AbortSignal),
+      maximumInputEndAt: "2026-07-24T00:04:00.000Z",
+    });
 
     const afterFinalizedBar = await eventually(
       () => setup.service.get(started.runId, "owner"),
@@ -957,6 +992,85 @@ describe("AI trading simulation service", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(setup.market.forecast).toHaveBeenCalledTimes(2);
     expect(setup.service.status()).toMatchObject({ activeSessions: 0 });
+  });
+
+  it("projects stock Rust scanner liquidity into non-directional decision risk", async () => {
+    const setup = harness();
+    setup.market.realtimeAnalysis.mockResolvedValue({
+      generatedAt: TECHNICAL_AT,
+      technical: {
+        instruments: [{
+          instrument_key: "BBB",
+          signals: {
+            latest: {
+              status: "entry_candidate",
+              calculation_timestamp: INPUT_END_AT,
+              signal_timestamp: INPUT_END_AT,
+              earliest_eligible_timestamp: TECHNICAL_AT,
+            },
+          },
+          scanner_metrics: {
+            relative_volume: {
+              availability: { status: "available", reason: "calculated" },
+              value: 0.2,
+              metadata: { baseline: "same_local_minute_prior_sessions" },
+            },
+            trading_amount: {
+              availability: { status: "available", reason: "calculated" },
+              value: 5_000_000,
+              metadata: { currency: "KRW" },
+            },
+          },
+        }],
+      },
+    });
+    setup.market.workspace.mockImplementation((input: {
+      scanOnly: boolean;
+      symbols?: string[];
+    }) => {
+      if (input.scanOnly) {
+        return Promise.resolve({ workspace: { candidates: workspaceCandidates() } });
+      }
+      const result = fullWorkspace(input.symbols ?? [], workspaceCandidates());
+      for (const instrument of result.workspace.instruments) {
+        (instrument.technical as Record<string, unknown>).scanner_metrics = {
+          relative_volume: {
+            availability: { status: "available", reason: "calculated" },
+            value: 0.2,
+            metadata: { baseline: "same_local_minute_prior_sessions" },
+          },
+          trading_amount: {
+            availability: { status: "available", reason: "calculated" },
+            value: 5_000_000,
+            metadata: { currency: "KRW" },
+          },
+        };
+      }
+      return Promise.resolve(result);
+    });
+
+    const started = await setup.service.start(request(1), "owner");
+    const running = await waitForPhase(
+      setup,
+      started.runId,
+      "running",
+    ) as unknown as {
+      snapshot: {
+        decisions: Array<{
+          exposureScale?: number;
+          components?: Record<string, number>;
+        }>;
+      };
+    };
+    const decision = running.snapshot.decisions.find(
+      ({ components }) => components?.indicatorRiskScale === 0.6,
+    );
+    expect(decision).toBeDefined();
+    expect(decision?.exposureScale).toBeLessThan(1);
+    expect(decision?.components).toMatchObject({
+      indicatorRiskScale: 0.6,
+    });
+    await setup.service.cancel(started.runId, "owner");
   });
 
   it("publishes live forming prices without triggering AI before the candle is final", async () => {
@@ -1139,7 +1253,18 @@ describe("AI trading simulation service", () => {
     ))).toBe(true);
     expect(setup.live.retain).toHaveBeenCalledWith(["AAA", "BBB", "CCC"], "KR", undefined);
     expect(setup.live.retain).toHaveBeenCalledWith(selected, "KR", undefined);
-    expect(setup.market.realtimeAnalysis).not.toHaveBeenCalled();
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledTimes(1);
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith({
+      marketCountry: "KR",
+      symbols: selected,
+      interval: "1m",
+      preset: "risk_management",
+      positionContext: { mode: "isolated", positions: [] },
+    }, {
+      signal: expect.any(AbortSignal),
+      skipAutomaticRefresh: true,
+      maximumInputEndAt: INPUT_END_AT,
+    });
 
     await setup.service.cancel(started.runId, "owner");
   });
@@ -1233,7 +1358,18 @@ describe("AI trading simulation service", () => {
       symbols: ["BBB"],
       scanOnly: false,
     }));
-    expect(setup.market.realtimeAnalysis).not.toHaveBeenCalled();
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledTimes(1);
+    expect(setup.market.realtimeAnalysis).toHaveBeenCalledWith({
+      marketCountry: "US",
+      symbols: ["BBB"],
+      interval: "1m",
+      preset: "risk_management",
+      positionContext: { mode: "isolated", positions: [] },
+    }, {
+      signal: expect.any(AbortSignal),
+      skipAutomaticRefresh: true,
+      maximumInputEndAt: INPUT_END_AT,
+    });
     await setup.service.cancel(started.runId, "owner");
   });
 
@@ -1669,16 +1805,16 @@ describe("AI trading simulation service", () => {
     };
     const trade = filled.snapshot.trades[0]!;
     expect(trade).toMatchObject({
-      quantity: 525,
-      grossAmount: 52_500,
+      quantity: 414,
+      grossAmount: 41_400,
       source: "kis_ws_trade",
     });
     expect(Number.isSafeInteger(trade.quantity)).toBe(true);
-    expect(trade.totalCosts).toBeCloseTo(157.5);
-    expect(filled.snapshot.totalCosts).toBeCloseTo(157.5);
-    expect(filled.snapshot.cash).toBeCloseTo(47_342.5);
+    expect(trade.totalCosts).toBeCloseTo(124.2);
+    expect(filled.snapshot.totalCosts).toBeCloseTo(124.2);
+    expect(filled.snapshot.cash).toBeCloseTo(58_475.8);
     expect(filled.snapshot.positions).toEqual([
-      expect.objectContaining({ symbol: "BBB", quantity: 525 }),
+      expect.objectContaining({ symbol: "BBB", quantity: 414 }),
     ]);
 
     await setup.service.cancel(started.runId, "owner");
@@ -1765,7 +1901,7 @@ describe("AI trading simulation service", () => {
         mode: "isolated",
         positions: [expect.objectContaining({
           symbol: "BBB",
-          quantity: 525,
+          quantity: 414,
           asOf: "2026-07-24T00:05:05.000Z",
         })],
       },
@@ -1825,7 +1961,7 @@ describe("AI trading simulation service", () => {
         mode: "isolated",
         positions: [expect.objectContaining({
           symbol: "BBB",
-          quantity: 525,
+          quantity: 414,
           asOf: "2026-07-24T00:07:03.000Z",
         })],
       },

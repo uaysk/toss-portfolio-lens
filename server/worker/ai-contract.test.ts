@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AiEvaluateRequestSchema,
   AiForecastRequestSchema,
+  AiHorizonForecastSchema,
   AiResponseSchema,
+  AiTargetStopBoundsSchema,
   aiRequestBase,
   type AiResponse,
 } from "./ai-contract.js";
@@ -138,7 +140,7 @@ function kronosForecastResponse(): unknown {
 
 function quantileObservations(overrides: Record<string, unknown> = {}) {
   return {
-    row_count: 7_680,
+    row_count: 54_600,
     non_finite_value_count: 0,
     crossing_row_count: 65,
     crossing_adjacent_pair_count: 74,
@@ -194,6 +196,64 @@ function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed
 }
 
 describe("AI worker response contract", () => {
+  it("target/stop path bounds의 완전성과 확률 항등식을 엄격히 검증한다", () => {
+    expect(AiTargetStopBoundsSchema.parse({
+      status: "available",
+      target_first_probability_lower: 0.6,
+      target_first_probability_upper: 0.7,
+      stop_first_probability_lower: 0.2,
+      stop_first_probability_upper: 0.3,
+      ambiguous_probability: 0.1,
+      neither_probability: 0.1,
+    })).toMatchObject({ status: "available" });
+    expect(() => AiTargetStopBoundsSchema.parse({
+      status: "available",
+      target_first_probability_lower: 0.6,
+      target_first_probability_upper: 0.75,
+      stop_first_probability_lower: 0.15,
+      stop_first_probability_upper: 0.25,
+    })).toThrow(/every probability/);
+    expect(() => AiTargetStopBoundsSchema.parse({
+      status: "unavailable",
+      reason: "target_stop_not_requested",
+      ambiguous_probability: 0,
+    })).toThrow(/require only a reason/);
+  });
+
+  it("방향확률 method와 up/down/flat 합계를 엄격히 검증한다", () => {
+    const valid = {
+      horizon_minutes: 5 as const,
+      target_timestamp: "2026-07-21T01:35:00.000Z",
+      return_quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95].map(
+        (quantile) => ({ quantile, value: quantile / 100 }),
+      ),
+      price_quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95].map(
+        (quantile) => ({ quantile, value: 100 + quantile }),
+      ),
+      up_probability: 0.6,
+      down_probability: 0.3,
+      flat_probability: 0.1,
+      probability_method: "derived_quantile_cdf" as const,
+      expected_volatility: 0.01,
+      volatility_method: "quantile_implied_sigma" as const,
+      uncertainty_interval_width: 0.02,
+      target_stop: { status: "unavailable" as const, reason: "not_requested" },
+      valid_path_count: 0,
+      invalid_path_count: 0,
+    };
+    expect(AiHorizonForecastSchema.parse(valid)).toMatchObject({
+      probability_method: "derived_quantile_cdf",
+    });
+    expect(() => AiHorizonForecastSchema.parse({
+      ...valid,
+      flat_probability: 0.2,
+    })).toThrow(/sum to one/);
+    expect(() => AiHorizonForecastSchema.parse({
+      ...valid,
+      probability_method: "unavailable",
+    })).toThrow(/must all be null/);
+  });
+
   it("Python walk-forward target/stop first-hit metrics와 동일한 필드를 검증한다", () => {
     const response = AiResponseSchema.parse(evaluatedResponse);
     expect(response.evaluation?.metrics[0]).toMatchObject({
@@ -491,9 +551,9 @@ describe("AI worker response contract", () => {
         model: { mixed_quantile_observations: { crossing_adjacent_pair_count: number } };
       }>;
     };
-    unbounded.model.mixed_quantile_observations.crossing_adjacent_pair_count = 61_441;
+    unbounded.model.mixed_quantile_observations.crossing_adjacent_pair_count = 436_801;
     unbounded.model_runs[0]!.model.mixed_quantile_observations
-      .crossing_adjacent_pair_count = 61_441;
+      .crossing_adjacent_pair_count = 436_801;
     expect(() => AiResponseSchema.parse(unbounded)).toThrow(
       /crossing adjacent-pair count exceeds/,
     );

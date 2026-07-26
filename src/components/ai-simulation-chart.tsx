@@ -163,6 +163,21 @@ const PATTERN_LABELS: Readonly<Record<string, string>> = {
   inside_bar: "인사이드 바",
   bullish_outside_bar: "상승 아웃사이드 바",
   bearish_outside_bar: "하락 아웃사이드 바",
+  bullish_flag: "상승 깃발형",
+  bearish_flag: "하락 깃발형",
+  bullish_pennant: "상승 페넌트",
+  bearish_pennant: "하락 페넌트",
+  rising_wedge: "상승 쐐기형",
+  falling_wedge: "하락 쐐기형",
+  symmetric_triangle: "대칭 삼각형",
+  ascending_triangle: "상승 삼각형",
+  descending_triangle: "하락 삼각형",
+  double_top: "이중 천장",
+  double_bottom: "이중 바닥",
+  head_and_shoulders: "헤드앤숄더",
+  inverse_head_and_shoulders: "역헤드앤숄더",
+  bullish_channel_breakout: "상승 채널 돌파",
+  bearish_channel_breakout: "하락 채널 돌파",
 };
 
 function finite(value: unknown): value is number {

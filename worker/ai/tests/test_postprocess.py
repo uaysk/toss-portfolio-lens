@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import math
 
+import pytest
+from pydantic import ValidationError
+
 from portfolio_ai_worker.adapters import PredictedBar, RawPrediction
-from portfolio_ai_worker.contracts import ForecastSeries, PriceBar, TargetStopSpec
+from portfolio_ai_worker.contracts import (
+    ForecastSeries,
+    HorizonForecast,
+    PriceBar,
+    TargetStopSpec,
+)
 from portfolio_ai_worker.postprocess import first_passage_outcome, postprocess_prediction
 
 from .helpers import bars, future
@@ -40,6 +48,16 @@ def test_sample_paths_return_quantiles_and_first_passage_bounds() -> None:
     assert first.target_stop.stop_first_probability_lower == 0.25
     assert first.target_stop.ambiguous_probability == 0.25
     assert first.target_stop.neither_probability == 0.25
+
+    inconsistent = first.model_dump(mode="python")
+    inconsistent["flat_probability"] = 0.5
+    with pytest.raises(ValidationError, match="sum to one"):
+        HorizonForecast.model_validate(inconsistent)
+
+    unavailable = first.model_dump(mode="python")
+    unavailable["probability_method"] = "unavailable"
+    with pytest.raises(ValidationError, match="must all be null"):
+        HorizonForecast.model_validate(unavailable)
 
 
 def test_inconsistent_ohlc_envelopes_keep_raw_returns_but_disable_first_passage() -> None:

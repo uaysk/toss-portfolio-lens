@@ -10,7 +10,7 @@ import {
   type PairSession,
 } from "./pair-catalog.js";
 
-export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v2" as const;
+export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v3" as const;
 
 export type PairRustTechnicalState =
   | "watch"
@@ -29,6 +29,11 @@ export type PairRustTechnicalInput = {
   confidence?: number;
   chartPatternBias?: "bullish" | "bearish" | "neutral";
   chartPatterns?: readonly string[];
+  chartPatternStrength?: number;
+  indicatorDirectionalScore?: number;
+  indicatorRiskScale?: number;
+  indicatorCount?: number;
+  indicatorComponents?: Readonly<Record<string, number>>;
   dataQuality: "good" | "partial" | "stale" | "unavailable";
   rationale?: readonly string[];
   rawOutput?: unknown;
@@ -88,7 +93,7 @@ export type PairEnsemblePolicyProfile = {
 export const DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE: Readonly<PairEnsemblePolicyProfile> =
   Object.freeze({
     policyVersion: PAIR_ENSEMBLE_POLICY_VERSION,
-    profileId: "aggressive-kronos-rust-v2",
+    profileId: "aggressive-kronos-rust-v3",
     weights: Object.freeze({
       kronos: 0.72,
       rust: 0.28,
@@ -120,6 +125,7 @@ export type PairModelDirectionScore = {
   bullProbability: number;
   bearProbability: number;
   leveragedUncertainty: number;
+  pathReliability: number;
   preferredDirection: PairDirection;
 };
 
@@ -288,6 +294,7 @@ function emptyModelScore(status: NormalizedPairModelOutput["status"]): PairModel
     bullProbability: 0,
     bearProbability: 0,
     leveragedUncertainty: 0,
+    pathReliability: 0,
     preferredDirection: "cash",
   };
 }
@@ -316,8 +323,20 @@ function scoreModel(
     (model.expectedVolatility ?? 0)
       * Math.max(Math.abs(bullMultiplier), Math.abs(bearMultiplier)),
   );
+  const totalPathCount = (model.validPathCount ?? 0) + (model.invalidPathCount ?? 0);
+  const pathReliability = totalPathCount > 0
+    ? (model.validPathCount ?? 0) / totalPathCount
+    : 1;
+  const unresolvedTargetStopProbability = model.targetStop?.status === "available"
+    ? (model.targetStop.ambiguousProbability ?? 0)
+      + (model.targetStop.neitherProbability ?? 0)
+    : 0;
   const uncertaintyPenalty = clamp(
-    leveragedUncertainty / profile.uncertaintyScale,
+    Math.max(
+      leveragedUncertainty / profile.uncertaintyScale,
+      1 - pathReliability,
+      unresolvedTargetStopProbability,
+    ),
     0,
     1,
   );
@@ -331,8 +350,24 @@ function scoreModel(
       * clamp(probability * 2 - 1)
     - profile.modelScoreWeights.uncertaintyPenalty * uncertaintyPenalty
   );
-  const bull = rounded(directional(bullNetExpectedReturn, model.upProbability));
-  const bear = rounded(directional(bearNetExpectedReturn, model.downProbability));
+  const targetStopEdge = model.targetStop?.status === "available"
+    ? clamp(
+        (model.targetStop.targetFirstProbabilityLower
+          ?? model.targetStop.targetFirstProbabilityUpper
+          ?? 0)
+        - (model.targetStop.stopFirstProbabilityUpper
+          ?? model.targetStop.stopFirstProbabilityLower
+          ?? 0),
+      )
+    : 0;
+  const pathAdjustment = profile.modelScoreWeights.directionProbability
+    * targetStopEdge * 0.5;
+  const bull = rounded(
+    directional(bullNetExpectedReturn, model.upProbability) + pathAdjustment,
+  );
+  const bear = rounded(
+    directional(bearNetExpectedReturn, model.downProbability) - pathAdjustment,
+  );
   const preferredDirection: PairDirection = bullNetExpectedReturn > 0
     && bull - bear >= profile.modelDirectionMargin
     ? "bull"
@@ -348,6 +383,7 @@ function scoreModel(
     bullProbability: model.upProbability,
     bearProbability: model.downProbability,
     leveragedUncertainty: rounded(leveragedUncertainty),
+    pathReliability: rounded(pathReliability),
     preferredDirection,
   };
 }
@@ -366,8 +402,12 @@ function scoreRust(
   else if (rust.technicalSignal === -1) bear += 0.2;
   if (rust.multiTimeframeAgreement === "aligned_bullish") bull += 0.25;
   else if (rust.multiTimeframeAgreement === "aligned_bearish") bear += 0.25;
-  if (rust.chartPatternBias === "bullish") bull += 0.1;
-  else if (rust.chartPatternBias === "bearish") bear += 0.1;
+  const patternWeight = 0.2 * clamp(rust.chartPatternStrength ?? 0.5, 0, 1);
+  if (rust.chartPatternBias === "bullish") bull += patternWeight;
+  else if (rust.chartPatternBias === "bearish") bear += patternWeight;
+  const indicatorScore = clamp(rust.indicatorDirectionalScore ?? 0);
+  if (indicatorScore > 0) bull += indicatorScore * 0.45;
+  else if (indicatorScore < 0) bear += Math.abs(indicatorScore) * 0.45;
   const qualityScale = rust.dataQuality === "good" ? 1
     : rust.dataQuality === "partial" ? 0.6 : 0;
   const confidenceScale = rust.confidence === undefined
@@ -696,6 +736,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   const exposureScale = rounded(
     (0.25 + input.riskTolerance / 100 * 0.75)
     * (rustNeutral ? profile.neutralRustExposureScale : 1)
+    * clamp(input.rust.indicatorRiskScale ?? 1, 0, 1)
     * (degraded ? 0.5 : 1),
   );
   const decisionKind: PairEnsembleDecision["decisionKind"] = input.currentDirection === candidate

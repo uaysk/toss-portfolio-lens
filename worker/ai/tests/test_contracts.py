@@ -135,7 +135,7 @@ def test_cuda_device_provenance_is_optional_for_legacy_but_atomic_when_present()
 
 def test_fincast_provenance_carries_strict_bounded_rearrangement_observations() -> None:
     observations = QuantileRearrangementObservations(
-        row_count=7_680,
+        row_count=54_600,
         non_finite_value_count=0,
         crossing_row_count=11,
         crossing_adjacent_pair_count=14,

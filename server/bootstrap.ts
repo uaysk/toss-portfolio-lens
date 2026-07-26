@@ -70,6 +70,7 @@ import {
   SimulationServiceMultiplexer,
 } from "./crypto/crypto-simulation-service.js";
 import { CryptoPaperRuntime } from "./crypto/crypto-paper-runtime.js";
+import { CryptoRustTechnicalAnalyzer } from "./crypto/crypto-rust-technical.js";
 import { createConfiguredFuturesExecution } from "./crypto/execution.js";
 import { cryptoWorkerPublicState } from "./crypto/worker-public-state.js";
 import { krIntegratedSessionWindows } from "./scalping/market-session.js";
@@ -290,6 +291,9 @@ const cryptoPaperRuntime = new CryptoPaperRuntime({
     kronos_base: cryptoKronosClient,
     ...(cryptoFincastClient ? { fincast: cryptoFincastClient } : {}),
   },
+  ...(rustCompute
+    ? { technicalAnalyzer: new CryptoRustTechnicalAnalyzer(rustCompute) }
+    : {}),
   instrumentRules: resolveBinanceRules,
   contextBars: 512,
   inferenceDeadlineMs: config.cryptoAi.sequentialDeadlineMs,

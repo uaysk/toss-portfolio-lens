@@ -246,6 +246,7 @@ class AIService:
                 inputs = [
                     InferenceSeries(
                         instrument_key=item.instrument_key,
+                        timezone=item.timezone,
                         bars=item.bars,
                         future_timestamps=item.future_timestamps,
                     )

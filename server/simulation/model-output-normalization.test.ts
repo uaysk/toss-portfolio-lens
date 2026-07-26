@@ -57,6 +57,15 @@ function run(overrides: Record<string, unknown> = {}) {
         down_probability: 0.25,
         flat_probability: 0.05,
         expected_volatility: 0.02,
+        target_stop: {
+          status: "available",
+          target_first_probability_lower: 0.6,
+          target_first_probability_upper: 0.7,
+          stop_first_probability_lower: 0.2,
+          stop_first_probability_upper: 0.3,
+          ambiguous_probability: 0.1,
+          neither_probability: 0.1,
+        },
       }],
     }],
     ...overrides,
@@ -96,6 +105,11 @@ describe("pair Kronos-base output normalization", () => {
         uncertaintyWidth: 0.04,
         upProbability: 0.7,
         downProbability: 0.25,
+        targetStop: {
+          status: "available",
+          targetFirstProbabilityLower: 0.6,
+          stopFirstProbabilityUpper: 0.3,
+        },
         calibration: { status: "good", brierScore: 0.18 },
         provenance: {
           modelId: MODEL_ID,
@@ -218,6 +232,35 @@ describe("pair Kronos-base output normalization", () => {
     expect(normalize(otherGpu).kronos).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["required_accelerator_mismatch"]),
+    });
+  });
+
+  it("fails closed when target-stop evidence is incomplete or violates path identities", () => {
+    const source = run();
+    const rawSeries = structuredClone(source.raw_series) as Array<Record<string, unknown>>;
+    const horizons = rawSeries[0]!.horizons as Array<Record<string, unknown>>;
+    horizons[0]!.target_stop = {
+      status: "available",
+      target_first_probability_lower: 0.6,
+      target_first_probability_upper: 0.75,
+      stop_first_probability_lower: 0.15,
+      stop_first_probability_upper: 0.25,
+    };
+    expect(normalize(run({ raw_series: rawSeries })).kronos).toMatchObject({
+      status: "unavailable",
+      reasonCodes: expect.arrayContaining(["target_stop_invalid"]),
+    });
+  });
+
+  it("fails closed when explicit direction probabilities do not form one distribution", () => {
+    const source = run();
+    const rawSeries = structuredClone(source.raw_series) as Array<Record<string, unknown>>;
+    const horizons = rawSeries[0]!.horizons as Array<Record<string, unknown>>;
+    horizons[0]!.down_probability = 0.3;
+    horizons[0]!.flat_probability = 0.1;
+    expect(normalize(run({ raw_series: rawSeries })).kronos).toMatchObject({
+      status: "unavailable",
+      reasonCodes: expect.arrayContaining(["direction_probability_invalid"]),
     });
   });
 });

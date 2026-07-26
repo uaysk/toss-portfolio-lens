@@ -268,6 +268,12 @@ export type AiSimulationDecision = {
   predictedMedianReturn?: number;
   q90Return?: number;
   technicalState?: string;
+  technicalScore?: number;
+  technicalDirection?: string;
+  technicalOriginAt?: string;
+  exposureScale?: number;
+  modelEvidenceScale?: number;
+  fusionPolicyVersion?: string;
   signalSymbol?: string;
   executionSymbol?: string;
   direction?: string;
@@ -277,6 +283,7 @@ export type AiSimulationDecision = {
   finalScores?: Record<string, number>;
   provenance?: string[];
   chartPatternBias?: "bullish" | "bearish" | "neutral";
+  chartPatternStrength?: number;
   chartPatterns: string[];
   model?: string;
 };
@@ -1134,6 +1141,24 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
       "predicted_q90_return",
     )),
     technicalState: textValue(first(item, "technicalState", "technical_state")),
+    technicalScore: finiteNumber(first(item, "technicalScore", "technical_score")),
+    technicalDirection: textValue(first(
+      item,
+      "technicalDirection",
+      "technical_direction",
+    )),
+    technicalOriginAt: textValue(first(item, "technicalOriginAt", "technical_origin_at")),
+    exposureScale: finiteNumber(first(item, "exposureScale", "exposure_scale")),
+    modelEvidenceScale: finiteNumber(first(
+      item,
+      "modelEvidenceScale",
+      "model_evidence_scale",
+    )),
+    fusionPolicyVersion: textValue(first(
+      item,
+      "fusionPolicyVersion",
+      "fusion_policy_version",
+    )),
     signalSymbol,
     executionSymbol,
     direction: textValue(item.direction),
@@ -1145,6 +1170,11 @@ function normalizeDecision(value: unknown): AiSimulationDecision | undefined {
     chartPatternBias: (
       ["bullish", "bearish", "neutral"] as const
     ).find((candidate) => candidate === first(item, "chartPatternBias", "chart_pattern_bias")),
+    chartPatternStrength: finiteNumber(first(
+      item,
+      "chartPatternStrength",
+      "chart_pattern_strength",
+    )),
     chartPatterns: stringList(first(item, "chartPatterns", "chart_patterns")),
     model: knownAiSimulationModelLabel(item.model),
   };

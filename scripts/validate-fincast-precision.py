@@ -20,20 +20,25 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "worker" / "ai" / "src"))
 
 from portfolio_ai_worker.adapters import RuntimeDevice  # noqa: E402
 from portfolio_ai_worker.contracts import (  # noqa: E402
+    FINCAST_QUALIFICATION_CANDLE_SECONDS,
+    FINCAST_QUALIFICATION_CASE_COUNT,
     FINCAST_QUALIFICATION_CONTEXT_COUNT,
-    FINCAST_QUALIFICATION_ROWS_PER_CONTEXT,
+    FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
+    FINCAST_QUALIFICATION_ROW_COUNT,
 )
 from portfolio_ai_worker.fincast import (  # noqa: E402
     MODEL_REVISION,
     SOURCE_REVISION,
     _load_model,
     _source_snapshot,
+    fincast_input_dtypes,
     observe_fincast_decode_output_dtypes,
     project_native_quantiles,
     rearrange_native_quantiles,
     validate_fincast_mixed_inference_observations,
 )
 from portfolio_ai_worker.precision_validation import (  # noqa: E402
+    CADENCE_VALIDATION_SCOPE,
     SCHEMA_VERSION,
     FinCastPrecisionValidation,
     MixedPrecisionMetrics,
@@ -42,6 +47,7 @@ from portfolio_ai_worker.precision_validation import (  # noqa: E402
     MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO,
     MIXED_RUNTIME_POLICY_VERSION,
     QUANTILE_MONOTONICITY_POLICY,
+    SCALE_STRESS_POLICY,
     QuantileRearrangementObservations,
     cost_exceeding_direction,
     precision_failure_reasons,
@@ -55,6 +61,16 @@ CONTEXT_SCHEMA = "fincast-crypto-contexts/v1"
 ARTIFACT_FILES = ("model.fp32.safetensors", "model.mixed-fp16.safetensors")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 ForecastOutput = list[list[list[float]]]
+_SCALE_STRESS_LAST_CLOSES = (131_072.0, 0.000_01)
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationCase:
+    instrument_key: str
+    closes: tuple[float, ...]
+    round_trip_cost_bps: float
+    candle_seconds: int
+    horizon_steps: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +87,62 @@ class PrecisionRunResult:
     peak_vram_measurement_complete: bool
     failure: PrecisionRunFailureObservation | None
     quantile_observations: QuantileRearrangementObservations | None = None
+
+
+def _qualification_cases(
+    contexts: list[dict[str, object]],
+) -> list[QualificationCase]:
+    if len(contexts) != FINCAST_QUALIFICATION_CONTEXT_COUNT:
+        raise ValueError("FinCast qualification requires exactly 128 source contexts")
+
+    normalized: list[tuple[str, tuple[float, ...], float]] = []
+    for index, context in enumerate(contexts):
+        closes = tuple(float(value) for value in context["closes"])  # type: ignore[arg-type]
+        cost_bps = float(context["round_trip_cost_bps"])
+        if (
+            len(closes) != 512
+            or any(not math.isfinite(value) or value <= 0 for value in closes)
+            or not math.isfinite(cost_bps)
+            or cost_bps < 0
+        ):
+            raise ValueError("FinCast qualification source context is invalid")
+        instrument_key = str(context.get("instrument_key", f"context-{index}"))
+        normalized.append((instrument_key, closes, cost_bps))
+
+    stress_source_key, stress_source_closes, stress_cost_bps = normalized[0]
+    for target_last_close in _SCALE_STRESS_LAST_CLOSES:
+        scale = target_last_close / stress_source_closes[-1]
+        scaled = tuple(value * scale for value in stress_source_closes[:-1]) + (
+            target_last_close,
+        )
+        if any(not math.isfinite(value) or value <= 0 for value in scaled):
+            raise ValueError("FinCast qualification scale-stress context is invalid")
+        normalized.append(
+            (
+                f"{stress_source_key}:scale-stress:{target_last_close:.8g}",
+                scaled,
+                stress_cost_bps,
+            )
+        )
+
+    cases = [
+        QualificationCase(
+            instrument_key=instrument_key,
+            closes=closes,
+            round_trip_cost_bps=cost_bps,
+            candle_seconds=candle_seconds,
+            horizon_steps=horizon_steps,
+        )
+        for instrument_key, closes, cost_bps in normalized
+        for candle_seconds, horizon_steps in zip(
+            FINCAST_QUALIFICATION_CANDLE_SECONDS,
+            FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
+            strict=True,
+        )
+    ]
+    if len(cases) != FINCAST_QUALIFICATION_CASE_COUNT:
+        raise ValueError("FinCast qualification case construction is incomplete")
+    return cases
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,21 +298,26 @@ def _forecast(
     torch: object,
     precision: str,
 ) -> tuple[ForecastOutput, QuantileRearrangementObservations]:
-    dtype = torch.float16 if precision == "mixed_float16" else torch.float32
     output: list[list[list[float]]] = []
-    for index, context in enumerate(contexts):
+    for index, case in enumerate(_qualification_cases(contexts)):
         torch.manual_seed(index)
         torch.cuda.manual_seed_all(index)
-        closes = context["closes"]
-        input_ts = torch.tensor([closes], dtype=dtype, device="cuda")
-        paddings = torch.zeros((1, 572), dtype=dtype, device="cuda")
+        # Runtime keeps raw prices and the decoder's patch normalization in
+        # FP32. Mixed inference enters FP16 only at the first learned layer.
+        input_dtype, padding_dtype = fincast_input_dtypes(torch, precision)
+        input_ts = torch.tensor([case.closes], dtype=input_dtype, device="cuda")
+        paddings = torch.zeros(
+            (1, 512 + case.horizon_steps),
+            dtype=padding_dtype,
+            device="cuda",
+        )
         frequency = torch.zeros((1, 1), dtype=torch.long, device="cuda")
         with torch.inference_mode():
             _mean, full = model.decode(
                 input_ts=input_ts,
                 paddings=paddings,
                 freq=frequency,
-                horizon_len=60,
+                horizon_len=case.horizon_steps,
                 output_patch_len=128,
                 max_len=512,
                 return_forecast_on_context=False,
@@ -383,12 +460,16 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 
 def _require_qualification_forecast_shape(forecasts: ForecastOutput) -> None:
-    if len(forecasts) != FINCAST_QUALIFICATION_CONTEXT_COUNT or any(
-        len(context) != FINCAST_QUALIFICATION_ROWS_PER_CONTEXT
-        for context in forecasts
+    expected_horizons = FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS * (
+        FINCAST_QUALIFICATION_CONTEXT_COUNT + len(_SCALE_STRESS_LAST_CLOSES)
+    )
+    if len(forecasts) != FINCAST_QUALIFICATION_CASE_COUNT or any(
+        len(case) != expected
+        for case, expected in zip(forecasts, expected_horizons, strict=True)
     ):
         raise ValueError(
-            "FinCast qualification requires exactly 128 contexts with 60 output rows each"
+            "FinCast qualification requires 390 ordered native-cadence cases "
+            "(15s/240, 30s/120, 60s/60) and 54,600 output rows"
         )
 
 
@@ -479,7 +560,7 @@ def _postprocess_qualification_forecasts(
 def qualification_metrics(
     fp32: ForecastOutput,
     mixed: ForecastOutput,
-    contexts: list[dict[str, object]],
+    cases: list[QualificationCase],
     fp32_peak: int,
     mixed_peak: int,
 ) -> MixedPrecisionMetrics:
@@ -497,9 +578,14 @@ def qualification_metrics(
     agreements = 0
     comparisons = 0
     ratios: list[float] = []
-    for context_index, (reference_context, candidate_context) in enumerate(zip(fp32, mixed, strict=True)):
-        base = float(contexts[context_index]["closes"][-1])  # type: ignore[index]
-        cost = float(contexts[context_index]["round_trip_cost_bps"]) / 10_000
+    for case, reference_context, candidate_context in zip(
+        cases,
+        fp32,
+        mixed,
+        strict=True,
+    ):
+        base = case.closes[-1]
+        cost = case.round_trip_cost_bps / 10_000
         for reference, candidate in zip(reference_context, candidate_context, strict=True):
             comparisons += 1
             try:
@@ -573,6 +659,7 @@ def qualify_precision(
     ):
         raise RuntimeError("FP32 FinCast baseline runtime failed")
     _require_qualification_forecast_shape(fp32_run.forecasts)
+    qualification_cases = _qualification_cases(contexts)
     if fp32_run.quantile_observations is None:
         fp32_forecasts, fp32_observations = _postprocess_qualification_forecasts(
             fp32_run.forecasts
@@ -614,7 +701,7 @@ def qualify_precision(
             metrics = qualification_metrics(
                 fp32_forecasts,
                 mixed_forecasts,
-                contexts,
+                qualification_cases,
                 fp32_run.peak_vram_bytes,
                 mixed_run.peak_vram_bytes,
             )
@@ -633,6 +720,13 @@ def qualify_precision(
         qualification_environment=qualification_environment,
         context_fixture_sha256=fixture_hash,
         context_count=128,
+        qualification_case_count=FINCAST_QUALIFICATION_CASE_COUNT,
+        qualification_row_count=FINCAST_QUALIFICATION_ROW_COUNT,
+        context_fixture_candle_seconds=60,
+        decoder_horizon_shape_candle_seconds=FINCAST_QUALIFICATION_CANDLE_SECONDS,
+        validated_native_horizon_steps=FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
+        cadence_validation_scope=CADENCE_VALIDATION_SCOPE,
+        scale_stress_policy=SCALE_STRESS_POLICY,
         quantile_tail_policy="tail_clamped_q10_q90",
         quantile_monotonicity_policy=QUANTILE_MONOTONICITY_POLICY,
         fp32_quantile_observations=fp32_observations,

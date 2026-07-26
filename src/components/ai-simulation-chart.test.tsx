@@ -106,6 +106,28 @@ describe("AiSimulationChart", () => {
     expect(markup).toContain("강도 80%");
   });
 
+  it("renders a localized structural-pattern label and its directional evidence", () => {
+    const markup = renderToStaticMarkup(
+      <AiSimulationChart
+        symbol="BTCUSDT"
+        currency="USDT"
+        bars={bars}
+        trades={[]}
+        indicators={[]}
+        patterns={[{
+          detectedAt: "2026-07-24T09:02:00+09:00",
+          name: "ascending_triangle",
+          bias: "bullish",
+          strength: 0.72,
+        }]}
+      />,
+    );
+
+    expect(markup).toContain('data-ai-simulation-pattern="bullish"');
+    expect(markup).toContain("상승 삼각형");
+    expect(markup).toContain("강도 72%");
+  });
+
   it("places a fill on its first causal candle and omits out-of-window fills", () => {
     const points = aiSimulationChartTradePoints(bars, [
       {

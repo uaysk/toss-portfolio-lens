@@ -213,7 +213,12 @@ export type AiRequest = z.infer<typeof AiRequestSchema>;
 export type AiForecastRequest = z.infer<typeof AiForecastRequestSchema>;
 export type AiEvaluateRequest = z.infer<typeof AiEvaluateRequestSchema>;
 
-export const FINCAST_QUALIFICATION_QUANTILE_ROWS = 128 * 60;
+/**
+ * Precision qualification covers 128 fixed contexts plus two deterministic
+ * price-scale stress contexts at each supported native cadence:
+ * 15s/240, 30s/120, and 60s/60.
+ */
+export const FINCAST_QUALIFICATION_QUANTILE_ROWS = 130 * (240 + 120 + 60);
 export const MAX_Q50_ADJUSTMENT_IQR_RATIO = 1_000_000_000;
 const FINCAST_PRECISION_FAILURE_REASONS = [
   "non_finite_output",
@@ -462,7 +467,7 @@ const UnavailableSchema = z.object({
 }).strict();
 
 const QuantileValueSchema = z.object({ quantile: finite.gt(0).lt(1), value: finite }).strict();
-const TargetStopBoundsSchema = z.object({
+export const AiTargetStopBoundsSchema = z.object({
   status: z.enum(["available", "unavailable"]),
   target_first_probability_lower: finite.min(0).max(1).nullable().optional(),
   target_first_probability_upper: finite.min(0).max(1).nullable().optional(),
@@ -471,9 +476,57 @@ const TargetStopBoundsSchema = z.object({
   ambiguous_probability: finite.min(0).max(1).nullable().optional(),
   neither_probability: finite.min(0).max(1).nullable().optional(),
   reason: z.string().max(500).nullable().optional(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const probabilities = [
+    value.target_first_probability_lower,
+    value.target_first_probability_upper,
+    value.stop_first_probability_lower,
+    value.stop_first_probability_upper,
+    value.ambiguous_probability,
+    value.neither_probability,
+  ];
+  if (value.status === "unavailable") {
+    if (!value.reason || probabilities.some((probability) => probability !== null
+      && probability !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "unavailable target/stop bounds require only a reason",
+      });
+    }
+    return;
+  }
+  if (value.reason || probabilities.some((probability) => probability === null
+    || probability === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message: "available target/stop bounds require every probability and no reason",
+    });
+    return;
+  }
+  const [
+    targetLower,
+    targetUpper,
+    stopLower,
+    stopUpper,
+    ambiguous,
+    neither,
+  ] = probabilities as [number, number, number, number, number, number];
+  const tolerance = 1e-9;
+  if (
+    targetLower > targetUpper
+    || stopLower > stopUpper
+    || Math.abs(targetLower + stopLower + ambiguous + neither - 1) > tolerance
+    || Math.abs(targetUpper - targetLower - ambiguous) > tolerance
+    || Math.abs(stopUpper - stopLower - ambiguous) > tolerance
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "target/stop probability bounds are inconsistent",
+    });
+  }
+});
 
-const HorizonForecastSchema = z.object({
+export const AiHorizonForecastSchema = z.object({
   horizon_minutes: z.union([z.literal(5), z.literal(15), z.literal(30), z.literal(60)]),
   target_timestamp: timestamp,
   return_quantiles: z.array(QuantileValueSchema).length(SCALPING_AI_QUANTILES.length),
@@ -485,10 +538,41 @@ const HorizonForecastSchema = z.object({
   expected_volatility: nonnegative.nullable().optional(),
   volatility_method: z.enum(["path_realized", "quantile_implied_sigma", "unavailable"]),
   uncertainty_interval_width: nonnegative.nullable().optional(),
-  target_stop: TargetStopBoundsSchema,
+  target_stop: AiTargetStopBoundsSchema,
   valid_path_count: z.number().int().nonnegative(),
   invalid_path_count: z.number().int().nonnegative(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const probabilities = [
+    value.up_probability,
+    value.down_probability,
+    value.flat_probability,
+  ];
+  if (value.probability_method === "unavailable") {
+    if (probabilities.some((probability) => probability !== null
+      && probability !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "unavailable direction probabilities must all be null",
+      });
+    }
+    return;
+  }
+  if (probabilities.some((probability) => probability === null
+    || probability === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message: "available direction probabilities must all be present",
+    });
+    return;
+  }
+  const complete = probabilities as [number, number, number];
+  if (Math.abs(complete.reduce((sum, probability) => sum + probability, 0) - 1) > 1e-9) {
+    context.addIssue({
+      code: "custom",
+      message: "direction probabilities must sum to one",
+    });
+  }
+});
 
 const InputQualitySchema = z.object({
   status: z.enum(["good", "partial"]),
@@ -503,7 +587,7 @@ const SeriesForecastResultSchema = z.object({
   instrument_key: z.string().min(1).max(256),
   status: z.enum(["available", "unavailable"]),
   input_end_at: timestamp,
-  horizons: z.array(HorizonForecastSchema).max(4),
+  horizons: z.array(AiHorizonForecastSchema).max(4),
   input_quality: InputQualitySchema,
   distribution_shift: z.object({
     status: z.literal("unavailable"),

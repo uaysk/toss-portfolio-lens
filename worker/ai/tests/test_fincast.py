@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
 import importlib.util
 import json
+import math
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -17,6 +19,7 @@ from portfolio_ai_worker.fincast import (
     FinCastAdapter,
     MemoryPressureError,
     _attention_softmax_structure_matches,
+    _cast_normalized_input_to_model_dtype,
     _promote_horizon_output,
     _remember_input_dtype,
     _restore_output_dtype,
@@ -32,7 +35,12 @@ from portfolio_ai_worker.fincast import (
     verify_pinned_attention_softmax_structure,
 )
 from portfolio_ai_worker.adapters import InferenceSeries
-from portfolio_ai_worker.contracts import PriceBar
+from portfolio_ai_worker.contracts import (
+    FINCAST_QUALIFICATION_CASE_COUNT,
+    FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
+    FINCAST_QUALIFICATION_ROW_COUNT,
+    PriceBar,
+)
 from portfolio_ai_worker.precision_validation import (
     FinCastPrecisionValidation,
     MixedPrecisionMetrics,
@@ -64,7 +72,7 @@ def _quantile_observations(
     postprocessed_monotonic: bool = True,
 ) -> QuantileRearrangementObservations:
     return QuantileRearrangementObservations(
-        row_count=7_680,
+        row_count=FINCAST_QUALIFICATION_ROW_COUNT,
         non_finite_value_count=non_finite_value_count,
         crossing_row_count=0,
         crossing_adjacent_pair_count=0,
@@ -80,13 +88,21 @@ def _qualification_forecasts(
     row: list[float] | None = None,
 ) -> list[list[list[float]]]:
     native = row or [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-    return [[list(native) for _ in range(60)] for _ in range(128)]
+    return [
+        [list(native) for _ in range(horizon_steps)]
+        for _ in range(130)
+        for horizon_steps in FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS
+    ]
 
 
 def _qualification_contexts() -> list[dict[str, object]]:
     return [
-        {"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}
-        for _ in range(128)
+        {
+            "instrument_key": f"context-{index}",
+            "closes": [5.0] * 512,
+            "round_trip_cost_bps": 8.0,
+        }
+        for index in range(128)
     ]
 
 
@@ -94,11 +110,11 @@ def _completed_validation(metrics: MixedPrecisionMetrics) -> FinCastPrecisionVal
     reasons = precision_failure_reasons(metrics)
     observations = _quantile_observations()
     return FinCastPrecisionValidation(
-        schema_version="fincast-precision-validation/v3",
+        schema_version="fincast-precision-validation/v4",
         model_id="Vincent05R/FinCast",
         model_revision="2d7d90b159db8961d27c2cf165d51195902ef92b",
         source_revision="488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
-        mixed_runtime_policy_version="fincast-mixed-runtime-policy/v1",
+        mixed_runtime_policy_version="fincast-mixed-runtime-policy/v2",
         qualification_environment=QualificationEnvironment(
             torch_version="2.6.0",
             cuda_runtime_version="12.4",
@@ -107,6 +123,17 @@ def _completed_validation(metrics: MixedPrecisionMetrics) -> FinCastPrecisionVal
         ),
         context_fixture_sha256="b" * 64,
         context_count=128,
+        qualification_case_count=390,
+        qualification_row_count=54_600,
+        context_fixture_candle_seconds=60,
+        decoder_horizon_shape_candle_seconds=(15, 30, 60),
+        validated_native_horizon_steps=(240, 120, 60),
+        cadence_validation_scope=(
+            "one-minute-close-contexts-with-native-15s-30s-60s-horizon-shapes/v1"
+        ),
+        scale_stress_policy=(
+            "rescale-context-0-last-close-to-131072-and-0.00001/v1"
+        ),
         quantile_tail_policy="tail_clamped_q10_q90",
         quantile_monotonicity_policy="fp32_monotone_rearrangement_v1",
         fp32_quantile_observations=observations,
@@ -188,10 +215,11 @@ def test_fincast_interval_seconds_accepts_supported_continuous_contexts(seconds:
             amount=100,
             complete=True,
         )
-        for index in range(16)
+        for index in range(512)
     )
     series = InferenceSeries(
         instrument_key="BTCUSDT",
+        timezone="UTC",
         bars=bars,
         future_timestamps=tuple(
             start + timedelta(minutes=index + 1)
@@ -206,11 +234,12 @@ def test_fincast_interval_seconds_rejects_non_continuous_context() -> None:
     start = datetime(2026, 7, 26, tzinfo=timezone.utc)
     timestamps = [
         start + timedelta(seconds=index * 15)
-        for index in range(16)
+        for index in range(512)
     ]
     timestamps[-1] += timedelta(seconds=15)
     series = InferenceSeries(
         instrument_key="BTCUSDT",
+        timezone="UTC",
         bars=tuple(
             PriceBar(
                 timestamp=timestamp,
@@ -234,6 +263,317 @@ def test_fincast_interval_seconds_rejects_non_continuous_context() -> None:
         fincast_interval_seconds(series)
 
 
+def test_fincast_interval_seconds_rejects_gap_before_the_last_sixteen_bars() -> None:
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    timestamps = tuple(
+        start + timedelta(seconds=index * 15 + (15 if index >= 32 else 0))
+        for index in range(512)
+    )
+    series = InferenceSeries(
+        instrument_key="BTCUSDT",
+        timezone="UTC",
+        bars=tuple(
+            PriceBar(
+                timestamp=timestamp,
+                open=100,
+                high=101,
+                low=99,
+                close=100,
+                volume=1,
+                amount=100,
+                complete=True,
+            )
+            for timestamp in timestamps
+        ),
+        future_timestamps=tuple(
+            timestamps[-1] + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="continuous"):
+        fincast_interval_seconds(series)
+
+
+def test_qualification_cases_bind_native_cadences_and_price_scale_stress() -> None:
+    module = _validation_script()
+
+    cases = module._qualification_cases(_qualification_contexts())
+
+    assert len(cases) == FINCAST_QUALIFICATION_CASE_COUNT
+    assert [
+        (case.candle_seconds, case.horizon_steps)
+        for case in cases[:3]
+    ] == [(15, 240), (30, 120), (60, 60)]
+    assert {
+        (seconds, steps): sum(
+            case.candle_seconds == seconds and case.horizon_steps == steps
+            for case in cases
+        )
+        for seconds, steps in ((15, 240), (30, 120), (60, 60))
+    } == {(15, 240): 130, (30, 120): 130, (60, 60): 130}
+    assert [case.closes[-1] for case in cases[-6:-3]] == [131_072.0] * 3
+    assert [case.closes[-1] for case in cases[-3:]] == [0.000_01] * 3
+    assert all(
+        value > 65_504
+        for case in cases[-6:-3]
+        for value in case.closes
+    )
+    assert all(value > 0 for case in cases[-3:] for value in case.closes)
+    assert max(value for case in cases[-3:] for value in case.closes) == pytest.approx(
+        0.000_01
+    )
+
+
+def test_qualification_forecast_decodes_every_case_at_its_native_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _validation_script()
+    decode_calls: list[dict[str, object]] = []
+    tensor_last_closes: list[float] = []
+    zero_calls: list[tuple[object, object]] = []
+
+    class FakeOutput:
+        def __init__(self, horizon_steps: int) -> None:
+            self.rows = [
+                [float(index) for index in range(1, 10)]
+                for _ in range(horizon_steps)
+            ]
+
+        def __getitem__(self, _key: object) -> "FakeOutput":
+            return self
+
+        def float(self) -> "FakeOutput":
+            return self
+
+        def cpu(self) -> "FakeOutput":
+            return self
+
+        def tolist(self) -> list[list[float]]:
+            return self.rows
+
+    class FakeModel:
+        def decode(self, **kwargs: object) -> tuple[None, FakeOutput]:
+            decode_calls.append(kwargs)
+            return None, FakeOutput(int(kwargs["horizon_len"]))  # type: ignore[arg-type]
+
+    class FakeTorch:
+        float32 = "torch.float32"
+        float16 = "torch.float16"
+        long = "torch.int64"
+
+        def __init__(self) -> None:
+            self.cuda = SimpleNamespace(manual_seed_all=lambda _seed: None)
+
+        def manual_seed(self, _seed: int) -> None:
+            return None
+
+        def tensor(self, values: object, *, dtype: object, device: str) -> object:
+            del dtype, device
+            tensor_last_closes.append(float(values[0][-1]))  # type: ignore[index]
+            return values
+
+        def zeros(self, shape: object, *, dtype: object, device: str) -> object:
+            del device
+            zero_calls.append((shape, dtype))
+            return shape
+
+        def inference_mode(self) -> object:
+            return nullcontext()
+
+    original_postprocess = module._postprocess_qualification_forecasts
+
+    def checked_postprocess(
+        forecasts: list[list[list[float]]],
+    ) -> tuple[list[list[list[float]]], QuantileRearrangementObservations]:
+        module._require_qualification_forecast_shape(forecasts)
+        return forecasts, _quantile_observations()
+
+    monkeypatch.setattr(
+        module,
+        "_postprocess_qualification_forecasts",
+        checked_postprocess,
+    )
+    forecasts, observations = module._forecast(
+        FakeModel(),
+        _qualification_contexts(),
+        FakeTorch(),
+        "float32",
+    )
+    monkeypatch.setattr(
+        module,
+        "_postprocess_qualification_forecasts",
+        original_postprocess,
+    )
+
+    assert len(forecasts) == FINCAST_QUALIFICATION_CASE_COUNT
+    assert observations.row_count == FINCAST_QUALIFICATION_ROW_COUNT
+    assert [call["horizon_len"] for call in decode_calls] == list(
+        FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS
+    ) * 130
+    assert [
+        call["paddings"]
+        for call in decode_calls[-3:]
+    ] == [(1, 752), (1, 632), (1, 572)]
+    assert tensor_last_closes[-6:-3] == [131_072.0] * 3
+    assert tensor_last_closes[-3:] == [0.000_01] * 3
+    assert zero_calls[-6:] == [
+        ((1, 752), "torch.float32"),
+        ((1, 1), "torch.int64"),
+        ((1, 632), "torch.float32"),
+        ((1, 1), "torch.int64"),
+        ((1, 572), "torch.float32"),
+        ((1, 1), "torch.int64"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected_horizon_steps"),
+    ((15, 240), (30, 120), (60, 60)),
+)
+def test_fincast_mixed_runtime_keeps_high_raw_prices_fp32_until_model_normalization(
+    seconds: int,
+    expected_horizon_steps: int,
+) -> None:
+    tensor_calls: list[dict[str, object]] = []
+    zero_calls: list[dict[str, object]] = []
+
+    class FakeTensor:
+        def __init__(self, values: object) -> None:
+            self.values = values
+
+        def float(self) -> "FakeTensor":
+            return self
+
+        def cpu(self) -> "FakeTensor":
+            return self
+
+        def tolist(self) -> object:
+            return self.values
+
+    class FakeTorch:
+        float16 = "torch.float16"
+        float32 = "torch.float32"
+        long = "torch.int64"
+
+        def __init__(self) -> None:
+            self.cuda = SimpleNamespace(manual_seed_all=lambda _seed: None)
+
+        def manual_seed(self, _seed: int) -> None:
+            return None
+
+        def tensor(self, values: object, *, dtype: object, device: str) -> FakeTensor:
+            tensor_calls.append({"values": values, "dtype": dtype, "device": device})
+            return FakeTensor(values)
+
+        def zeros(self, shape: object, *, dtype: object, device: str) -> FakeTensor:
+            zero_calls.append({"shape": shape, "dtype": dtype, "device": device})
+            rows, columns = shape  # type: ignore[misc]
+            return FakeTensor([[0 for _ in range(columns)] for _ in range(rows)])
+
+        def inference_mode(self) -> object:
+            return nullcontext()
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.call: dict[str, object] | None = None
+
+        def decode(self, **kwargs: object) -> tuple[None, FakeTensor]:
+            self.call = kwargs
+            rows = [
+                [
+                    100_000.0,
+                    99_000.0,
+                    99_200.0,
+                    99_400.0,
+                    99_600.0,
+                    100_000.0,
+                    100_400.0,
+                    100_600.0,
+                    100_800.0,
+                    101_000.0,
+                ]
+                for _ in range(expected_horizon_steps)
+            ]
+            return None, FakeTensor([rows])
+
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    bars = tuple(
+        PriceBar(
+            timestamp=start + timedelta(seconds=index * seconds),
+            open=100_000.0 + index * 0.01,
+            high=100_001.0 + index * 0.01,
+            low=99_999.0 + index * 0.01,
+            close=100_000.5 + index * 0.01,
+            volume=2,
+            amount=200_001.0 + index * 0.02,
+            complete=True,
+        )
+        for index in range(512)
+    )
+    item = InferenceSeries(
+        instrument_key="BTCUSDT",
+        timezone="UTC",
+        bars=bars,
+        future_timestamps=tuple(
+            bars[-1].timestamp + timedelta(minutes=index + 1)
+            for index in range(60)
+        ),
+    )
+    torch = FakeTorch()
+    model = FakeModel()
+    adapter = object.__new__(FinCastAdapter)
+    adapter._runtime = SimpleNamespace(torch=torch, name="cuda")
+    adapter._context_bars = 512
+    adapter._model = model
+    adapter._precision = "mixed_float16"
+
+    result = adapter.predict_batch((item,), seed=7)
+
+    assert tensor_calls[0]["dtype"] == "torch.float32"
+    captured_context = tensor_calls[0]["values"]
+    assert isinstance(captured_context, list)
+    assert len(captured_context) == 1
+    assert len(captured_context[0]) == 512
+    assert captured_context[0] == [bar.close for bar in bars]
+    assert captured_context[0] != [bar.open for bar in bars]
+    assert captured_context[0] != [bar.high for bar in bars]
+    assert captured_context[0] != [bar.low for bar in bars]
+    assert captured_context[0] != [bar.volume for bar in bars]
+    assert captured_context[0] != [bar.amount for bar in bars]
+    assert not any(isinstance(value, datetime) for value in captured_context[0])
+    assert all(math.isfinite(value) and value > 65_504 for value in captured_context[0])
+    assert zero_calls[0] == {
+        "shape": (1, 512 + expected_horizon_steps),
+        "dtype": "torch.float16",
+        "device": "cuda",
+    }
+    assert zero_calls[1] == {
+        "shape": (1, 1),
+        "dtype": "torch.int64",
+        "device": "cuda",
+    }
+    assert model.call is not None
+    assert set(model.call) == {
+        "input_ts",
+        "paddings",
+        "freq",
+        "horizon_len",
+        "output_patch_len",
+        "max_len",
+        "return_forecast_on_context",
+    }
+    assert model.call["input_ts"].values == captured_context  # type: ignore[union-attr]
+    padding_values = model.call["paddings"].values  # type: ignore[union-attr]
+    assert len(padding_values) == 1
+    assert len(padding_values[0]) == 512 + expected_horizon_steps
+    assert set(padding_values[0]) == {0}
+    assert model.call["freq"].values == [[0]]  # type: ignore[union-attr]
+    assert model.call["horizon_len"] == expected_horizon_steps
+    assert model.call["max_len"] == 512
+    assert result[0].close_quantiles is not None
+
+
 def test_native_quantile_rearrangement_leaves_monotonic_values_unchanged() -> None:
     native = (10.0, 20.0, 20.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0)
 
@@ -254,12 +594,10 @@ def test_qualification_rearrangement_matches_runtime_projection() -> None:
     module = _validation_script()
     reference = [9.0, 2.0, 7.0, 4.0, 5.0, 6.0, 3.0, 8.0, 1.0]
     candidate = [9.1, 2.1, 7.1, 4.1, 5.1, 6.1, 3.1, 8.1, 1.1]
-    reference_forecasts = [[reference] * 60 for _ in range(128)]
-    candidate_forecasts = [[candidate] * 60 for _ in range(128)]
-    contexts = [
-        {"closes": [5.0] * 512, "round_trip_cost_bps": 8.0}
-        for _ in range(128)
-    ]
+    reference_forecasts = _qualification_forecasts(reference)
+    candidate_forecasts = _qualification_forecasts(candidate)
+    contexts = _qualification_contexts()
+    cases = module._qualification_cases(contexts)
 
     normalized_reference, reference_observations = (
         module._postprocess_qualification_forecasts(reference_forecasts)
@@ -272,16 +610,22 @@ def test_qualification_rearrangement_matches_runtime_projection() -> None:
     metrics = module.qualification_metrics(
         normalized_reference,
         normalized_candidate,
-        contexts,
+        cases,
         10_000,
         6_000,
     )
 
     assert normalized_reference[0][0] == list(rearrange_native_quantiles(reference))
     assert normalized_candidate[0][0] == list(rearrange_native_quantiles(candidate))
-    assert reference_observations.row_count == 7_680
-    assert reference_observations.crossing_row_count == 7_680
-    assert reference_observations.adjusted_row_count == 7_680
+    assert reference_observations.row_count == FINCAST_QUALIFICATION_ROW_COUNT
+    assert (
+        reference_observations.crossing_row_count
+        == FINCAST_QUALIFICATION_ROW_COUNT
+    )
+    assert (
+        reference_observations.adjusted_row_count
+        == FINCAST_QUALIFICATION_ROW_COUNT
+    )
     assert reference_observations.postprocessed_monotonic is True
     assert candidate_observations.postprocessed_monotonic is True
     assert metrics.quantile_monotonic is True
@@ -291,17 +635,17 @@ def test_qualification_rearrangement_matches_runtime_projection() -> None:
     )
 
 
-def test_qualification_rejects_per_context_row_shape_even_when_total_is_7680() -> None:
+def test_qualification_rejects_wrong_native_cadence_shape_even_when_total_matches() -> None:
     module = _validation_script()
     row = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-    malformed = [[row] * 60 for _ in range(128)]
-    malformed[0] = [row] * 59
-    malformed[1] = [row] * 61
+    malformed = _qualification_forecasts(row)
+    malformed[0] = [row] * 239
+    malformed[1] = [row] * 121
 
-    with pytest.raises(ValueError, match="128 contexts with 60 output rows each"):
+    with pytest.raises(ValueError, match="390 ordered native-cadence cases"):
         module._postprocess_qualification_forecasts(malformed)
 
-    with pytest.raises(ValueError, match="128 contexts with 60 output rows each"):
+    with pytest.raises(ValueError, match="390 ordered native-cadence cases"):
         module._postprocess_qualification_forecasts(malformed[:-1])
 
 
@@ -494,7 +838,7 @@ def test_precision_validation_round_trips_nonempty_failure_reasons_from_json(
     )
 
 
-def test_precision_validation_v3_binds_policies_and_exact_qualification_environment() -> None:
+def test_precision_validation_v4_binds_cadences_scale_policy_and_environment() -> None:
     validation = _completed_validation(
         MixedPrecisionMetrics(
             finite=True,
@@ -508,11 +852,29 @@ def test_precision_validation_v3_binds_policies_and_exact_qualification_environm
     observed = qualification_environment_from_torch(_qualification_torch())
     assert observed == validation.qualification_environment
     validate_qualification_runtime(validation, _qualification_torch())
+    assert validation.qualification_case_count == 390
+    assert validation.qualification_row_count == 54_600
+    assert validation.context_fixture_candle_seconds == 60
+    assert validation.decoder_horizon_shape_candle_seconds == (15, 30, 60)
+    assert validation.validated_native_horizon_steps == (240, 120, 60)
+    assert (
+        validation.cadence_validation_scope
+        == "one-minute-close-contexts-with-native-15s-30s-60s-horizon-shapes/v1"
+    )
+    assert (
+        validation.scale_stress_policy
+        == "rescale-context-0-last-close-to-131072-and-0.00001/v1"
+    )
 
     missing_policy = validation.model_dump(mode="python")
     missing_policy.pop("mixed_runtime_policy_version")
     with pytest.raises(ValidationError, match="mixed_runtime_policy_version"):
         FinCastPrecisionValidation.model_validate(missing_policy)
+
+    stale_policy = validation.model_dump(mode="python")
+    stale_policy["mixed_runtime_policy_version"] = "fincast-mixed-runtime-policy/v1"
+    with pytest.raises(ValidationError, match="fincast-mixed-runtime-policy/v2"):
+        FinCastPrecisionValidation.model_validate(stale_policy)
 
     missing_environment = validation.model_dump(mode="python")
     missing_environment.pop("qualification_environment")
@@ -525,19 +887,39 @@ def test_precision_validation_v3_binds_policies_and_exact_qualification_environm
         FinCastPrecisionValidation.model_validate(missing_monotonicity_policy)
 
     stale_schema = validation.model_dump(mode="python")
-    stale_schema["schema_version"] = "fincast-precision-validation/v2"
-    with pytest.raises(ValidationError, match="fincast-precision-validation/v3"):
+    stale_schema["schema_version"] = "fincast-precision-validation/v3"
+    with pytest.raises(ValidationError, match="fincast-precision-validation/v4"):
         FinCastPrecisionValidation.model_validate(stale_schema)
 
     incomplete_fp32 = validation.model_dump(mode="python")
-    incomplete_fp32["fp32_quantile_observations"]["row_count"] = 7_679
-    with pytest.raises(ValidationError, match="128x60"):
+    incomplete_fp32["fp32_quantile_observations"]["row_count"] = 54_599
+    with pytest.raises(ValidationError, match="54,600"):
         FinCastPrecisionValidation.model_validate(incomplete_fp32)
 
     incomplete_mixed = validation.model_dump(mode="python")
-    incomplete_mixed["mixed_quantile_observations"]["row_count"] = 7_679
-    with pytest.raises(ValidationError, match="128x60"):
+    incomplete_mixed["mixed_quantile_observations"]["row_count"] = 54_599
+    with pytest.raises(ValidationError, match="54,600"):
         FinCastPrecisionValidation.model_validate(incomplete_mixed)
+
+    stale_cadences = validation.model_dump(mode="python")
+    stale_cadences["decoder_horizon_shape_candle_seconds"] = (60, 30, 15)
+    with pytest.raises(ValidationError, match="decoder_horizon_shape_candle_seconds"):
+        FinCastPrecisionValidation.model_validate(stale_cadences)
+
+    overstated_contexts = validation.model_dump(mode="python")
+    overstated_contexts["context_fixture_candle_seconds"] = 15
+    with pytest.raises(ValidationError, match="context_fixture_candle_seconds"):
+        FinCastPrecisionValidation.model_validate(overstated_contexts)
+
+    missing_scope = validation.model_dump(mode="python")
+    missing_scope.pop("cadence_validation_scope")
+    with pytest.raises(ValidationError, match="cadence_validation_scope"):
+        FinCastPrecisionValidation.model_validate(missing_scope)
+
+    missing_scale_policy = validation.model_dump(mode="python")
+    missing_scale_policy.pop("scale_stress_policy")
+    with pytest.raises(ValidationError, match="scale_stress_policy"):
+        FinCastPrecisionValidation.model_validate(missing_scale_policy)
 
 
 @pytest.mark.parametrize(
@@ -911,6 +1293,11 @@ class _HorizonLayer:
     pass
 
 
+class _InputLayer:
+    def __init__(self, weight: _FakeTensor) -> None:
+        self.weight = weight
+
+
 class _MixedBoundaryModel:
     def __init__(
         self,
@@ -925,6 +1312,8 @@ class _MixedBoundaryModel:
         threshold_train = _FakeTensor(island_dtype)
         threshold_eval = _FakeTensor(island_dtype)
         router_zero = _FakeTensor(island_dtype)
+        input_weight = _FakeTensor(ordinary_dtype)
+        self.input_ff_layer = _InputLayer(input_weight)
         self.input_norm = RMSNorm({"weight": input_norm_weight})
         self.moe_norm = RMSNorm({"gamma": moe_norm_gamma})
         self.router = TopNGating(
@@ -937,7 +1326,7 @@ class _MixedBoundaryModel:
         )
         self.horizon_ff_layer = _HorizonLayer()
         self._parameters = {
-            "input_ff_layer.hidden_layer.0.weight": _FakeTensor(ordinary_dtype),
+            "input_ff_layer.hidden_layer.0.weight": input_weight,
             f"{prefix}.self_attn.scaling": _FakeTensor(ordinary_dtype),
             f"{prefix}.input_layernorm.weight": input_norm_weight,
             f"{prefix}.moe.moe_prenorm.gamma": moe_norm_gamma,
@@ -1092,6 +1481,12 @@ def test_provisioning_rolls_back_a_partial_atomic_publish(
 
 def test_precision_hooks_observe_compute_restore_horizon_and_decode_dtypes() -> None:
     model = _MixedBoundaryModel()
+    model.input_ff_layer._fincast_model_input_dtype = "torch.float16"
+    normalized_args = _cast_normalized_input_to_model_dtype(
+        model.input_ff_layer,
+        (_FakeTensor("torch.float32"),),
+    )
+    assert normalized_args[0].dtype == "torch.float16"
     for module in (model.input_norm, model.moe_norm):
         compute_args = _remember_input_dtype(module, (_FakeTensor("torch.float16"),))
         assert compute_args[0].dtype == "torch.float32"

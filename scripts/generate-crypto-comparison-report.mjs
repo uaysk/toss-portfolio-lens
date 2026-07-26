@@ -25,7 +25,7 @@ const REPLAY_WINDOW = Object.freeze({
   originStrideMinutes: 15,
   futureBarsPerOrigin: 60,
 });
-const FINCAST_QUALIFICATION_QUANTILE_ROWS = 128 * 60;
+const FINCAST_QUALIFICATION_QUANTILE_ROWS = 130 * (240 + 120 + 60);
 const MAX_Q50_ADJUSTMENT_IQR_RATIO = 1_000_000_000;
 const MARKET = Object.freeze({
   kind: "crypto_futures",

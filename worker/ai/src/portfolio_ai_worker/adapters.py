@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
+from zoneinfo import ZoneInfo
 
 from .contracts import (
     FINCAST_MODEL_ID,
@@ -23,6 +24,7 @@ from .settings import AISettings
 @dataclass(frozen=True, slots=True)
 class InferenceSeries:
     instrument_key: str
+    timezone: str
     bars: tuple[PriceBar, ...]
     future_timestamps: tuple[datetime, ...]
 
@@ -377,6 +379,12 @@ class KronosAdapter:
         y_timestamps: list[Any] = []
         owners: list[str] = []
         for item in series:
+            # Kronos derives calendar covariates from these timestamps. Preserve
+            # each instant while presenting it in the exchange-local timezone
+            # declared by the request (UTC remains unchanged for crypto).
+            local_timezone = ZoneInfo(item.timezone)
+            include_volume = all(bar.volume is not None for bar in item.bars)
+            include_amount = all(bar.amount is not None for bar in item.bars)
             frame = pandas.DataFrame(
                 [
                     {
@@ -384,16 +392,18 @@ class KronosAdapter:
                         "high": bar.high,
                         "low": bar.low,
                         "close": bar.close,
-                        **({"volume": bar.volume} if bar.volume is not None else {}),
-                        **({"amount": bar.amount} if bar.amount is not None else {}),
+                        **({"volume": bar.volume} if include_volume else {}),
+                        **({"amount": bar.amount} if include_amount else {}),
                     }
                     for bar in item.bars
                 ]
             )
             for _ in range(self._sample_count):
                 frames.append(frame)
-                x_timestamps.append(pandas.Series([bar.timestamp for bar in item.bars]))
-                y_timestamps.append(pandas.Series(item.future_timestamps))
+                x_timestamps.append(pandas.Series([bar.timestamp.astimezone(local_timezone) for bar in item.bars]))
+                y_timestamps.append(
+                    pandas.Series([timestamp.astimezone(local_timezone) for timestamp in item.future_timestamps])
+                )
                 owners.append(item.instrument_key)
         with math_sdpa(torch), torch.inference_mode():
             predicted = self._predictor.predict_batch(

@@ -50,6 +50,7 @@ _FP32_ISLAND_SUFFIXES = (
 )
 _FLOAT16_DTYPE = "torch.float16"
 _FLOAT32_DTYPE = "torch.float32"
+_FINCAST_CONTEXT_BARS = 512
 _OBSERVATION_ATTRIBUTE = "_fincast_mixed_dtype_observation"
 _DECODE_OBSERVATION_ATTRIBUTE = "_fincast_decode_dtype_observation"
 _PINNED_ST_MOE_FILES = {
@@ -57,6 +58,15 @@ _PINNED_ST_MOE_FILES = {
     "st_moe_pytorch.st_moe_pytorch": "src/st_moe_pytorch/st_moe_pytorch.py",
     "st_moe_pytorch.distributed": "src/st_moe_pytorch/distributed.py",
 }
+
+
+def fincast_input_dtypes(torch: Any, precision: str) -> tuple[Any, Any]:
+    """Return the reviewed raw-input and zero-padding dtypes for a lane."""
+
+    if precision not in {"float32", "mixed_float16"}:
+        raise ValueError("FinCast precision is unsupported")
+    padding_dtype = torch.float16 if precision == "mixed_float16" else torch.float32
+    return torch.float32, padding_dtype
 
 
 def is_fincast_fp32_island_key(key: str) -> bool:
@@ -322,6 +332,22 @@ def _remember_input_dtype(module: Any, args: tuple[Any, ...]) -> tuple[Any, ...]
     return (compute_input, *args[1:])
 
 
+def _cast_normalized_input_to_model_dtype(module: Any, args: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Keep raw price normalization in FP32, then enter the FP16 model boundary."""
+
+    if not args:
+        return args
+    target_dtype = getattr(module, "_fincast_model_input_dtype", None)
+    if target_dtype is None:
+        raise AdapterLoadError("FinCast normalized input dtype boundary is unavailable")
+    marker = _dtype_observation(module)
+    marker["calls"] = int(marker.get("calls", 0)) + 1
+    _record_dtype(module, "activation_input", args[0])
+    compute_input = args[0].to(dtype=target_dtype)
+    _record_dtype(module, "compute_input", compute_input)
+    return (compute_input, *args[1:])
+
+
 def _restore_output_dtype(module: Any, _args: tuple[Any, ...], output: Any) -> Any:
     _record_dtype(module, "compute_output", output)
     dtype = module._fincast_input_dtype
@@ -378,6 +404,14 @@ def _require_dtype_observation(
 def validate_fincast_mixed_inference_observations(model: Any) -> None:
     """Validate tensor-free dtype markers populated by actual mixed inference."""
 
+    _require_dtype_observation(
+        getattr(model.input_ff_layer, _OBSERVATION_ATTRIBUTE, None),
+        {
+            "activation_input": {_FLOAT32_DTYPE},
+            "compute_input": {_FLOAT16_DTYPE},
+        },
+        "normalized input",
+    )
     counts = {"RMSNorm": 0, "TopNGating": 0}
     for module in model.modules():
         class_name = type(module).__name__
@@ -431,13 +465,22 @@ def validate_fincast_mixed_inference_observations(model: Any) -> None:
 def apply_mixed_precision_policy(model: Any) -> None:
     """Apply reviewed FP32 islands around the official FinCast source.
 
-    The pinned decoder already evaluates attention softmax and its own RMSNorm
-    arithmetic in FP32. These hooks cover the upstream MoE RMSNorm and router;
-    the horizon projection remains FP16 but its returned tensor is promoted
-    before inverse normalization and application post-processing.
+    Raw prices and the pinned decoder's patch normalization remain FP32, then
+    the first learned projection enters FP16 through a checked hook. The pinned
+    decoder already evaluates attention softmax and its own RMSNorm arithmetic
+    in FP32. Further hooks cover the upstream MoE RMSNorm and router; the
+    horizon projection remains FP16 but its returned tensor is promoted before
+    inverse normalization and application post-processing.
     """
 
     model.half()
+    input_parameters = iter(model.input_ff_layer.parameters())
+    first_input_parameter = next(input_parameters, None)
+    if first_input_parameter is None or _dtype_name(first_input_parameter) != _FLOAT16_DTYPE:
+        raise AdapterLoadError("FinCast normalized input layer does not expose the reviewed FP16 boundary")
+    setattr(model.input_ff_layer, "_fincast_model_input_dtype", first_input_parameter.dtype)
+    setattr(model.input_ff_layer, _OBSERVATION_ATTRIBUTE, _new_dtype_observation())
+    model.input_ff_layer.register_forward_pre_hook(_cast_normalized_input_to_model_dtype)
     for module in model.modules():
         class_name = type(module).__name__
         if class_name == "RMSNorm":
@@ -583,15 +626,16 @@ def project_native_quantiles(values: Sequence[float]) -> dict[float, float]:
 
 
 def fincast_interval_seconds(item: InferenceSeries) -> int:
-    if len(item.bars) < 2:
-        raise ValueError("FinCast requires at least two timestamped context bars")
+    context = item.bars[-_FINCAST_CONTEXT_BARS:]
+    if len(context) != _FINCAST_CONTEXT_BARS:
+        raise ValueError("FinCast requires exactly 512 timestamped context bars")
     deltas = tuple(
-        int((right.timestamp - left.timestamp).total_seconds())
-        for left, right in zip(item.bars[-16:-1], item.bars[-15:], strict=True)
+        (right.timestamp - left.timestamp).total_seconds()
+        for left, right in zip(context[:-1], context[1:], strict=True)
     )
-    if not deltas or len(set(deltas)) != 1 or deltas[0] not in (15, 30, 60):
+    if len(deltas) != _FINCAST_CONTEXT_BARS - 1 or len(set(deltas)) != 1 or deltas[0] not in (15, 30, 60):
         raise ValueError("FinCast context bars must use a continuous 15s, 30s, or 60s interval")
-    return deltas[0]
+    return int(deltas[0])
 
 
 class FinCastAdapter:
@@ -666,17 +710,21 @@ class FinCastAdapter:
         interval_seconds = intervals[0]
         native_horizon_steps = max(FIXED_HORIZONS) * 60 // interval_seconds
         torch = self._runtime.torch
-        dtype = torch.float16 if self._precision == "mixed_float16" else torch.float32
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         contexts = [
             [bar.close for bar in item.bars[-self._context_bars :]]
             for item in series
         ]
-        input_ts = torch.tensor(contexts, dtype=dtype, device=self._runtime.name)
+        # The pinned decoder performs its per-patch normalization before the
+        # first learned projection. Raw prices must remain FP32 until that
+        # point: casting BTC-like levels directly to FP16 can overflow
+        # above 65,504 or quantize micro-priced contracts before normalization.
+        input_dtype, padding_dtype = fincast_input_dtypes(torch, self._precision)
+        input_ts = torch.tensor(contexts, dtype=input_dtype, device=self._runtime.name)
         paddings = torch.zeros(
             (len(series), self._context_bars + native_horizon_steps),
-            dtype=dtype,
+            dtype=padding_dtype,
             device=self._runtime.name,
         )
         frequency = torch.zeros((len(series), 1), dtype=torch.long, device=self._runtime.name)

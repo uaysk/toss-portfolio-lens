@@ -147,6 +147,21 @@ const PATTERN_LABELS: Record<string, string> = {
   inside_bar: "인사이드 바",
   bullish_outside_bar: "상승 아웃사이드 바",
   bearish_outside_bar: "하락 아웃사이드 바",
+  bullish_flag: "상승 깃발형",
+  bearish_flag: "하락 깃발형",
+  bullish_pennant: "상승 페넌트",
+  bearish_pennant: "하락 페넌트",
+  rising_wedge: "상승 쐐기형",
+  falling_wedge: "하락 쐐기형",
+  symmetric_triangle: "대칭 삼각형",
+  ascending_triangle: "상승 삼각형",
+  descending_triangle: "하락 삼각형",
+  double_top: "이중 천장",
+  double_bottom: "이중 바닥",
+  head_and_shoulders: "헤드앤숄더",
+  inverse_head_and_shoulders: "역헤드앤숄더",
+  bullish_channel_breakout: "상승 채널 돌파",
+  bearish_channel_breakout: "하락 채널 돌파",
 };
 
 function requestedSymbolCount(request: AiSimulationRequest): number {
@@ -594,7 +609,22 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
                     {decision.degraded ? " · degraded" : ""}
                   </p>
                 ) : null}
-                {decision.components || decision.weights || decision.finalScores || decision.provenance?.length ? (
+                {decision.technicalScore !== undefined
+                  || decision.exposureScale !== undefined
+                  || decision.chartPatternStrength !== undefined ? (
+                    <p className="mt-1 break-words text-[9px] text-muted-foreground">
+                      기술 점수 {formatScore(decision.technicalScore)}
+                      {decision.technicalDirection ? ` · 기술 방향 ${decision.technicalDirection}` : ""}
+                      {decision.exposureScale !== undefined
+                        ? ` · 노출 ${formatRatio(decision.exposureScale)}` : ""}
+                      {decision.modelEvidenceScale !== undefined
+                        ? ` · 모델 증거 ${formatRatio(decision.modelEvidenceScale)}` : ""}
+                      {decision.chartPatternStrength !== undefined
+                        ? ` · 패턴 강도 ${formatRatio(decision.chartPatternStrength)}` : ""}
+                    </p>
+                  ) : null}
+                {decision.components || decision.weights || decision.finalScores
+                  || decision.provenance?.length || decision.fusionPolicyVersion ? (
                   <details className="mt-2 rounded-xl bg-card p-3">
                     <summary className="cursor-pointer text-[9px] font-black">판단 구성 상세</summary>
                     <div className="mt-2 space-y-1 break-words text-[8px] leading-4 text-muted-foreground">
@@ -602,6 +632,8 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
                       {decision.weights ? <p>weights · {Object.entries(decision.weights).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
                       {decision.finalScores ? <p>final scores · {Object.entries(decision.finalScores).map(([key, value]) => `${key} ${value}`).join(" · ")}</p> : null}
                       {decision.provenance?.length ? <p>provenance · {decision.provenance.join(" · ")}</p> : null}
+                      {decision.fusionPolicyVersion
+                        ? <p>fusion · {decision.fusionPolicyVersion}</p> : null}
                     </div>
                   </details>
                 ) : null}

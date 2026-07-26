@@ -16,10 +16,17 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 FINCAST_MODEL_ID = "Vincent05R/FinCast"
 FINCAST_QUALIFICATION_CONTEXT_COUNT = 128
-FINCAST_QUALIFICATION_ROWS_PER_CONTEXT = 60
+FINCAST_QUALIFICATION_CANDLE_SECONDS = (15, 30, 60)
+FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS = (240, 120, 60)
+FINCAST_QUALIFICATION_SCALE_STRESS_CONTEXT_COUNT = 2
+FINCAST_QUALIFICATION_CASE_COUNT = (
+    FINCAST_QUALIFICATION_CONTEXT_COUNT
+    + FINCAST_QUALIFICATION_SCALE_STRESS_CONTEXT_COUNT
+) * len(FINCAST_QUALIFICATION_CANDLE_SECONDS)
 FINCAST_QUALIFICATION_ROW_COUNT = (
-    FINCAST_QUALIFICATION_CONTEXT_COUNT * FINCAST_QUALIFICATION_ROWS_PER_CONTEXT
-)
+    FINCAST_QUALIFICATION_CONTEXT_COUNT
+    + FINCAST_QUALIFICATION_SCALE_STRESS_CONTEXT_COUNT
+) * sum(FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS)
 MAX_QUANTILE_ADJUSTMENT_IQR_RATIO = 1_000_000_000.0
 
 
@@ -478,6 +485,24 @@ class HorizonForecast(StrictModel):
     target_stop: TargetStopBounds
     valid_path_count: int = Field(ge=0)
     invalid_path_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def probability_shape(self) -> "HorizonForecast":
+        probabilities = (
+            self.up_probability,
+            self.down_probability,
+            self.flat_probability,
+        )
+        if self.probability_method == "unavailable":
+            if any(value is not None for value in probabilities):
+                raise ValueError("unavailable direction probabilities must all be null")
+        elif any(value is None for value in probabilities):
+            raise ValueError("available direction probabilities must all be present")
+        else:
+            assert all(value is not None for value in probabilities)
+            if not math.isclose(sum(probabilities), 1, rel_tol=0, abs_tol=1e-9):
+                raise ValueError("direction probabilities must sum to one")
+        return self
 
 
 class InputQuality(StrictModel):

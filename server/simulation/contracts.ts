@@ -277,6 +277,16 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
         });
       }
     } else {
+      if (
+        input.modelLanes.length !== 1
+        || input.modelLanes[0] !== "kronos_base"
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["modelLanes"],
+          message: "주식 시뮬레이션은 검증된 Kronos-base lane만 지원합니다.",
+        });
+      }
       if (input.initialCash < 100_000) {
         context.addIssue({
           code: "custom",

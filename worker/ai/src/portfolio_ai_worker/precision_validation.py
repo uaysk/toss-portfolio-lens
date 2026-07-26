@@ -9,15 +9,18 @@ from typing import Literal, TypeAlias
 from pydantic import Field, ValidationError, model_validator
 
 from .contracts import (
+    FINCAST_QUALIFICATION_CANDLE_SECONDS,
+    FINCAST_QUALIFICATION_CASE_COUNT,
     FINCAST_QUALIFICATION_CONTEXT_COUNT,
+    FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS,
     FINCAST_QUALIFICATION_ROW_COUNT,
     MAX_QUANTILE_ADJUSTMENT_IQR_RATIO,
     QuantileRearrangementObservations,
     StrictModel,
 )
 
-SCHEMA_VERSION = "fincast-precision-validation/v3"
-MIXED_RUNTIME_POLICY_VERSION = "fincast-mixed-runtime-policy/v1"
+SCHEMA_VERSION = "fincast-precision-validation/v4"
+MIXED_RUNTIME_POLICY_VERSION = "fincast-mixed-runtime-policy/v2"
 EXPECTED_CONTEXT_COUNT = FINCAST_QUALIFICATION_CONTEXT_COUNT
 EXPECTED_TORCH_VERSION = "2.6.0"
 EXPECTED_CUDA_RUNTIME_VERSION = "12.4"
@@ -28,6 +31,12 @@ MAX_Q50_MEDIAN_IQR_RATIO = 0.05
 MAX_Q50_P95_IQR_RATIO = 0.15
 MIN_PEAK_VRAM_REDUCTION = 0.25
 QUANTILE_MONOTONICITY_POLICY = "fp32_monotone_rearrangement_v1"
+SCALE_STRESS_POLICY = (
+    "rescale-context-0-last-close-to-131072-and-0.00001/v1"
+)
+CADENCE_VALIDATION_SCOPE = (
+    "one-minute-close-contexts-with-native-15s-30s-60s-horizon-shapes/v1"
+)
 MAX_OBSERVED_QUANTILE_ROWS = FINCAST_QUALIFICATION_ROW_COUNT
 MAX_OBSERVED_Q50_ADJUSTMENT_IQR_RATIO = MAX_QUANTILE_ADJUSTMENT_IQR_RATIO
 
@@ -113,14 +122,25 @@ class QualificationEnvironment(StrictModel):
 
 
 class FinCastPrecisionValidation(StrictModel):
-    schema_version: Literal["fincast-precision-validation/v3"]
+    schema_version: Literal["fincast-precision-validation/v4"]
     model_id: Literal["Vincent05R/FinCast"]
     model_revision: Literal["2d7d90b159db8961d27c2cf165d51195902ef92b"]
     source_revision: Literal["488b19d1d85fa2b3d4b93469530cefdcf1cc97a4"]
-    mixed_runtime_policy_version: Literal["fincast-mixed-runtime-policy/v1"]
+    mixed_runtime_policy_version: Literal["fincast-mixed-runtime-policy/v2"]
     qualification_environment: QualificationEnvironment
     context_fixture_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     context_count: Literal[128]
+    qualification_case_count: Literal[390]
+    qualification_row_count: Literal[54600]
+    context_fixture_candle_seconds: Literal[60]
+    decoder_horizon_shape_candle_seconds: tuple[Literal[15], Literal[30], Literal[60]]
+    validated_native_horizon_steps: tuple[Literal[240], Literal[120], Literal[60]]
+    cadence_validation_scope: Literal[
+        "one-minute-close-contexts-with-native-15s-30s-60s-horizon-shapes/v1"
+    ]
+    scale_stress_policy: Literal[
+        "rescale-context-0-last-close-to-131072-and-0.00001/v1"
+    ]
     quantile_tail_policy: Literal["tail_clamped_q10_q90"]
     quantile_monotonicity_policy: Literal["fp32_monotone_rearrangement_v1"]
     fp32_quantile_observations: QuantileRearrangementObservations
@@ -136,12 +156,27 @@ class FinCastPrecisionValidation(StrictModel):
     @model_validator(mode="after")
     def gate_matches_metrics(self) -> "FinCastPrecisionValidation":
         if (
+            self.qualification_case_count != FINCAST_QUALIFICATION_CASE_COUNT
+            or self.qualification_row_count != FINCAST_QUALIFICATION_ROW_COUNT
+            or self.context_fixture_candle_seconds != 60
+            or self.decoder_horizon_shape_candle_seconds
+            != FINCAST_QUALIFICATION_CANDLE_SECONDS
+            or self.validated_native_horizon_steps
+            != FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS
+            or self.cadence_validation_scope != CADENCE_VALIDATION_SCOPE
+            or self.scale_stress_policy != SCALE_STRESS_POLICY
+        ):
+            raise ValueError(
+                "FinCast qualification must distinguish the one-minute context fixture "
+                "from native decoder cadence shapes and bind numeric scale stress cases"
+            )
+        if (
             self.fp32_quantile_observations.row_count != MAX_OBSERVED_QUANTILE_ROWS
             or self.fp32_quantile_observations.non_finite_value_count != 0
             or not self.fp32_quantile_observations.postprocessed_monotonic
         ):
             raise ValueError(
-                "FP32 baseline quantile postprocessing must cover 128x60 finite monotonic rows"
+                "FP32 baseline must cover all 54,600 native-cadence and scale-stress rows"
             )
         if self.fp32.file != "model.fp32.safetensors":
             raise ValueError("FP32 fallback artifact name is not pinned")
@@ -159,7 +194,7 @@ class FinCastPrecisionValidation(StrictModel):
                 != MAX_OBSERVED_QUANTILE_ROWS
             ):
                 raise ValueError(
-                    "completed mixed qualification requires metrics for all 128x60 rows"
+                    "completed mixed qualification requires metrics for all 54,600 rows"
                 )
             if self.mixed_fp16.peak_vram_bytes <= 0 or not self.mixed_fp16.peak_vram_measurement_complete:
                 raise ValueError("completed mixed qualification requires a completed positive peak measurement")

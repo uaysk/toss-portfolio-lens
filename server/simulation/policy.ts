@@ -6,8 +6,18 @@ import {
   calculateBrokerExecutionCharges,
   type TossSimulationCostProfile,
 } from "./cost-profile.js";
+import {
+  FORECAST_TECHNICAL_FUSION_VERSION,
+  fuseForecastWithTechnical,
+  type ForecastTechnicalFusionResult,
+  type FusionQuality,
+} from "./forecast-technical-fusion.js";
+import {
+  parseRustIndicatorEvidence,
+  type RustIndicatorEvidence,
+} from "./technical-indicator-evidence.js";
 
-export const AI_PAPER_POLICY_VERSION = "ai-paper-policy/v2" as const;
+export const AI_PAPER_POLICY_VERSION = "ai-paper-policy/v3" as const;
 
 export const AI_PAPER_FORECAST_HORIZON_MINUTES = 5 as const;
 
@@ -157,6 +167,22 @@ export type AiPaperForecastCandidate = {
   q10Return: number;
   q90Return: number;
   upProbability: number;
+  downProbability?: number;
+  flatProbability?: number;
+  expectedVolatility?: number;
+  uncertaintyIntervalWidth?: number;
+  validPathCount?: number;
+  invalidPathCount?: number;
+  targetStop?: {
+    status: "available" | "unavailable";
+    targetFirstProbabilityLower?: number;
+    targetFirstProbabilityUpper?: number;
+    stopFirstProbabilityLower?: number;
+    stopFirstProbabilityUpper?: number;
+    ambiguousProbability?: number;
+    neitherProbability?: number;
+    reason?: string;
+  };
   score: number;
   riskPenalty: number;
   roundTripCostRate: number;
@@ -197,6 +223,14 @@ export type PaperPolicyAction = {
   technicalObservedAt?: string;
   chartPatternBias: PaperChartPatternBias | null;
   chartPatterns: string[];
+  chartPatternStrength?: number;
+  fusionPolicyVersion?: typeof FORECAST_TECHNICAL_FUSION_VERSION;
+  technicalScore?: number;
+  technicalDirection?: ForecastTechnicalFusionResult["technicalDirection"];
+  exposureScale?: number;
+  modelEvidenceScale?: number;
+  technicalComponents?: Record<string, number>;
+  targetAllocationRate?: number;
   reasons: string[];
   model: AiPaperModelProvenance;
 };
@@ -382,6 +416,85 @@ function parseQuantiles(value: unknown): { q10: number; median: number; q90: num
   return { q10, median, q90 };
 }
 
+function probability(value: unknown): number | undefined {
+  const parsed = finite(value);
+  return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+}
+
+function nonnegativeInteger(value: unknown): number | undefined {
+  const parsed = finite(value);
+  return parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : undefined;
+}
+
+function parseTargetStop(value: unknown): AiPaperForecastCandidate["targetStop"] | undefined {
+  const source = record(value);
+  if (!source || source.status !== "available" && source.status !== "unavailable") {
+    return undefined;
+  }
+  const keys = [
+    "target_first_probability_lower",
+    "target_first_probability_upper",
+    "stop_first_probability_lower",
+    "stop_first_probability_upper",
+    "ambiguous_probability",
+    "neither_probability",
+  ] as const;
+  const reason = optionalString(source.reason, 500);
+  if (reason === null) return undefined;
+  if (source.status === "unavailable") {
+    if (!reason || keys.some((key) => source[key] !== undefined && source[key] !== null)) {
+      return undefined;
+    }
+    return { status: "unavailable", reason };
+  }
+  if (reason) return undefined;
+  const values = keys.map((key) => probability(source[key]));
+  if (values.some((item) => item === undefined)) return undefined;
+  const [
+    targetFirstProbabilityLower,
+    targetFirstProbabilityUpper,
+    stopFirstProbabilityLower,
+    stopFirstProbabilityUpper,
+    ambiguousProbability,
+    neitherProbability,
+  ] = values as [number, number, number, number, number, number];
+  const tolerance = 1e-9;
+  if (
+    targetFirstProbabilityLower > targetFirstProbabilityUpper
+    || stopFirstProbabilityLower > stopFirstProbabilityUpper
+    || Math.abs(
+      targetFirstProbabilityLower
+      + stopFirstProbabilityLower
+      + ambiguousProbability
+      + neitherProbability
+      - 1
+    ) > tolerance
+    || Math.abs(
+      targetFirstProbabilityUpper
+      - targetFirstProbabilityLower
+      - ambiguousProbability
+    ) > tolerance
+    || Math.abs(
+      stopFirstProbabilityUpper
+      - stopFirstProbabilityLower
+      - ambiguousProbability
+    ) > tolerance
+  ) {
+    return undefined;
+  }
+  return {
+    status: "available",
+    targetFirstProbabilityLower,
+    targetFirstProbabilityUpper,
+    stopFirstProbabilityLower,
+    stopFirstProbabilityUpper,
+    ambiguousProbability,
+    neitherProbability,
+  };
+}
+
 function parseCandidate(
   value: unknown,
   generatedAt: string,
@@ -411,6 +524,27 @@ function parseCandidate(
     - riskPenalty * (quantiles.q90 - quantiles.q10)
     - roundTripCostRate;
   if (!Number.isFinite(score)) return undefined;
+  const rawDownProbability = horizon?.down_probability;
+  const rawFlatProbability = horizon?.flat_probability;
+  const downProbability = probability(rawDownProbability);
+  const flatProbability = probability(rawFlatProbability);
+  const auxiliaryProbabilitiesReported = (
+    rawDownProbability !== undefined && rawDownProbability !== null
+  ) || (
+    rawFlatProbability !== undefined && rawFlatProbability !== null
+  );
+  if (auxiliaryProbabilitiesReported && (
+    downProbability === undefined
+    || flatProbability === undefined
+    || Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-9
+  )) return undefined;
+  const expectedVolatility = finite(horizon?.expected_volatility);
+  const uncertaintyIntervalWidth = finite(horizon?.uncertainty_interval_width);
+  const validPathCount = nonnegativeInteger(horizon?.valid_path_count);
+  const invalidPathCount = nonnegativeInteger(horizon?.invalid_path_count);
+  const rawTargetStop = horizon?.target_stop;
+  const targetStop = parseTargetStop(rawTargetStop);
+  if (rawTargetStop !== undefined && rawTargetStop !== null && !targetStop) return undefined;
   return {
     symbol,
     inputEndAt,
@@ -421,6 +555,15 @@ function parseCandidate(
     q10Return: quantiles.q10,
     q90Return: quantiles.q90,
     upProbability,
+    ...(downProbability === undefined ? {} : { downProbability }),
+    ...(flatProbability === undefined ? {} : { flatProbability }),
+    ...(expectedVolatility !== undefined && expectedVolatility >= 0
+      ? { expectedVolatility } : {}),
+    ...(uncertaintyIntervalWidth !== undefined && uncertaintyIntervalWidth >= 0
+      ? { uncertaintyIntervalWidth } : {}),
+    ...(validPathCount === undefined ? {} : { validPathCount }),
+    ...(invalidPathCount === undefined ? {} : { invalidPathCount }),
+    ...(targetStop ? { targetStop } : {}),
     score,
     riskPenalty,
     roundTripCostRate,
@@ -531,8 +674,18 @@ function maxTimestamp(left: string, right: string): string {
 function technicalObservation(value: unknown): {
   state: PaperTechnicalState | null;
   observedAt?: string;
+  signalOriginAt?: string;
+  calculationAt?: string;
+  evidenceAt?: string;
+  earliestEligibleAt?: string;
+  directionalSignal?: -1 | 0 | 1;
+  confidence?: number;
+  multiTimeframeAgreement?: string;
+  quality: FusionQuality;
+  indicators?: RustIndicatorEvidence;
   chartPatternBias: PaperChartPatternBias | null;
   chartPatterns: string[];
+  chartPatternStrength: number;
 } {
   const source = record(value);
   const rawState = source?.status
@@ -545,6 +698,51 @@ function technicalObservation(value: unknown): {
     ? rawState
     : null;
   const observedAt = isoTimestamp(source?.observedAt ?? source?.observed_at);
+  const signalOriginAt = isoTimestamp(source?.signalOriginAt ?? source?.signal_origin_at);
+  const calculationAt = isoTimestamp(source?.calculationAt ?? source?.calculation_at);
+  const evidenceAt = isoTimestamp(
+    source?.technicalEvidenceAt
+      ?? source?.technical_evidence_at
+      ?? source?.patternObservedAt
+      ?? source?.pattern_observed_at,
+  );
+  const earliestEligibleAt = isoTimestamp(
+    source?.earliestEligibleAt ?? source?.earliest_eligible_at,
+  );
+  const rawDirectionalSignal = source?.technicalSignal ?? source?.technical_signal;
+  const directionalSignal = rawDirectionalSignal === -1
+    || rawDirectionalSignal === 0 || rawDirectionalSignal === 1
+    ? rawDirectionalSignal
+    : state === "entry_candidate" ? 1 : state === "exit_candidate" ? -1 : 0;
+  const confidenceValue = source?.confidence;
+  const confidence = typeof confidenceValue === "number"
+    && Number.isFinite(confidenceValue) && confidenceValue >= 0 && confidenceValue <= 1
+    ? confidenceValue
+    : undefined;
+  const multiTimeframeAgreement = nonemptyString(
+    source?.multiTimeframeAgreement ?? source?.multi_timeframe_agreement,
+    64,
+  );
+  const signalQuality = nonemptyString(record(source?.signalDataQuality)?.status, 64)?.toLowerCase();
+  const instrumentQuality = nonemptyString(
+    record(source?.instrumentDataQuality)?.status,
+    64,
+  )?.toLowerCase();
+  const qualityValues = [signalQuality, instrumentQuality].filter(
+    (item): item is string => item !== undefined,
+  );
+  const quality: FusionQuality = qualityValues.some((item) => item.includes("stale"))
+    ? "stale"
+    : qualityValues.some((item) => (
+        ["unavailable", "invalid", "failed", "error"].some((token) => item.includes(token))
+      ))
+      ? "unavailable"
+      : qualityValues.some((item) => (
+          ["partial", "warning", "degraded"].some((token) => item.includes(token))
+        ))
+        ? "partial"
+        : "good";
+  const indicators = parseRustIndicatorEvidence(source?.indicatorEvidence);
   const rawBias = source?.chartPatternBias ?? source?.chart_pattern_bias;
   const chartPatternBias = rawBias === "bullish" || rawBias === "bearish" || rawBias === "neutral"
     ? rawBias
@@ -556,11 +754,112 @@ function technicalObservation(value: unknown): {
         .filter((pattern): pattern is string => pattern !== undefined))]
         .slice(0, 16)
     : [];
+  const rawPatternStrength = source?.chartPatternStrength ?? source?.chart_pattern_strength;
+  const chartPatternStrength = typeof rawPatternStrength === "number"
+    && Number.isFinite(rawPatternStrength)
+    ? clamp(rawPatternStrength, 0, 1)
+    : chartPatternBias === null || chartPatternBias === "neutral" ? 0 : 0.5;
   return {
     state,
     ...(observedAt ? { observedAt } : {}),
+    ...(signalOriginAt ? { signalOriginAt } : {}),
+    ...(calculationAt ? { calculationAt } : {}),
+    ...(evidenceAt ? { evidenceAt } : {}),
+    ...(earliestEligibleAt ? { earliestEligibleAt } : {}),
+    ...(directionalSignal !== undefined ? { directionalSignal } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(multiTimeframeAgreement ? { multiTimeframeAgreement } : {}),
+    quality,
+    ...(indicators ? { indicators } : {}),
     chartPatternBias,
     chartPatterns,
+    chartPatternStrength,
+  };
+}
+
+function modelEvidence(candidate: AiPaperForecastCandidate): {
+  admitted: boolean;
+  scale: number;
+  reasons: string[];
+  components: Record<string, number>;
+} {
+  const reasons: string[] = [];
+  const components: Record<string, number> = {};
+  const scales: number[] = [1];
+  let admitted = true;
+  if (candidate.downProbability !== undefined) {
+    const directionalEdge = candidate.upProbability - candidate.downProbability;
+    components.modelDirectionalEdge = rounded(directionalEdge);
+    scales.push(clamp(0.5 + directionalEdge / 2, 0.5, 1));
+    if (directionalEdge <= 0) {
+      admitted = false;
+      reasons.push("model_down_probability_not_below_up_probability");
+    }
+  }
+  if (candidate.flatProbability !== undefined) {
+    components.modelFlatProbability = rounded(candidate.flatProbability);
+    scales.push(clamp(1 - candidate.flatProbability * 0.5, 0.5, 1));
+  }
+  if (candidate.expectedVolatility !== undefined) {
+    components.modelExpectedVolatility = rounded(candidate.expectedVolatility);
+    scales.push(clamp(
+      0.02 / Math.max(0.02, candidate.expectedVolatility),
+      0.5,
+      1,
+    ));
+  }
+  if (candidate.uncertaintyIntervalWidth !== undefined) {
+    components.modelUncertaintyIntervalWidth = rounded(candidate.uncertaintyIntervalWidth);
+    scales.push(clamp(
+      0.04 / Math.max(0.04, candidate.uncertaintyIntervalWidth),
+      0.5,
+      1,
+    ));
+  }
+  if (candidate.validPathCount !== undefined || candidate.invalidPathCount !== undefined) {
+    const valid = candidate.validPathCount ?? 0;
+    const invalid = candidate.invalidPathCount ?? 0;
+    const total = valid + invalid;
+    const reliability = total > 0 ? valid / total : 0.5;
+    components.modelValidPathRatio = rounded(reliability);
+    scales.push(clamp(reliability, 0.5, 1));
+  }
+  const targetStop = candidate.targetStop;
+  if (targetStop?.status === "available") {
+    const targetLower = targetStop.targetFirstProbabilityLower;
+    const targetUpper = targetStop.targetFirstProbabilityUpper;
+    const stopLower = targetStop.stopFirstProbabilityLower;
+    const stopUpper = targetStop.stopFirstProbabilityUpper;
+    if (targetLower !== undefined) components.targetFirstProbabilityLower = targetLower;
+    if (targetUpper !== undefined) components.targetFirstProbabilityUpper = targetUpper;
+    if (stopLower !== undefined) components.stopFirstProbabilityLower = stopLower;
+    if (stopUpper !== undefined) components.stopFirstProbabilityUpper = stopUpper;
+    if (targetStop.ambiguousProbability !== undefined) {
+      components.targetStopAmbiguousProbability = targetStop.ambiguousProbability;
+    }
+    if (targetStop.neitherProbability !== undefined) {
+      components.targetStopNeitherProbability = targetStop.neitherProbability;
+    }
+    if (targetLower !== undefined && stopUpper !== undefined) {
+      scales.push(clamp(0.5 + (targetLower - stopUpper) / 2, 0.35, 1));
+    }
+    if (targetUpper !== undefined && stopLower !== undefined && targetUpper < stopLower) {
+      admitted = false;
+      reasons.push("model_target_before_stop_definitively_unfavorable");
+    }
+    const unresolvedProbability = (
+      targetStop.ambiguousProbability ?? 0
+    ) + (targetStop.neitherProbability ?? 0);
+    if (unresolvedProbability > 0) {
+      scales.push(clamp(1 - unresolvedProbability * 0.5, 0.5, 1));
+    }
+  }
+  const scale = rounded(Math.min(...scales));
+  return {
+    admitted,
+    scale,
+    reasons,
+    components,
   };
 }
 
@@ -582,6 +881,39 @@ export function decidePaperActions(input: {
     const patternEntryConfirmed = input.profile.patternConfirmation === "bullish"
       ? observation.chartPatternBias === "bullish"
       : observation.chartPatternBias !== "bearish";
+    const hasTechnicalEvidence = Boolean(
+      observation.state
+      || observation.signalOriginAt
+      || observation.calculationAt
+      || observation.evidenceAt
+      || observation.indicators
+      || observation.chartPatternBias && observation.chartPatternBias !== "neutral",
+    );
+    const fusion = fuseForecastWithTechnical({
+      lane: "kronos_base",
+      modelDirection: "long",
+      modelConfidence: candidate.upProbability,
+      modelOriginAt: candidate.inputEndAt,
+      modelGeneratedAt: candidate.generatedAt,
+      ...(hasTechnicalEvidence ? {
+        technical: {
+          originAt: observation.signalOriginAt ?? observation.calculationAt,
+          calculationAt: observation.calculationAt ?? observation.signalOriginAt,
+          evidenceAt: observation.evidenceAt,
+          ...(observation.earliestEligibleAt
+            ? { eligibleAfter: observation.earliestEligibleAt } : {}),
+          quality: observation.quality,
+          directionalSignal: observation.directionalSignal,
+          confidence: observation.confidence,
+          multiTimeframeAgreement: observation.multiTimeframeAgreement,
+          indicators: observation.indicators,
+          patternBias: observation.chartPatternBias ?? undefined,
+          patternStrength: observation.chartPatternStrength,
+        },
+      } : {}),
+      maximumTechnicalAgeMs: AI_PAPER_FORECAST_HORIZON_MINUTES * 2 * 60_000,
+    });
+    const model = modelEvidence(candidate);
     const exitReasons = [
       ...(candidate.score < 0 ? ["negative_risk_adjusted_score"] : []),
       ...(candidate.upProbability <= input.profile.exitUpProbability
@@ -592,7 +924,9 @@ export function decidePaperActions(input: {
     const canEnter = candidate.score > 0
       && candidate.upProbability >= input.profile.entryUpProbability
       && technicalEntryConfirmed
-      && patternEntryConfirmed;
+      && patternEntryConfirmed
+      && fusion.admitted
+      && model.admitted;
     const action: PaperPolicyActionKind = isHeld
       ? exitReasons.length ? "sell" : "hold"
       : canEnter ? "buy" : "watch";
@@ -620,11 +954,17 @@ export function decidePaperActions(input: {
                 ? ["bearish_chart_pattern"] : []),
               ...(observation.chartPatternBias !== "bearish" && !patternEntryConfirmed
                 ? ["bullish_chart_pattern_required"] : []),
+              ...(!fusion.admitted ? fusion.reasonCodes : []),
+              ...(!model.admitted ? model.reasons : []),
             ];
     const aiEligibleAfter = maxTimestamp(candidate.inputEndAt, candidate.generatedAt);
-    const eligibleAfter = observation.observedAt
-      ? maxTimestamp(aiEligibleAfter, observation.observedAt)
-      : aiEligibleAfter;
+    const technicalEligibleAfter = [
+      observation.observedAt,
+      observation.earliestEligibleAt,
+      fusion.eligibleAfter,
+    ].filter((item): item is string => item !== undefined)
+      .reduce(maxTimestamp, aiEligibleAfter);
+    const eligibleAfter = maxTimestamp(aiEligibleAfter, technicalEligibleAfter);
     return {
       policyVersion: AI_PAPER_POLICY_VERSION,
       symbol: candidate.symbol,
@@ -641,7 +981,23 @@ export function decidePaperActions(input: {
       ...(observation.observedAt ? { technicalObservedAt: observation.observedAt } : {}),
       chartPatternBias: observation.chartPatternBias,
       chartPatterns: [...observation.chartPatterns],
-      reasons,
+      chartPatternStrength: observation.chartPatternStrength,
+      fusionPolicyVersion: FORECAST_TECHNICAL_FUSION_VERSION,
+      technicalScore: fusion.technicalScore,
+      technicalDirection: fusion.technicalDirection,
+      exposureScale: fusion.exposureScale,
+      modelEvidenceScale: model.scale,
+      technicalComponents: {
+        ...fusion.components,
+        ...model.components,
+      },
+      targetAllocationRate: rounded(
+        input.profile.targetAllocationRate
+          * (action === "buy" ? fusion.exposureScale * model.scale : 1),
+      ),
+      reasons: action === "buy"
+        ? [...reasons, ...fusion.reasonCodes, ...model.reasons]
+        : reasons,
       model: candidate.model,
     };
   });

@@ -15,7 +15,7 @@ const ORIGIN = "2026-07-24T14:30:00.000Z";
 
 function model(): NormalizedPairModelOutput {
   return {
-    normalizationVersion: "pair-model-normalization/v2",
+    normalizationVersion: "pair-model-normalization/v3",
     component: "kronos",
     status: "available",
     reasonCodes: [],
@@ -50,7 +50,7 @@ function ensembleInput(): PairEnsembleInput {
   return {
     pair: getPairCatalogEntry("tsla-tsll-tslq"),
     models: {
-      normalizationVersion: "pair-model-normalization/v2",
+      normalizationVersion: "pair-model-normalization/v3",
       signalSymbol: "TSLA",
       expectedOrigin: ORIGIN,
       alignedOrigin: ORIGIN,

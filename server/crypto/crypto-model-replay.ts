@@ -3,6 +3,7 @@ import {
   AiCostAssumptionsSchema,
   AiEvaluateRequestSchema,
   AiResponseSchema,
+  FINCAST_QUALIFICATION_QUANTILE_ROWS,
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
   QuantileRearrangementObservationsSchema,
@@ -438,14 +439,14 @@ function validatePinnedProvenance(
       .some((reason) => reason.startsWith("mixed_"));
     const validFp32Observations = fp32QuantileObservations !== undefined
       && fp32QuantileObservations !== null
-      && fp32QuantileObservations.rowCount === 128 * 60
+      && fp32QuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
       && fp32QuantileObservations.nonFiniteValueCount === 0
       && fp32QuantileObservations.postprocessedMonotonic;
     const validMixedObservations = mixedRuntimeFailed
       ? mixedQuantileObservations === null
       : mixedQuantileObservations !== undefined
         && mixedQuantileObservations !== null
-        && mixedQuantileObservations.rowCount === 128 * 60
+        && mixedQuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
         && precisionFailureReasons.includes("non_finite_output")
           === (mixedQuantileObservations.nonFiniteValueCount > 0)
         && precisionFailureReasons.includes("quantile_postprocessing_failed")

@@ -17,11 +17,14 @@ import type {
   BinanceScannerSnapshot,
 } from "./contracts.js";
 import { FuturesPaperLedger } from "./futures-paper-ledger.js";
+import type { CryptoRustTechnicalAnalysis } from "./crypto-rust-technical.js";
 import {
   aggregatePortfolioEquitySeries,
   aggregatePortfolioLaneMetrics,
   aggregatePortfolioLaneProvenance,
   canonicalCryptoModelInputDigest,
+  CRYPTO_LOCAL_CHART_PROJECTION_BARS,
+  cryptoChartProjection,
   cryptoModelForecastIsFresh,
   CryptoPaperRuntime,
   CryptoPaperRuntimeError,
@@ -152,8 +155,12 @@ function simulationRequest(
 }
 
 function restBars(): unknown[] {
-  return Array.from({ length: 64 }, (_, index) => {
-    const openTime = START - (65 - index) * 60_000;
+  return historicalRestBars(64);
+}
+
+function historicalRestBars(count: number): unknown[] {
+  return Array.from({ length: count }, (_, index) => {
+    const openTime = START - (count + 1 - index) * 60_000;
     const price = 100 + Math.sin(index / 8) * 0.1;
     return [
       openTime,
@@ -169,6 +176,26 @@ function restBars(): unknown[] {
       "500",
       "0",
     ];
+  });
+}
+
+function finalizedKlineHistory(count: number): BinanceKline[] {
+  return historicalRestBars(count).map((raw) => {
+    const row = raw as unknown[];
+    return {
+      symbol: "BTCUSDT",
+      interval: "1m",
+      openTime: Number(row[0]),
+      closeTime: Number(row[6]),
+      open: Number(row[1]),
+      high: Number(row[2]),
+      low: Number(row[3]),
+      close: Number(row[4]),
+      volume: Number(row[5]),
+      quoteVolume: Number(row[7]),
+      tradeCount: Number(row[8]),
+      final: true,
+    };
   });
 }
 
@@ -347,7 +374,7 @@ const fincastSourceRevision = "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4";
 
 function qualificationObservations(overrides: UnknownRecord = {}) {
   return {
-    row_count: 7_680,
+    row_count: 54_600,
     non_finite_value_count: 0,
     crossing_row_count: 65,
     crossing_adjacent_pair_count: 74,
@@ -474,13 +501,52 @@ function laneClient(
   generatedAt: number,
   returns: readonly number[],
   observed: AiForecastRequest[],
+  transform: (
+    raw: ReturnType<typeof response>,
+    request: AiForecastRequest,
+  ) => unknown = (raw) => raw,
 ): CryptoAiLaneClient {
   return {
     request: vi.fn(async (request: AiForecastRequest) => {
       observed.push(structuredClone(request));
-      return response(lane, request, generatedAt, returns);
+      return transform(response(lane, request, generatedAt, returns), request);
     }),
   };
+}
+
+function withCompleteDistributionEvidence(
+  raw: ReturnType<typeof response>,
+  request: AiForecastRequest,
+): ReturnType<typeof response> {
+  const output = structuredClone(raw);
+  const series = output.series[0]!;
+  const horizon = series.horizons[0] as UnknownRecord;
+  Object.assign(horizon, {
+    up_probability: 0.7,
+    down_probability: 0.2,
+    flat_probability: 0.1,
+    probability_method: "derived_quantile_cdf",
+    expected_volatility: 0.03,
+    volatility_method: "quantile_implied_sigma",
+    uncertainty_interval_width: 0.04,
+    valid_path_count: 90,
+    invalid_path_count: 10,
+    target_stop: request.series[0]!.target_stop
+      ? {
+        status: "available",
+        target_first_probability_lower: 0.6,
+        target_first_probability_upper: 0.7,
+        stop_first_probability_lower: 0.1,
+        stop_first_probability_upper: 0.2,
+        ambiguous_probability: 0.1,
+        neither_probability: 0.2,
+      }
+      : {
+        status: "unavailable",
+        reason: "target_stop_not_requested",
+      },
+  });
+  return output;
 }
 
 function deferred<T>() {
@@ -497,6 +563,127 @@ function rest() {
   return {
     klines: vi.fn().mockResolvedValue(restBars()),
   } satisfies Pick<BinanceRestMarketData, "klines">;
+}
+
+function rustTechnicalAnalysis(
+  bars: readonly BinanceKline[],
+): CryptoRustTechnicalAnalysis {
+  const last = bars.at(-1);
+  if (!last) throw new Error("test Rust analysis needs a finalized bar");
+  const originAt = new Date(last.openTime + 60_000).toISOString();
+  const previousAt = new Date(
+    (bars.at(-2)?.openTime ?? last.openTime - 60_000) + 60_000,
+  ).toISOString();
+  return {
+    schemaVersion: "crypto-rust-technical/v1",
+    symbol: last.symbol,
+    scalpingEngineVersion: "scalping-analysis/1.4.0",
+    indicatorEngineVersion: "technical-indicators/1.5.0",
+    originAt,
+    calculationAt: originAt,
+    signalAt: originAt,
+    earliestEligibleAt: new Date(Date.parse(originAt) + 60_000).toISOString(),
+    status: "entry_candidate",
+    technicalSignal: 1,
+    basisPrice: last.close,
+    stopCandidatePrice: last.close * 0.99,
+    targetCandidatePrice: last.close * 1.02,
+    confidence: 0.9,
+    confidenceSemantics: "deterministic completeness, not success probability",
+    quality: {
+      status: "available",
+      reason: "finalized_ohlcv_bar_available",
+      reasons: [],
+      finalBarCount: bars.length,
+      sameSessionGapCount: 0,
+      missingVolumeCount: 0,
+      missingAmountCount: 0,
+    },
+    multiTimeframeAgreement: "aligned_bullish",
+    multiTimeframeTrends: {
+      "1m": "bullish",
+      "5m": "bullish",
+      "15m": "bullish",
+    },
+    rationale: ["test_exact_origin_rust_snapshot"],
+    calculations: [{
+      id: "ema-fast-9",
+      kind: "ema",
+      availability: { status: "available", reason: "calculated" },
+      latest: { at: originAt, values: { value: last.close * 1.01 } },
+      previous: { at: previousAt, values: { value: last.close } },
+    }, {
+      id: "ema-slow-21",
+      kind: "ema",
+      availability: { status: "available", reason: "calculated" },
+      latest: { at: originAt, values: { value: last.close * 0.99 } },
+      previous: { at: previousAt, values: { value: last.close * 0.99 } },
+    }, {
+      id: "adx-dmi-14",
+      kind: "adx_dmi",
+      availability: { status: "available", reason: "calculated" },
+      latest: {
+        at: originAt,
+        values: { adx: 35, plus_di: 40, minus_di: 10 },
+      },
+      previous: {
+        at: previousAt,
+        values: { adx: 30, plus_di: 35, minus_di: 12 },
+      },
+    }, {
+      id: "normalized-atr-14",
+      kind: "normalized_atr",
+      availability: { status: "available", reason: "calculated" },
+      latest: { at: originAt, values: { value: 1.2 } },
+      previous: { at: previousAt, values: { value: 1.1 } },
+    }],
+    scannerEvidence: {
+      schemaVersion: "rust-scanner-evidence/v1",
+      originAt,
+      tradingAmount: {
+        availability: { status: "available", reason: "calculated" },
+        value: 5_000_000,
+        metadata: {
+          formula: "sum(caller_supplied_final_bar_amount)",
+          missing_policy: "complete_current_session_coverage_required",
+        },
+      },
+      relativeVolume: {
+        availability: { status: "available", reason: "calculated" },
+        value: 1.25,
+        metadata: {
+          baseline: "same_local_minute_prior_sessions",
+          current_session_excluded: true,
+        },
+      },
+      provenance: {
+        source: "rust_scalping_scanner_metrics",
+        resultSchemaVersion: "scalping-analysis-result/v3",
+        market: "BINANCE_USDM",
+        quoteAsset: "USDT",
+        interval: "1m",
+        finalizedBarsOnly: true,
+        tradingAmountSource: "quote_volume",
+        relativeVolumeBaseline: "same_local_minute_prior_sessions",
+        currentSessionExcluded: true,
+      },
+      components: {
+        availableMetricCount: 2,
+        tradingAmount: 5_000_000,
+        relativeVolume: 1.25,
+      },
+    },
+    input: {
+      interval: "1m",
+      barCount: bars.length,
+      firstFinalizedAt: new Date(bars[0]!.openTime + 60_000).toISOString(),
+      lastFinalizedAt: originAt,
+      outputTailPoints: 64,
+      usesOhlc: true,
+      usesVolume: true,
+      usesQuoteVolumeAsAmount: true,
+    },
+  };
 }
 
 function artifact(
@@ -569,6 +756,21 @@ async function runProvenanceSimulation(options: {
 }
 
 describe("CryptoPaperRuntime", () => {
+  it("bounds local chart indicators and pattern detection to the causal 240-bar tail", () => {
+    const source = finalizedKlineHistory(400);
+    const projection = cryptoChartProjection(source);
+    const expected = source.slice(-CRYPTO_LOCAL_CHART_PROJECTION_BARS);
+    const firstTimestamp = new Date(expected[0]!.closeTime).toISOString();
+    const lastTimestamp = new Date(expected.at(-1)!.closeTime).toISOString();
+
+    expect(projection.bars).toHaveLength(CRYPTO_LOCAL_CHART_PROJECTION_BARS);
+    expect(projection.bars[0]!.timestamp).toBe(firstTimestamp);
+    expect(projection.bars.at(-1)!.timestamp).toBe(lastTimestamp);
+    expect(projection.patterns.every((pattern) => (
+      pattern.detectedAt >= firstTimestamp && pattern.detectedAt <= lastTimestamp
+    ))).toBe(true);
+  });
+
   it("serializes same-lane worker calls even when portfolio symbols request concurrently", async () => {
     const clock = new ScheduledClock();
     const runtime = new CryptoPaperRuntime({
@@ -1218,6 +1420,35 @@ describe("CryptoPaperRuntime", () => {
     ]);
   });
 
+  it("fails closed when explicit up/down/flat probabilities do not sum to one", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "kronos_base",
+      transform: (raw) => {
+        const output = structuredClone(raw);
+        const horizon = output.series[0]!.horizons[0] as UnknownRecord;
+        Object.assign(horizon, {
+          up_probability: 0.7,
+          down_probability: 0.2,
+          flat_probability: 0.2,
+          probability_method: "derived_quantile_cdf",
+        });
+        return output;
+      },
+    });
+    const snapshot = (result.result as {
+      snapshot: CryptoPaperRuntimeSnapshot;
+    }).snapshot;
+
+    expect(snapshot.modelForecasts).toEqual([
+      expect.objectContaining({
+        lane: "kronos_base",
+        status: "unavailable",
+        points: [],
+        unavailableReason: "model_direction_probabilities_invalid",
+      }),
+    ]);
+  });
+
   it("preserves complete FinCast mixed-FP16 validation provenance", async () => {
     const { result } = await runProvenanceSimulation({ lane: "fincast" });
     const comparisonLane = (
@@ -1244,7 +1475,7 @@ describe("CryptoPaperRuntime", () => {
         memoryStatus: "ok",
         quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
         fp32QuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 65,
           crossingAdjacentPairCount: 74,
           adjustedRowCount: 65,
@@ -1252,7 +1483,7 @@ describe("CryptoPaperRuntime", () => {
           postprocessedMonotonic: true,
         },
         mixedQuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 67,
           crossingAdjacentPairCount: 79,
           adjustedRowCount: 67,
@@ -1273,12 +1504,12 @@ describe("CryptoPaperRuntime", () => {
       memoryStatus: "ok",
       quantileMonotonicityPolicy: "fp32_monotone_rearrangement_v1",
       fp32QuantileObservations: {
-        rowCount: 7_680,
+        rowCount: 54_600,
         crossingRowCount: 65,
         adjustedRowCount: 65,
       },
       mixedQuantileObservations: {
-        rowCount: 7_680,
+        rowCount: 54_600,
         crossingRowCount: 67,
         adjustedRowCount: 67,
       },
@@ -1530,7 +1761,7 @@ describe("CryptoPaperRuntime", () => {
         precision: "fp32",
         precisionFailureReasons: ["mixed_inference_failure"],
         fp32QuantileObservations: {
-          rowCount: 7_680,
+          rowCount: 54_600,
           crossingRowCount: 65,
         },
         mixedQuantileObservations: null,
@@ -1665,10 +1896,69 @@ describe("CryptoPaperRuntime", () => {
     );
   });
 
+  it("paginates 10,080 causal one-minute bars for Rust without widening neural context", async () => {
+    const clock = new ScheduledClock();
+    const history = historicalRestBars(10_240);
+    const klines = vi.fn(async (
+      input: Parameters<BinanceRestMarketData["klines"]>[0],
+    ) => history.filter((row) => {
+      const openTime = Number((row as unknown[])[0]);
+      return (input.startTime === undefined || openTime >= input.startTime)
+        && (input.endTime === undefined || openTime <= input.endTime);
+    }).slice(-(input.limit ?? 1_024)));
+    const observed: AiForecastRequest[] = [];
+    let rustBars: readonly BinanceKline[] = [];
+    const analyze = vi.fn(async (input: {
+      bars: readonly BinanceKline[];
+    }) => {
+      rustBars = input.bars;
+      return rustTechnicalAnalysis(input.bars);
+    });
+    const runtime = new CryptoPaperRuntime({
+      rest: { klines },
+      streams: new ScheduledStreams(clock, [
+        ...riskPrelude(),
+        { at: START + 100, event: finalKline(START + 100, true) },
+      ]),
+      laneClients: {
+        kronos_base: laneClient(
+          "kronos_base",
+          START + 150,
+          longReturns,
+          observed,
+        ),
+      },
+      technicalAnalyzer: { analyze },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+
+    await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(klines).toHaveBeenCalledTimes(10);
+    expect(analyze).toHaveBeenCalledTimes(1);
+    expect(rustBars).toHaveLength(7 * 24 * 60);
+    expect(rustBars.every((bar, index) => (
+      bar.final
+      && (
+        index === 0
+        || bar.openTime - rustBars[index - 1]!.openTime === 60_000
+      )
+    ))).toBe(true);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]!.series[0]!.bars).toHaveLength(64);
+  });
+
   it("uses finalized 15-second aggTrade bars only for FinCast input while keeping the chart at one minute", async () => {
     const clock = new ScheduledClock();
     const observed: AiForecastRequest[] = [];
-    const client = laneClient("fincast", START + 15_002, flatReturns, observed);
+    const client = laneClient("fincast", START + 15_002, longReturns, observed);
     const streams = new ScheduledStreams(clock, [
       ...riskPrelude(START + 14_980),
       { at: START + 1, event: aggTrade(START + 1) },
@@ -1684,6 +1974,13 @@ describe("CryptoPaperRuntime", () => {
         m: false,
       };
     });
+    const analyze = vi.fn(async (input: {
+      bars: readonly BinanceKline[];
+    }) => {
+      expect(input.bars.every((bar) => bar.final && bar.interval === "1m")).toBe(true);
+      expect(input.bars.at(-1)!.closeTime).toBeLessThanOrEqual(START + 14_999);
+      return rustTechnicalAnalysis(input.bars);
+    });
     const runtime = new CryptoPaperRuntime({
       rest: {
         ...rest(),
@@ -1691,6 +1988,7 @@ describe("CryptoPaperRuntime", () => {
       },
       streams,
       laneClients: { fincast: client },
+      technicalAnalyzer: { analyze },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -1708,6 +2006,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     expect(observed).toHaveLength(1);
+    expect(analyze).toHaveBeenCalledTimes(1);
     const sentBars = observed[0]!.series[0]!.bars;
     expect(sentBars).toHaveLength(64);
     expect(sentBars.slice(1).every((bar, index) => (
@@ -1732,11 +2031,285 @@ describe("CryptoPaperRuntime", () => {
       chartCandleSeconds: 60,
       realOrder: false,
     });
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    expect(decisions.find((decision) => decision.lane === "fincast")).toMatchObject({
+      direction: "long",
+      // Rust's latest finalized one-minute bar is the minute before START, so
+      // its strict-after barrier is START. The later model completion remains
+      // the causal fill barrier for this 15-second origin.
+      fillEligibleAfter: new Date(START + 15_002).toISOString(),
+    });
     expect((terminal.charts as Array<{ bars: Array<{ timestamp: string }> }>)[0]!.bars
       .every((bar, index, values) => (
         index === 0
         || Date.parse(bar.timestamp) - Date.parse(values[index - 1]!.timestamp) === 60_000
       ))).toBe(true);
+  });
+
+  it.each([
+    {
+      cadence: 15 as const,
+      cacheState: "result",
+      fails: false,
+      boundaries: [15_001, 30_001, 45_001],
+      durationMinutes: 1,
+    },
+    {
+      cadence: 15 as const,
+      cacheState: "failure",
+      fails: true,
+      boundaries: [15_001, 30_001, 45_001],
+      durationMinutes: 1,
+    },
+    {
+      cadence: 30 as const,
+      cacheState: "result",
+      fails: false,
+      boundaries: [30_001, 60_001],
+      durationMinutes: 2,
+    },
+    {
+      cadence: 30 as const,
+      cacheState: "failure",
+      fails: true,
+      boundaries: [30_001, 60_001],
+      durationMinutes: 2,
+    },
+  ])(
+    "reuses one Rust analyzer $cacheState for every $cadence-second decision at the same finalized minute origin",
+    async ({ cadence, fails, boundaries, durationMinutes }) => {
+      const clock = new ScheduledClock();
+      const observed: AiForecastRequest[] = [];
+      const client: CryptoAiLaneClient = {
+        request: vi.fn(async (request: AiForecastRequest) => {
+          observed.push(structuredClone(request));
+          return response(
+            "fincast",
+            request,
+            Date.parse(request.series[0]!.input_end_at) + 2,
+            longReturns,
+          );
+        }),
+      };
+      const historicalTrades = Array.from({ length: 64 }, (_, index) => {
+        const executedAt = START - (64 - index) * cadence * 1_000 + 1;
+        return {
+          a: index + 1,
+          p: String(100 + index / 1_000),
+          q: "1",
+          T: executedAt,
+          m: false,
+        };
+      });
+      const analyze = vi.fn(async (input: {
+        bars: readonly BinanceKline[];
+      }) => {
+        if (fails) throw new Error("bounded cached Rust failure");
+        return rustTechnicalAnalysis(input.bars);
+      });
+      const runtime = new CryptoPaperRuntime({
+        rest: {
+          ...rest(),
+          aggregateTrades: vi.fn().mockResolvedValue(historicalTrades),
+        },
+        streams: new ScheduledStreams(clock, [
+          { at: START + 1, event: aggTrade(START + 1) },
+          ...boundaries.flatMap((offset, index) => [
+            ...riskPrelude(START + offset - 21),
+            {
+              at: START + offset,
+              event: aggTrade(START + offset, 101 + index),
+            },
+          ]),
+        ]),
+        laneClients: { fincast: client },
+        technicalAnalyzer: { analyze },
+        instrumentRules: rules,
+        clock,
+        contextBars: 64,
+      });
+
+      await runtime.run({
+        request: {
+          ...simulationRequest(["fincast"]),
+          durationMinutes,
+          fincastCandleSeconds: cadence,
+        },
+        snapshot: scannerSnapshot,
+        selected: candidate,
+        context: context().value,
+      });
+
+      expect(observed).toHaveLength(boundaries.length);
+      expect(analyze).toHaveBeenCalledTimes(1);
+      expect(new Set(observed.map((request) => (
+        request.series[0]!.input_end_at
+      ))).size).toBe(boundaries.length);
+    },
+  );
+
+  it("computes one exact-origin Rust snapshot and shares it across Kronos and FinCast lanes", async () => {
+    const clock = new ScheduledClock();
+    const kronosRequests: AiForecastRequest[] = [];
+    const fincastRequests: AiForecastRequest[] = [];
+    const analyze = vi.fn(async (input: {
+      bars: readonly BinanceKline[];
+    }) => rustTechnicalAnalysis(input.bars));
+    const streams = new ScheduledStreams(clock, [
+      ...riskPrelude(),
+      { at: START + 100, event: finalKline(START + 100, true) },
+      ...riskPrelude(START + 60_010),
+      { at: START + 60_200, event: aggTrade(START + 60_200) },
+    ]);
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams,
+      laneClients: {
+        kronos_base: laneClient(
+          "kronos_base",
+          START + 150,
+          longReturns,
+          kronosRequests,
+          withCompleteDistributionEvidence,
+        ),
+        fincast: laneClient(
+          "fincast",
+          START + 150,
+          longReturns,
+          fincastRequests,
+          withCompleteDistributionEvidence,
+        ),
+      },
+      technicalAnalyzer: { analyze },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: {
+        ...simulationRequest(["kronos_base", "fincast"]),
+        durationMinutes: 2,
+      },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(analyze).toHaveBeenCalledTimes(1);
+    expect(kronosRequests).toHaveLength(1);
+    expect(fincastRequests).toHaveLength(1);
+    expect(kronosRequests[0]!.series[0]!.target_stop).toEqual({
+      side: "long",
+      stop_price: 99,
+      target_price: 102,
+    });
+    expect(fincastRequests[0]).toEqual(kronosRequests[0]);
+    const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
+    const laneDecisions = decisions.filter((decision) => (
+      decision.lane === "kronos_base" || decision.lane === "fincast"
+    ));
+    expect(laneDecisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        lane: "kronos_base",
+        fusionPolicyVersion: "forecast-technical-fusion/v1",
+        technicalOriginAt: new Date(START).toISOString(),
+        technicalEngineVersion: "scalping-analysis/1.4.0",
+        indicatorEngineVersion: "technical-indicators/1.5.0",
+        technicalDirection: "long",
+        modelEvidenceScale: 0.5,
+        modelProbabilityMethod: "derived_quantile_cdf",
+        modelVolatilityMethod: "quantile_implied_sigma",
+        modelValidPathCount: 90,
+        modelInvalidPathCount: 10,
+        technicalScannerEvidence: expect.objectContaining({
+          schemaVersion: "rust-scanner-evidence/v1",
+          originAt: new Date(START).toISOString(),
+          components: {
+            availableMetricCount: 2,
+            tradingAmount: 5_000_000,
+            relativeVolume: 1.25,
+          },
+        }),
+        components: expect.objectContaining({
+          "scanner:available_metric_count": 2,
+          "scanner:confirmation_scale": 1,
+          "scanner:relative_volume": 1.25,
+          "scanner:trading_amount": 5_000_000,
+          modelUpProbability: 0.7,
+          modelDownProbability: 0.2,
+          modelFlatProbability: 0.1,
+          modelExpectedVolatility: 0.03,
+          modelUncertaintyIntervalWidth: 0.04,
+          modelValidPathRatio: 0.9,
+          targetStopAmbiguousProbability: 0.1,
+          targetStopNeitherProbability: 0.2,
+        }),
+      }),
+      expect.objectContaining({
+        lane: "fincast",
+        fusionPolicyVersion: "forecast-technical-fusion/v1",
+        technicalOriginAt: new Date(START).toISOString(),
+        technicalDirection: "long",
+        modelEvidenceScale: 0.5,
+        technicalScannerEvidence: expect.objectContaining({
+          schemaVersion: "rust-scanner-evidence/v1",
+          originAt: new Date(START).toISOString(),
+        }),
+        components: expect.objectContaining({
+          "scanner:confirmation_scale": 1,
+        }),
+      }),
+    ]));
+    const scannerEvidenceByLane = laneDecisions
+      .filter((decision) => decision.technicalScannerEvidence)
+      .map((decision) => JSON.stringify(decision.technicalScannerEvidence));
+    expect(new Set(scannerEvidenceByLane).size).toBe(1);
+    const inputDigests = laneDecisions
+      .filter((decision) => decision.requestDigest)
+      .map((decision) => decision.requestDigest);
+    expect(new Set(inputDigests).size).toBe(1);
+  });
+
+  it("fails new crypto entries closed when configured Rust technical analysis fails", async () => {
+    const clock = new ScheduledClock();
+    const observed: AiForecastRequest[] = [];
+    const analyze = vi.fn().mockRejectedValue(new Error("bounded test failure"));
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams: new ScheduledStreams(clock, [
+        ...riskPrelude(),
+        { at: START + 100, event: finalKline(START + 100, true) },
+        { at: START + 200, event: aggTrade(START + 200) },
+      ]),
+      laneClients: {
+        kronos_base: laneClient("kronos_base", START + 150, longReturns, observed),
+      },
+      technicalAnalyzer: { analyze },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+    });
+    const result = await runtime.run({
+      request: simulationRequest(),
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+    expect(analyze).toHaveBeenCalledTimes(1);
+    expect(observed[0]!.series[0]!.target_stop).toBeNull();
+    const trades = artifact(result, "simulation-trades");
+    const lane = (trades.lanes as UnknownRecord).kronos_base as UnknownRecord;
+    expect(((lane.ledger as UnknownRecord).fills as unknown[])).toEqual([]);
+    expect(artifact(result, "simulation-decisions").decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          lane: "kronos_base",
+          action: "none",
+          status: "blocked",
+          reason: "technical_quality_unavailable",
+        }),
+      ]),
+    );
   });
 
   it("drains risk streams during deferred inference and fills only after the completion watermark", async () => {

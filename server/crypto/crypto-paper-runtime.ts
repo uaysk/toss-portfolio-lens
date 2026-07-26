@@ -7,6 +7,7 @@ import {
   type SimulationStartRequest,
 } from "../simulation/contracts.js";
 import {
+  FINCAST_QUALIFICATION_QUANTILE_ROWS,
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
   QuantileRearrangementObservationsSchema,
@@ -61,9 +62,24 @@ import {
   type SimulationChartBar,
   type SimulationChartPatternBias,
 } from "../simulation/chart-data.js";
+import {
+  FORECAST_TECHNICAL_FUSION_VERSION,
+  fuseForecastWithTechnical,
+} from "../simulation/forecast-technical-fusion.js";
+import {
+  scoreRustIndicatorEvidence,
+  type RustIndicatorEvidence,
+} from "../simulation/technical-indicator-evidence.js";
+import type {
+  CryptoRustScannerEvidence,
+  CryptoRustTechnicalAnalysis,
+  CryptoRustTechnicalAnalyzer,
+} from "./crypto-rust-technical.js";
+import { CRYPTO_RUST_MAX_INPUT_BARS } from "./crypto-rust-technical.js";
 
 const MINUTE_MS = 60_000;
 const MAXIMUM_RESTORED_BARS = 1_024;
+export const CRYPTO_LOCAL_CHART_PROJECTION_BARS = 240;
 const DEFAULT_CONTEXT_BARS = 512;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_INFERENCE_DEADLINE_MS = 240_000;
@@ -101,6 +117,9 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "crypto_lane_sequential_deadline_exceeded",
   "crypto_runtime_expiry_deadline_exceeded",
   "model_call_failed",
+  "model_direction_probabilities_invalid",
+  "model_distribution_method_invalid",
+  "model_distribution_metric_invalid",
   "model_generated_at_invalid",
   "model_generated_before_origin",
   "model_identity_mismatch",
@@ -109,6 +128,7 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_lane_identity_mismatch",
   "model_memory_status_invalid",
   "model_mode_mismatch",
+  "model_path_count_invalid",
   "model_peak_vram_invalid",
   "model_price_quantiles_invalid",
   "model_price_targets_non_monotone",
@@ -129,6 +149,7 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_revision_invalid",
   "model_runtime_provenance_invalid",
   "model_series_unavailable",
+  "model_target_stop_invalid",
   "model_tokenizer_provenance_invalid",
   "model_unavailable",
   "terminal_settlement_unavailable",
@@ -199,6 +220,8 @@ export const CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS = Object.freeze({
   terminalSettlementFinalizationReserveMs: TERMINAL_SETTLEMENT_FINALIZATION_RESERVE_MS,
   terminalSettlementNoEventPolicy: "unsettled_fail_closed",
   maximumRestoredOneMinuteBars: MAXIMUM_RESTORED_BARS,
+  maximumRustTechnicalOneMinuteBars: CRYPTO_RUST_MAX_INPUT_BARS,
+  maximumLocalChartProjectionBars: CRYPTO_LOCAL_CHART_PROJECTION_BARS,
   note: "The coordinator task deadline must cover the requested shadow duration, bounded terminal settlement grace, and setup/finalization. A short generic RunService deadline will abort a valid run.",
 });
 
@@ -250,6 +273,7 @@ export type CryptoPaperRuntimeOptions = {
     & Partial<Pick<BinanceRestMarketData, "aggregateTrades">>;
   streams: CryptoPublicStreams;
   laneClients: Partial<Record<SimulationModelLane, CryptoAiLaneClient>>;
+  technicalAnalyzer?: Pick<CryptoRustTechnicalAnalyzer, "analyze">;
   instrumentRules:
     | BinanceInstrumentRules
     | ((
@@ -277,6 +301,18 @@ type RuntimeModelForecastPoint = {
   upProbability?: number;
 };
 
+type RuntimeTargetStopEvidence = {
+  status: "available" | "unavailable";
+  side?: FuturesSide;
+  targetFirstProbabilityLower?: number;
+  targetFirstProbabilityUpper?: number;
+  stopFirstProbabilityLower?: number;
+  stopFirstProbabilityUpper?: number;
+  ambiguousProbability?: number;
+  neitherProbability?: number;
+  reason?: string;
+};
+
 type NormalizedLaneForecast = {
   lane: SimulationModelLane;
   generatedAt: number;
@@ -284,6 +320,16 @@ type NormalizedLaneForecast = {
   inputEndAt: string;
   quantiles: ReturnQuantile[];
   displayPoints: RuntimeModelForecastPoint[];
+  upProbability?: number;
+  downProbability?: number;
+  flatProbability?: number;
+  probabilityMethod: "sample_paths" | "derived_quantile_cdf" | "unavailable";
+  expectedVolatility?: number;
+  volatilityMethod: "path_realized" | "quantile_implied_sigma" | "unavailable";
+  uncertaintyIntervalWidth?: number;
+  validPathCount: number;
+  invalidPathCount: number;
+  targetStop: RuntimeTargetStopEvidence;
   modelId: string;
   modelRevision: string;
   sourceRevision: string;
@@ -337,6 +383,20 @@ type RuntimeDecision = {
   technicalState?: string;
   chartPatternBias?: SimulationChartPatternBias;
   chartPatterns?: string[];
+  chartPatternStrength?: number;
+  fusionPolicyVersion?: typeof FORECAST_TECHNICAL_FUSION_VERSION;
+  technicalScore?: number;
+  technicalDirection?: FuturesSide | "flat";
+  exposureScale?: number;
+  modelEvidenceScale?: number;
+  modelProbabilityMethod?: NormalizedLaneForecast["probabilityMethod"];
+  modelVolatilityMethod?: NormalizedLaneForecast["volatilityMethod"];
+  modelValidPathCount?: number;
+  modelInvalidPathCount?: number;
+  technicalOriginAt?: string;
+  technicalEngineVersion?: string;
+  indicatorEngineVersion?: string;
+  technicalScannerEvidence?: CryptoRustScannerEvidence;
   components?: Record<string, number>;
   status: "pending" | "executed" | "held" | "blocked" | "unavailable" | "skipped";
   reason: string;
@@ -513,7 +573,22 @@ type RuntimeInferenceCompletion = {
   decisionSpreadBps: number;
   currentAtr: number;
   currentVolatility: number;
+  technicalBars: BinanceKline[];
+  rustTechnical?: CryptoRustTechnicalAnalysis;
+  rustTechnicalError?: string;
 };
+
+type RuntimeRustTechnicalCacheEntry =
+  | Readonly<{
+    originCloseTime: number;
+    status: "available";
+    analysis: CryptoRustTechnicalAnalysis;
+  }>
+  | Readonly<{
+    originCloseTime: number;
+    status: "failed";
+    error: "rust_technical_analysis_failed";
+  }>;
 
 type PortfolioDailyLossObservation = DailyLossGateState & {
   closeAllReduceOnly: boolean;
@@ -1827,6 +1902,76 @@ function normalizeDisplayForecastPoints(
   return points;
 }
 
+function normalizedProbability(value: unknown): number | undefined {
+  const parsed = finite(value);
+  return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+}
+
+function normalizedNonnegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    ? value
+    : undefined;
+}
+
+function normalizeTargetStopEvidence(
+  value: unknown,
+  requested: AiForecastRequest["series"][number]["target_stop"],
+): RuntimeTargetStopEvidence {
+  const source = record(value);
+  const status = exactEnum(source?.status, ["available", "unavailable"] as const);
+  if (!source || !status) throw new Error("model_target_stop_invalid");
+  const reason = text(source.reason);
+  const names = [
+    ["targetFirstProbabilityLower", "target_first_probability_lower"],
+    ["targetFirstProbabilityUpper", "target_first_probability_upper"],
+    ["stopFirstProbabilityLower", "stop_first_probability_lower"],
+    ["stopFirstProbabilityUpper", "stop_first_probability_upper"],
+    ["ambiguousProbability", "ambiguous_probability"],
+    ["neitherProbability", "neither_probability"],
+  ] as const;
+  const values = Object.fromEntries(names.map(([normalized, wire]) => [
+    normalized,
+    normalizedProbability(source[wire]),
+  ])) as Record<(typeof names)[number][0], number | undefined>;
+  if (status === "unavailable") {
+    if (!reason || names.some(([, wire]) => source[wire] !== null && source[wire] !== undefined)) {
+      throw new Error("model_target_stop_invalid");
+    }
+    return { status, reason };
+  }
+  if (!requested || reason
+    || Object.values(values).some((probability) => probability === undefined)) {
+    throw new Error("model_target_stop_invalid");
+  }
+  const targetLower = values.targetFirstProbabilityLower!;
+  const targetUpper = values.targetFirstProbabilityUpper!;
+  const stopLower = values.stopFirstProbabilityLower!;
+  const stopUpper = values.stopFirstProbabilityUpper!;
+  const ambiguous = values.ambiguousProbability!;
+  const neither = values.neitherProbability!;
+  if (
+    targetLower > targetUpper
+    || stopLower > stopUpper
+    || Math.abs(targetLower + stopLower + ambiguous + neither - 1) > 1e-9
+    || Math.abs(targetUpper - targetLower - ambiguous) > 1e-9
+    || Math.abs(stopUpper - stopLower - ambiguous) > 1e-9
+  ) {
+    throw new Error("model_target_stop_invalid");
+  }
+  return {
+    status,
+    side: requested.side,
+    targetFirstProbabilityLower: targetLower,
+    targetFirstProbabilityUpper: targetUpper,
+    stopFirstProbabilityLower: stopLower,
+    stopFirstProbabilityUpper: stopUpper,
+    ambiguousProbability: ambiguous,
+    neitherProbability: neither,
+  };
+}
+
 function normalizeLaneForecast(
   lane: SimulationModelLane,
   raw: unknown,
@@ -1898,6 +2043,98 @@ function normalizeLaneForecast(
       throw new Error("model_return_quantiles_non_monotone");
     }
   }
+  const optionalProbability = (key: string, camel: string): number | undefined => {
+    const rawValue = first(horizon, key, camel);
+    if (rawValue === undefined || rawValue === null) return undefined;
+    const parsed = normalizedProbability(rawValue);
+    if (parsed === undefined) throw new Error("model_direction_probabilities_invalid");
+    return parsed;
+  };
+  const upProbability = optionalProbability("up_probability", "upProbability");
+  const downProbability = optionalProbability("down_probability", "downProbability");
+  const flatProbability = optionalProbability("flat_probability", "flatProbability");
+  if (
+    upProbability !== undefined
+    && downProbability !== undefined
+    && flatProbability !== undefined
+    && Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-6
+  ) {
+    throw new Error("model_direction_probabilities_invalid");
+  }
+  const rawProbabilityMethod = first(horizon, "probability_method", "probabilityMethod");
+  const probabilityMethod = rawProbabilityMethod === undefined
+    ? "unavailable" as const
+    : exactEnum(
+        rawProbabilityMethod,
+        ["sample_paths", "derived_quantile_cdf", "unavailable"] as const,
+      );
+  const rawVolatilityMethod = first(horizon, "volatility_method", "volatilityMethod");
+  const volatilityMethod = rawVolatilityMethod === undefined
+    ? "unavailable" as const
+    : exactEnum(
+        rawVolatilityMethod,
+        ["path_realized", "quantile_implied_sigma", "unavailable"] as const,
+      );
+  if (!probabilityMethod || !volatilityMethod) {
+    throw new Error("model_distribution_method_invalid");
+  }
+  const auxiliaryProbabilitiesReported = downProbability !== undefined
+    || flatProbability !== undefined;
+  if (
+    rawProbabilityMethod !== undefined
+    && (
+      probabilityMethod === "unavailable"
+        ? upProbability !== undefined || auxiliaryProbabilitiesReported
+        : upProbability === undefined
+          || downProbability === undefined
+          || flatProbability === undefined
+          || Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-9
+    )
+  ) {
+    throw new Error("model_direction_probabilities_invalid");
+  }
+  if (
+    rawProbabilityMethod === undefined
+    && auxiliaryProbabilitiesReported
+    && (
+      upProbability === undefined
+      || downProbability === undefined
+      || flatProbability === undefined
+      || Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-9
+    )
+  ) {
+    throw new Error("model_direction_probabilities_invalid");
+  }
+  const optionalNonnegative = (key: string, camel: string): number | undefined => {
+    const rawValue = first(horizon, key, camel);
+    if (rawValue === undefined || rawValue === null) return undefined;
+    const parsed = finite(rawValue);
+    if (parsed === undefined || parsed < 0) throw new Error("model_distribution_metric_invalid");
+    return parsed;
+  };
+  const expectedVolatility = optionalNonnegative(
+    "expected_volatility",
+    "expectedVolatility",
+  );
+  const uncertaintyIntervalWidth = optionalNonnegative(
+    "uncertainty_interval_width",
+    "uncertaintyIntervalWidth",
+  );
+  const rawValidPathCount = first(horizon, "valid_path_count", "validPathCount");
+  const rawInvalidPathCount = first(horizon, "invalid_path_count", "invalidPathCount");
+  const validPathCount = rawValidPathCount === undefined
+    ? 0
+    : normalizedNonnegativeInteger(rawValidPathCount);
+  const invalidPathCount = rawInvalidPathCount === undefined
+    ? 0
+    : normalizedNonnegativeInteger(rawInvalidPathCount);
+  if (validPathCount === undefined || invalidPathCount === undefined) {
+    throw new Error("model_path_count_invalid");
+  }
+  const rawTargetStop = first(horizon, "target_stop", "targetStop");
+  const targetStop = rawTargetStop === undefined
+    ? { status: "unavailable" as const, reason: "not_reported" }
+    : normalizeTargetStopEvidence(rawTargetStop, expectedSeries.target_stop);
 
   const modelRuns = Array.isArray(first(response, "model_runs", "modelRuns"))
     ? first(response, "model_runs", "modelRuns") as unknown[]
@@ -2094,14 +2331,14 @@ function normalizeLaneForecast(
       .some((reason) => reason.startsWith("mixed_"));
     const validFp32Observations = fp32QuantileObservations !== undefined
       && fp32QuantileObservations !== null
-      && fp32QuantileObservations.rowCount === 128 * 60
+      && fp32QuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
       && fp32QuantileObservations.nonFiniteValueCount === 0
       && fp32QuantileObservations.postprocessedMonotonic;
     const validMixedObservations = mixedRuntimeFailed
       ? mixedQuantileObservations === null
       : mixedQuantileObservations !== undefined
         && mixedQuantileObservations !== null
-        && mixedQuantileObservations.rowCount === 128 * 60
+        && mixedQuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
         && precisionFailureReasons.includes("non_finite_output")
           === (mixedQuantileObservations.nonFiniteValueCount > 0)
         && precisionFailureReasons.includes("quantile_postprocessing_failed")
@@ -2135,6 +2372,16 @@ function normalizeLaneForecast(
     inputEndAt,
     quantiles,
     displayPoints,
+    ...(upProbability === undefined ? {} : { upProbability }),
+    ...(downProbability === undefined ? {} : { downProbability }),
+    ...(flatProbability === undefined ? {} : { flatProbability }),
+    probabilityMethod,
+    ...(expectedVolatility === undefined ? {} : { expectedVolatility }),
+    volatilityMethod,
+    ...(uncertaintyIntervalWidth === undefined ? {} : { uncertaintyIntervalWidth }),
+    validPathCount,
+    invalidPathCount,
+    targetStop,
     modelId,
     modelRevision,
     sourceRevision,
@@ -2255,7 +2502,7 @@ function rollingRsi(values: readonly number[], index: number, period = 14): numb
   return 100 - 100 / (1 + relativeStrength);
 }
 
-type CryptoChartProjection = {
+export type CryptoChartProjection = {
   bars: SimulationChartBar[];
   indicators: Array<{
     id: string;
@@ -2266,7 +2513,13 @@ type CryptoChartProjection = {
   patterns: ReturnType<typeof detectSimulationChartPatterns>;
 };
 
-function cryptoChartProjection(bars: readonly BinanceKline[]): CryptoChartProjection {
+export function cryptoChartProjection(
+  sourceBars: readonly BinanceKline[],
+): CryptoChartProjection {
+  // Pattern detection contains rolling window work. Keep its causal input
+  // independent from the much longer Rust scanner history so seven days of
+  // one-minute bars cannot turn a decision into quadratic local work.
+  const bars = sourceBars.slice(-CRYPTO_LOCAL_CHART_PROJECTION_BARS);
   const closes = bars.map((bar) => bar.close);
   const ema9 = exponentialMovingAverage(closes, 9);
   const ema21 = exponentialMovingAverage(closes, 21);
@@ -2336,14 +2589,29 @@ function cryptoChartProjection(bars: readonly BinanceKline[]): CryptoChartProjec
 function cryptoTechnicalObservation(
   bars: readonly BinanceKline[],
   preset: SimulationStartRequest["preset"],
+  rust?: CryptoRustTechnicalAnalysis,
+  rustError?: string,
 ): {
   state: string;
   direction: FuturesSide | "flat";
+  directionalSignal: -1 | 0 | 1;
   chartPatternBias: SimulationChartPatternBias;
   chartPatterns: string[];
+  chartPatternStrength: number;
+  indicators: RustIndicatorEvidence;
+  originAt?: string;
+  calculationAt?: string;
+  eligibleAfter?: string;
+  quality: "good" | "partial" | "stale" | "unavailable";
+  confidence?: number;
+  multiTimeframeAgreement?: string;
+  scalpingEngineVersion?: string;
+  indicatorEngineVersion?: string;
+  scannerEvidence?: CryptoRustScannerEvidence;
   components: Record<string, number>;
 } {
-  const chart = cryptoChartProjection(bars);
+  const localBars = bars.slice(-CRYPTO_LOCAL_CHART_PROJECTION_BARS);
+  const chart = cryptoChartProjection(localBars);
   const latest = chart.bars.at(-1);
   const values = latest?.indicatorValues ?? {};
   const emaFast = values["trend-ema-fast:value"];
@@ -2357,7 +2625,7 @@ function cryptoTechnicalObservation(
   if (preset === "trend" && emaFast !== undefined && emaSlow !== undefined) {
     direction = emaFast > emaSlow ? "long" : emaFast < emaSlow ? "short" : "flat";
   } else if (preset === "breakout" && latest) {
-    const previousWindow = bars.slice(-21, -1);
+    const previousWindow = localBars.slice(-21, -1);
     const previousHigh = previousWindow.length
       ? Math.max(...previousWindow.map((bar) => bar.high))
       : upper;
@@ -2394,15 +2662,84 @@ function cryptoTechnicalObservation(
   const bearish = latestPatterns
     .filter((pattern) => pattern.bias === "bearish")
     .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
+  const localIndicators = scoreRustIndicatorEvidence({
+    indicators: chart.indicators.map((indicator) => ({
+      id: indicator.id,
+      kind: indicator.kind,
+      latestValues: indicator.values,
+    })),
+    preset,
+    currentPrice: latest?.close ?? 0,
+    ...(latest?.volume === undefined ? {} : { currentVolume: latest.volume }),
+  });
+  const rustIndicators = rust
+    ? scoreRustIndicatorEvidence({
+        indicators: rust.calculations,
+        preset,
+        currentPrice: latest?.close ?? rust.basisPrice,
+        ...(latest?.volume === undefined ? {} : { currentVolume: latest.volume }),
+        scannerEvidence: rust.scannerEvidence,
+      })
+    : undefined;
+  const directionalScore = rustIndicators?.directionalScore;
+  const directionalSignal = rust?.technicalSignal ?? (
+    direction === "long" ? 1 : direction === "short" ? -1 : 0
+  );
+  if (directionalScore !== undefined || rust) {
+    const combinedScore = (directionalScore ?? 0) * 0.75 + directionalSignal * 0.25;
+    direction = combinedScore >= 0.15
+      ? "long"
+      : combinedScore <= -0.15 ? "short" : "flat";
+  }
+  const rustQualityStatus = rust?.quality.status.toLowerCase();
+  const quality = rustError
+    ? "unavailable" as const
+    : !rust
+      ? "good" as const
+      : rustQualityStatus?.includes("stale")
+        ? "stale" as const
+        : rustQualityStatus && ["unavailable", "invalid", "failed", "error"].some(
+            (token) => rustQualityStatus.includes(token),
+          )
+          ? "unavailable" as const
+          : rust.quality.sameSessionGapCount > 0
+            || rust.quality.missingVolumeCount > 0
+            || rust.quality.missingAmountCount > 0
+            || rustQualityStatus?.includes("partial")
+            ? "partial" as const
+            : "good" as const;
   return {
-    state: `${preset}:${direction}`,
+    state: rust ? `${preset}:${direction}:${rust.status}` : `${preset}:${direction}`,
     direction,
+    directionalSignal,
     chartPatternBias: bullish === bearish ? "neutral" : bullish > bearish ? "bullish" : "bearish",
     chartPatterns: latestPatterns.map((pattern) => pattern.name),
+    chartPatternStrength: Math.max(bullish, bearish),
+    indicators: rustIndicators ?? localIndicators,
+    ...(rust?.originAt ?? latestAt ? { originAt: rust?.originAt ?? latestAt } : {}),
+    ...(rust?.calculationAt ?? latestAt
+      ? { calculationAt: rust?.calculationAt ?? latestAt } : {}),
+    ...(rust?.earliestEligibleAt ? { eligibleAfter: rust.earliestEligibleAt } : {}),
+    quality,
+    ...(rust ? {
+      confidence: rust.confidence,
+      multiTimeframeAgreement: rust.multiTimeframeAgreement,
+      scalpingEngineVersion: rust.scalpingEngineVersion,
+      indicatorEngineVersion: rust.indicatorEngineVersion,
+      scannerEvidence: rust.scannerEvidence,
+    } : {}),
     components: {
       ...(emaFast !== undefined ? { emaFast } : {}),
       ...(emaSlow !== undefined ? { emaSlow } : {}),
       ...(rsi !== undefined ? { rsi } : {}),
+      ...(rustIndicators ? {
+        rustDirectionalScore: rustIndicators.directionalScore,
+        rustRiskScale: rustIndicators.riskScale,
+        rustIndicatorCount: rustIndicators.availableIndicatorCount,
+        ...Object.fromEntries(Object.entries(rustIndicators.components).filter(
+          ([key]) => key.startsWith("scanner:"),
+        )),
+      } : {}),
     },
   };
 }
@@ -2434,6 +2771,7 @@ function aiRequest(
   runId: string,
   symbol: string,
   bars: readonly BinanceKline[],
+  targetStop: AiForecastRequest["series"][number]["target_stop"] = null,
 ): AiForecastRequest {
   const safeRunId = runId.replaceAll(/[^A-Za-z0-9._:-]/g, "-").slice(0, 48) || "run";
   const final = bars.at(-1);
@@ -2461,9 +2799,29 @@ function aiRequest(
         amount: bar.quoteVolume,
         complete: true as const,
       })),
-      target_stop: null,
+      target_stop: targetStop,
     }],
   };
+}
+
+function cryptoTargetStop(
+  analysis: CryptoRustTechnicalAnalysis | undefined,
+): AiForecastRequest["series"][number]["target_stop"] {
+  if (!analysis || analysis.status !== "entry_candidate"
+    || analysis.stopCandidatePrice === null || analysis.targetCandidatePrice === null) {
+    return null;
+  }
+  if (analysis.stopCandidatePrice < analysis.basisPrice
+    && analysis.basisPrice < analysis.targetCandidatePrice) {
+    return {
+      side: "long",
+      target_price: analysis.targetCandidatePrice,
+      stop_price: analysis.stopCandidatePrice,
+    };
+  }
+  // The current Rust assistance contract is long-position-oriented. A short
+  // first-passage target must not be fabricated from its exit label.
+  return null;
 }
 
 function costRate(
@@ -2476,6 +2834,123 @@ function costRate(
     + Math.max(request.costs.spreadBpsRoundTrip, observedSpreadBps)
     + request.costs.slippageBpsPerSide * 2
   ) / 10_000;
+}
+
+function cryptoModelEvidence(input: {
+  forecast: NormalizedLaneForecast;
+  direction: FuturesSide | "flat";
+  roundTripCostRate: number;
+  realizedVolatilityRate: number;
+}): {
+  admitted: boolean;
+  exposureScale: number;
+  reasonCodes: string[];
+  components: Record<string, number>;
+} {
+  const clampUnit = (value: number, minimum = 0, maximum = 1) => (
+    Math.max(minimum, Math.min(maximum, value))
+  );
+  const rounded = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
+  const scales = [1];
+  const reasonCodes: string[] = [];
+  const components: Record<string, number> = {};
+  let admitted = true;
+  const { forecast } = input;
+
+  if (
+    input.direction !== "flat"
+    && forecast.upProbability !== undefined
+    && forecast.downProbability !== undefined
+  ) {
+    const directionalEdge = input.direction === "long"
+      ? forecast.upProbability - forecast.downProbability
+      : forecast.downProbability - forecast.upProbability;
+    components.modelDirectionalProbabilityEdge = rounded(directionalEdge);
+    scales.push(clampUnit(0.5 + Math.max(0, directionalEdge) / 2, 0.5, 1));
+    if (directionalEdge <= 0) {
+      admitted = false;
+      reasonCodes.push("model_direction_probability_conflict");
+    }
+  }
+  if (forecast.upProbability !== undefined) {
+    components.modelUpProbability = rounded(forecast.upProbability);
+  }
+  if (forecast.downProbability !== undefined) {
+    components.modelDownProbability = rounded(forecast.downProbability);
+  }
+  if (forecast.flatProbability !== undefined) {
+    components.modelFlatProbability = rounded(forecast.flatProbability);
+    scales.push(clampUnit(1 - forecast.flatProbability * 0.5, 0.5, 1));
+  }
+  if (forecast.expectedVolatility !== undefined) {
+    components.modelExpectedVolatility = rounded(forecast.expectedVolatility);
+    const reference = Math.max(
+      input.realizedVolatilityRate,
+      input.roundTripCostRate,
+      0.001,
+    );
+    scales.push(clampUnit(
+      reference / Math.max(reference, forecast.expectedVolatility),
+      0.5,
+      1,
+    ));
+  }
+  if (forecast.uncertaintyIntervalWidth !== undefined) {
+    components.modelUncertaintyIntervalWidth = rounded(
+      forecast.uncertaintyIntervalWidth,
+    );
+    const reference = Math.max(input.roundTripCostRate * 2, 0.005);
+    scales.push(clampUnit(
+      reference / Math.max(reference, forecast.uncertaintyIntervalWidth),
+      0.5,
+      1,
+    ));
+  }
+  const totalPathCount = forecast.validPathCount + forecast.invalidPathCount;
+  components.modelValidPathCount = forecast.validPathCount;
+  components.modelInvalidPathCount = forecast.invalidPathCount;
+  if (totalPathCount > 0) {
+    const reliability = forecast.validPathCount / totalPathCount;
+    components.modelValidPathRatio = rounded(reliability);
+    scales.push(clampUnit(reliability, 0.5, 1));
+    if (forecast.validPathCount === 0) {
+      admitted = false;
+      reasonCodes.push("model_has_no_valid_paths");
+    }
+  }
+
+  const targetStop = forecast.targetStop;
+  if (
+    input.direction !== "flat"
+    && targetStop.status === "available"
+    && targetStop.side === input.direction
+  ) {
+    const targetLower = targetStop.targetFirstProbabilityLower!;
+    const targetUpper = targetStop.targetFirstProbabilityUpper!;
+    const stopLower = targetStop.stopFirstProbabilityLower!;
+    const stopUpper = targetStop.stopFirstProbabilityUpper!;
+    const ambiguous = targetStop.ambiguousProbability!;
+    const neither = targetStop.neitherProbability!;
+    components.targetFirstProbabilityLower = rounded(targetLower);
+    components.targetFirstProbabilityUpper = rounded(targetUpper);
+    components.stopFirstProbabilityLower = rounded(stopLower);
+    components.stopFirstProbabilityUpper = rounded(stopUpper);
+    components.targetStopAmbiguousProbability = rounded(ambiguous);
+    components.targetStopNeitherProbability = rounded(neither);
+    scales.push(clampUnit(0.5 + (targetLower - stopUpper) / 2, 0.35, 1));
+    scales.push(clampUnit(1 - (ambiguous + neither) * 0.5, 0.5, 1));
+    if (targetUpper < stopLower) {
+      admitted = false;
+      reasonCodes.push("model_target_before_stop_definitively_unfavorable");
+    }
+  }
+
+  return {
+    admitted,
+    exposureScale: rounded(Math.min(...scales)),
+    reasonCodes,
+    components,
+  };
 }
 
 function laneTradingMetricInputs(state: LaneState) {
@@ -2948,6 +3423,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const queue = new AsyncMarketEventQueue();
     const ingressStore = new CausalBinanceKlineStore();
     const decisionStore = new CausalBinanceKlineStore();
+    // A single run has one symbol and preset. Replacing this entry whenever
+    // the latest finalized one-minute origin changes is therefore a bounded
+    // causal cache and prevents 15s/30s FinCast decisions from re-running Rust
+    // four or two times for the same minute.
+    let rustTechnicalCache: RuntimeRustTechnicalCacheEntry | undefined;
     let fincastMicroBars: BinanceKline[] = [];
     let fincastMicroAggregator: FinCastMicroCandleAggregator | undefined;
     const bufferedSetupAggregateTrades: BinanceAggregateTrade[] = [];
@@ -4471,8 +4951,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         throw new Error("inference_origin_already_processed");
       }
       lastInferredOpenTime = bar.openTime;
-      const canonicalRequest = aiRequest(context.runId, symbol, bars);
-      const requestDigest = digest(canonicalRequest);
       const decisionSpreadBps = currentSpreadBps;
       const currentAtr = Math.max(
         atr14(bars),
@@ -4505,6 +4983,57 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       triggeredEvents += 1;
       lastTriggeredAt = iso(bar.closeTime);
       try {
+        const technicalBars = decisionStore.list(symbol)
+          .filter((candidate) => candidate.final && candidate.closeTime <= bar.closeTime)
+          .slice(-CRYPTO_RUST_MAX_INPUT_BARS);
+        let rustTechnical: CryptoRustTechnicalAnalysis | undefined;
+        let rustTechnicalError: string | undefined;
+        if (this.options.technicalAnalyzer) {
+          const technicalOriginCloseTime = technicalBars.at(-1)?.closeTime;
+          const cached = technicalOriginCloseTime === undefined
+            ? undefined
+            : rustTechnicalCache?.originCloseTime === technicalOriginCloseTime
+              ? rustTechnicalCache
+              : undefined;
+          if (cached?.status === "available") {
+            rustTechnical = cached.analysis;
+          } else if (cached?.status === "failed") {
+            rustTechnicalError = cached.error;
+          } else if (technicalOriginCloseTime !== undefined) {
+            try {
+              rustTechnical = await raceWithAbort(
+                this.options.technicalAnalyzer.analyze({
+                  symbol,
+                  bars: technicalBars,
+                  preset: request.preset,
+                  signal: inferenceController.signal,
+                }),
+                inferenceController.signal,
+              );
+              rustTechnicalCache = {
+                originCloseTime: technicalOriginCloseTime,
+                status: "available",
+                analysis: rustTechnical,
+              };
+            } catch {
+              rustTechnicalError = "rust_technical_analysis_failed";
+              rustTechnicalCache = {
+                originCloseTime: technicalOriginCloseTime,
+                status: "failed",
+                error: "rust_technical_analysis_failed",
+              };
+            }
+          } else {
+            rustTechnicalError = "rust_technical_analysis_failed";
+          }
+        }
+        const canonicalRequest = aiRequest(
+          context.runId,
+          symbol,
+          bars,
+          cryptoTargetStop(rustTechnical),
+        );
+        const requestDigest = digest(canonicalRequest);
         for (const lane of selectedLanes) {
           const state = states.get(lane)!;
           const attemptAt = this.clock.now();
@@ -4581,6 +5110,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisionSpreadBps,
           currentAtr,
           currentVolatility,
+          technicalBars,
+          ...(rustTechnical ? { rustTechnical } : {}),
+          ...(rustTechnicalError ? { rustTechnicalError } : {}),
         };
       } finally {
         clearTimeout(deadlineTimer);
@@ -4604,6 +5136,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         decisionSpreadBps,
         currentAtr,
         currentVolatility,
+        technicalBars,
+        rustTechnical,
+        rustTechnicalError,
       } = completion;
       const commonDecisionAt = Math.max(
         bar.closeTime,
@@ -4713,7 +5248,12 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
 
       const observedCostRate = costRate(request, decisionSpreadBps);
-      const technical = cryptoTechnicalObservation(completion.bars, request.preset);
+      const technical = cryptoTechnicalObservation(
+        technicalBars,
+        request.preset,
+        rustTechnical,
+        rustTechnicalError,
+      );
       for (const lane of selectedLanes) {
         const state = states.get(lane)!;
         const outcome = outcomes.get(lane);
@@ -4739,6 +5279,40 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           spreadBps: decisionSpreadBps,
           mode: "paper",
         });
+        const fusion = fuseForecastWithTechnical({
+          lane,
+          modelDirection: signal.direction,
+          modelConfidence: signal.confidence,
+          modelOriginAt: iso(bar.closeTime),
+          modelGeneratedAt: outcome.forecast.generatedAtIso,
+          ...(this.options.technicalAnalyzer ? {
+            technical: {
+              originAt: technical.originAt,
+              calculationAt: technical.calculationAt,
+              ...(technical.eligibleAfter
+                ? { eligibleAfter: technical.eligibleAfter } : {}),
+              quality: technical.quality,
+              directionalSignal: technical.directionalSignal,
+              confidence: technical.confidence,
+              multiTimeframeAgreement: technical.multiTimeframeAgreement,
+              indicators: technical.indicators,
+              patternBias: technical.chartPatternBias,
+              patternStrength: technical.chartPatternStrength,
+            },
+          } : {}),
+          maximumTechnicalAgeMs: subminuteFinCast ? 90_000 : 2 * MINUTE_MS,
+          technicalBoundaryToleranceMs: 1,
+        });
+        const modelEvidence = cryptoModelEvidence({
+          forecast: outcome.forecast,
+          direction: signal.direction,
+          roundTripCostRate: observedCostRate,
+          realizedVolatilityRate: currentVolatility,
+        });
+        const entryDecisionAt = Math.max(
+          commonDecisionAt,
+          Date.parse(fusion.eligibleAfter),
+        );
         const baseDecision: RuntimeDecision = {
           id: decisionId(lane, commonDecisionAt),
           lane,
@@ -4756,10 +5330,29 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           technicalState: technical.state,
           chartPatternBias: technical.chartPatternBias,
           chartPatterns: [...technical.chartPatterns],
+          chartPatternStrength: technical.chartPatternStrength,
+          fusionPolicyVersion: FORECAST_TECHNICAL_FUSION_VERSION,
+          technicalScore: fusion.technicalScore,
+          technicalDirection: fusion.technicalDirection,
+          exposureScale: fusion.exposureScale,
+          modelEvidenceScale: modelEvidence.exposureScale,
+          modelProbabilityMethod: outcome.forecast.probabilityMethod,
+          modelVolatilityMethod: outcome.forecast.volatilityMethod,
+          modelValidPathCount: outcome.forecast.validPathCount,
+          modelInvalidPathCount: outcome.forecast.invalidPathCount,
+          ...(technical.originAt ? { technicalOriginAt: technical.originAt } : {}),
+          ...(technical.scalpingEngineVersion
+            ? { technicalEngineVersion: technical.scalpingEngineVersion } : {}),
+          ...(technical.indicatorEngineVersion
+            ? { indicatorEngineVersion: technical.indicatorEngineVersion } : {}),
+          ...(technical.scannerEvidence
+            ? { technicalScannerEvidence: technical.scannerEvidence } : {}),
           components: {
             confidence: signal.confidence,
             minimumConfidence: policyProfile.minimumConfidence,
             ...technical.components,
+            ...fusion.components,
+            ...modelEvidence.components,
           },
           status: "held",
           reason: "flat_signal",
@@ -4828,6 +5421,18 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisions.push(baseDecision);
           continue;
         }
+        if (!fusion.admitted) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = fusion.reasonCodes[0] ?? "technical_fusion_blocked";
+          decisions.push(baseDecision);
+          continue;
+        }
+        if (!modelEvidence.admitted) {
+          baseDecision.status = "blocked";
+          baseDecision.reason = modelEvidence.reasonCodes[0] ?? "model_evidence_blocked";
+          decisions.push(baseDecision);
+          continue;
+        }
         if (policyProfile.technicalConfirmationRequired
           && technical.direction !== signal.direction) {
           baseDecision.status = "blocked";
@@ -4860,10 +5465,16 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           rules,
         });
         const policyQuantity = floorToStep(
-          sizing.quantity * policyProfile.targetAllocationRate,
+          sizing.quantity
+            * policyProfile.targetAllocationRate
+            * fusion.exposureScale
+            * modelEvidence.exposureScale,
           rules.stepSize,
         );
         baseDecision.action = signal.direction === "long" ? "open_long" : "open_short";
+        baseDecision.id = decisionId(lane, entryDecisionAt);
+        baseDecision.decisionAt = iso(entryDecisionAt);
+        baseDecision.fillEligibleAfter = iso(entryDecisionAt);
         baseDecision.leverage = sizing.leverage;
         baseDecision.quantity = policyQuantity;
         baseDecision.notional = policyQuantity * bar.close;
@@ -4882,7 +5493,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         state.pending = {
           action: "open",
           decision: baseDecision,
-          decisionAt: commonDecisionAt,
+          decisionAt: entryDecisionAt,
           eligibleAfterIngressSequence: decisionIngressWatermark,
           side: signal.direction,
           quantity: policyQuantity,
@@ -5292,6 +5903,35 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         : restoredRaw;
       ingressStore.applyRest(symbol, boundedRestored, this.clock.now());
       decisionStore.applyRest(symbol, boundedRestored, this.clock.now());
+      if (this.options.technicalAnalyzer) {
+        // The neural context remains bounded at 512. Rust scanner metrics need
+        // five prior complete UTC sessions, so backfill a separate causal
+        // technical window in bounded Binance pages.
+        const maximumPages = Math.ceil(CRYPTO_RUST_MAX_INPUT_BARS / MAXIMUM_RESTORED_BARS);
+        for (let page = 1; page < maximumPages; page += 1) {
+          await cancellationCheckpoint();
+          const before = decisionStore.list(symbol);
+          if (before.length >= CRYPTO_RUST_MAX_INPUT_BARS) break;
+          const earliestOpenTime = before[0]?.openTime;
+          if (earliestOpenTime === undefined || earliestOpenTime <= 0) break;
+          const earlierRaw = await this.options.rest.klines({
+            symbol,
+            endTime: earliestOpenTime - 1,
+            limit: MAXIMUM_RESTORED_BARS,
+          });
+          const boundedEarlier = Array.isArray(earlierRaw)
+            ? earlierRaw.slice(-MAXIMUM_RESTORED_BARS)
+            : earlierRaw;
+          decisionStore.applyRest(symbol, boundedEarlier, this.clock.now());
+          const nextEarliestOpenTime = decisionStore.list(symbol)[0]?.openTime;
+          if (
+            nextEarliestOpenTime === undefined
+            || nextEarliestOpenTime >= earliestOpenTime
+          ) {
+            break;
+          }
+        }
+      }
       const restored = decisionStore.list(symbol);
       if (!hasContinuousFinalContext(restored, this.contextBars)) {
         throw new CryptoPaperRuntimeError(

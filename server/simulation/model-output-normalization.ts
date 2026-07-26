@@ -1,4 +1,4 @@
-export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v2" as const;
+export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v3" as const;
 
 export type PairModelComponent = "kronos";
 export type PairModelStatus = "available" | "degraded" | "unavailable";
@@ -57,6 +57,18 @@ export type NormalizedPairModelOutput = {
   flatProbability?: number;
   uncertaintyWidth?: number;
   expectedVolatility?: number;
+  validPathCount?: number;
+  invalidPathCount?: number;
+  targetStop?: {
+    status: "available" | "unavailable";
+    targetFirstProbabilityLower?: number;
+    targetFirstProbabilityUpper?: number;
+    stopFirstProbabilityLower?: number;
+    stopFirstProbabilityUpper?: number;
+    ambiguousProbability?: number;
+    neitherProbability?: number;
+    reason?: string;
+  };
   calibration: NormalizedPairCalibration;
   inputQuality: {
     status: PairInputQualityStatus;
@@ -362,6 +374,93 @@ function normalizedProbability(value: unknown): number | undefined {
   return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed : undefined;
 }
 
+function normalizedNonnegativeInteger(value: unknown): number | undefined {
+  const parsed = finite(value);
+  return parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : undefined;
+}
+
+function normalizedTargetStop(value: unknown): NormalizedPairModelOutput["targetStop"] | undefined {
+  const source = record(value);
+  if (!source || source.status !== "available" && source.status !== "unavailable") {
+    return undefined;
+  }
+  const reason = text(first(source, "reason"), 500);
+  const targetFirstProbabilityLower = normalizedProbability(
+    first(source, "target_first_probability_lower", "targetFirstProbabilityLower"),
+  );
+  const targetFirstProbabilityUpper = normalizedProbability(
+    first(source, "target_first_probability_upper", "targetFirstProbabilityUpper"),
+  );
+  const stopFirstProbabilityLower = normalizedProbability(
+    first(source, "stop_first_probability_lower", "stopFirstProbabilityLower"),
+  );
+  const stopFirstProbabilityUpper = normalizedProbability(
+    first(source, "stop_first_probability_upper", "stopFirstProbabilityUpper"),
+  );
+  const ambiguousProbability = normalizedProbability(
+    first(source, "ambiguous_probability", "ambiguousProbability"),
+  );
+  const neitherProbability = normalizedProbability(
+    first(source, "neither_probability", "neitherProbability"),
+  );
+  const values = [
+    targetFirstProbabilityLower,
+    targetFirstProbabilityUpper,
+    stopFirstProbabilityLower,
+    stopFirstProbabilityUpper,
+    ambiguousProbability,
+    neitherProbability,
+  ];
+  if (source.status === "unavailable") {
+    const wireKeys = [
+      "target_first_probability_lower",
+      "targetFirstProbabilityLower",
+      "target_first_probability_upper",
+      "targetFirstProbabilityUpper",
+      "stop_first_probability_lower",
+      "stopFirstProbabilityLower",
+      "stop_first_probability_upper",
+      "stopFirstProbabilityUpper",
+      "ambiguous_probability",
+      "ambiguousProbability",
+      "neither_probability",
+      "neitherProbability",
+    ];
+    if (!reason || wireKeys.some((key) => source[key] !== undefined && source[key] !== null)) {
+      return undefined;
+    }
+    return { status: "unavailable", reason };
+  }
+  if (reason || values.some((item) => item === undefined)) return undefined;
+  const targetLower = targetFirstProbabilityLower!;
+  const targetUpper = targetFirstProbabilityUpper!;
+  const stopLower = stopFirstProbabilityLower!;
+  const stopUpper = stopFirstProbabilityUpper!;
+  const ambiguous = ambiguousProbability!;
+  const neither = neitherProbability!;
+  const tolerance = 1e-9;
+  if (
+    targetLower > targetUpper
+    || stopLower > stopUpper
+    || Math.abs(targetLower + stopLower + ambiguous + neither - 1) > tolerance
+    || Math.abs(targetUpper - targetLower - ambiguous) > tolerance
+    || Math.abs(stopUpper - stopLower - ambiguous) > tolerance
+  ) {
+    return undefined;
+  }
+  return {
+    status: "available",
+    targetFirstProbabilityLower: targetLower,
+    targetFirstProbabilityUpper: targetUpper,
+    stopFirstProbabilityLower: stopLower,
+    stopFirstProbabilityUpper: stopUpper,
+    ambiguousProbability: ambiguous,
+    neitherProbability: neither,
+  };
+}
+
 function normalizeRun(
   run: ExtractedRun,
   component: PairModelComponent,
@@ -407,19 +506,44 @@ function normalizeRun(
   const upProbability = horizon
     ? normalizedProbability(first(horizon, "up_probability", "upProbability"))
     : undefined;
-  const flatProbability = horizon
-    ? normalizedProbability(first(horizon, "flat_probability", "flatProbability"))
+  const rawFlatProbability = horizon
+    ? first(horizon, "flat_probability", "flatProbability")
     : undefined;
-  const explicitDownProbability = horizon
-    ? normalizedProbability(first(horizon, "down_probability", "downProbability"))
+  const rawDownProbability = horizon
+    ? first(horizon, "down_probability", "downProbability")
     : undefined;
+  const flatProbability = normalizedProbability(rawFlatProbability);
+  const explicitDownProbability = normalizedProbability(rawDownProbability);
+  const auxiliaryProbabilitiesReported = (
+    rawDownProbability !== undefined && rawDownProbability !== null
+  ) || (
+    rawFlatProbability !== undefined && rawFlatProbability !== null
+  );
+  const directionProbabilitiesInvalid = auxiliaryProbabilitiesReported && (
+    explicitDownProbability === undefined
+    || flatProbability === undefined
+    || upProbability === undefined
+    || Math.abs(upProbability + explicitDownProbability + flatProbability - 1) > 1e-9
+  );
   const downProbability = explicitDownProbability ?? (
-    upProbability !== undefined
+    upProbability !== undefined && !auxiliaryProbabilitiesReported
       ? Math.max(0, Math.min(1, 1 - upProbability - (flatProbability ?? 0)))
       : undefined
   );
   const expectedVolatility = horizon
     ? finite(first(horizon, "expected_volatility", "expectedVolatility"))
+    : undefined;
+  const validPathCount = horizon
+    ? normalizedNonnegativeInteger(first(horizon, "valid_path_count", "validPathCount"))
+    : undefined;
+  const invalidPathCount = horizon
+    ? normalizedNonnegativeInteger(first(horizon, "invalid_path_count", "invalidPathCount"))
+    : undefined;
+  const rawTargetStop = horizon
+    ? first(horizon, "target_stop", "targetStop")
+    : undefined;
+  const targetStop = horizon
+    ? normalizedTargetStop(rawTargetStop)
     : undefined;
   const inputQuality = parseInputQuality(series);
   const calibration = horizon ? parseCalibration(run, series, horizon) : { status: "unavailable" as const };
@@ -430,8 +554,12 @@ function normalizeRun(
   if (!horizon) reasonCodes.push("forecast_horizon_missing");
   if (!targetTimestamp) reasonCodes.push("target_timestamp_invalid");
   if (!quantiles) reasonCodes.push("return_quantiles_invalid");
-  if (upProbability === undefined || downProbability === undefined) {
+  if (upProbability === undefined || downProbability === undefined
+    || directionProbabilitiesInvalid) {
     reasonCodes.push("direction_probability_invalid");
+  }
+  if (rawTargetStop !== undefined && rawTargetStop !== null && !targetStop) {
+    reasonCodes.push("target_stop_invalid");
   }
   if (!provenance.loaded) reasonCodes.push("model_not_loaded");
   const modelId = provenance.modelId?.toLowerCase();
@@ -518,6 +646,7 @@ function normalizeRun(
     "target_timestamp_invalid",
     "return_quantiles_invalid",
     "direction_probability_invalid",
+    "target_stop_invalid",
     "model_not_loaded",
     "unexpected_model_id",
     "model_run_provenance_inconsistent",
@@ -560,6 +689,9 @@ function normalizeRun(
     ...(flatProbability !== undefined ? { flatProbability } : {}),
     ...(expectedVolatility !== undefined && expectedVolatility >= 0
       ? { expectedVolatility } : {}),
+    ...(validPathCount === undefined ? {} : { validPathCount }),
+    ...(invalidPathCount === undefined ? {} : { invalidPathCount }),
+    ...(targetStop ? { targetStop } : {}),
     calibration,
     inputQuality,
     provenance,

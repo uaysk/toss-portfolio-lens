@@ -120,8 +120,8 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
     expect(validatePairEnsemblePolicyProfile(
       structuredClone(DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE),
     )).toMatchObject({
-      policyVersion: "pair-ensemble-policy/v2",
-      profileId: "aggressive-kronos-rust-v2",
+      policyVersion: "pair-ensemble-policy/v3",
+      profileId: "aggressive-kronos-rust-v3",
       weights: { kronos: 0.72, rust: 0.28 },
       entryScoreThreshold: 0.045,
       holdScoreThreshold: 0.01,
@@ -151,6 +151,120 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
       "rust_direction_supports_ai",
       "cost_and_uncertainty_adjusted_score_passed",
     ]));
+  });
+
+  it("uses Rust indicator direction/risk and Kronos target-before-stop evidence", () => {
+    const base = model();
+    const favorable = {
+      ...base,
+      targetStop: {
+        status: "available" as const,
+        targetFirstProbabilityLower: 0.7,
+        targetFirstProbabilityUpper: 0.8,
+        stopFirstProbabilityLower: 0.1,
+        stopFirstProbabilityUpper: 0.2,
+      },
+    };
+    const decision = evaluatePairEnsemble(input({
+      models: models(favorable),
+      rust: rust({
+        indicatorDirectionalScore: 0.8,
+        indicatorRiskScale: 0.7,
+        indicatorCount: 20,
+        indicatorComponents: { "group:trend": 0.8 },
+      }),
+    }));
+    expect(decision.direction).toBe("bull");
+    expect(decision.componentScores.kronos.bull)
+      .toBeGreaterThan(evaluatePairEnsemble(input()).componentScores.kronos.bull);
+    expect(decision.componentScores.rust.bull).toBeGreaterThan(0);
+    expect(decision.exposureScale).toBeLessThanOrEqual(0.7);
+  });
+
+  it("uses structural-pattern strength directionally without letting liquidity risk rewrite direction", () => {
+    const neutralBase = {
+      status: "watch" as const,
+      technicalSignal: 0 as const,
+      multiTimeframeAgreement: "mixed",
+      chartPatternBias: "bullish" as const,
+    };
+    const weakPattern = evaluatePairEnsemble(input({
+      rust: rust({
+        ...neutralBase,
+        chartPatternStrength: 0.2,
+        indicatorRiskScale: 1,
+      }),
+    }));
+    const strongPattern = evaluatePairEnsemble(input({
+      rust: rust({
+        ...neutralBase,
+        chartPatternStrength: 0.9,
+        indicatorRiskScale: 1,
+      }),
+    }));
+    expect(strongPattern.componentScores.rust.bull)
+      .toBeGreaterThan(weakPattern.componentScores.rust.bull);
+
+    const fullLiquidity = evaluatePairEnsemble(input({
+      rust: rust({ indicatorRiskScale: 1 }),
+    }));
+    const thinLiquidity = evaluatePairEnsemble(input({
+      rust: rust({ indicatorRiskScale: 0.2 }),
+    }));
+    expect(thinLiquidity.componentScores.rust).toEqual(fullLiquidity.componentScores.rust);
+    expect(thinLiquidity.direction).toBe(fullLiquidity.direction);
+    expect(thinLiquidity.exposureScale).toBeLessThan(fullLiquidity.exposureScale);
+  });
+
+  it("preserves opposing Rust evidence even when scanner liquidity scales exposure to zero", () => {
+    const opposing = {
+      status: "watch" as const,
+      technicalSignal: 0 as const,
+      multiTimeframeAgreement: "mixed",
+      chartPatternBias: "neutral" as const,
+      indicatorDirectionalScore: -1,
+    };
+    const liquid = evaluatePairEnsemble(input({
+      rust: rust({ ...opposing, indicatorRiskScale: 1 }),
+    }));
+    const illiquid = evaluatePairEnsemble(input({
+      rust: rust({ ...opposing, indicatorRiskScale: 0 }),
+    }));
+    expect(illiquid.componentScores.rust).toEqual(liquid.componentScores.rust);
+    expect(illiquid.direction).toBe(liquid.direction);
+  });
+
+  it("penalizes unreliable paths and unresolved target-stop outcomes", () => {
+    const reliable = model();
+    reliable.validPathCount = 100;
+    reliable.invalidPathCount = 0;
+    reliable.targetStop = {
+      status: "available",
+      targetFirstProbabilityLower: 0.7,
+      targetFirstProbabilityUpper: 0.7,
+      stopFirstProbabilityLower: 0.2,
+      stopFirstProbabilityUpper: 0.2,
+      ambiguousProbability: 0,
+      neitherProbability: 0.1,
+    };
+    const unreliable = model();
+    unreliable.validPathCount = 10;
+    unreliable.invalidPathCount = 90;
+    unreliable.targetStop = {
+      status: "available",
+      targetFirstProbabilityLower: 0.4,
+      targetFirstProbabilityUpper: 0.7,
+      stopFirstProbabilityLower: 0.1,
+      stopFirstProbabilityUpper: 0.4,
+      ambiguousProbability: 0.3,
+      neitherProbability: 0.2,
+    };
+    const reliableDecision = evaluatePairEnsemble(input({ models: models(reliable) }));
+    const unreliableDecision = evaluatePairEnsemble(input({ models: models(unreliable) }));
+    expect(reliableDecision.componentScores.kronos.pathReliability).toBe(1);
+    expect(unreliableDecision.componentScores.kronos.pathReliability).toBe(0.1);
+    expect(unreliableDecision.componentScores.kronos.bull)
+      .toBeLessThan(reliableDecision.componentScores.kronos.bull);
   });
 
   it("allows a high-risk reduced entry while Rust watch is genuinely neutral", () => {

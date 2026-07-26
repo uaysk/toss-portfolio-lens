@@ -94,6 +94,11 @@ import {
   type PaperTrade,
 } from "./policy.js";
 import {
+  parseRustIndicatorEvidence,
+  projectRustScannerEvidence,
+  scoreRustIndicatorEvidence,
+} from "./technical-indicator-evidence.js";
+import {
   reduceDecisionQueueTick,
   transitionSimulationPhase,
   type SimulationPhase,
@@ -277,15 +282,69 @@ function latestTimestamp(values: readonly unknown[]): string | undefined {
   return timestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0];
 }
 
+/**
+ * Projects chart-derived evidence to the Rust/model origin. Live chart state can
+ * already contain the next finalized candle while an older inference is still
+ * completing, so reading `chart.bars.at(-1)` here would leak future price and
+ * structural-pattern information into the older decision.
+ */
+function causalChartEvidence(
+  chart: SimulationChartView | undefined,
+  originValue: unknown,
+): {
+  latestPrice?: SimulationChartView["bars"][number];
+  pattern: ReturnType<typeof latestSimulationPatternObservation>;
+} {
+  const originAt = timestamp(originValue);
+  if (!chart || !originAt) {
+    return {
+      pattern: {
+        chartPatternBias: "neutral",
+        chartPatterns: [],
+        chartPatternStrength: 0,
+      },
+    };
+  }
+  const origin = Date.parse(originAt);
+  const bars = chart.bars.filter((bar) => (
+    bar.status === "final" && Date.parse(bar.timestamp) <= origin
+  ));
+  const latestPrice = bars.at(-1);
+  // A chart projection may trail the Rust origin by one minute while the
+  // finalized candle is being merged. A bounded older observation is causal;
+  // a newer or materially stale one is not.
+  if (!latestPrice || origin - Date.parse(latestPrice.timestamp) > 2 * 60_000) {
+    return {
+      pattern: {
+        chartPatternBias: "neutral",
+        chartPatterns: [],
+        chartPatternStrength: 0,
+      },
+    };
+  }
+  return {
+    latestPrice,
+    pattern: latestSimulationPatternObservation({
+      ...chart,
+      bars,
+      patterns: chart.patterns.filter((pattern) => Date.parse(pattern.detectedAt) <= origin),
+      updatedAt: originAt,
+    }),
+  };
+}
+
 function technicalStates(
   value: ScalpingRealtimeAnalysisResult,
   charts: readonly SimulationChartView[],
+  preset: SimulationPreset = "risk_management",
 ): Record<string, unknown> {
   const technical = value.technical;
   const output: Record<string, unknown> = Object.fromEntries(charts.map((chart) => {
     const pattern = latestSimulationPatternObservation(chart);
     return [chart.symbol, {
       observedAt: latestTimestamp([value.generatedAt, pattern.patternObservedAt]),
+      ...(pattern.patternObservedAt
+        ? { technicalEvidenceAt: pattern.patternObservedAt } : {}),
       ...pattern,
     }];
   }));
@@ -293,9 +352,19 @@ function technicalStates(
   for (const instrument of technical.instruments) {
     const symbol = instrument.instrument_key.toUpperCase();
     const latest = instrument.signals?.latest ?? instrument.signals?.points?.at(-1);
-    const pattern = latestSimulationPatternObservation(
-      charts.find((chart) => chart.symbol === symbol),
-    );
+    const chart = charts.find((candidate) => candidate.symbol === symbol);
+    const technicalOriginAt = latest?.calculation_timestamp ?? latest?.signal_timestamp;
+    const { latestPrice, pattern } = causalChartEvidence(chart, technicalOriginAt);
+    const scannerEvidence = projectRustScannerEvidence(instrument.scanner_metrics, {
+      originAt: technicalOriginAt,
+    });
+    const indicatorEvidence = scoreRustIndicatorEvidence({
+      indicators: instrument.indicators,
+      preset,
+      currentPrice: latest?.basis_price ?? latestPrice?.close ?? 0,
+      ...(latestPrice?.volume === undefined ? {} : { currentVolume: latestPrice.volume }),
+      ...(scannerEvidence === undefined ? {} : { scannerEvidence }),
+    });
     output[symbol] = {
       ...(latest?.status ? { status: latest.status } : {}),
       ...(latest?.technical_signal !== undefined
@@ -315,58 +384,18 @@ function technicalStates(
       ...(latest?.data_quality ? { signalDataQuality: latest.data_quality } : {}),
       ...(latest?.rationale ? { rationale: latest.rationale } : {}),
       ...(instrument.data_quality ? { instrumentDataQuality: instrument.data_quality } : {}),
+      ...(scannerEvidence === undefined ? {} : { scannerEvidence }),
+      indicatorEvidence,
+      ...(technicalOriginAt || pattern.patternObservedAt
+        ? {
+            technicalEvidenceAt: latestTimestamp([
+              technicalOriginAt,
+              pattern.patternObservedAt,
+            ]),
+          }
+        : {}),
       observedAt: latestTimestamp([
         value.generatedAt,
-        latest?.calculation_timestamp,
-        latest?.signal_timestamp,
-        pattern.patternObservedAt,
-      ]),
-      ...pattern,
-    };
-  }
-  return output;
-}
-
-function workspaceTechnicalStates(
-  value: ScalpingWorkspaceResult,
-  charts: readonly SimulationChartView[],
-): Record<string, unknown> {
-  const output: Record<string, unknown> = Object.fromEntries(charts.map((chart) => {
-    const pattern = latestSimulationPatternObservation(chart);
-    return [chart.symbol, {
-      observedAt: latestTimestamp([value.workspace.generatedAt, pattern.patternObservedAt]),
-      ...pattern,
-    }];
-  }));
-  for (const item of value.workspace.instruments) {
-    if (!("instrument_key" in item.technical)) continue;
-    const latest = item.technical.signals?.latest ?? item.technical.signals?.points?.at(-1);
-    const symbol = item.symbol.toUpperCase();
-    const pattern = latestSimulationPatternObservation(
-      charts.find((chart) => chart.symbol === symbol),
-    );
-    output[symbol] = {
-      ...(latest?.status ? { status: latest.status } : {}),
-      ...(latest?.technical_signal !== undefined
-        ? { technicalSignal: latest.technical_signal } : {}),
-      ...(latest?.earliest_eligible_timestamp
-        ? { earliestEligibleAt: latest.earliest_eligible_timestamp } : {}),
-      ...(latest?.signal_timestamp ? { signalOriginAt: latest.signal_timestamp } : {}),
-      ...(latest?.calculation_timestamp
-        ? { calculationAt: latest.calculation_timestamp } : {}),
-      ...(latest?.multi_timeframe_agreement
-        ? { multiTimeframeAgreement: latest.multi_timeframe_agreement } : {}),
-      ...(latest?.multi_timeframe_trends
-        ? { multiTimeframeTrends: latest.multi_timeframe_trends } : {}),
-      ...(latest?.confidence !== undefined ? { confidence: latest.confidence } : {}),
-      ...(latest?.confidence_semantics
-        ? { confidenceSemantics: latest.confidence_semantics } : {}),
-      ...(latest?.data_quality ? { signalDataQuality: latest.data_quality } : {}),
-      ...(latest?.rationale ? { rationale: latest.rationale } : {}),
-      ...(item.technical.data_quality
-        ? { instrumentDataQuality: item.technical.data_quality } : {}),
-      observedAt: latestTimestamp([
-        value.workspace.generatedAt,
         latest?.calculation_timestamp,
         latest?.signal_timestamp,
         pattern.patternObservedAt,
@@ -481,6 +510,7 @@ type SimulationDecision = {
   technicalState: PaperPolicyAction["technicalState"];
   chartPatternBias: PaperPolicyAction["chartPatternBias"];
   chartPatterns: string[];
+  chartPatternStrength?: number;
   model: AiPaperForecastCandidate["model"];
   signalSymbol?: string;
   executionSymbol?: string | null;
@@ -488,6 +518,7 @@ type SimulationDecision = {
   decisionKind?: PairEnsembleDecision["decisionKind"];
   degraded?: boolean;
   exposureScale?: number;
+  modelEvidenceScale?: number;
   weights?: Record<string, number>;
   components?: Record<string, number>;
   finalScores?: Record<string, number>;
@@ -631,6 +662,14 @@ function pairRustTechnicalInput(value: unknown): PairRustTechnicalInput {
   const rationale = values(firstDefined(source, "rationale"))
     .flatMap((item) => nonempty(item, 500) ?? []);
   const confidence = finite(firstDefined(source, "confidence"));
+  const indicatorEvidence = parseRustIndicatorEvidence(
+    firstDefined(source, "indicatorEvidence", "indicator_evidence"),
+  );
+  const chartPatternStrength = finite(firstDefined(
+    source,
+    "chartPatternStrength",
+    "chart_pattern_strength",
+  ));
   return {
     status,
     ...(timestamp(firstDefined(source, "signalOriginAt", "signal_origin_at"))
@@ -659,6 +698,14 @@ function pairRustTechnicalInput(value: unknown): PairRustTechnicalInput {
     ...(chartPatternBias === "bullish" || chartPatternBias === "bearish" || chartPatternBias === "neutral"
       ? { chartPatternBias } : {}),
     ...(chartPatterns.length ? { chartPatterns } : {}),
+    ...(chartPatternStrength !== undefined
+      ? { chartPatternStrength: Math.max(0, Math.min(1, chartPatternStrength)) } : {}),
+    ...(indicatorEvidence ? {
+      indicatorDirectionalScore: indicatorEvidence.directionalScore,
+      indicatorRiskScale: indicatorEvidence.riskScale,
+      indicatorCount: indicatorEvidence.availableIndicatorCount,
+      indicatorComponents: { ...indicatorEvidence.components },
+    } : {}),
     dataQuality: pairTechnicalQuality(source),
     ...(rationale.length ? { rationale } : {}),
     rawOutput: value,
@@ -942,6 +989,28 @@ function latestFinalChartOrigin(
   return session.charts.find((chart) => chart.symbol === symbol)?.bars
     .filter((bar) => bar.status === "final")
     .at(-1)?.timestamp;
+}
+
+function latestSharedFinalChartOrigin(
+  session: ActiveSession,
+  symbols: readonly string[],
+): string | undefined {
+  if (!symbols.length) return undefined;
+  const finalizedBySymbol = symbols.map((symbol) => new Set(
+    session.charts.find((chart) => chart.symbol === symbol)?.bars
+      .filter((bar) => bar.status === "final")
+      .map((bar) => bar.timestamp) ?? [],
+  ));
+  const first = finalizedBySymbol[0];
+  if (!first) return undefined;
+  return [...first]
+    .filter((candidate) => finalizedBySymbol.every((timestamps) => timestamps.has(candidate)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+}
+
+function sharedSelectionOrigin(selection: AiPaperSelection): string | undefined {
+  const origins = [...new Set(selection.selected.map(({ inputEndAt }) => inputEndAt))];
+  return origins.length === 1 ? origins[0] : undefined;
 }
 
 function finalizedChartMarkAt(
@@ -1759,6 +1828,7 @@ export class AiTradingSimulationService {
         deterministicChartPatterns: true,
         eventDrivenDecisions: true,
         gpuForecastWorker: "provenance_reported_per_run",
+        stockModelLanes: "kronos_base",
         nextObservedExecutionOnly: true,
         pairStrategy: true,
         kronosRustEnsemble: true,
@@ -1807,6 +1877,7 @@ export class AiTradingSimulationService {
         "진행 중인 봉을 미래정보처럼 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "페어 전략은 기초자산 신호와 실행 ETF를 분리하며 bull·bear·cash 중 하나만 활성화합니다.",
+        "주식 시뮬레이션은 검증된 Kronos-base lane만 사용하며 FinCast lane은 암호화폐 선물에서만 실행합니다.",
         "Kronos-base 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
@@ -2505,6 +2576,25 @@ export class AiTradingSimulationService {
     if (missingCharts.length) {
       this.warn(session, `차트 분봉 unavailable: ${missingCharts.join(", ")}`);
     }
+    const maximumInputEndAt = sharedSelectionOrigin(selection);
+    if (!maximumInputEndAt) {
+      throw new Error("선정된 Kronos-base 예측의 입력 origin이 종목 간 일치하지 않습니다.");
+    }
+    const initialTechnical = await this.market.realtimeAnalysis({
+      marketCountry: session.request.marketCountry,
+      symbols,
+      interval: "1m",
+      preset: session.request.preset,
+      positionContext: isolatedPositionContext(session),
+    }, {
+      signal: session.decisionAbort.signal,
+      skipAutomaticRefresh: true,
+      maximumInputEndAt,
+    });
+    if (session.phase !== "selecting") return;
+    for (const chart of session.charts) {
+      mergeSimulationLatestTechnical(chart, initialTechnical);
+    }
     const startedAtMs = this.now();
     session.startedAt = new Date(startedAtMs).toISOString();
     session.expiresAt = new Date(startedAtMs + session.request.durationMinutes * MINUTE_MS).toISOString();
@@ -2516,7 +2606,7 @@ export class AiTradingSimulationService {
     const decisionRecordedAt = this.recordActions(
       session,
       selection,
-      workspaceTechnicalStates(chartWorkspace, session.charts),
+      technicalStates(initialTechnical, session.charts, session.request.preset),
     );
     session.lastDecisionFinishedAt = decisionRecordedAt;
     this.recordEquity(session, decisionRecordedAt);
@@ -2698,7 +2788,7 @@ export class AiTradingSimulationService {
     session.phase = runningTransition.phase;
     session.lastDecisionTriggeredAt = session.startedAt;
     session.lastDecisionStartedAt = session.startedAt;
-    const states = technicalStates(technical, session.charts);
+    const states = technicalStates(technical, session.charts, session.request.preset);
     const decisionRecord = this.recordPairDecision(
       session,
       forecastResult.forecast,
@@ -2784,6 +2874,15 @@ export class AiTradingSimulationService {
         technicalState: action.technicalState,
         chartPatternBias: action.chartPatternBias,
         chartPatterns: action.chartPatterns,
+        ...(action.chartPatternStrength === undefined
+          ? {} : { chartPatternStrength: action.chartPatternStrength }),
+        ...(action.exposureScale === undefined ? {} : { exposureScale: action.exposureScale }),
+        ...(action.modelEvidenceScale === undefined
+          ? {} : { modelEvidenceScale: action.modelEvidenceScale }),
+        ...(action.technicalComponents
+          ? { components: { ...action.technicalComponents } } : {}),
+        ...(action.fusionPolicyVersion
+          ? { provenance: [action.fusionPolicyVersion] } : {}),
         model: action.model,
       };
       session.decisions.push(decision);
@@ -3524,25 +3623,33 @@ export class AiTradingSimulationService {
     const positionContext = isolatedPositionContext(session);
     await this.live.waitForIdle();
     if (signal.aborted || session.phase !== "running") return;
-    const [forecastResult, technical] = await Promise.all([
-      this.market.forecast({
-        marketCountry: session.request.marketCountry,
-        symbols,
-        interval: "1m",
-      }, {
-        signal,
-      }),
-      this.market.realtimeAnalysis({
-        marketCountry: session.request.marketCountry,
-        symbols,
-        interval: "1m",
-        preset: session.request.preset,
-        positionContext,
-      }, {
-        signal,
-        skipAutomaticRefresh: true,
-      }),
-    ]);
+    const maximumInputEndAt = latestSharedFinalChartOrigin(session, symbols);
+    if (!maximumInputEndAt) {
+      this.warn(session, "선정 종목 전체에 공통인 최종 확정봉 origin이 없어 판단을 보류했습니다.");
+      return;
+    }
+    // Forecast first so the captured finalized bar is persisted for retained
+    // Rust analysis. Both calls are bounded to the same causal origin.
+    const forecastResult = await this.market.forecast({
+      marketCountry: session.request.marketCountry,
+      symbols,
+      interval: "1m",
+    }, {
+      signal,
+      maximumInputEndAt,
+    });
+    if (signal.aborted || session.phase !== "running") return;
+    const technical = await this.market.realtimeAnalysis({
+      marketCountry: session.request.marketCountry,
+      symbols,
+      interval: "1m",
+      preset: session.request.preset,
+      positionContext,
+    }, {
+      signal,
+      skipAutomaticRefresh: true,
+      maximumInputEndAt,
+    });
     if (signal.aborted || session.phase !== "running") return;
     if (session.expiresAt && this.now() >= Date.parse(session.expiresAt)) return;
     if (session.ledgerRevision !== ledgerRevision) {
@@ -3578,7 +3685,7 @@ export class AiTradingSimulationService {
     const decisionRecordedAt = this.recordActions(
       session,
       selection,
-      technicalStates(technical, session.charts),
+      technicalStates(technical, session.charts, session.request.preset),
     );
     this.recordEquity(session, decisionRecordedAt);
     const checkpoint = this.now() - (session.lastArtifactPersistedAtMs ?? Number.NEGATIVE_INFINITY)
@@ -3636,7 +3743,7 @@ export class AiTradingSimulationService {
       return;
     }
     for (const chart of session.charts) mergeSimulationLatestTechnical(chart, technical);
-    const states = technicalStates(technical, session.charts);
+    const states = technicalStates(technical, session.charts, session.request.preset);
     const decisionRecord = this.recordPairDecision(
       session,
       forecastResult.forecast,

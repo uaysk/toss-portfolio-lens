@@ -31,7 +31,7 @@ const COSTS = {
 
 function qualificationObservations(overrides: Record<string, unknown> = {}) {
   return {
-    row_count: 7_680,
+    row_count: 54_600,
     non_finite_value_count: 0,
     crossing_row_count: 65,
     crossing_adjacent_pair_count: 74,
