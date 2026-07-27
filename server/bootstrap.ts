@@ -87,6 +87,7 @@ import {
 import { createCompatibleApiRouter } from "./routes/compatible-api.js";
 import { createPortfolioDataRouter } from "./routes/portfolio-data.js";
 import { createDashboardToolsRouter } from "./routes/dashboard-tools.js";
+import { createAiQualificationRouter } from "./routes/ai-qualification.js";
 import { warnReadOnlyApiTokenFallbackOnce } from "./startup-warning.js";
 
 export async function bootstrap(config: AppConfig): Promise<void> {
@@ -250,12 +251,12 @@ const binanceMaintenanceMargin = new BinanceMaintenanceMarginProvider({
   environment: "live",
 });
 const binanceMarketData = new OfficialBinanceUsdmRestMarketData();
-const cryptoKronosClient = new AiComputeClient(config.cryptoAi.kronos);
-const cryptoFincastClient = config.cryptoAi.fincast
-  ? new AiComputeClient(config.cryptoAi.fincast)
+const cryptoFincastClient = new AiComputeClient(config.cryptoAi.fincast);
+const cryptoKronosClient = config.cryptoAi.kronos
+  ? new AiComputeClient(config.cryptoAi.kronos)
   : undefined;
-cryptoKronosClient.start();
-cryptoFincastClient?.start();
+cryptoFincastClient.start();
+cryptoKronosClient?.start();
 const cryptoRuntimeSnapshots = new Map<string, unknown>();
 let binanceRulesCache:
   | { loadedAt: number; rules: ReturnType<typeof normalizeBinanceUniverse> }
@@ -288,9 +289,10 @@ const cryptoPaperRuntime = new CryptoPaperRuntime({
   rest: binanceMarketData,
   streams: new OfficialBinanceUsdmPublicStreams(),
   laneClients: {
-    kronos_base: cryptoKronosClient,
-    ...(cryptoFincastClient ? { fincast: cryptoFincastClient } : {}),
+    fincast: cryptoFincastClient,
+    ...(cryptoKronosClient ? { kronos_base: cryptoKronosClient } : {}),
   },
+  executionLane: "fincast",
   ...(rustCompute
     ? { technicalAnalyzer: new CryptoRustTechnicalAnalyzer(rustCompute) }
     : {}),
@@ -322,8 +324,8 @@ const cryptoSimulationService = new CryptoSimulationCoordinator({
     await resolveBinanceRules(symbol, requiredMaximumNotional, true);
   },
   workerState: () => ({
-    kronos_base: cryptoWorkerPublicState(cryptoKronosClient.snapshot()),
-    fincast: cryptoWorkerPublicState(cryptoFincastClient?.snapshot()),
+    kronos_base: cryptoWorkerPublicState(cryptoKronosClient?.snapshot()),
+    fincast: cryptoWorkerPublicState(cryptoFincastClient.snapshot()),
   }),
 });
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
@@ -369,15 +371,15 @@ if (config.scalping.enabled && scalpingRepository) {
     maximumResponseBytes: config.scalping.ai.maximumResponseBytes,
     tlsCa: config.scalping.ai.tlsCa,
   });
-  const scalpingAi = new ScalpingAiService(
+  const stockFincastAi = new ScalpingAiService(
     aiComputeClient,
     scalpingRepository,
     runService,
     config.scalping.ai.maximumBatchSize,
   );
-  const stockFincastAi = cryptoFincastClient
+  const stockKronosAi = cryptoKronosClient
     ? new ScalpingAiService(
-        cryptoFincastClient,
+        cryptoKronosClient,
         scalpingRepository,
         runService,
         config.scalping.ai.maximumBatchSize,
@@ -390,12 +392,13 @@ if (config.scalping.enabled && scalpingRepository) {
     scalpingLiveRuntime,
     scalpingRepository,
     rustCompute,
-    scalpingAi,
+    stockKronosAi,
     toss,
     technicalTradeMarkerService,
     config.scalping.service,
     undefined,
     stockFincastAi,
+    "fincast",
   );
   if (config.scalping.recorder.enabled) {
     marketDataRecorder = new MarketDataRecorder(
@@ -571,6 +574,10 @@ const dashboardToolsRouter = createDashboardToolsRouter({
   tools: computeToolDependencies,
   technicalTradeMarkerService,
 });
+const aiQualificationRouter = createAiQualificationRouter({
+  authenticate: requireSession,
+  sseConnections,
+});
 const reportsRouter = createReportsRouter({
   authenticate: requireSession,
   portfolioAnalysis,
@@ -597,6 +604,7 @@ const app = createApp({
     (application) => application.use(compatibleApiRouter),
     (application) => application.use(portfolioDataRouter),
     (application) => application.use(dashboardToolsRouter),
+    (application) => application.use(aiQualificationRouter),
     (application) => application.use(reportsRouter),
     (application) => registerApiAndSpaFallbacks(application, {
       clientDirectory,
@@ -689,8 +697,8 @@ const lifecycle = new GracefulLifecycle({
       }),
       shutdownStep("AI client", () => aiComputeClient?.close()),
       shutdownStep("crypto AI clients", () => {
-        cryptoKronosClient.close();
-        cryptoFincastClient?.close();
+        cryptoKronosClient?.close();
+        cryptoFincastClient.close();
       }),
       shutdownStep("Rust client", () => rustCompute?.close()),
       shutdownStep("MCP transport", () => mcpHttpRuntime?.close()),

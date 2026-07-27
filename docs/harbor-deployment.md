@@ -84,8 +84,9 @@ docker compose \
   up -d --no-build --pull never --no-deps ai-worker
 ```
 
-FinCast는 위 파일 목록 뒤에 `compose.ai-remote-fincast.yaml`과
-`compose.harbor-fincast.yaml`을 순서대로 추가하고 `--profile fincast`로 `fincast-worker`만 pull·기동한다.
+FinCast는 메인 worker이므로 위 파일 목록 대신 `compose.ai-remote-fincast.yaml`과
+`compose.harbor-fincast.yaml`을 순서대로 추가해 프로필 없이 `fincast-worker`를 pull·기동한다.
+Kronos-base를 복구할 때만 `--profile legacy-kronos`를 사용한다.
 
 ## Local cache retention and bounded cleanup
 

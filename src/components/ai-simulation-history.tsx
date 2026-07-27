@@ -78,8 +78,8 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 const MODEL_LANE_LABELS: Record<AiSimulationModelLane, string> = {
-  kronos_base: "Kronos-base",
-  fincast: "FinCast",
+  kronos_base: "Kronos-base · Legacy",
+  fincast: "FinCast · Main",
 };
 
 function modelLaneFromIdentity(
@@ -402,7 +402,7 @@ export function SimulationRunReportView({
     ? Object.entries(configuration.costs).map(([key, value]) => `${key} ${value}bps`)
     : [];
   const cryptoFutures = configuration.market?.kind === "crypto_futures";
-  const cryptoModelLanes = ([
+  const reportModelLanes = ([
     ...(configuration.modelLanes ?? []),
     ...(report.modelComparison?.lanes.map(({ id }) => id) ?? []),
     ...modelForecasts.map(({ lane }) => lane),
@@ -413,12 +413,12 @@ export function SimulationRunReportView({
   ] as Array<AiSimulationModelLane | undefined>)
     .filter((lane): lane is AiSimulationModelLane => Boolean(lane))
     .filter((lane, index, lanes) => lanes.indexOf(lane) === index);
-  const cryptoModelLabel = cryptoModelLanes.length
-    ? cryptoModelLanes.map((lane) => MODEL_LANE_LABELS[lane]).join(" · ")
+  const reportModelLabel = reportModelLanes.length
+    ? reportModelLanes.map((lane) => MODEL_LANE_LABELS[lane]).join(" · ")
     : "모델";
   const modelSectionTitle = cryptoFutures
-    ? `${cryptoModelLabel} lane·판단 주기`
-    : "Kronos-base 모델·판단 주기";
+    ? `${reportModelLabel} lane·판단 주기`
+    : `${reportModelLabel} 모델·판단 주기`;
 
   return (
     <div className="min-w-0 space-y-3" data-simulation-report={report.runId}>
@@ -547,7 +547,7 @@ export function SimulationRunReportView({
             >
               <summary className="cursor-pointer text-[9px] font-black">
                 판단 provenance {report.decisionProvenance.length}건
-                {" · "}{cryptoFutures ? cryptoModelLabel : "Kronos-base / Rust"}
+                {" · "}{cryptoFutures ? reportModelLabel : `${reportModelLabel} / Rust`}
               </summary>
               <div className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1">
                 {[...report.decisionProvenance].reverse().map((decision, decisionIndex) => (

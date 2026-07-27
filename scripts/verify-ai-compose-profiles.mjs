@@ -11,7 +11,7 @@ const composeFiles = [
 ];
 const safeEnvironment = {
   PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-  AI_COMPUTE_URL: "ws://172.30.1.14:18765/ws/scalping-ai/v1",
+  AI_COMPUTE_URL: "ws://172.30.1.14:18766/ws/scalping-ai/v1",
   AI_KRONOS_COMPUTE_URL: "ws://172.30.1.14:18765/ws/scalping-ai/v1",
   AI_FINCAST_COMPUTE_URL: "ws://172.30.1.14:18766/ws/scalping-ai/v1",
   AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: "true",
@@ -20,17 +20,16 @@ const safeEnvironment = {
   POSTGRES_CA_HOST_PATH: "/dev/null",
   APP_GIT_SHA: "compose-profile-test",
 };
-const baseArguments = [
-  "compose",
-  "--project-directory",
-  projectRoot,
-  "--env-file",
-  "/dev/null",
-  ...composeFiles.flatMap((file) => ["-f", file]),
-];
-
-function compose(arguments_) {
-  const result = spawnSync("docker", [...baseArguments, ...arguments_], {
+function composeWithFiles(files, arguments_) {
+  const result = spawnSync("docker", [
+    "compose",
+    "--project-directory",
+    projectRoot,
+    "--env-file",
+    "/dev/null",
+    ...files.flatMap((file) => ["-f", file]),
+    ...arguments_,
+  ], {
     cwd: projectRoot,
     encoding: "utf8",
     env: safeEnvironment,
@@ -42,9 +41,26 @@ function compose(arguments_) {
   return result.stdout;
 }
 
+function compose(arguments_) {
+  return composeWithFiles(composeFiles, arguments_);
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const localDefaultServices = new Set(composeWithFiles(
+  [composeFiles[0]],
+  ["config", "--no-env-resolution", "--services"],
+).trim().split(/\r?\n/).filter(Boolean));
+assert(
+  localDefaultServices.has("fincast-worker"),
+  "local default stack must activate the FinCast main worker",
+);
+assert(
+  !localDefaultServices.has("ai-worker"),
+  "local default stack must keep the Kronos worker behind the legacy-kronos profile",
+);
 
 const rendered = JSON.parse(compose([
   "--profile",
@@ -71,21 +87,29 @@ assert(
     === JSON.stringify(["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]),
   "Kronos runtime healthcheck must execute the installed offline worker directly",
 );
+assert(
+  rendered.services?.["ai-worker"]?.environment?.AI_KRONOS_KV_CACHE_ENABLED === "false",
+  "Experimental Kronos K/V cache must remain disabled by default",
+);
+assert(
+  rendered.services?.["fincast-worker"]?.environment?.AI_MICROBATCH_SIZE === "4",
+  "FinCast worker must retain the qualified microbatch size of four",
+);
 
-const fincastProfileServices = new Set(compose([
+const legacyProfileServices = new Set(compose([
   "--profile",
-  "fincast",
+  "legacy-kronos",
   "config",
   "--no-env-resolution",
   "--services",
 ]).trim().split(/\r?\n/).filter(Boolean));
 assert(
-  !fincastProfileServices.has("ai-worker"),
-  "remote-main must not activate the local Kronos worker under --profile fincast",
+  !legacyProfileServices.has("ai-worker"),
+  "remote-main must not activate the local Kronos worker under --profile legacy-kronos",
 );
 assert(
-  !fincastProfileServices.has("fincast-worker"),
-  "remote-main must not activate the local FinCast worker under --profile fincast",
+  !legacyProfileServices.has("fincast-worker"),
+  "remote-main must not activate the local FinCast worker under --profile legacy-kronos",
 );
 
-process.stdout.write("remote-main AI worker profiles are fail-closed\n");
+process.stdout.write("FinCast is the local main worker and remote-main AI profiles are fail-closed\n");

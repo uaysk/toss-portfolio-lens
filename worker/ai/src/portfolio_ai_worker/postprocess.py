@@ -8,7 +8,6 @@ from typing import Iterable, Sequence
 from .adapters import PredictedBar, RawPrediction
 from .contracts import (
     DistributionShift,
-    FIXED_HORIZONS,
     FIXED_QUANTILES,
     ForecastSeries,
     HorizonForecast,
@@ -20,6 +19,7 @@ from .contracts import (
     TargetStopBounds,
     TargetStopSpec,
     UnavailableDetail,
+    forecast_horizons_for_steps,
 )
 
 _NORMAL_90 = 1.2815515655446004
@@ -186,7 +186,7 @@ def _path_horizons(series: ForecastSeries, raw: RawPrediction) -> tuple[HorizonF
     assert raw.paths is not None
     base = series.bars[-1].close
     output: list[HorizonForecast] = []
-    for horizon in FIXED_HORIZONS:
+    for horizon in forecast_horizons_for_steps(len(series.future_timestamps)):
         valid = [
             path[:horizon]
             for path in raw.paths
@@ -242,7 +242,7 @@ def _direct_horizons(series: ForecastSeries, raw: RawPrediction) -> tuple[Horizo
     assert raw.close_quantiles is not None
     base = series.bars[-1].close
     output: list[HorizonForecast] = []
-    for horizon in FIXED_HORIZONS:
+    for horizon in forecast_horizons_for_steps(len(series.future_timestamps)):
         provided = raw.close_quantiles.get(horizon)
         if provided is None or any(quantile not in provided for quantile in FIXED_QUANTILES):
             return None

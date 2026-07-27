@@ -7,12 +7,13 @@
 
 ## 기본 Compose 토폴로지
 
-프로필 없이 `docker compose up`을 실행하면 Kronos `ai-worker`만 같은 스택에서 시작된다.
-FinCast는 모델 cache·precision qualification·VRAM headroom 검증이 끝난 뒤에만 `fincast` profile로
-명시적으로 추가한다. 기본 구성은 다음과 같다.
+프로필 없이 `docker compose up`을 실행하면 메인 FinCast `fincast-worker`만 같은 스택에서 시작된다.
+Kronos-base `ai-worker`는 레거시 호환이 필요할 때만 `legacy-kronos` profile로 명시적으로 추가한다.
+기본 구성은 다음과 같다.
 
-- web은 Kronos `ws://ai-worker:8765/ws/scalping-ai/v1`, FinCast
-  `ws://fincast-worker:8766/ws/scalping-ai/v1`에 동일 origin·512봉 입력을 순차 전송한다.
+- web의 기본·FinCast endpoint는 `ws://fincast-worker:8766/ws/scalping-ai/v1`이다. 레거시 비교를
+  명시적으로 켜면 Kronos `ws://ai-worker:8765/ws/scalping-ai/v1`에도 동일 origin·512봉 입력을
+  순차 전송한다.
 - 두 worker는 외부 port를 publish하지 않고 `internal: true`인 `ai_internal` network에만 연결된다.
 - web은 provider API 접근용 기본 network와 AI 전용 network에 함께 연결된다.
 - 기본 `AI_DEVICE=cuda`, `AI_ALLOW_CPU_FALLBACK=false`이며 GPU device reservation이 없으면 모델을
@@ -28,25 +29,22 @@ FinCast는 모델 cache·precision qualification·VRAM headroom 검증이 끝난
 애플리케이션 요청에는 bearer 인증으로 사용한다.
 
 ```bash
-docker compose build ai-worker
+docker compose build fincast-worker
 docker compose up -d
-docker compose ps ai-worker web
+docker compose ps fincast-worker web
 
-# FinCast qualification 완료 후에만 실행
-docker compose --profile fincast build fincast-worker
-AI_FINCAST_COMPUTE_URL=ws://fincast-worker:8766/ws/scalping-ai/v1 \
-  docker compose --profile fincast up -d fincast-worker web
+# 레거시 Kronos-base를 명시적으로 복구할 때만 실행
+docker compose --profile legacy-kronos up -d ai-worker
 ```
 
 로컬 GPU에서 실제 추론할 때 GPU override를 추가한다.
 
 ```bash
-docker compose -f compose.yaml -f compose.ai-gpu.yaml up --build -d ai-worker web
+docker compose -f compose.yaml -f compose.ai-gpu.yaml up --build -d fincast-worker web
 
-# FinCast qualification 완료 후에만 실행
-AI_FINCAST_COMPUTE_URL=ws://fincast-worker:8766/ws/scalping-ai/v1 \
-  docker compose -f compose.yaml -f compose.ai-gpu.yaml \
-    --profile fincast up --build -d fincast-worker web
+# 레거시 Kronos-base를 명시적으로 복구할 때만 실행
+docker compose -f compose.yaml -f compose.ai-gpu.yaml \
+  --profile legacy-kronos up --build -d ai-worker
 ```
 
 `compose.ai-gpu.yaml`은 NVIDIA GPU 한 개를 예약하고 CPU fallback을 계속 비활성화한다. 기본 image와 web
@@ -285,14 +283,14 @@ docker compose \
   -f compose.ai-gpu.yaml \
   -f compose.ai-remote-worker.yaml \
   -f compose.ai-remote-fincast.yaml \
-  --profile fincast pull fincast-worker
+  pull fincast-worker
 
 docker compose \
   -f compose.yaml \
   -f compose.ai-gpu.yaml \
   -f compose.ai-remote-worker.yaml \
   -f compose.ai-remote-fincast.yaml \
-  --profile fincast up -d --no-deps fincast-worker
+  up -d --no-deps fincast-worker
 ```
 
 원격 worker override는 web·Rust services를 비활성 profile로 옮기므로 main services는 GPU 서버에서
@@ -307,7 +305,10 @@ main 호스트는 같은 token directory를 read-only로 mount하고 원격 URL�
 TLS가 없는 private LAN에서만 다음 opt-in을 허용한다.
 
 ```text
-AI_COMPUTE_URL=ws://172.30.1.14:18765/ws/scalping-ai/v1
+AI_COMPUTE_URL=ws://172.30.1.14:18766/ws/scalping-ai/v1
+AI_FINCAST_COMPUTE_URL=ws://172.30.1.14:18766/ws/scalping-ai/v1
+# 레거시 비교를 복구한 경우에만 설정
+AI_KRONOS_COMPUTE_URL=ws://172.30.1.14:18765/ws/scalping-ai/v1
 AI_KRONOS_COMPUTE_URL=ws://172.30.1.14:18765/ws/scalping-ai/v1
 AI_FINCAST_COMPUTE_URL=ws://172.30.1.14:18766/ws/scalping-ai/v1
 CRYPTO_SIMULATION_MAX_ACTIVE_SESSIONS=1

@@ -1,5 +1,6 @@
 import { lazy, type ReactNode } from "react";
 import {
+  Activity,
   BarChart3,
   Bot,
   CandlestickChart,
@@ -19,6 +20,7 @@ const ResearchLibrary = lazy(() => import("@/components/research-library").then(
 const TechnicalAnalysisView = lazy(() => import("@/components/technical-analysis").then((module) => ({ default: module.TechnicalAnalysisView })));
 const ScalpingAssistant = lazy(() => import("@/components/scalping-assistant").then((module) => ({ default: module.ScalpingAssistant })));
 const AiSimulation = lazy(() => import("@/components/ai-simulation").then((module) => ({ default: module.AiSimulation })));
+const AiQualificationDashboard = lazy(() => import("@/components/ai-qualification-dashboard").then((module) => ({ default: module.AiQualificationDashboard })));
 
 export type DashboardViewContentContext = {
   portfolio: Portfolio;
@@ -147,6 +149,23 @@ export const DASHBOARD_VIEW_REGISTRY = [
           key={`${portfolio.selectedAccountId}:simulation`}
           onUnauthorized={onUnauthorized}
         />
+      ),
+    },
+  },
+  {
+    value: "qualification",
+    hash: "#ai-qualification",
+    sidebarLabel: "모델 검증",
+    mobileLabel: "모델 검증",
+    eyebrow: "AI MODEL QUALIFICATION",
+    title: "모델 검증",
+    loadingLabel: "모델 검증 모니터를 불러오는 중",
+    icon: Activity,
+    navigation: { desktop: true, mobile: true },
+    content: {
+      kind: "lazy",
+      render: ({ onUnauthorized }) => (
+        <AiQualificationDashboard onUnauthorized={onUnauthorized} />
       ),
     },
   },

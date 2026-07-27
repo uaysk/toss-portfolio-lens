@@ -18,7 +18,7 @@ from .adapters import (
     _inside,
     _provenance,
 )
-from .contracts import FIXED_HORIZONS, FIXED_QUANTILES, ModelProvenance
+from .contracts import FIXED_QUANTILES, ModelProvenance, forecast_horizons_for_steps
 from .precision_validation import (
     FinCastPrecisionValidation,
     load_precision_validation,
@@ -692,8 +692,7 @@ def fincast_interval_seconds(item: InferenceSeries) -> int:
             gap_policy=gap_policy,
             label="context",
         )
-    if len(item.future_timestamps) != max(FIXED_HORIZONS):
-        raise ValueError("FinCast requires exactly 60 one-minute result timestamps")
+    forecast_horizons_for_steps(len(item.future_timestamps))
     _validate_fincast_timestamp_cadence(
         (context_timestamps[-1], *item.future_timestamps),
         candle_seconds=60,
@@ -773,7 +772,11 @@ class FinCastAdapter:
         if len(set(intervals)) != 1:
             raise ValueError("FinCast batch series must use the same candle interval")
         interval_seconds = intervals[0]
-        native_horizon_steps = max(FIXED_HORIZONS) * 60 // interval_seconds
+        result_steps = len(series[0].future_timestamps)
+        if any(len(item.future_timestamps) != result_steps for item in series):
+            raise ValueError("FinCast batch series must use the same forecast profile")
+        requested_horizons = forecast_horizons_for_steps(result_steps)
+        native_horizon_steps = max(requested_horizons) * 60 // interval_seconds
         torch = self._runtime.torch
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
@@ -811,7 +814,7 @@ class FinCastAdapter:
             if len(forecast) != native_horizon_steps:
                 raise ValueError("FinCast returned an invalid native horizon length")
             close_quantiles: dict[int, dict[float, float]] = {}
-            for horizon in FIXED_HORIZONS:
+            for horizon in requested_horizons:
                 native_step = horizon * 60 // interval_seconds
                 row = forecast[native_step - 1]
                 if len(row) != 1 + len(NATIVE_QUANTILES) or not all(math.isfinite(float(value)) for value in row):

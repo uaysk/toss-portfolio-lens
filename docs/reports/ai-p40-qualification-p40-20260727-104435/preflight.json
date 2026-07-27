@@ -1,0 +1,17 @@
+{
+  "dockerServerVersion": "29.5.2",
+  "gpu": {
+    "name": "Tesla P40",
+    "cudaCapability": "6.1",
+    "memoryTotalMiB": 24576
+  },
+  "images": {
+    "kronos": "harbor.uaysk.com/toss-portfolio-lens/kronos-worker@sha256:a880c7f474d59386595cbfddd8542842c0eb61812be7a57b40ba8a8e37dec0b1",
+    "fincast": "harbor.uaysk.com/toss-portfolio-lens/fincast-worker@sha256:60ec760fd89a4d4d866ae60731406ead4ffd318845d9e53eea33d86b126b2bd4"
+  },
+  "sourceMode": "bind-mounted /app/src; no Docker build",
+  "modelCaches": [
+    "/home/uaysk/toss-portfolio-lens-ai-worker-runtime/kronos-model-cache-240c4b0f01f8",
+    "/home/uaysk/toss-portfolio-lens-ai-worker-runtime/fincast-model-cache-240c4b0f01f8"
+  ]
+}

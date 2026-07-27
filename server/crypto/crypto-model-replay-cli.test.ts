@@ -40,6 +40,7 @@ function result(): CryptoModelReplayResult {
     window: {
       startAt: "2026-07-18T00:00:00.000Z",
       endExclusiveAt: "2026-07-25T00:00:00.000Z",
+      durationHours: 168,
       completeUtcDays: 7,
       barCount: 10_080,
       contextPrefetchBarCount: 511,
@@ -85,6 +86,8 @@ describe("crypto model replay CLI", () => {
       symbol: "BTCUSDT",
       output: "/tmp/replay.json",
       deadlineMs: 3_600_000,
+      durationHours: 168,
+      kronosLoaderProfile: "base",
     });
     expect(() => parseCryptoReplayCliArguments([
       "--symbol", "BTCUSD",
@@ -94,6 +97,33 @@ describe("crypto model replay CLI", () => {
       "--symbol", "BTCUSDT",
       "--output", "relative.json",
     ])).toThrow("absolute");
+  });
+
+  it("accepts a bounded duration, exact end minute, and reviewed Kronos loader profile", () => {
+    expect(parseCryptoReplayCliArguments([
+      "--symbol", "ETHUSDT",
+      "--output", "/tmp/replay.json",
+      "--duration-hours", "48",
+      "--end-exclusive", "2026-07-25T00:00:00Z",
+      "--kronos-loader-profile", "kv_cache_v1",
+    ])).toEqual({
+      symbol: "ETHUSDT",
+      output: "/tmp/replay.json",
+      deadlineMs: 43_200_000,
+      durationHours: 48,
+      endExclusive: Date.parse("2026-07-25T00:00:00.000Z"),
+      kronosLoaderProfile: "kv_cache_v1",
+    });
+    expect(() => parseCryptoReplayCliArguments([
+      "--symbol", "ETHUSDT",
+      "--output", "/tmp/replay.json",
+      "--duration-hours", "0",
+    ])).toThrow("duration-hours");
+    expect(() => parseCryptoReplayCliArguments([
+      "--symbol", "ETHUSDT",
+      "--output", "/tmp/replay.json",
+      "--end-exclusive", "2026-07-25T00:00:30Z",
+    ])).toThrow("exact UTC minute");
   });
 
   it("publishes mode-0600 replay evidence atomically and never overwrites it", async () => {
@@ -106,6 +136,7 @@ describe("crypto model replay CLI", () => {
         schemaVersion: "crypto-model-comparison-replay/v1",
         symbol: "BTCUSDT",
         window: {
+          durationHours: 168,
           completeUtcDays: 7,
           barCount: 10_080,
           contextPrefetchBarCount: 511,

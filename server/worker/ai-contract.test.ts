@@ -446,6 +446,51 @@ describe("AI worker response contract", () => {
     });
   });
 
+  it("실시간 forecast profile은 5·15분 horizon과 15개 timestamp만 허용한다", () => {
+    const at = "2026-07-21T00:00:00.000Z";
+    const series = {
+      instrument_key: "BINANCE_USDM:BTCUSDT",
+      timezone: "UTC",
+      input_end_at: at,
+      bars: [{
+        timestamp: at,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        complete: true as const,
+      }],
+      future_timestamps: Array.from({ length: 15 }, (_, index) => (
+        new Date(Date.parse(at) + (index + 1) * 60_000).toISOString()
+      )),
+    };
+    const request = {
+      ...aiRequestBase("realtime-profile"),
+      mode: "forecast" as const,
+      forecast_profile: "realtime_5_15" as const,
+      horizons_minutes: [5, 15] as const,
+      series: [series],
+    };
+
+    expect(AiForecastRequestSchema.parse(request)).toMatchObject({
+      forecast_profile: "realtime_5_15",
+      horizons_minutes: [5, 15],
+    });
+    expect(() => AiForecastRequestSchema.parse({
+      ...request,
+      horizons_minutes: [5, 15, 30, 60],
+    })).toThrow(/realtime_5_15 forecast horizon profile/);
+    expect(() => AiForecastRequestSchema.parse({
+      ...request,
+      series: [{
+        ...series,
+        future_timestamps: Array.from({ length: 60 }, (_, index) => (
+          new Date(Date.parse(at) + (index + 1) * 60_000).toISOString()
+        )),
+      }],
+    })).toThrow(/requires 15 future timestamps/);
+  });
+
   it("model loaded 상태와 runtime provenance 불일치를 거부한다", () => {
     const input = structuredClone(evaluatedResponse);
     input.model.loaded = false;

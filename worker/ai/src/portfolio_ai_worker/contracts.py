@@ -10,8 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator,
 
 SCHEMA_VERSION = "scalping-ai/v1"
 FIXED_HORIZONS = (5, 15, 30, 60)
+REALTIME_HORIZONS = (5, 15)
 FIXED_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 FORECAST_STEPS = max(FIXED_HORIZONS)
+REALTIME_FORECAST_STEPS = max(REALTIME_HORIZONS)
+FORECAST_HORIZONS_BY_STEPS = {
+    REALTIME_FORECAST_STEPS: REALTIME_HORIZONS,
+    FORECAST_STEPS: FIXED_HORIZONS,
+}
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 FINCAST_MODEL_ID = "Vincent05R/FinCast"
@@ -28,6 +34,15 @@ FINCAST_QUALIFICATION_ROW_COUNT = (
     + FINCAST_QUALIFICATION_SCALE_STRESS_CONTEXT_COUNT
 ) * sum(FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS)
 MAX_QUANTILE_ADJUSTMENT_IQR_RATIO = 1_000_000_000.0
+
+
+def forecast_horizons_for_steps(step_count: int) -> tuple[int, ...]:
+    try:
+        return FORECAST_HORIZONS_BY_STEPS[step_count]
+    except KeyError as error:
+        raise ValueError(
+            f"forecast timestamps must contain exactly {REALTIME_FORECAST_STEPS} or {FORECAST_STEPS} steps"
+        ) from error
 
 
 class StrictModel(BaseModel):
@@ -120,8 +135,11 @@ class RequestBase(StrictModel):
     @field_validator("horizons_minutes")
     @classmethod
     def fixed_horizons(cls, value: tuple[int, ...]) -> tuple[int, ...]:
-        if value != FIXED_HORIZONS:
-            raise ValueError(f"horizons_minutes must be exactly {list(FIXED_HORIZONS)}")
+        if value not in (REALTIME_HORIZONS, FIXED_HORIZONS):
+            raise ValueError(
+                "horizons_minutes must select the realtime [5, 15] "
+                "or full [5, 15, 30, 60] profile"
+            )
         return value
 
     @field_validator("quantiles")
@@ -139,7 +157,10 @@ class ForecastSeries(StrictModel):
     instrument_key: str = Field(min_length=1, max_length=128)
     timezone: str = Field(min_length=1, max_length=64)
     input_end_at: datetime
-    future_timestamps: tuple[datetime, ...] = Field(min_length=FORECAST_STEPS, max_length=FORECAST_STEPS)
+    future_timestamps: tuple[datetime, ...] = Field(
+        min_length=REALTIME_FORECAST_STEPS,
+        max_length=FORECAST_STEPS,
+    )
     bars: tuple[PriceBar, ...] = Field(min_length=1)
     target_stop: TargetStopSpec | None = None
     input_cadence: SeriesCadence | None = None
@@ -163,6 +184,7 @@ class ForecastSeries(StrictModel):
     def valid_future_timestamps(cls, value: tuple[datetime, ...]) -> tuple[datetime, ...]:
         for item in value:
             _aware(item, "future timestamp")
+        forecast_horizons_for_steps(len(value))
         return _strictly_increasing(value, "future_timestamps")
 
     @model_validator(mode="after")
@@ -188,13 +210,28 @@ class ForecastSeries(StrictModel):
 
 class ForecastRequest(RequestBase):
     mode: Literal["forecast"]
+    forecast_profile: Literal["full", "realtime_5_15"] = "full"
     series: tuple[ForecastSeries, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def unique_instruments(self) -> "ForecastRequest":
+    def valid_forecast_profile(self) -> "ForecastRequest":
         keys = [item.instrument_key for item in self.series]
         if len(keys) != len(set(keys)):
             raise ValueError("forecast instrument_key values must be unique")
+        expected_horizons = (
+            REALTIME_HORIZONS
+            if self.forecast_profile == "realtime_5_15"
+            else FIXED_HORIZONS
+        )
+        expected_steps = max(expected_horizons)
+        if self.horizons_minutes != expected_horizons:
+            raise ValueError(
+                f"{self.forecast_profile} requires horizons_minutes={list(expected_horizons)}"
+            )
+        if any(len(item.future_timestamps) != expected_steps for item in self.series):
+            raise ValueError(
+                f"{self.forecast_profile} requires exactly {expected_steps} future timestamps"
+            )
         return self
 
 
@@ -327,6 +364,8 @@ class EvaluateRequest(RequestBase):
         keys = [item.instrument_key for item in self.series]
         if len(keys) != len(set(keys)):
             raise ValueError("evaluation instrument_key values must be unique")
+        if self.horizons_minutes != FIXED_HORIZONS:
+            raise ValueError("evaluation requires the full [5, 15, 30, 60] horizon profile")
         return self
 
 
@@ -575,10 +614,15 @@ class SeriesForecastResult(StrictModel):
 
     @model_validator(mode="after")
     def status_shape(self) -> "SeriesForecastResult":
-        if self.status == "available" and (self.unavailable is not None or len(self.horizons) != len(FIXED_HORIZONS)):
-            raise ValueError("available series must contain all horizons and no unavailable detail")
-        if self.status == "available" and tuple(item.horizon_minutes for item in self.horizons) != FIXED_HORIZONS:
-            raise ValueError("available series horizons must be ordered as 5, 15, 30, 60")
+        horizon_shape = tuple(item.horizon_minutes for item in self.horizons)
+        if self.status == "available" and (
+            self.unavailable is not None
+            or horizon_shape not in (REALTIME_HORIZONS, FIXED_HORIZONS)
+        ):
+            raise ValueError(
+                "available series must contain ordered realtime (5, 15) "
+                "or full (5, 15, 30, 60) horizons and no unavailable detail"
+            )
         if self.status == "unavailable" and (self.unavailable is None or self.horizons):
             raise ValueError("unavailable series must contain a reason and no horizons")
         return self

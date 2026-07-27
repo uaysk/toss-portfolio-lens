@@ -1,5 +1,6 @@
 import { isValidElement, type ReactElement } from "react";
 import {
+  Activity,
   BarChart3,
   Bot,
   CandlestickChart,
@@ -76,6 +77,18 @@ const expectedViews = [
     title: "시뮬레이션",
     loadingLabel: "시뮬레이션 화면을 불러오는 중",
     icon: Bot,
+    navigation: { desktop: true, mobile: true },
+    contentKind: "lazy",
+  },
+  {
+    value: "qualification",
+    hash: "#ai-qualification",
+    sidebarLabel: "모델 검증",
+    mobileLabel: "모델 검증",
+    eyebrow: "AI MODEL QUALIFICATION",
+    title: "모델 검증",
+    loadingLabel: "모델 검증 모니터를 불러오는 중",
+    icon: Activity,
     navigation: { desktop: true, mobile: true },
     contentKind: "lazy",
   },
@@ -170,6 +183,7 @@ describe("dashboard navigation", () => {
     const technical = lazyContent("technical", context);
     const scalping = lazyContent("scalping", context);
     const simulation = lazyContent("simulation", context);
+    const qualification = lazyContent("qualification", context);
     const backtest = lazyContent("backtest", context);
     const optimization = lazyContent("optimization", context);
     const library = lazyContent("library", context);
@@ -179,6 +193,7 @@ describe("dashboard navigation", () => {
     expect(technical.props.onOpenTechnicalBacktest).toBe(context.onOpenTechnicalBacktest);
     expect(scalping.key).toBe("account-1:scalping");
     expect(simulation.key).toBe("account-1:simulation");
+    expect(qualification.props.onUnauthorized).toBe(context.onUnauthorized);
     expect(backtest.key).toBe("account-1:backtest");
     expect(backtest.props.mode).toBe("backtest");
     expect(backtest.props.technicalStrategyHandoff).toBe(technicalStrategyHandoff);

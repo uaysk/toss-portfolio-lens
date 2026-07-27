@@ -1,4 +1,6 @@
 export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast"] as const;
+export const AI_SIMULATION_MAIN_MODEL_LANE = "fincast" as const;
+export const AI_SIMULATION_LEGACY_MODEL_LANE = "kronos_base" as const;
 export const AI_SIMULATION_FINCAST_CANDLE_SECONDS = [60, 30, 15] as const;
 export const AI_SIMULATION_EXECUTION_MODES = ["paper", "testnet", "live"] as const;
 export const AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH = 100;
@@ -96,7 +98,7 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
     slippageBpsPerSide: 1,
   },
   riskLimits: { ...DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS },
-  modelLanes: ["kronos_base"],
+  modelLanes: [AI_SIMULATION_MAIN_MODEL_LANE],
   fincastCandleSeconds: 60,
   execution: { mode: "paper" },
 };

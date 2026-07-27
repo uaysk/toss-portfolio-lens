@@ -91,8 +91,8 @@ describe("AiSimulation", () => {
     expect(markup).toContain("페어 전략 capability를 확인하고 있습니다.");
     expect(markup).toContain('aria-label="AI 선정 종목 수"');
     expect(markup).toContain('aria-label="공격 방어 성향"');
-    expect(markup).toContain("Kronos-base 예측");
-    expect(markup).toContain("Kronos-base · Rust · 패턴");
+    expect(markup).toContain("FinCast · Main");
+    expect(markup).toContain("FinCast Main · Rust · 패턴");
     expect(markup).toContain("최대 공격 · 최대 배분");
     expect(markup).toContain("현금 100% · 0주");
     expect(markup).toContain("확정봉 이벤트 즉시");

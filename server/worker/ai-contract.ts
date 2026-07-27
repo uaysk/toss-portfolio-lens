@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1" as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
+export const SCALPING_AI_REALTIME_HORIZONS = [5, 15] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
 export const KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
 export const FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
@@ -15,9 +16,11 @@ const timestamp = z.string().max(64).refine((value) => (
 ), "RFC3339 timestamp with offset is required");
 const timestampMillis = (value: string) => Date.parse(value);
 const requestId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
-const horizons = z.tuple([
+const fullHorizons = z.tuple([
   z.literal(5), z.literal(15), z.literal(30), z.literal(60),
 ]);
+const realtimeHorizons = z.tuple([z.literal(5), z.literal(15)]);
+const horizons = z.union([realtimeHorizons, fullHorizons]);
 const quantiles = z.tuple([
   z.literal(0.05), z.literal(0.1), z.literal(0.25), z.literal(0.5),
   z.literal(0.75), z.literal(0.9), z.literal(0.95),
@@ -59,7 +62,13 @@ export const AiSeriesCadenceSchema = z.object({
 });
 export type AiSeriesCadence = z.infer<typeof AiSeriesCadenceSchema>;
 
-const futureTimestamps = z.array(timestamp).length(60).superRefine((items, context) => {
+const futureTimestamps = z.array(timestamp).min(15).max(60).superRefine((items, context) => {
+  if (items.length !== 15 && items.length !== 60) {
+    context.addIssue({
+      code: "custom",
+      message: "future timestamps must contain exactly 15 or 60 values",
+    });
+  }
   for (let index = 1; index < items.length; index += 1) {
     if (timestampMillis(items[index]!) <= timestampMillis(items[index - 1]!)) {
       context.addIssue({ code: "custom", path: [index], message: "future timestamps must be increasing" });
@@ -214,15 +223,61 @@ export const AiCostAssumptionsSchema = z.object({
 export const AiForecastRequestSchema = z.object({
   ...requestBase,
   mode: z.literal("forecast"),
+  forecast_profile: z.enum(["full", "realtime_5_15"]).optional(),
   series: z.array(ForecastSeriesSchema).min(1).max(50),
-}).strict().superRefine((request, context) => validateUniqueInstrumentKeys(request.series, context));
+}).strict().superRefine((request, context) => {
+  validateUniqueInstrumentKeys(request.series, context);
+  const profile = request.forecast_profile ?? "full";
+  const expectedHorizons = profile === "realtime_5_15"
+    ? SCALPING_AI_REALTIME_HORIZONS
+    : SCALPING_AI_HORIZONS;
+  const expectedTimestampCount = expectedHorizons.at(-1)!;
+  if (request.horizons_minutes.length !== expectedHorizons.length
+    || request.horizons_minutes.some((value, index) => value !== expectedHorizons[index])) {
+    context.addIssue({
+      code: "custom",
+      path: ["horizons_minutes"],
+      message: `${profile} forecast horizon profile is required`,
+    });
+  }
+  request.series.forEach((series, index) => {
+    if (series.future_timestamps.length !== expectedTimestampCount) {
+      context.addIssue({
+        code: "custom",
+        path: ["series", index, "future_timestamps"],
+        message: `${profile} requires ${expectedTimestampCount} future timestamps`,
+      });
+    }
+  });
+});
 
 export const AiEvaluateRequestSchema = z.object({
   ...requestBase,
   mode: z.literal("evaluate"),
   series: z.array(EvaluationSeriesSchema).min(1).max(50),
   cost_assumptions: AiCostAssumptionsSchema,
-}).strict().superRefine((request, context) => validateUniqueInstrumentKeys(request.series, context));
+}).strict().superRefine((request, context) => {
+  validateUniqueInstrumentKeys(request.series, context);
+  if (request.horizons_minutes.length !== SCALPING_AI_HORIZONS.length
+    || request.horizons_minutes.some((value, index) => value !== SCALPING_AI_HORIZONS[index])) {
+    context.addIssue({
+      code: "custom",
+      path: ["horizons_minutes"],
+      message: "evaluation requires the full horizon profile",
+    });
+  }
+  request.series.forEach((series, seriesIndex) => {
+    series.origins.forEach((origin, originIndex) => {
+      if (origin.future_timestamps.length !== 60) {
+        context.addIssue({
+          code: "custom",
+          path: ["series", seriesIndex, "origins", originIndex, "future_timestamps"],
+          message: "evaluation requires 60 future timestamps",
+        });
+      }
+    });
+  });
+});
 
 export const AiRequestSchema = z.discriminatedUnion("mode", [AiForecastRequestSchema, AiEvaluateRequestSchema]);
 export type AiRequest = z.infer<typeof AiRequestSchema>;
@@ -612,8 +667,19 @@ const SeriesForecastResultSchema = z.object({
   }).strict(),
   unavailable: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((series, context) => {
-  if (series.status === "available" && (series.horizons.length !== 4 || series.unavailable)) {
-    context.addIssue({ code: "custom", message: "available series must have four horizons" });
+  const horizonShape = series.horizons.map((item) => item.horizon_minutes);
+  const matches = (expected: readonly number[]) => (
+    horizonShape.length === expected.length
+    && horizonShape.every((value, index) => value === expected[index])
+  );
+  if (series.status === "available"
+    && (!matches(SCALPING_AI_REALTIME_HORIZONS)
+      && !matches(SCALPING_AI_HORIZONS)
+      || series.unavailable)) {
+    context.addIssue({
+      code: "custom",
+      message: "available series must have ordered realtime or full horizons",
+    });
   }
   if (series.status === "unavailable" && (series.horizons.length || !series.unavailable)) {
     context.addIssue({ code: "custom", message: "unavailable series must have a reason only" });

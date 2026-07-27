@@ -19,6 +19,12 @@ from .contracts import (
     QuantileRearrangementObservations,
     SeriesCadence,
 )
+from .kronos_kv_cache import (
+    KRONOS_BASE_LOADER_VERSION,
+    KRONOS_KV_CACHE_LOADER_VERSION,
+    KRONOS_SOURCE_REVISION,
+    install_kronos_kv_cache,
+)
 from .settings import AISettings
 
 
@@ -342,6 +348,12 @@ class KronosAdapter:
             tokenizer = module.KronosTokenizer.from_pretrained(str(tokenizer_path), local_files_only=True)
             model.eval()
             tokenizer.eval()
+            if settings.kronos_kv_cache_enabled:
+                install_kronos_kv_cache(
+                    module,
+                    model,
+                    source_revision=source_revision,
+                )
             self._predictor = module.KronosPredictor(
                 model=model,
                 tokenizer=tokenizer,
@@ -354,8 +366,13 @@ class KronosAdapter:
             raise AdapterLoadError(f"failed to load pinned Kronos snapshots: {type(error).__name__}") from error
         self._runtime = runtime
         self._sample_count = settings.sample_count
+        provenance_model = (
+            {**manifest_model, "loader_version": KRONOS_KV_CACHE_LOADER_VERSION}
+            if settings.kronos_kv_cache_enabled
+            else manifest_model
+        )
         self._provenance = _provenance(
-            manifest_model,
+            provenance_model,
             source_revision=source_revision,
             device=runtime.name,
             device_name=runtime.device_name,
@@ -460,8 +477,9 @@ def _try_load(
             or not model["revision"]
             or not isinstance(model.get("tokenizer_revision"), str)
             or not model["tokenizer_revision"]
+            or model.get("loader_version") != KRONOS_BASE_LOADER_VERSION
             or not isinstance(source.get("revision"), str)
-            or not source["revision"]
+            or source.get("revision") != KRONOS_SOURCE_REVISION
         ):
             raise AdapterLoadError("Kronos-base manifest identity or revisions are invalid")
         return KronosAdapter(
@@ -556,7 +574,7 @@ def _load_named_adapter(
 
 
 def load_production_adapter(settings: AISettings) -> ModelAdapter:
-    """Load the sole production model, pinned Kronos-base, without fallbacks."""
+    """Load the legacy pinned Kronos-base adapter for compatibility callers."""
     return _load_named_adapter(settings, "kronos-base", require_cuda=True)
 
 

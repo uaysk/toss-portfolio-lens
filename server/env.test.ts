@@ -69,8 +69,8 @@ describe("database environment configuration", () => {
       minimumTopCount: 5,
       maximumTopCount: 50,
       ai: {
-        url: "ws://ai-worker:8765/ws/scalping-ai/v1",
-        authTokenFile: "/run/ai-auth/token",
+        url: "ws://fincast-worker:8766/ws/scalping-ai/v1",
+        authTokenFile: "/run/fincast-auth/token",
         connectTimeoutMs: 10_000,
         reconnectBaseMs: 250,
         reconnectMaxMs: 10_000,
@@ -88,9 +88,9 @@ describe("database environment configuration", () => {
       recorder: { enabled: false },
     });
     expect(config.cryptoAi).toEqual({
-      kronos: {
-        url: "ws://ai-worker:8765/ws/scalping-ai/v1",
-        authTokenFile: "/run/ai-auth/token",
+      fincast: {
+        url: "ws://fincast-worker:8766/ws/scalping-ai/v1",
+        authTokenFile: "/run/fincast-auth/token",
         timeoutMs: 120_000,
         connectTimeoutMs: 10_000,
         reconnectBaseMs: 250,
@@ -313,7 +313,7 @@ describe("database environment configuration", () => {
   it("AI WebSocket URL의 local, private opt-in, remote TLS 경계를 검증하고 비활성 시 token file을 읽지 않는다", () => {
     process.env.AI_COMPUTE_AUTH_TOKEN_FILE = "/definitely/missing/scalping-ai-token";
     expect(loadConfig().scalping.ai).toMatchObject({
-      url: "ws://ai-worker:8765/ws/scalping-ai/v1",
+      url: "ws://fincast-worker:8766/ws/scalping-ai/v1",
       authTokenFile: "/definitely/missing/scalping-ai-token",
     });
 
@@ -334,15 +334,15 @@ describe("database environment configuration", () => {
     expect(() => loadConfig()).toThrow("절대 경로");
   });
 
-  it("암호화폐 AI lane은 Kronos legacy fallback과 독립 FinCast 설정을 검증한다", () => {
+  it("암호화폐 AI lane은 FinCast main fallback과 명시적 Kronos legacy 설정을 검증한다", () => {
     writeDistinctCryptoAiTokens();
     Object.assign(process.env, {
-      AI_COMPUTE_URL: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
-      AI_COMPUTE_AUTH_TOKEN_FILE: legacyAiTokenPath,
+      AI_COMPUTE_URL: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
+      AI_COMPUTE_AUTH_TOKEN_FILE: fincastAiTokenPath,
       AI_COMPUTE_MAX_IN_FLIGHT: "1",
-      AI_FINCAST_COMPUTE_URL: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
-      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: fincastAiTokenPath,
-      AI_FINCAST_COMPUTE_MAX_IN_FLIGHT: "1",
+      AI_KRONOS_COMPUTE_URL: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
+      AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE: legacyAiTokenPath,
+      AI_KRONOS_COMPUTE_MAX_IN_FLIGHT: "1",
       AI_COMPUTE_TIMEOUT_MS: "90000",
       AI_COMPUTE_CONNECT_TIMEOUT_MS: "9000",
       AI_COMPUTE_RECONNECT_BASE_MS: "500",
@@ -356,10 +356,10 @@ describe("database environment configuration", () => {
 
     const cryptoAi = loadConfig().cryptoAi;
     expect(cryptoAi).toEqual({
-      kronos: {
-        url: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
-        authTokenFile: legacyAiTokenPath,
-        authTokenMustDifferFromFile: fincastAiTokenPath,
+      fincast: {
+        url: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
+        authTokenFile: fincastAiTokenPath,
+        authTokenMustDifferFromFile: legacyAiTokenPath,
         timeoutMs: 90_000,
         connectTimeoutMs: 9_000,
         reconnectBaseMs: 500,
@@ -368,10 +368,10 @@ describe("database environment configuration", () => {
         maximumRequestBytes: 33_554_432,
         maximumResponseBytes: 67_108_864,
       },
-      fincast: {
-        url: "wss://fincast.example.test:8766/ws/scalping-ai/v1",
-        authTokenFile: fincastAiTokenPath,
-        authTokenMustDifferFromFile: legacyAiTokenPath,
+      kronos: {
+        url: "wss://legacy-kronos.example.test:8765/ws/scalping-ai/v1",
+        authTokenFile: legacyAiTokenPath,
+        authTokenMustDifferFromFile: fincastAiTokenPath,
         timeoutMs: 90_000,
         connectTimeoutMs: 9_000,
         reconnectBaseMs: 500,
@@ -480,7 +480,7 @@ describe("database environment configuration", () => {
     });
 
     process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = kronosAiTokenPath;
-    expect(() => loadConfig()).toThrow("Kronos와 분리된 token 절대 경로");
+    expect(() => loadConfig()).toThrow("FinCast와 분리된 token 절대 경로");
     process.env.AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE = fincastAiTokenPath;
     process.env.AI_FINCAST_COMPUTE_URL = "ws://10.20.30.41:18766/ws/scalping-ai/v1";
     process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";

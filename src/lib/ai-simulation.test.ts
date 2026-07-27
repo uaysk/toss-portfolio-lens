@@ -13,9 +13,9 @@ import {
 } from "./ai-simulation";
 
 describe("AI simulation request validation", () => {
-  it("defaults to the backward-compatible single strategy", () => {
+  it("defaults to the FinCast main lane and backward-compatible single strategy", () => {
     expect(DEFAULT_AI_SIMULATION_REQUEST.strategy).toEqual({ mode: "single" });
-    expect(DEFAULT_AI_SIMULATION_REQUEST.modelLanes).toEqual(["kronos_base"]);
+    expect(DEFAULT_AI_SIMULATION_REQUEST.modelLanes).toEqual(["fincast"]);
     expect(DEFAULT_AI_SIMULATION_REQUEST.execution).toEqual({ mode: "paper" });
     expect(AI_SIMULATION_PAIR_CATALOG.map(({ id, label }) => ({ id, label }))).toEqual([
       { id: "sndk-snxx-sndq", label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)" },
@@ -133,6 +133,7 @@ describe("AI simulation request validation", () => {
     expect(validateAiSimulationRequest({
       ...DEFAULT_AI_SIMULATION_REQUEST,
       marketCountry: "US",
+      modelLanes: ["kronos_base"],
       strategy: {
         mode: "pair",
         pairId: "tsla-tsll-tslq",
@@ -141,6 +142,7 @@ describe("AI simulation request validation", () => {
     })).toEqual([]);
     expect(validateAiSimulationRequest({
       ...DEFAULT_AI_SIMULATION_REQUEST,
+      modelLanes: ["kronos_base"],
       strategy: {
         mode: "pair",
         pairId: "qqq-tqqq-sqqq",
@@ -150,6 +152,7 @@ describe("AI simulation request validation", () => {
     expect(validateAiSimulationRequest({
       ...DEFAULT_AI_SIMULATION_REQUEST,
       marketCountry: "US",
+      modelLanes: ["kronos_base"],
       strategy: {
         mode: "pair",
         pairId: "qqq-tqqq-sqqq",

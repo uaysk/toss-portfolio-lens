@@ -780,6 +780,7 @@ export class ScalpingService {
     private readonly config: ScalpingServiceConfig,
     candidateUniverse?: CandidateUniverseSelector,
     private readonly fincastAi?: AiService,
+    private readonly defaultModelLane: ScalpingForecastModelLane = "kronos_base",
   ) {
     if (!Number.isInteger(config.maximumSubscriptions)
       || config.maximumSubscriptions < config.maximumTopCount * 3) {
@@ -1130,7 +1131,7 @@ export class ScalpingService {
   ): Promise<ScalpingForecastResult> {
     throwIfAborted(options.signal);
     const request = this.forecastRequestSchema.parse(input);
-    const modelLane = options.modelLane ?? "kronos_base";
+    const modelLane = options.modelLane ?? this.defaultModelLane;
     const forecastAi = modelLane === "fincast" ? this.fincastAi : this.ai;
     if (!forecastAi || !this.rust) {
       return {
@@ -1442,7 +1443,7 @@ export class ScalpingService {
     options: ScalpingEvaluationOptions = {},
   ) {
     const request = this.evaluationRequestSchema.parse(input);
-    const modelLane = options.modelLane ?? "kronos_base";
+    const modelLane = options.modelLane ?? this.defaultModelLane;
     const evaluationAi = modelLane === "fincast" ? this.fincastAi : this.ai;
     if (!evaluationAi || !this.rust) {
       throw new Error(!evaluationAi

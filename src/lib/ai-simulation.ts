@@ -7,6 +7,7 @@ import {
   type AiSimulationModelForecast,
 } from "./ai-simulation-forecast";
 import {
+  AI_SIMULATION_MAIN_MODEL_LANE,
   AI_SIMULATION_MODEL_LANES,
   normalizeAiSimulationCryptoStatus,
   normalizeAiSimulationFuturesPositions,
@@ -28,6 +29,8 @@ export {
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_FUTURES_MARKET,
   AI_SIMULATION_EXECUTION_MODES,
+  AI_SIMULATION_LEGACY_MODEL_LANE,
+  AI_SIMULATION_MAIN_MODEL_LANE,
   AI_SIMULATION_MODEL_LANES,
   DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS,
   DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
@@ -567,7 +570,7 @@ export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
   },
   strategy: { mode: "single" },
   costs: defaultAiSimulationCosts("KR"),
-  modelLanes: ["kronos_base"],
+  modelLanes: [AI_SIMULATION_MAIN_MODEL_LANE],
   fincastCandleSeconds: 60,
   execution: { mode: "paper" },
 };

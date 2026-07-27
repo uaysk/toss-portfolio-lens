@@ -22,7 +22,8 @@ import {
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 const REPLAY_DAYS = 7;
-const EVALUATION_BAR_COUNT = REPLAY_DAYS * 24 * 60;
+const DEFAULT_REPLAY_DURATION_HOURS = REPLAY_DAYS * 24;
+const MAXIMUM_REPLAY_DURATION_HOURS = 5 * 7 * 24;
 const BINANCE_PAGE_LIMIT = 1_024;
 const ORIGIN_STRIDE_BARS = 15;
 const FUTURE_BAR_COUNT = 60;
@@ -48,6 +49,7 @@ const PINNED_GPU_DEVICE_NAME = "Tesla P40";
 const PINNED_GPU_CUDA_CAPABILITY = "6.1";
 
 export type CryptoReplayLane = "kronos_base" | "fincast";
+export type KronosReplayLoaderProfile = "base" | "kv_cache_v1";
 type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
 type ReplayPrecision = "fp16" | "fp32";
 type ReplayPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
@@ -113,6 +115,9 @@ export type CryptoModelReplayInput = {
   costAssumptions: CryptoReplayCostAssumptions;
   signal?: AbortSignal;
   deadlineMs?: number;
+  durationHours?: number;
+  endExclusive?: number;
+  kronosLoaderProfile?: KronosReplayLoaderProfile;
 };
 
 export type CryptoReplayQuantileMetric = {
@@ -139,6 +144,7 @@ export type CryptoReplayLaneResult = {
   identityVerified: boolean;
   inputDigest: string;
   recordDigest?: string;
+  predictionDigest?: string;
   effectiveContextDigest?: string;
   effectiveContextBars?: number;
   provenance?: CryptoReplayModelProvenance;
@@ -164,7 +170,8 @@ export type CryptoModelReplayResult = {
   window: {
     startAt: string;
     endExclusiveAt: string;
-    completeUtcDays: 7;
+    durationHours: number;
+    completeUtcDays: number | null;
     barCount: number;
     contextPrefetchBarCount: number;
     outcomeTailBarCount: 60;
@@ -228,6 +235,7 @@ type ExpectedRecord = {
 type ValidatedLane = {
   response: AiResponse;
   recordDigest: string;
+  predictionDigest: string;
   effectiveContextDigest: string;
   provenance: CryptoReplayModelProvenance;
   metrics: CryptoReplayHorizonMetrics[];
@@ -283,6 +291,11 @@ const pinnedModelProvenance = {
   tokenizerRevision: string | null;
 }>;
 
+const kronosLoaderVersion = {
+  base: "kronos-source-67b630e",
+  kv_cache_v1: "kronos-source-67b630e-kv-cache-v1",
+} as const satisfies Record<KronosReplayLoaderProfile, string>;
+
 function normalizedPrecisionFailureReasons(
   value: unknown,
 ): PrecisionFailureReason[] | undefined {
@@ -323,12 +336,16 @@ function replayQuantileObservations(
 function validatePinnedProvenance(
   role: CryptoReplayLane,
   model: AiResponse["model"],
+  kronosLoaderProfile: KronosReplayLoaderProfile,
 ): CryptoReplayModelProvenance {
   const pinned = pinnedModelProvenance[role];
+  const expectedLoaderVersion = role === "kronos_base"
+    ? kronosLoaderVersion[kronosLoaderProfile]
+    : pinned.loaderVersion;
   if (model.model_id !== pinned.modelId
     || model.model_revision !== pinned.modelRevision
     || model.source_revision !== pinned.sourceRevision
-    || model.loader_version !== pinned.loaderVersion
+    || model.loader_version !== expectedLoaderVersion
     || model.license !== pinned.license) {
     throw new LaneReplayValidationError(
       "MODEL_PROVENANCE_MISMATCH",
@@ -486,7 +503,7 @@ function validatePinnedProvenance(
     modelId: pinned.modelId,
     modelRevision: pinned.modelRevision,
     sourceRevision: pinned.sourceRevision,
-    loaderVersion: pinned.loaderVersion,
+    loaderVersion: expectedLoaderVersion,
     license: pinned.license,
     tokenizerId: model.tokenizer_id ?? null,
     tokenizerRevision: model.tokenizer_revision ?? null,
@@ -535,16 +552,35 @@ function normalizedSymbol(value: string): string {
   return symbol;
 }
 
-function replayWindow(now: number, contextBars: number): ReplayWindow {
+function replayWindow(
+  now: number,
+  contextBars: number,
+  durationHours: number,
+  requestedEndExclusive?: number,
+): ReplayWindow {
   if (!Number.isFinite(now) || now < DAY_MS) {
     throw new CryptoModelReplayError("invalid_input", "Replay clock returned an invalid instant.");
   }
-  const date = new Date(now);
-  const todayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-  const endExclusive = now >= todayStart + FUTURE_BAR_COUNT * MINUTE_MS
-    ? todayStart
-    : todayStart - DAY_MS;
-  const evaluationStart = endExclusive - REPLAY_DAYS * DAY_MS;
+  let endExclusive: number;
+  if (requestedEndExclusive === undefined) {
+    const date = new Date(now);
+    const todayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    endExclusive = now >= todayStart + FUTURE_BAR_COUNT * MINUTE_MS
+      ? todayStart
+      : todayStart - DAY_MS;
+  } else {
+    if (!Number.isSafeInteger(requestedEndExclusive)
+      || requestedEndExclusive <= 0
+      || requestedEndExclusive % MINUTE_MS !== 0
+      || requestedEndExclusive + FUTURE_BAR_COUNT * MINUTE_MS > now) {
+      throw new CryptoModelReplayError(
+        "invalid_input",
+        "Replay endExclusive must be an exact completed UTC minute with a complete outcome tail.",
+      );
+    }
+    endExclusive = requestedEndExclusive;
+  }
+  const evaluationStart = endExclusive - durationHours * 60 * MINUTE_MS;
   return {
     evaluationStart,
     dataStart: evaluationStart - (contextBars - 1) * MINUTE_MS,
@@ -651,13 +687,14 @@ async function loadCompleteBars(
   window: ReplayWindow,
   contextBars: number,
   authoritativeNow: number,
+  evaluationBarCount: number,
   signal: AbortSignal,
 ): Promise<BinanceKline[]> {
   const byOpenTime = new Map<number, BinanceKline>();
   let cursor = window.dataStart;
   let pageCount = 0;
   const expectedInputBarCount = (
-    EVALUATION_BAR_COUNT
+    evaluationBarCount
     + contextBars - 1
     + FUTURE_BAR_COUNT
   );
@@ -753,7 +790,7 @@ function alignedFirstOriginIndex(
   }
   throw new CryptoModelReplayError(
     "invalid_input",
-    "Seven complete days do not contain a valid walk-forward origin.",
+    "The selected replay window does not contain a valid walk-forward origin.",
   );
 }
 
@@ -864,6 +901,7 @@ function validateAndMeasure(
   request: AiEvaluateRequest,
   expected: ReadonlyMap<string, ExpectedRecord>,
   contextBars: number,
+  kronosLoaderProfile: KronosReplayLoaderProfile,
 ): ValidatedLane {
   const response = AiResponseSchema.parse(raw);
   if (response.request_id !== request.request_id || response.mode !== "evaluate") {
@@ -880,7 +918,7 @@ function validateAndMeasure(
       response.model.model_id,
     );
   }
-  const provenance = validatePinnedProvenance(role, response.model);
+  const provenance = validatePinnedProvenance(role, response.model, kronosLoaderProfile);
   if (response.error || !response.evaluation) {
     throw new LaneReplayValidationError(
       "EVALUATION_UNAVAILABLE",
@@ -933,6 +971,15 @@ function validateAndMeasure(
     actualReturn: number;
     executionReturn: number;
     roundTripCostRate: number;
+  }> = [];
+  const predictionRecords: Array<{
+    key: string;
+    status: "available" | "unavailable";
+    predictedMedianReturn: number | null;
+    predictedQuantiles: Array<{ quantile: number; value: number }>;
+    upProbability: number | null;
+    predictedFirstPassage: "target" | "stop" | "ambiguous" | null;
+    unavailableCode: string | null;
   }> = [];
   const observedKeys = new Set<string>();
   const costRate = roundTripCostRate(request.cost_assumptions);
@@ -1000,8 +1047,21 @@ function validateAndMeasure(
       executionReturn: reference.executionReturn,
       roundTripCostRate: costRate,
     });
+    predictionRecords.push({
+      key: reference.key,
+      status: record.status,
+      predictedMedianReturn: record.predicted_median_return,
+      predictedQuantiles: record.predicted_quantiles.map((item) => ({
+        quantile: item.quantile,
+        value: item.value,
+      })),
+      upProbability: record.up_probability,
+      predictedFirstPassage: record.predicted_first_passage,
+      unavailableCode: record.unavailable?.code ?? null,
+    });
   }
   realizedRecords.sort((left, right) => left.key.localeCompare(right.key));
+  predictionRecords.sort((left, right) => left.key.localeCompare(right.key));
 
   const metrics = SCALPING_AI_HORIZONS.map((horizonMinutes): CryptoReplayHorizonMetrics => {
     const records = response.evaluation!.records.filter((record) => (
@@ -1062,6 +1122,7 @@ function validateAndMeasure(
   return {
     response,
     recordDigest: digest(realizedRecords),
+    predictionDigest: digest(predictionRecords),
     effectiveContextDigest: digest(contextEvidence),
     provenance,
     metrics,
@@ -1102,7 +1163,7 @@ export class CryptoModelComparisonReplay {
     this.contextBars = finiteInteger(
       options.contextBars ?? DEFAULT_CONTEXT_BARS,
       1,
-      EVALUATION_BAR_COUNT - FUTURE_BAR_COUNT,
+      DEFAULT_CONTEXT_BARS,
       "Replay contextBars",
     );
     this.deadlineMs = finiteInteger(
@@ -1123,8 +1184,21 @@ export class CryptoModelComparisonReplay {
       MAXIMUM_DEADLINE_MS,
       "Replay deadlineMs",
     );
+    const durationHours = finiteInteger(
+      input.durationHours ?? DEFAULT_REPLAY_DURATION_HOURS,
+      1,
+      MAXIMUM_REPLAY_DURATION_HOURS,
+      "Replay durationHours",
+    );
+    const evaluationBarCount = durationHours * 60;
+    const kronosLoaderProfile = input.kronosLoaderProfile ?? "base";
     const authoritativeNow = this.clock.now();
-    const window = replayWindow(authoritativeNow, this.contextBars);
+    const window = replayWindow(
+      authoritativeNow,
+      this.contextBars,
+      durationHours,
+      input.endExclusive,
+    );
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(new CryptoModelReplayError(
       "deadline_exceeded",
@@ -1146,6 +1220,7 @@ export class CryptoModelComparisonReplay {
         window,
         this.contextBars,
         authoritativeNow,
+        evaluationBarCount,
         controller.signal,
       );
       const request = freezeDeep(buildRequest(
@@ -1174,6 +1249,7 @@ export class CryptoModelComparisonReplay {
             request,
             expected,
             this.contextBars,
+            kronosLoaderProfile,
           );
           const latencyMs = Math.max(0, this.clock.now() - startedAt);
           invocations[lane] = {
@@ -1186,6 +1262,7 @@ export class CryptoModelComparisonReplay {
               identityVerified: true,
               inputDigest,
               recordDigest: validated.recordDigest,
+              predictionDigest: validated.predictionDigest,
               effectiveContextDigest: validated.effectiveContextDigest,
               effectiveContextBars: this.contextBars,
               provenance: validated.provenance,
@@ -1254,8 +1331,9 @@ export class CryptoModelComparisonReplay {
         window: {
           startAt: new Date(window.evaluationStart).toISOString(),
           endExclusiveAt: new Date(window.endExclusive).toISOString(),
-          completeUtcDays: 7,
-          barCount: EVALUATION_BAR_COUNT,
+          durationHours,
+          completeUtcDays: durationHours % 24 === 0 ? durationHours / 24 : null,
+          barCount: evaluationBarCount,
           contextPrefetchBarCount: this.contextBars - 1,
           outcomeTailBarCount: 60,
           inputBarCount: bars.length,

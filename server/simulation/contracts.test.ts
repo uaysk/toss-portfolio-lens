@@ -37,7 +37,7 @@ describe("AI paper simulation contracts", () => {
       preset: "risk_management",
       riskTolerance: 50,
       costs: DEFAULT_SIMULATION_COSTS,
-      modelLanes: ["kronos_base"],
+      modelLanes: ["fincast"],
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     });
@@ -288,6 +288,7 @@ describe("AI paper simulation contracts", () => {
       initialCash: 1_000_000,
       durationMinutes: 60,
       selection: { mode: "manual", symbols: ["TSLA"] },
+      modelLanes: ["kronos_base"],
       strategy: {
         mode: "pair",
         pairId: "tsla-tsll-tslq",

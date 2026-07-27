@@ -1,0 +1,1303 @@
+<!doctype html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Tesla P40에서 수행한 Kronos-Base와 FinCast 48시간 모델 검증 결과 대시보드">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';">
+  <title>P40 AI Qualification · p40-20260727-104435</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: 0 0% 3.5%;
+      --foreground: 0 0% 98%;
+      --card: 0 0% 7%;
+      --card-strong: 0 0% 10%;
+      --muted: 0 0% 13%;
+      --muted-foreground: 0 0% 61%;
+      --subtle: 0 0% 42%;
+      --green: 151 70% 56%;
+      --amber: 42 92% 62%;
+      --rose: 351 90% 68%;
+      --cyan: 190 88% 62%;
+      --radius: 1.45rem;
+      --shadow: 0 24px 80px rgb(0 0 0 / 24%);
+      font-family: Inter, Pretendard, "Noto Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 0; background: hsl(var(--background)); scroll-behavior: smooth; }
+    body {
+      min-width: 0;
+      margin: 0;
+      overflow-x: hidden;
+      background:
+        radial-gradient(circle at 88% -8%, rgb(255 255 255 / 7%), transparent 34rem),
+        radial-gradient(circle at -10% 38%, hsl(var(--cyan) / 4%), transparent 28rem),
+        hsl(var(--background));
+      color: hsl(var(--foreground));
+      font-feature-settings: "tnum" 1, "ss01" 1;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { border: 0; color: inherit; font: inherit; }
+    button:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px rgb(255 255 255 / 28%);
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+
+    .shell {
+      width: min(1440px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 24px 0 72px;
+    }
+
+    .topbar, .brand, .status-line, .hero-meta, .section-head, .legend, .toggle, .gate-head, .step-head, .action-row {
+      display: flex;
+      align-items: center;
+    }
+    .topbar { justify-content: space-between; gap: 18px; padding: 4px 4px 22px; }
+    .brand { min-width: 0; gap: 11px; }
+    .mark {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      flex: none;
+      place-items: center;
+      border-radius: 12px;
+      background: hsl(var(--foreground));
+      color: hsl(var(--background));
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: -.05em;
+    }
+    .brand strong { display: block; font-size: 12px; letter-spacing: -.02em; }
+    .brand span, .timestamp { color: hsl(var(--muted-foreground)); font-size: 9px; }
+    .brand span { display: block; margin-top: 3px; }
+    .timestamp { text-align: right; line-height: 1.65; }
+
+    .card {
+      min-width: 0;
+      overflow: hidden;
+      border-radius: var(--radius);
+      background: hsl(var(--card));
+      box-shadow: var(--shadow);
+    }
+    .card.flat { box-shadow: none; }
+    .surface {
+      min-width: 0;
+      border-radius: calc(var(--radius) - .25rem);
+      background: hsl(var(--card-strong));
+    }
+
+    .hero {
+      position: relative;
+      padding: clamp(28px, 6vw, 68px);
+      background:
+        linear-gradient(135deg, rgb(255 255 255 / 7%), transparent 46%),
+        hsl(var(--card));
+    }
+    .hero::after {
+      position: absolute;
+      right: -220px;
+      bottom: -310px;
+      width: 520px;
+      height: 520px;
+      border-radius: 999px;
+      background: rgb(255 255 255 / 4%);
+      content: "";
+      pointer-events: none;
+    }
+    .eyebrow {
+      margin: 0;
+      color: hsl(var(--muted-foreground));
+      font-size: 9px;
+      font-weight: 950;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .status-line { position: relative; z-index: 1; flex-wrap: wrap; gap: 7px; }
+    .pill {
+      display: inline-flex;
+      min-height: 28px;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 0 11px;
+      border-radius: 999px;
+      background: hsl(var(--muted));
+      color: hsl(var(--muted-foreground));
+      font-size: 9px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .pill::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; opacity: .9; }
+    .pill.plain::before { display: none; }
+    .pill.green { background: hsl(var(--green) / 12%); color: hsl(var(--green)); }
+    .pill.amber { background: hsl(var(--amber) / 13%); color: hsl(var(--amber)); }
+    .pill.rose { background: hsl(var(--rose) / 13%); color: hsl(var(--rose)); }
+    .pill.cyan { background: hsl(var(--cyan) / 12%); color: hsl(var(--cyan)); }
+    .hero h1 {
+      position: relative;
+      z-index: 1;
+      max-width: 1060px;
+      margin: 18px 0 0;
+      font-size: clamp(2.35rem, 6.7vw, 6rem);
+      font-weight: 950;
+      line-height: .94;
+      letter-spacing: -.074em;
+      word-break: keep-all;
+    }
+    .hero-copy {
+      position: relative;
+      z-index: 1;
+      max-width: 850px;
+      margin: 24px 0 0;
+      color: hsl(var(--muted-foreground));
+      font-size: clamp(12px, 1.6vw, 15px);
+      line-height: 1.85;
+      word-break: keep-all;
+    }
+    .hero-meta {
+      position: relative;
+      z-index: 1;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 28px;
+    }
+    .hero-chip {
+      min-width: 148px;
+      padding: 13px 15px;
+      border-radius: 16px;
+      background: rgb(255 255 255 / 5%);
+    }
+    .hero-chip span { display: block; color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; }
+    .hero-chip strong { display: block; margin-top: 6px; font-size: 11px; }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 9px;
+      margin-top: 10px;
+    }
+    .metric { min-height: 132px; padding: 22px; }
+    .metric-label { margin: 0; color: hsl(var(--muted-foreground)); font-size: 9px; font-weight: 900; letter-spacing: .07em; }
+    .metric-value { margin: 24px 0 0; font-size: clamp(1.55rem, 3vw, 2.55rem); font-weight: 950; letter-spacing: -.055em; }
+    .metric-note { margin: 7px 0 0; color: hsl(var(--subtle)); font-size: 9px; line-height: 1.55; }
+    .tone-green { color: hsl(var(--green)); }
+    .tone-amber { color: hsl(var(--amber)); }
+    .tone-rose { color: hsl(var(--rose)); }
+    .tone-cyan { color: hsl(var(--cyan)); }
+
+    .tabs {
+      position: sticky;
+      z-index: 20;
+      top: 10px;
+      display: flex;
+      gap: 5px;
+      margin: 14px 0;
+      padding: 6px;
+      overflow-x: auto;
+      border-radius: 999px;
+      background: rgb(25 25 25 / 90%);
+      box-shadow: 0 16px 48px rgb(0 0 0 / 30%);
+      backdrop-filter: blur(18px);
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      min-height: 40px;
+      flex: 1 0 auto;
+      padding: 0 16px;
+      border-radius: 999px;
+      background: transparent;
+      color: hsl(var(--muted-foreground));
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 900;
+      transition: background .16s ease, color .16s ease;
+    }
+    .tab[aria-selected="true"] { background: hsl(var(--foreground)); color: hsl(var(--background)); }
+    [role="tabpanel"][hidden] { display: none; }
+    .panel { display: grid; min-width: 0; gap: 10px; animation: appear .18s ease-out; }
+    @keyframes appear { from { opacity: 0; transform: translateY(4px); } }
+
+    .section { padding: clamp(22px, 4vw, 38px); }
+    .section-head { align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+    .section-head h2 { margin: 5px 0 0; font-size: clamp(1.35rem, 3.4vw, 2.35rem); letter-spacing: -.05em; }
+    .section-head p:not(.eyebrow) { max-width: 760px; margin: 9px 0 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.75; }
+
+    .verdict-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 9px; }
+    .statement { min-height: 330px; padding: clamp(26px, 5vw, 46px); }
+    .statement h2 { max-width: 760px; margin: 15px 0 0; font-size: clamp(1.9rem, 5vw, 4.35rem); line-height: 1.02; letter-spacing: -.065em; word-break: keep-all; }
+    .statement > p:last-child { max-width: 760px; margin: 20px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.85; }
+    .decision-stack { display: grid; gap: 8px; }
+    .decision { min-height: 104px; padding: 20px; }
+    .decision strong { display: block; font-size: 12px; }
+    .decision p { margin: 9px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.7; }
+
+    .gate-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .gate { min-height: 142px; padding: 20px; }
+    .gate-head { justify-content: space-between; gap: 12px; }
+    .gate-head span:first-child { color: hsl(var(--muted-foreground)); font-size: 9px; font-weight: 900; }
+    .gate h3 { margin: 25px 0 0; font-size: 18px; letter-spacing: -.035em; }
+    .gate p { margin: 7px 0 0; color: hsl(var(--subtle)); font-size: 9px; line-height: 1.6; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .mini-stat { min-height: 118px; padding: 18px; }
+    .mini-stat span { display: block; color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; }
+    .mini-stat strong { display: block; margin-top: 18px; font-size: 21px; letter-spacing: -.04em; }
+    .mini-stat small { display: block; margin-top: 6px; color: hsl(var(--subtle)); font-size: 8px; line-height: 1.5; }
+
+    .chart-grid { display: grid; grid-template-columns: 1.35fr .65fr; gap: 10px; }
+    .chart-card { min-width: 0; padding: clamp(20px, 3vw, 28px); }
+    .chart-card h3 { margin: 0; font-size: 13px; letter-spacing: -.02em; }
+    .chart-card > p { margin: 7px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.6; }
+    .chart-wrap { position: relative; height: 310px; margin-top: 16px; }
+    .chart-wrap.short { height: 240px; }
+    .legend { flex-wrap: wrap; gap: 12px; margin-top: 13px; color: hsl(var(--muted-foreground)); font-size: 8px; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .legend .base { color: hsl(var(--foreground)); }
+    .legend .cache { color: hsl(var(--amber)); }
+    .legend .fincast { color: hsl(var(--cyan)); }
+
+    .toggle {
+      gap: 5px;
+      margin-top: 17px;
+      padding: 4px;
+      overflow-x: auto;
+      border-radius: 14px;
+      background: hsl(var(--muted));
+      scrollbar-width: none;
+    }
+    .toggle::-webkit-scrollbar { display: none; }
+    .toggle button {
+      min-height: 36px;
+      flex: 1 0 max-content;
+      padding: 0 12px;
+      border-radius: 10px;
+      background: transparent;
+      color: hsl(var(--muted-foreground));
+      cursor: pointer;
+      font-size: 9px;
+      font-weight: 900;
+    }
+    .toggle button[aria-pressed="true"] { background: hsl(var(--foreground)); color: hsl(var(--background)); }
+
+    .speed-list { display: grid; gap: 18px; margin-top: 22px; }
+    .speed-row { min-width: 0; }
+    .speed-label { display: flex; justify-content: space-between; gap: 16px; font-size: 9px; }
+    .speed-label span { color: hsl(var(--muted-foreground)); }
+    .bar-track { position: relative; height: 9px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: hsl(var(--muted)); }
+    .bar { height: 100%; border-radius: inherit; background: hsl(var(--foreground)); }
+    .bar.cache { background: hsl(var(--amber)); }
+
+    .matrix { display: grid; grid-template-columns: minmax(110px, 1.25fr) repeat(4, minmax(72px, .75fr)); gap: 5px; margin-top: 18px; }
+    .matrix > div { min-width: 0; padding: 11px 10px; border-radius: 11px; background: hsl(var(--card-strong)); font-size: 8px; text-align: center; }
+    .matrix .head { color: hsl(var(--muted-foreground)); font-weight: 900; }
+    .matrix .row-label { color: hsl(var(--foreground)); font-weight: 900; text-align: left; }
+    .matrix .pass { color: hsl(var(--green)); }
+    .matrix .fail { color: hsl(var(--rose)); }
+
+    .table-wrap { margin-top: 18px; overflow-x: auto; scrollbar-width: thin; }
+    table { width: 100%; min-width: 860px; border-collapse: separate; border-spacing: 0 6px; font-size: 9px; text-align: left; }
+    th { padding: 5px 11px; color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; }
+    td { padding: 12px 11px; background: hsl(var(--card-strong)); }
+    td:first-child { border-radius: 12px 0 0 12px; font-weight: 900; }
+    td:last-child { border-radius: 0 12px 12px 0; }
+    td.good { color: hsl(var(--cyan)); }
+    td.warn { color: hsl(var(--amber)); }
+
+    .candidate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .candidate { min-height: 250px; padding: 22px; }
+    .candidate-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .candidate h3 { margin: 0; font-size: 21px; letter-spacing: -.04em; }
+    .candidate .big { margin-top: 28px; font-size: 35px; font-weight: 950; letter-spacing: -.06em; }
+    .candidate .big span { color: hsl(var(--muted-foreground)); font-size: 12px; }
+    .candidate p { margin: 7px 0 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.65; }
+    .candidate dl { display: grid; grid-template-columns: 1fr auto; gap: 9px 12px; margin: 24px 0 0; font-size: 9px; }
+    .candidate dt { color: hsl(var(--muted-foreground)); }
+    .candidate dd { margin: 0; font-weight: 900; }
+
+    .callout { padding: clamp(22px, 4vw, 34px); }
+    .callout h3 { margin: 0; font-size: clamp(1.25rem, 3vw, 2rem); letter-spacing: -.045em; }
+    .callout p { margin: 13px 0 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.8; }
+    .callout.amber-wash { background: linear-gradient(135deg, hsl(var(--amber) / 10%), hsl(var(--card-strong)) 50%); }
+    .callout.rose-wash { background: linear-gradient(135deg, hsl(var(--rose) / 10%), hsl(var(--card-strong)) 50%); }
+    .callout.cyan-wash { background: linear-gradient(135deg, hsl(var(--cyan) / 8%), hsl(var(--card-strong)) 50%); }
+
+    .step-list { display: grid; gap: 6px; }
+    .step {
+      display: grid;
+      grid-template-columns: 34px minmax(180px, 1fr) minmax(90px, .7fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 13px 15px;
+    }
+    .step-index { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 50%; background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); font-size: 8px; font-weight: 900; }
+    .step h4 { margin: 0; font-size: 10px; }
+    .step p { margin: 5px 0 0; color: hsl(var(--subtle)); font-size: 8px; overflow-wrap: anywhere; }
+    .step-duration { color: hsl(var(--muted-foreground)); font-size: 9px; text-align: right; }
+    .step-share { height: 7px; overflow: hidden; border-radius: 999px; background: hsl(var(--muted)); }
+    .step-share span { display: block; min-width: 2px; height: 100%; border-radius: inherit; background: hsl(var(--foreground)); }
+    .step.failed .step-share span { background: hsl(var(--rose)); }
+
+    .facts { display: grid; gap: 6px; margin: 0; }
+    .fact { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 16px; padding: 14px 16px; border-radius: 13px; background: hsl(var(--card-strong)); font-size: 9px; line-height: 1.65; }
+    .fact dt { color: hsl(var(--muted-foreground)); font-weight: 900; }
+    .fact dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+
+    details { border-radius: 15px; background: hsl(var(--card-strong)); }
+    summary { padding: 16px 18px; cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 9px; font-weight: 900; list-style: none; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { float: right; content: "+"; }
+    details[open] summary::after { content: "−"; }
+    pre { max-height: 460px; margin: 0; padding: 0 18px 18px; overflow: auto; color: hsl(var(--muted-foreground)); font-size: 8px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+    .action-row { flex-wrap: wrap; gap: 7px; margin-top: 15px; }
+    .action {
+      min-height: 36px;
+      padding: 0 13px;
+      border-radius: 999px;
+      background: hsl(var(--foreground));
+      color: hsl(var(--background));
+      cursor: pointer;
+      font-size: 9px;
+      font-weight: 900;
+    }
+    .action.secondary { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+
+    footer { padding: 28px 5px 0; color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.75; }
+
+    @media (max-width: 1100px) {
+      .metrics, .gate-grid, .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .verdict-grid, .chart-grid { grid-template-columns: 1fr; }
+      .statement { min-height: 0; }
+    }
+    @media (max-width: 820px) {
+      .candidate-grid, .grid-3 { grid-template-columns: 1fr; }
+      .grid-2 { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 30px minmax(0, 1fr) auto; }
+      .step-share { grid-column: 2 / -1; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 20px, 1440px); padding-top: 10px; }
+      .topbar { align-items: flex-start; }
+      .hero { padding: 28px 21px; }
+      .hero h1 { font-size: 2.45rem; line-height: 1.02; letter-spacing: -.06em; }
+      .hero-chip { min-width: calc(50% - 4px); flex: 1; }
+      .metrics, .gate-grid, .grid-4 { grid-template-columns: 1fr; }
+      .tabs { top: 4px; }
+      .tab { min-height: 44px; padding: 0 13px; }
+      .section-head { flex-direction: column; }
+      .matrix { grid-template-columns: minmax(92px, 1.1fr) repeat(4, minmax(54px, .7fr)); overflow-x: auto; }
+      .fact { grid-template-columns: 1fr; gap: 4px; }
+      .chart-wrap { height: 255px; }
+      .candidate { min-height: 0; }
+      .timestamp { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .panel { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">PL</div>
+        <span>
+          <strong>Portfolio Lens · AI Qualification</strong>
+          <span>Standalone result dashboard · embedded source data</span>
+        </span>
+      </div>
+      <div class="timestamp">
+        2026.07.27 10:54 → 14:48 KST<br>
+        Tesla P40 · CUDA 6.1 · FP32
+      </div>
+    </div>
+
+    <header class="hero card">
+      <div class="status-line">
+        <span class="pill amber">일부 실패로 완료</span>
+        <span class="pill green">예산 내 완료</span>
+        <span class="pill plain">48시간 screening</span>
+      </div>
+      <h1>15배 빨라졌지만,<br>같은 예측은 아니었습니다.</h1>
+      <p class="hero-copy">
+        BTCUSDT·ETHUSDT 각각 192개 origin을 같은 입력·record·context로 비교했습니다.
+        Kronos KV cache는 큰 속도 이득을 냈지만 prediction digest와 품질 지표가 달라 승격할 수 없습니다.
+        FinCast는 측정된 batch 4·16에서 반복 출력이 안정적이었고, batch 8은 모델이 아니라 컨테이너 lifecycle 경합으로 미측정입니다.
+      </p>
+      <div class="hero-meta">
+        <div class="hero-chip"><span>RUN ID</span><strong class="mono">p40-20260727-104435</strong></div>
+        <div class="hero-chip"><span>WINDOW</span><strong>2026.07.25–07.27 · 48h</strong></div>
+        <div class="hero-chip"><span>ORIGINS</span><strong>192 × 2 symbols</strong></div>
+        <div class="hero-chip"><span>DOCKER BUILD</span><strong>Skipped · source bind</strong></div>
+      </div>
+    </header>
+
+    <section class="metrics" aria-label="핵심 실행 지표">
+      <article class="metric card flat">
+        <p class="metric-label">실제 실행 시간</p>
+        <p class="metric-value">3h 53m</p>
+        <p class="metric-note">6시간 예산의 64.9% 사용</p>
+      </article>
+      <article class="metric card flat">
+        <p class="metric-label">Kronos cache speedup</p>
+        <p class="metric-value tone-amber">15.28×</p>
+        <p class="metric-note">BTC·ETH 단순 평균 · parity는 실패</p>
+      </article>
+      <article class="metric card flat">
+        <p class="metric-label">FinCast 최저 median</p>
+        <p class="metric-value tone-cyan">235.1ms</p>
+        <p class="metric-note">batch 4 · 5회 모두 동일 digest</p>
+      </article>
+      <article class="metric card flat">
+        <p class="metric-label">완료 단계</p>
+        <p class="metric-value">8 / 9</p>
+        <p class="metric-note">batch 8만 인프라 오류로 미측정</p>
+      </article>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="결과 대시보드 섹션">
+      <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true" tabindex="0">판정 요약</button>
+      <button class="tab" role="tab" id="tab-accuracy" aria-controls="panel-accuracy" aria-selected="false" tabindex="-1">모델 예측 정확도</button>
+      <button class="tab" role="tab" id="tab-kronos" aria-controls="panel-kronos" aria-selected="false" tabindex="-1">Kronos cache</button>
+      <button class="tab" role="tab" id="tab-fincast" aria-controls="panel-fincast" aria-selected="false" tabindex="-1">FinCast batch</button>
+      <button class="tab" role="tab" id="tab-evidence" aria-controls="panel-evidence" aria-selected="false" tabindex="-1">실행·근거</button>
+    </nav>
+
+    <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" class="panel">
+      <div class="verdict-grid">
+        <article class="statement surface">
+          <p class="eyebrow">EXECUTIVE VERDICT</p>
+          <h2>속도 후보는 찾았고,<br>승격 근거는 아직 없습니다.</h2>
+          <p>
+            Kronos cache는 재설계 또는 정확성 보존 전략이 필요합니다. FinCast는 batch 4를 low-latency 후보,
+            batch 16을 throughput 후보로 유지할 수 있지만 batch 8 재측정과 5주 out-of-sample 검증 전에는 최종 채택하지 않습니다.
+          </p>
+        </article>
+        <div class="decision-stack">
+          <article class="decision surface">
+            <strong class="tone-rose">Kronos KV cache · 승격 금지</strong>
+            <p>두 심볼 모두 prediction digest 불일치. 최대 지표 차이 16.67%p.</p>
+          </article>
+          <article class="decision surface">
+            <strong class="tone-cyan">FinCast batch 4 · latency 후보</strong>
+            <p>median 235.1ms, p95 281.3ms, 반복 출력 digest 안정.</p>
+          </article>
+          <article class="decision surface">
+            <strong class="tone-amber">FinCast batch 8 · 재실행 필요</strong>
+            <p>Docker name conflict로 모델 요청 전 실패. 안정성 실패로 해석하면 안 됨.</p>
+          </article>
+        </div>
+      </div>
+
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">QUALIFICATION GATES</p>
+            <h2>무엇이 통과했고 무엇이 남았나</h2>
+            <p>최종 state와 원본 JSON을 함께 읽어 모델 결과와 실행 인프라 문제를 구분했습니다.</p>
+          </div>
+          <span class="pill plain">final state · 8 complete / 1 failed</span>
+        </div>
+        <div class="gate-grid">
+          <article class="gate surface">
+            <div class="gate-head"><span>동일 입력 비교</span><span class="pill green">PASS</span></div>
+            <h3>Comparable</h3>
+            <p>identity·input·record·origin·context·cost·fill barrier 일치.</p>
+          </article>
+          <article class="gate surface">
+            <div class="gate-head"><span>Kronos cache parity</span><span class="pill rose">FAIL</span></div>
+            <h3>Digest mismatch</h3>
+            <p>속도 이득과 무관하게 기존 decoder와 수치적으로 비동등.</p>
+          </article>
+          <article class="gate surface">
+            <div class="gate-head"><span>FinCast 관측 안정성</span><span class="pill green">PASS*</span></div>
+            <h3>4 &amp; 16 stable</h3>
+            <p>*batch 8은 미측정. 관측된 두 후보의 5회 digest는 각각 동일.</p>
+          </article>
+          <article class="gate surface">
+            <div class="gate-head"><span>6시간 예산</span><span class="pill green">PASS</span></div>
+            <h3>2h 06m 여유</h3>
+            <p>총 3h 53m 41s, 예산 64.9% 사용.</p>
+          </article>
+        </div>
+      </article>
+
+      <div class="grid-2">
+        <article class="chart-card card flat">
+          <h3>Kronos 처리 시간 · base vs cache</h3>
+          <p>같은 48시간·192 origin 처리. 막대 길이는 각 심볼 base 시간을 100으로 정규화.</p>
+          <div class="legend"><span class="base"><i></i>기준선</span><span class="cache"><i></i>KV cache</span></div>
+          <div class="speed-list">
+            <div class="speed-row">
+              <div class="speed-label"><strong>BTCUSDT · base</strong><span>6,500.9s</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>BTCUSDT · cache</strong><span>426.6s · 15.24×</span></div>
+              <div class="bar-track"><div class="bar cache" style="width:6.56%"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>ETHUSDT · base</strong><span>6,530.9s</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>ETHUSDT · cache</strong><span>426.3s · 15.32×</span></div>
+              <div class="bar-track"><div class="bar cache" style="width:6.53%"></div></div>
+            </div>
+          </div>
+        </article>
+        <article class="callout surface amber-wash">
+          <p class="eyebrow">INTERPRETATION LIMIT</p>
+          <h3>48시간 screening은 성과 개선을 확정하지 않습니다.</h3>
+          <p>
+            이 결과는 속도·출력 동등성·기초 예측 지표를 좁은 구간에서 거르는 단계입니다.
+            시장 국면을 포함한 모델 또는 지표 개선 판단에는 최소 5주 out-of-sample replay,
+            비용 후 성과·drawdown·turnover·calibration 비교가 추가로 필요합니다.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="panel-accuracy" role="tabpanel" aria-labelledby="tab-accuracy" class="panel" hidden>
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">BASELINE MODEL ACCURACY</p>
+            <h2>Kronos-Base와 FinCast의 예측 정확도 차이</h2>
+            <p>cache 후보가 아닌 각 모델 기준선 결과만 사용합니다. 동일한 48시간·192 origin·512 context에서 horizon별로 비교합니다.</p>
+          </div>
+          <span class="pill cyan">동일 입력 기준</span>
+        </div>
+        <div class="grid-4">
+          <article class="mini-stat surface">
+            <span>방향 정확도 · 단순 평균</span>
+            <strong>48.89% <small style="display:inline;color:hsl(var(--subtle))">Kronos</small></strong>
+            <small>FinCast 49.67% · +0.78%p</small>
+          </article>
+          <article class="mini-stat surface">
+            <span>Mean pinball loss</span>
+            <strong class="tone-cyan">−66.6%</strong>
+            <small>FinCast 0.000301 · Kronos 0.000902</small>
+          </article>
+          <article class="mini-stat surface">
+            <span>Median return MAE</span>
+            <strong class="tone-cyan">−57.6%</strong>
+            <small>FinCast 0.000961 · Kronos 0.002267</small>
+          </article>
+          <article class="mini-stat surface">
+            <span>최대 절대 calibration error</span>
+            <strong class="tone-cyan">−74.0%</strong>
+            <small>FinCast 10.17%p · Kronos 39.13%p</small>
+          </article>
+        </div>
+        <p class="metric-note" style="margin-top:12px">
+          종합치는 BTC/ETH × 5/15/30/60분 8개 관측의 단순 평균입니다. metric별 scale과 horizon 난이도가 달라 자동 우승 점수로 사용하지 않습니다.
+        </p>
+      </article>
+
+      <div class="chart-grid">
+        <article class="chart-card card flat">
+          <h3>Horizon별 기준선 정확도</h3>
+          <p id="accuracy-description">방향 정확도 · 높을수록 좋음</p>
+          <div class="legend"><span class="base"><i></i>Kronos-Base</span><span class="fincast"><i></i>FinCast</span></div>
+          <div class="toggle" role="group" aria-label="정확도 심볼 선택">
+            <button data-accuracy-symbol="BTCUSDT" aria-pressed="true">BTCUSDT</button>
+            <button data-accuracy-symbol="ETHUSDT" aria-pressed="false">ETHUSDT</button>
+          </div>
+          <div class="toggle" role="group" aria-label="정확도 지표 선택">
+            <button data-accuracy-metric="direction" aria-pressed="true">방향 정확도</button>
+            <button data-accuracy-metric="pinball" aria-pressed="false">Pinball loss</button>
+            <button data-accuracy-metric="mae" aria-pressed="false">Return MAE</button>
+            <button data-accuracy-metric="calibration" aria-pressed="false">Calibration error</button>
+          </div>
+          <div class="chart-wrap"><canvas id="accuracy-chart" role="img" aria-label="Kronos-Base와 FinCast 기준선 예측 정확도 비교 차트"></canvas></div>
+        </article>
+        <article class="chart-card card flat">
+          <h3>모델별 요약</h3>
+          <p>낮은 loss·MAE·calibration error는 더 나은 확률/수익률 분포 적합을 뜻합니다.</p>
+          <div class="speed-list" style="margin-top:25px">
+            <div class="speed-row">
+              <div class="speed-label"><strong>FinCast / Kronos pinball</strong><span>33.4%</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%;opacity:.28"></div><div class="bar" style="position:absolute;inset:0 auto 0 0;width:33.4%;background:hsl(var(--cyan))"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>FinCast / Kronos MAE</strong><span>42.4%</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%;opacity:.28"></div><div class="bar" style="position:absolute;inset:0 auto 0 0;width:42.4%;background:hsl(var(--cyan))"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>FinCast / Kronos calibration</strong><span>26.0%</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%;opacity:.28"></div><div class="bar" style="position:absolute;inset:0 auto 0 0;width:26%;background:hsl(var(--cyan))"></div></div>
+            </div>
+          </div>
+          <div class="callout surface cyan-wash" style="margin-top:24px;padding:20px">
+            <h3 style="font-size:16px">짧은 구간의 관측</h3>
+            <p>
+              FinCast는 분포 손실과 calibration에서 일관되게 낮았지만 방향 정확도 우위는 평균 +0.78%p로 작고
+              심볼·horizon별로 뒤집힙니다. “FinCast가 더 정확하다”는 최종 결론은 5주 검증 전에는 보류합니다.
+            </p>
+          </div>
+        </article>
+      </div>
+
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">DETAILED BASELINE METRICS</p>
+            <h2>심볼·horizon별 차이</h2>
+          </div>
+          <span class="pill plain">direction ↑ · others ↓</span>
+        </div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="모델 기준선 예측 지표 상세 표">
+          <table>
+            <thead>
+              <tr><th>심볼</th><th>Horizon</th><th>모델</th><th>방향 정확도</th><th>Mean pinball</th><th>Median return MAE</th><th>Max |calibration error|</th></tr>
+            </thead>
+            <tbody id="accuracy-table"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section id="panel-kronos" role="tabpanel" aria-labelledby="tab-kronos" class="panel" hidden>
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">KRONOS KV-CACHE-V1</p>
+            <h2>속도와 동등성은 별개의 gate입니다.</h2>
+            <p>입력·record·context digest는 같지만 prediction digest가 다릅니다. 지표가 일부 좋아진 구간도 “동등”을 의미하지 않습니다.</p>
+          </div>
+          <span class="pill rose">승격 금지</span>
+        </div>
+        <div class="grid-4">
+          <article class="mini-stat surface"><span>BTC speedup</span><strong class="tone-amber">15.24×</strong><small>6,500.9s → 426.6s</small></article>
+          <article class="mini-stat surface"><span>ETH speedup</span><strong class="tone-amber">15.32×</strong><small>6,530.9s → 426.3s</small></article>
+          <article class="mini-stat surface"><span>BTC max metric delta</span><strong class="tone-rose">16.67%p</strong><small>summary parity gate 기준</small></article>
+          <article class="mini-stat surface"><span>ETH max metric delta</span><strong class="tone-rose">16.15%p</strong><small>summary parity gate 기준</small></article>
+        </div>
+      </article>
+
+      <div class="chart-grid">
+        <article class="chart-card card flat">
+          <h3>Base · cache · FinCast 품질 지표</h3>
+          <p id="kronos-description">방향 정확도 · 높을수록 좋음</p>
+          <div class="legend"><span class="base"><i></i>Kronos base</span><span class="cache"><i></i>KV cache</span><span class="fincast"><i></i>FinCast</span></div>
+          <div class="toggle" role="group" aria-label="Kronos 심볼 선택">
+            <button data-kronos-symbol="BTCUSDT" aria-pressed="true">BTCUSDT</button>
+            <button data-kronos-symbol="ETHUSDT" aria-pressed="false">ETHUSDT</button>
+          </div>
+          <div class="toggle" role="group" aria-label="Kronos 지표 선택">
+            <button data-kronos-metric="direction" aria-pressed="true">방향 정확도</button>
+            <button data-kronos-metric="pinball" aria-pressed="false">Pinball loss</button>
+            <button data-kronos-metric="mae" aria-pressed="false">Return MAE</button>
+            <button data-kronos-metric="calibration" aria-pressed="false">Calibration error</button>
+          </div>
+          <div class="chart-wrap"><canvas id="kronos-chart" role="img" aria-label="Kronos base와 KV cache 및 FinCast의 horizon별 지표 비교"></canvas></div>
+        </article>
+        <article class="chart-card card flat">
+          <h3>Digest parity</h3>
+          <p>base와 cache를 심볼별로 직접 비교한 결과.</p>
+          <div class="matrix">
+            <div class="head">심볼</div><div class="head">Input</div><div class="head">Record</div><div class="head">Context</div><div class="head">Prediction</div>
+            <div class="row-label">BTCUSDT</div><div class="pass">MATCH</div><div class="pass">MATCH</div><div class="pass">MATCH</div><div class="fail">MISMATCH</div>
+            <div class="row-label">ETHUSDT</div><div class="pass">MATCH</div><div class="pass">MATCH</div><div class="pass">MATCH</div><div class="fail">MISMATCH</div>
+          </div>
+          <div class="callout surface rose-wash" style="margin-top:22px;padding:20px">
+            <h3 style="font-size:16px">왜 달라졌나</h3>
+            <p>
+              512 context가 가득 찬 sliding 전환 뒤 base decoder는 오래된 token을 버리고 전체 window hidden state를 다시 계산합니다.
+              cache 후보는 남은 token의 과거 hidden state를 유지하므로 수치적으로 동일하지 않습니다.
+            </p>
+          </div>
+        </article>
+      </div>
+
+      <article class="callout surface amber-wash">
+        <h3>다음 비교는 exact-cache · periodic re-prefill · 5/15분 context 정책입니다.</h3>
+        <p>
+          각 후보를 동일 origin에서 base와 다시 비교하고 prediction digest 또는 승인된 tolerance gate를 통과시킨 뒤에만
+          5주 성과 검증으로 확장합니다. 현재 구현은 실험 플래그로 유지하고 production 기본값은 비활성으로 둡니다.
+        </p>
+      </article>
+    </section>
+
+    <section id="panel-fincast" role="tabpanel" aria-labelledby="tab-fincast" class="panel" hidden>
+      <article class="candidate-grid">
+        <article class="candidate card flat">
+          <div class="candidate-top"><h3>Batch 4</h3><span class="pill green">STABLE</span></div>
+          <div class="big">235.1<span> ms</span></div>
+          <p>가장 낮은 외부 median. 실시간 latency 우선 후보.</p>
+          <dl><dt>p95</dt><dd>281.3ms</dd><dt>model median</dt><dd>154.0ms</dd><dt>throughput</dt><dd>17.01 series/s</dd><dt>per series</dt><dd>58.79ms</dd></dl>
+        </article>
+        <article class="candidate card flat">
+          <div class="candidate-top"><h3>Batch 8</h3><span class="pill rose">NO DATA</span></div>
+          <div class="big">—</div>
+          <p>모델 실행 전 Docker container name conflict로 실패.</p>
+          <dl><dt>분류</dt><dd class="tone-rose">infra race</dd><dt>model output</dt><dd>없음</dd><dt>stability</dt><dd>판정 불가</dd><dt>조치</dt><dd>재실행</dd></dl>
+        </article>
+        <article class="candidate card flat">
+          <div class="candidate-top"><h3>Batch 16</h3><span class="pill green">STABLE</span></div>
+          <div class="big">465.3<span> ms</span></div>
+          <p>median은 1.98배지만 4배 시계열을 처리해 throughput 우위.</p>
+          <dl><dt>p95</dt><dd>553.4ms</dd><dt>model median</dt><dd>192.2ms</dd><dt>throughput</dt><dd>34.39 series/s</dd><dt>per series</dt><dd>29.08ms</dd></dl>
+        </article>
+      </article>
+
+      <div class="chart-grid">
+        <article class="chart-card card flat">
+          <h3>Latency와 처리량의 trade-off</h3>
+          <p id="fincast-description">외부 왕복 median/p95 · 낮을수록 좋음</p>
+          <div class="toggle" role="group" aria-label="FinCast 차트 지표 선택">
+            <button data-fincast-metric="latency" aria-pressed="true">Latency</button>
+            <button data-fincast-metric="throughput" aria-pressed="false">Throughput</button>
+          </div>
+          <div class="chart-wrap"><canvas id="fincast-chart" role="img" aria-label="FinCast batch별 latency와 처리량 비교"></canvas></div>
+        </article>
+        <article class="chart-card card flat">
+          <h3>Batch 16의 의미</h3>
+          <p>4배 많은 series를 1.98배 시간에 처리했습니다.</p>
+          <div class="speed-list" style="margin-top:25px">
+            <div class="speed-row">
+              <div class="speed-label"><strong>Batch 4 throughput</strong><span>17.01 series/s</span></div>
+              <div class="bar-track"><div class="bar" style="width:49.47%;background:hsl(var(--cyan))"></div></div>
+            </div>
+            <div class="speed-row">
+              <div class="speed-label"><strong>Batch 16 throughput</strong><span>34.39 series/s</span></div>
+              <div class="bar-track"><div class="bar" style="width:100%;background:hsl(var(--cyan))"></div></div>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-top:24px">
+            <article class="mini-stat surface"><span>처리량 증가</span><strong class="tone-cyan">2.02×</strong><small>batch 4 대비</small></article>
+            <article class="mini-stat surface"><span>series당 시간</span><strong class="tone-cyan">−50.5%</strong><small>58.79 → 29.08ms</small></article>
+          </div>
+        </article>
+      </div>
+
+      <article class="callout surface rose-wash">
+        <p class="eyebrow">BATCH 8 FAILURE ANALYSIS</p>
+        <h3>모델 안정성 실패가 아니라 container 제거 완료 전 재생성 경합입니다.</h3>
+        <p>
+          직전 FinCast container에 stop을 보낸 직후 같은 이름으로 `docker run --rm`을 수행했고,
+          Docker가 이전 container를 아직 제거하지 않아 exit 125 `name is already in use`가 발생했습니다.
+          러너에 removal 완료 대기 또는 고유 generation 이름을 추가한 뒤 batch 8만 재실행해야 합니다.
+        </p>
+      </article>
+    </section>
+
+    <section id="panel-evidence" role="tabpanel" aria-labelledby="tab-evidence" class="panel" hidden>
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">EXECUTION TIMELINE</p>
+            <h2>3시간 53분의 대부분은 base replay였습니다.</h2>
+            <p>단계 duration을 최종 state 기준으로 표시합니다. base BTC·ETH가 전체 시간의 93.4%를 차지했습니다.</p>
+          </div>
+          <span class="pill green">production workers restored</span>
+        </div>
+        <div class="step-list" id="step-list"></div>
+      </article>
+
+      <div class="grid-2">
+        <article class="card flat section">
+          <div class="section-head">
+            <div><p class="eyebrow">MODEL PROVENANCE</p><h2>고정된 실행 경계</h2></div>
+          </div>
+          <dl class="facts">
+            <div class="fact"><dt>Kronos</dt><dd>NeoQuasar/Kronos-base · model <span class="mono">2b554741…</span> · loader <span class="mono">kronos-source-67b630e</span></dd></div>
+            <div class="fact"><dt>Kronos cache</dt><dd><span class="mono">kronos-source-67b630e-kv-cache-v1</span> · 실험 플래그</dd></div>
+            <div class="fact"><dt>FinCast</dt><dd>Vincent05R/FinCast · model <span class="mono">2d7d90b1…</span> · loader <span class="mono">fincast-source-488b19d</span></dd></div>
+            <div class="fact"><dt>Precision</dt><dd>FP32 · math SDPA · BF16 미사용 · Tesla P40 capability 6.1</dd></div>
+            <div class="fact"><dt>Replay</dt><dd>2,880 bars + 511 prefetch + 60 outcome tail · 192 origins · 15분 stride · 512 context</dd></div>
+            <div class="fact"><dt>Costs</dt><dd>commission 4bps/side · spread 2bps round-trip · slippage 1bps/side</dd></div>
+          </dl>
+        </article>
+        <article class="card flat section">
+          <div class="section-head">
+            <div><p class="eyebrow">DATA INTEGRITY</p><h2>worker 원본과 일치</h2><p>다운로드한 21개 파일의 SHA-256을 worker-1 원본과 대조했습니다.</p></div>
+            <span class="pill green">21 / 21</span>
+          </div>
+          <dl class="facts">
+            <div class="fact"><dt>qualification-summary.json</dt><dd class="mono">3beee8423d7c342b…</dd></div>
+            <div class="fact"><dt>state.json</dt><dd class="mono">e8ab3010defa2716…</dd></div>
+            <div class="fact"><dt>base-BTCUSDT.json</dt><dd class="mono">e949418c10d03f45…</dd></div>
+            <div class="fact"><dt>base-ETHUSDT.json</dt><dd class="mono">232e6c7593309059…</dd></div>
+            <div class="fact"><dt>kv-cache-v1-BTCUSDT.json</dt><dd class="mono">e3b76d6779a4851b…</dd></div>
+            <div class="fact"><dt>kv-cache-v1-ETHUSDT.json</dt><dd class="mono">80b811bc0faae43c…</dd></div>
+          </dl>
+        </article>
+      </div>
+
+      <article class="card flat section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">EMBEDDED RESULT DATA</p>
+            <h2>이 HTML 하나로 결과를 다시 확인할 수 있습니다.</h2>
+            <p>차트를 그리는 정규화 데이터와 최종 state 요약을 파일 내부 JavaScript object로 포함했습니다.</p>
+          </div>
+        </div>
+        <details>
+          <summary>내장 결과 JSON 보기</summary>
+          <pre id="raw-json"></pre>
+        </details>
+        <div class="action-row">
+          <button class="action" type="button" id="copy-json">JSON 복사</button>
+          <button class="action secondary" type="button" id="download-json">JSON 다운로드</button>
+          <span id="copy-status" class="metric-note" role="status" aria-live="polite"></span>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      이 대시보드는 run <span class="mono">p40-20260727-104435</span>의 최종 state와 검증된 원본 JSON에서 생성했습니다.
+      자동 winner를 선택하지 않으며 48시간 screening을 5주 out-of-sample 검증의 대체물로 사용하지 않습니다.
+    </footer>
+  </main>
+
+  <script>
+    "use strict";
+
+    const DATA = {
+      run: {
+        id: "p40-20260727-104435",
+        status: "completed_with_failures",
+        startedAt: "2026-07-27T01:54:25.225Z",
+        finishedAt: "2026-07-27T05:48:07.185Z",
+        elapsedMs: 14021961,
+        budgetMs: 21600000,
+        remainingBudgetMs: 7578026,
+        symbols: ["BTCUSDT", "ETHUSDT"],
+        durationHours: 48,
+        originsPerSymbol: 192,
+        contextBars: 512,
+        verifiedFiles: 21
+      },
+      gates: {
+        replayComparable: true,
+        kronosKvCacheParity: false,
+        observedFincastCandidatesStable: true,
+        fincastBatch8Measured: false,
+        withinBudget: true
+      },
+      baseline: {
+        aggregate: {
+          kronos_base: { direction: 0.4889322916666667, pinball: 0.0009016750317385792, mae: 0.002267499538534666, calibration: 0.3912760416666667 },
+          fincast: { direction: 0.4967447916666667, pinball: 0.00030141958924364935, mae: 0.0009607302790572764, calibration: 0.10169270833333333 }
+        },
+        BTCUSDT: [
+          { h: 5,  kronos_base: { direction: .4895833333333333, pinball: .00013560632609851446, mae: .000397663969582624, calibration: .19166666666666665 }, fincast: { direction: .453125, pinball: .00012069570052273864, mae: .0003881489353968146, calibration: .06458333333333333 } },
+          { h: 15, kronos_base: { direction: .4635416666666667, pinball: .0002341158769128839, mae: .000670831535360108, calibration: .2729166666666666 }, fincast: { direction: .5104166666666666, pinball: .00018538148352353784, mae: .0005968205917800234, calibration: .08020833333333333 } },
+          { h: 30, kronos_base: { direction: .5729166666666666, pinball: .000639576891777471, mae: .001811136975789812, calibration: .390625 }, fincast: { direction: .53125, pinball: .00025736710566034093, mae: .0008073298861267699, calibration: .11458333333333334 } },
+          { h: 60, kronos_base: { direction: .5520833333333334, pinball: .0015644618106225561, mae: .003570536564741548, calibration: .5541666666666667 }, fincast: { direction: .4947916666666667, pinball: .0003834375103664102, mae: .0012411025787418186, calibration: .08854166666666669 } }
+        ],
+        ETHUSDT: [
+          { h: 5,  kronos_base: { direction: .4739583333333333, pinball: .00022820006147504537, mae: .0006536378622506309, calibration: .2333333333333334 }, fincast: { direction: .4791666666666667, pinball: .00018830920652201428, mae: .0006143141046329343, calibration: .06979166666666659 } },
+          { h: 15, kronos_base: { direction: .4635416666666667, pinball: .00039357277261115725, mae: .0011106140614473008, calibration: .3427083333333334 }, fincast: { direction: .4791666666666667, pinball: .0002706090260336731, mae: .0008488846743123912, calibration: .09895833333333334 } },
+          { h: 30, kronos_base: { direction: .46875, pinball: .0010973148210758393, mae: .0030541509399000057, calibration: .48124999999999996 }, fincast: { direction: .4895833333333333, pinball: .00039439589650743775, mae: .001246819742492216, calibration: .15104166666666669 } },
+          { h: 60, kronos_base: { direction: .4270833333333333, pinball: .0029205516933351653, mae: .006871424399205299, calibration: .6635416666666667 }, fincast: { direction: .5364583333333334, pinball: .0006111607848130424, mae: .0019424217189752437, calibration: .14583333333333331 } }
+        ]
+      },
+      kronos: {
+        BTCUSDT: {
+          latency: { base: 6500887, cache: 426638, fincast: 9035 }, speedup: 15.23747767428124, maximumMetricDelta: .16666666666666674,
+          digest: { input: true, record: true, context: true, prediction: false, fincastPrediction: true },
+          horizons: [
+            { h: 5,  base: { direction: .4895833333333333, pinball: .00013560632609851446, mae: .000397663969582624, calibration: .19166666666666665 }, cache: { direction: .5052083333333334, pinball: .0001474065382952151, mae: .00041175933607879206, calibration: .2177083333333334 }, fincast: { direction: .453125, pinball: .00012069570052273864, mae: .0003881489353968146, calibration: .06458333333333333 } },
+            { h: 15, base: { direction: .4635416666666667, pinball: .0002341158769128839, mae: .000670831535360108, calibration: .2729166666666666 }, cache: { direction: .4739583333333333, pinball: .0003587611152638705, mae: .0009483920915681927, calibration: .42083333333333334 }, fincast: { direction: .5104166666666666, pinball: .00018538148352353784, mae: .0005968205917800234, calibration: .08020833333333333 } },
+            { h: 30, base: { direction: .5729166666666666, pinball: .000639576891777471, mae: .001811136975789812, calibration: .390625 }, cache: { direction: .5885416666666666, pinball: .0007508959236662606, mae: .00177791791454517, calibration: .5385416666666667 }, fincast: { direction: .53125, pinball: .00025736710566034093, mae: .0008073298861267699, calibration: .11458333333333334 } },
+            { h: 60, base: { direction: .5520833333333334, pinball: .0015644618106225561, mae: .003570536564741548, calibration: .5541666666666667 }, cache: { direction: .546875, pinball: .001170376187029237, mae: .002646722133036232, calibration: .5802083333333332 }, fincast: { direction: .4947916666666667, pinball: .0003834375103664102, mae: .0012411025787418186, calibration: .08854166666666669 } }
+          ]
+        },
+        ETHUSDT: {
+          latency: { base: 6530902, cache: 426325, fincast: 8372 }, speedup: 15.319068785550929, maximumMetricDelta: .16145833333333331,
+          digest: { input: true, record: true, context: true, prediction: false, fincastPrediction: true },
+          horizons: [
+            { h: 5,  base: { direction: .4739583333333333, pinball: .00022820006147504537, mae: .0006536378622506309, calibration: .2333333333333334 }, cache: { direction: .453125, pinball: .00026002455052678586, mae: .0007133646876379207, calibration: .2885416666666666 }, fincast: { direction: .4791666666666667, pinball: .00018830920652201428, mae: .0006143141046329343, calibration: .06979166666666659 } },
+            { h: 15, base: { direction: .4635416666666667, pinball: .00039357277261115725, mae: .0011106140614473008, calibration: .3427083333333334 }, cache: { direction: .5, pinball: .0006505925742944103, mae: .0016439828507215204, calibration: .48645833333333327 }, fincast: { direction: .4791666666666667, pinball: .0002706090260336731, mae: .0008488846743123912, calibration: .09895833333333334 } },
+            { h: 30, base: { direction: .46875, pinball: .0010973148210758393, mae: .0030541509399000057, calibration: .48124999999999996 }, cache: { direction: .4739583333333333, pinball: .0013642676823137426, mae: .003201994654049816, calibration: .5697916666666667 }, fincast: { direction: .4895833333333333, pinball: .00039439589650743775, mae: .001246819742492216, calibration: .15104166666666669 } },
+            { h: 60, base: { direction: .4270833333333333, pinball: .0029205516933351653, mae: .006871424399205299, calibration: .6635416666666667 }, cache: { direction: .4322916666666667, pinball: .0024383284546473953, mae: .005483960029721424, calibration: .7 }, fincast: { direction: .5364583333333334, pinball: .0006111607848130424, mae: .0019424217189752437, calibration: .14583333333333331 } }
+          ]
+        }
+      },
+      fincast: {
+        batch4: { series: 4, median: 235.140395, p95: 281.3167774, modelMedian: 154.033248, throughput: 17.0111137, perSeries: 58.78509875, stable: true },
+        batch8: { series: 8, measured: false, errorType: "docker_name_conflict" },
+        batch16: { series: 16, median: 465.269481, p95: 553.3579284, modelMedian: 192.228083, throughput: 34.3886729, perSeries: 29.07934256, stable: true },
+        throughputGain: 2.02154153
+      },
+      steps: [
+        { id: "preflight", label: "P40 사전 점검", status: "completed", durationMs: 70, summary: "Tesla P40 / CUDA 6.1 / 기존 이미지 / 모델 캐시 점검 통과" },
+        { id: "replay-base-btcusdt", label: "BTCUSDT 기준선 리플레이", status: "completed", durationMs: 6559366, summary: "192 origins · Kronos 6,500.9s" },
+        { id: "replay-base-ethusdt", label: "ETHUSDT 기준선 리플레이", status: "completed", durationMs: 6540346, summary: "192 origins · Kronos 6,530.9s" },
+        { id: "replay-cache-btcusdt", label: "BTCUSDT KV 캐시 검증", status: "completed", durationMs: 446655, summary: "192 origins · Kronos 426.6s" },
+        { id: "replay-cache-ethusdt", label: "ETHUSDT KV 캐시 검증", status: "completed", durationMs: 435683, summary: "192 origins · Kronos 426.3s" },
+        { id: "fincast-batch-4", label: "FinCast batch 4", status: "completed", durationMs: 2813, summary: "median 235.1ms · stable" },
+        { id: "fincast-batch-8", label: "FinCast batch 8", status: "failed", durationMs: 1096, summary: "Docker exit 125 · container name conflict" },
+        { id: "fincast-batch-16", label: "FinCast batch 16", status: "completed", durationMs: 35904, summary: "median 465.3ms · stable" },
+        { id: "finalize", label: "결과 판정 및 인계 자료 생성", status: "completed", durationMs: 13, summary: "KV 캐시 검토 필요" }
+      ],
+      hashes: {
+        "qualification-summary.json": "3beee8423d7c342bfc83300d2e0486f8e81b4a05d80132ac41cc09ba84834f1f",
+        "state.json": "e8ab3010defa2716bead688f8c411388989a8eed9e20c456b5c04e9e95b7bb4d",
+        "base-BTCUSDT.json": "e949418c10d03f45b8a7bb7b33e337dd77064419935c3f138b1f3c2b72d968a6",
+        "base-ETHUSDT.json": "232e6c7593309059f6438e67d2589485970f633020bb1d0fe3f98ad6ccd3eac3",
+        "kv-cache-v1-BTCUSDT.json": "e3b76d6779a4851b7f5e0d62ad318fd7348b91c0fe111136a7c24ea01af3d817",
+        "kv-cache-v1-ETHUSDT.json": "80b811bc0faae43c18cdc4210c5689a3e17f38ba0003ac6ba030589c5633a39d",
+        "fincast-batch-4.json": "3cbfd76eed6e9f2e70ece5ab454bd8ff5202973931025e2e4f3b8e30271d9a6f",
+        "fincast-batch-16.json": "06cfb9199e90e0b0e1b3c5f14f06e8361358901047cfb136248dda0b9e381ccd"
+      }
+    };
+
+    const metricMeta = {
+      direction: { label: "방향 정확도", description: "방향 정확도 · 높을수록 좋음", percent: true },
+      pinball: { label: "Mean pinball loss", description: "Mean pinball loss · 낮을수록 좋음", percent: false },
+      mae: { label: "Median return MAE", description: "Median return MAE · 낮을수록 좋음", percent: false },
+      calibration: { label: "Max |calibration error|", description: "최대 절대 calibration error · 낮을수록 좋음", percent: true }
+    };
+    const colors = {
+      base: "hsl(0 0% 96%)",
+      cache: "hsl(42 92% 62%)",
+      fincast: "hsl(190 88% 62%)",
+      grid: "rgba(255,255,255,.075)",
+      text: "rgba(255,255,255,.45)"
+    };
+    const view = {
+      accuracySymbol: "BTCUSDT",
+      accuracyMetric: "direction",
+      kronosSymbol: "BTCUSDT",
+      kronosMetric: "direction",
+      fincastMetric: "latency"
+    };
+
+    function setupCanvas(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width = Math.max(1, Math.round(rect.width * ratio));
+      canvas.height = Math.max(1, Math.round(rect.height * ratio));
+      const context = canvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return { context, width: rect.width, height: rect.height };
+    }
+
+    function formatMetric(value, metric) {
+      if (metric === "direction" || metric === "calibration") return `${(value * 100).toFixed(1)}%`;
+      if (value >= .001) return value.toFixed(5);
+      return value.toFixed(6);
+    }
+
+    function drawGroupedBars(canvas, rows, series, metric) {
+      if (!canvas || canvas.offsetParent === null) return;
+      const { context: ctx, width, height } = setupCanvas(canvas);
+      const pad = { left: width < 560 ? 42 : 54, right: 14, top: 18, bottom: 38 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      const values = rows.flatMap(row => series.map(item => row[item.key][metric]));
+      let max = Math.max(...values) * 1.16;
+      if (metric === "direction") max = Math.max(.65, max);
+      if (metric === "calibration") max = Math.max(.75, max);
+      ctx.clearRect(0, 0, width, height);
+      ctx.font = "9px Inter, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 1;
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const y = pad.top + plotH - plotH * tick / 4;
+        ctx.strokeStyle = colors.grid;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+        ctx.fillStyle = colors.text;
+        ctx.textAlign = "right";
+        ctx.fillText(formatMetric(max * tick / 4, metric), pad.left - 8, y);
+      }
+      const groupW = plotW / rows.length;
+      const innerW = Math.min(groupW * .72, 92);
+      const gap = 4;
+      const barW = Math.max(5, (innerW - gap * (series.length - 1)) / series.length);
+      rows.forEach((row, index) => {
+        const start = pad.left + groupW * index + (groupW - innerW) / 2;
+        series.forEach((item, seriesIndex) => {
+          const value = row[item.key][metric];
+          const barH = Math.max(1, value / max * plotH);
+          const x = start + seriesIndex * (barW + gap);
+          const y = pad.top + plotH - barH;
+          ctx.fillStyle = item.color;
+          ctx.beginPath();
+          ctx.roundRect(x, y, barW, barH, Math.min(5, barW / 2));
+          ctx.fill();
+        });
+        ctx.fillStyle = colors.text;
+        ctx.textAlign = "center";
+        ctx.fillText(`${row.h}m`, pad.left + groupW * (index + .5), height - 16);
+      });
+    }
+
+    function drawAccuracy() {
+      const rows = DATA.baseline[view.accuracySymbol];
+      const meta = metricMeta[view.accuracyMetric];
+      document.getElementById("accuracy-description").textContent = `${view.accuracySymbol} · ${meta.description}`;
+      drawGroupedBars(
+        document.getElementById("accuracy-chart"),
+        rows,
+        [
+          { key: "kronos_base", color: colors.base },
+          { key: "fincast", color: colors.fincast }
+        ],
+        view.accuracyMetric
+      );
+    }
+
+    function drawKronos() {
+      const rows = DATA.kronos[view.kronosSymbol].horizons;
+      const meta = metricMeta[view.kronosMetric];
+      document.getElementById("kronos-description").textContent = `${view.kronosSymbol} · ${meta.description}`;
+      drawGroupedBars(
+        document.getElementById("kronos-chart"),
+        rows,
+        [
+          { key: "base", color: colors.base },
+          { key: "cache", color: colors.cache },
+          { key: "fincast", color: colors.fincast }
+        ],
+        view.kronosMetric
+      );
+    }
+
+    function drawFincast() {
+      const canvas = document.getElementById("fincast-chart");
+      if (!canvas || canvas.offsetParent === null) return;
+      const { context: ctx, width, height } = setupCanvas(canvas);
+      const pad = { left: width < 560 ? 45 : 58, right: 14, top: 20, bottom: 40 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      const latency = view.fincastMetric === "latency";
+      const groups = latency
+        ? [
+            { label: "Batch 4", values: [DATA.fincast.batch4.median, DATA.fincast.batch4.p95] },
+            { label: "Batch 8", values: [null, null] },
+            { label: "Batch 16", values: [DATA.fincast.batch16.median, DATA.fincast.batch16.p95] }
+          ]
+        : [
+            { label: "Batch 4", values: [DATA.fincast.batch4.throughput] },
+            { label: "Batch 8", values: [null] },
+            { label: "Batch 16", values: [DATA.fincast.batch16.throughput] }
+          ];
+      const maxValue = Math.max(...groups.flatMap(group => group.values.filter(Number.isFinite))) * 1.18;
+      document.getElementById("fincast-description").textContent = latency
+        ? "외부 왕복 median/p95 · 낮을수록 좋음"
+        : "처리량 series/s · 높을수록 좋음";
+      ctx.clearRect(0, 0, width, height);
+      ctx.font = "9px Inter, sans-serif";
+      ctx.textBaseline = "middle";
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const y = pad.top + plotH - plotH * tick / 4;
+        ctx.strokeStyle = colors.grid;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+        ctx.fillStyle = colors.text;
+        ctx.textAlign = "right";
+        ctx.fillText(`${(maxValue * tick / 4).toFixed(latency ? 0 : 1)}${latency ? "ms" : ""}`, pad.left - 8, y);
+      }
+      const groupW = plotW / groups.length;
+      groups.forEach((group, index) => {
+        const usable = group.values.filter(Number.isFinite);
+        if (!usable.length) {
+          ctx.fillStyle = "hsl(351 90% 68%)";
+          ctx.textAlign = "center";
+          ctx.fillText("NO DATA", pad.left + groupW * (index + .5), pad.top + plotH * .55);
+        } else {
+          const barW = Math.min(34, groupW / (group.values.length + 1));
+          const totalW = barW * group.values.length + 5 * (group.values.length - 1);
+          const start = pad.left + groupW * index + (groupW - totalW) / 2;
+          group.values.forEach((value, valueIndex) => {
+            const barH = value / maxValue * plotH;
+            ctx.fillStyle = valueIndex === 0 ? colors.fincast : "rgba(103,232,249,.38)";
+            ctx.beginPath();
+            ctx.roundRect(start + valueIndex * (barW + 5), pad.top + plotH - barH, barW, barH, 7);
+            ctx.fill();
+          });
+        }
+        ctx.fillStyle = colors.text;
+        ctx.textAlign = "center";
+        ctx.fillText(group.label, pad.left + groupW * (index + .5), height - 16);
+      });
+    }
+
+    function renderAccuracyTable() {
+      const tbody = document.getElementById("accuracy-table");
+      const rows = [];
+      for (const symbol of DATA.run.symbols) {
+        for (const point of DATA.baseline[symbol]) {
+          for (const [key, label] of [["kronos_base", "Kronos-Base"], ["fincast", "FinCast"]]) {
+            const item = point[key];
+            rows.push(`
+              <tr>
+                <td>${symbol}</td><td>${point.h}m</td><td>${label}</td>
+                <td>${(item.direction * 100).toFixed(2)}%</td>
+                <td>${item.pinball.toFixed(6)}</td>
+                <td>${item.mae.toFixed(6)}</td>
+                <td>${(item.calibration * 100).toFixed(2)}%p</td>
+              </tr>
+            `);
+          }
+        }
+      }
+      tbody.innerHTML = rows.join("");
+    }
+
+    function formatDuration(milliseconds) {
+      if (milliseconds < 1000) return `${milliseconds}ms`;
+      const seconds = milliseconds / 1000;
+      if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const rest = Math.floor(seconds % 60);
+      if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+      return `${minutes}m ${String(rest).padStart(2, "0")}s`;
+    }
+
+    function renderSteps() {
+      const total = DATA.run.elapsedMs;
+      document.getElementById("step-list").innerHTML = DATA.steps.map((step, index) => {
+        const share = step.durationMs / total * 100;
+        const pill = step.status === "failed" ? '<span class="pill rose">실패</span>' : '<span class="pill green">완료</span>';
+        return `
+          <article class="step surface ${step.status === "failed" ? "failed" : ""}">
+            <span class="step-index">${index + 1}</span>
+            <div><h4>${step.label}</h4><p>${step.summary}</p></div>
+            <div class="step-share" aria-label="전체 실행시간 중 ${share.toFixed(2)}%"><span style="width:${Math.max(.25, share)}%"></span></div>
+            <div class="step-duration">${formatDuration(step.durationMs)}<br>${pill}</div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function setPressed(selector, value, attribute) {
+      document.querySelectorAll(selector).forEach(button => {
+        button.setAttribute("aria-pressed", String(button.dataset[attribute] === value));
+      });
+    }
+
+    document.querySelectorAll("[data-accuracy-symbol]").forEach(button => {
+      button.addEventListener("click", () => {
+        view.accuracySymbol = button.dataset.accuracySymbol;
+        setPressed("[data-accuracy-symbol]", view.accuracySymbol, "accuracySymbol");
+        drawAccuracy();
+      });
+    });
+    document.querySelectorAll("[data-accuracy-metric]").forEach(button => {
+      button.addEventListener("click", () => {
+        view.accuracyMetric = button.dataset.accuracyMetric;
+        setPressed("[data-accuracy-metric]", view.accuracyMetric, "accuracyMetric");
+        drawAccuracy();
+      });
+    });
+    document.querySelectorAll("[data-kronos-symbol]").forEach(button => {
+      button.addEventListener("click", () => {
+        view.kronosSymbol = button.dataset.kronosSymbol;
+        setPressed("[data-kronos-symbol]", view.kronosSymbol, "kronosSymbol");
+        drawKronos();
+      });
+    });
+    document.querySelectorAll("[data-kronos-metric]").forEach(button => {
+      button.addEventListener("click", () => {
+        view.kronosMetric = button.dataset.kronosMetric;
+        setPressed("[data-kronos-metric]", view.kronosMetric, "kronosMetric");
+        drawKronos();
+      });
+    });
+    document.querySelectorAll("[data-fincast-metric]").forEach(button => {
+      button.addEventListener("click", () => {
+        view.fincastMetric = button.dataset.fincastMetric;
+        setPressed("[data-fincast-metric]", view.fincastMetric, "fincastMetric");
+        drawFincast();
+      });
+    });
+
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+    function activateTab(tab) {
+      tabs.forEach(item => {
+        const selected = item === tab;
+        item.setAttribute("aria-selected", String(selected));
+        item.tabIndex = selected ? 0 : -1;
+      });
+      panels.forEach(panel => { panel.hidden = panel.id !== tab.getAttribute("aria-controls"); });
+      if (tab.id === "tab-accuracy") requestAnimationFrame(drawAccuracy);
+      if (tab.id === "tab-kronos") requestAnimationFrame(drawKronos);
+      if (tab.id === "tab-fincast") requestAnimationFrame(drawFincast);
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => activateTab(tab));
+      tab.addEventListener("keydown", event => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        let next = index;
+        if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+        if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = tabs.length - 1;
+        activateTab(tabs[next]);
+        tabs[next].focus();
+      });
+    });
+
+    function renderAllVisibleCharts() {
+      drawAccuracy();
+      drawKronos();
+      drawFincast();
+    }
+    let resizeTimer;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(renderAllVisibleCharts, 100);
+    });
+
+    renderAccuracyTable();
+    renderSteps();
+    document.getElementById("raw-json").textContent = JSON.stringify(DATA, null, 2);
+
+    async function copyJson() {
+      const status = document.getElementById("copy-status");
+      const text = JSON.stringify(DATA, null, 2);
+      try {
+        await navigator.clipboard.writeText(text);
+        status.textContent = "복사했습니다.";
+      } catch {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+        status.textContent = "복사했습니다.";
+      }
+    }
+    document.getElementById("copy-json").addEventListener("click", copyJson);
+    document.getElementById("download-json").addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(DATA, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${DATA.run.id}-visualization-data.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    });
+  </script>
+</body>
+</html>

@@ -13,6 +13,7 @@ import {
   QuantileRearrangementObservationsSchema,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
+  SCALPING_AI_REALTIME_HORIZONS,
   SCALPING_AI_SCHEMA_VERSION,
   type AiForecastRequest,
   type QuantileRearrangementObservations as WorkerQuantileRearrangementObservations,
@@ -1840,6 +1841,7 @@ function normalizeDisplayForecastPoints(
   horizons: readonly Record<string, unknown>[],
   inputEndAt: string,
   expectedTargets: AiForecastRequest["series"][number]["future_timestamps"],
+  expectedHorizons: AiForecastRequest["horizons_minutes"],
 ): RuntimeModelForecastPoint[] {
   const hasDisplayProjection = horizons.some((horizon) => (
     first(horizon, "target_timestamp", "targetTimestamp") !== undefined
@@ -1848,7 +1850,7 @@ function normalizeDisplayForecastPoints(
   // Compatibility for old fixtures/artifacts that predate price-path output.
   // Current workers always publish the complete projection below.
   if (!hasDisplayProjection) return [];
-  const points = SCALPING_AI_HORIZONS.map((wantedHorizon) => {
+  const points = expectedHorizons.map((wantedHorizon) => {
     const horizon = horizons.find((item) => (
       finite(first(item, "horizon_minutes", "horizonMinutes")) === wantedHorizon
     ));
@@ -2017,6 +2019,7 @@ function normalizeLaneForecast(
     horizons,
     inputEndAt,
     expectedSeries.future_timestamps,
+    request.horizons_minutes,
   );
   const horizon = horizons.find((item) => finite(
     first(item, "horizon_minutes", "horizonMinutes"),
@@ -2761,7 +2764,7 @@ function hasContinuousFinalContext(
 
 function futureTimestamps(inputEndAt: number): AiForecastRequest["series"][number]["future_timestamps"] {
   const values = Array.from(
-    { length: 60 },
+    { length: SCALPING_AI_REALTIME_HORIZONS.at(-1)! },
     (_, index) => iso(inputEndAt + (index + 1) * MINUTE_MS),
   );
   return values as AiForecastRequest["series"][number]["future_timestamps"];
@@ -2781,7 +2784,8 @@ function aiRequest(
     schema_version: SCALPING_AI_SCHEMA_VERSION,
     request_id: `crypto:${safeRunId}:${inputEndAt}`,
     mode: "forecast",
-    horizons_minutes: [...SCALPING_AI_HORIZONS],
+    forecast_profile: "realtime_5_15",
+    horizons_minutes: [...SCALPING_AI_REALTIME_HORIZONS],
     quantiles: [...SCALPING_AI_QUANTILES],
     seed: 0,
     series: [{
@@ -3417,8 +3421,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         ? "final_fincast_30s_aggtrade_bar" as const
         : "final_binance_1m_kline" as const;
     const policyProfile = cryptoFuturesPolicyProfile(request);
-    const executionLane = selectedLanes.includes(this.options.executionLane ?? "kronos_base")
-      ? this.options.executionLane ?? "kronos_base"
+    const preferredExecutionLane = this.options.executionLane ?? "fincast";
+    const executionLane = selectedLanes.includes(preferredExecutionLane)
+      ? preferredExecutionLane
       : selectedLanes[0]!;
     const queue = new AsyncMarketEventQueue();
     const ingressStore = new CausalBinanceKlineStore();

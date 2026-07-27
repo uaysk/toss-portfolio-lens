@@ -256,8 +256,8 @@ describe("AI simulation history", () => {
         }}
       />,
     );
-    expect(fincastOnlyMarkup).toContain("FinCast lane·판단 주기");
-    expect(fincastOnlyMarkup).toContain("판단 provenance 1건 · FinCast");
+    expect(fincastOnlyMarkup).toContain("FinCast · Main lane·판단 주기");
+    expect(fincastOnlyMarkup).toContain("판단 provenance 1건 · FinCast · Main");
     expect(fincastOnlyMarkup).toContain('data-simulation-model-provenance="fincast"');
     expect(fincastOnlyMarkup).not.toContain("Kronos-base · FinCast lane");
   });

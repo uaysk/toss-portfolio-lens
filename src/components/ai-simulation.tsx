@@ -177,7 +177,7 @@ function selectionModeLabel(request: AiSimulationRequest): string {
 }
 
 function stockModelLaneLabel(lane: AiSimulationModelLane): string {
-  return lane === "fincast" ? "FinCast" : "Kronos-base";
+  return lane === "fincast" ? "FinCast · Main" : "Kronos-base · Legacy";
 }
 
 export function aiSimulationRequestWithStrategy(
@@ -201,6 +201,7 @@ export function aiSimulationRequestWithStrategy(
       pairId: strategy.pairId,
       allowDegradedMode: false,
     },
+    // The retained pair strategy is the only legacy-only stock path.
     modelLanes: ["kronos_base"],
     costs: usingDefaultCosts ? defaultAiSimulationCosts("US") : current.costs,
   };
@@ -1261,14 +1262,14 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
               {assetClass === "crypto_futures"
                 ? "Binance USDⓈ-M USDT 무기한 계약 중 유동성 조건을 통과한 1~2개 계약을 자동 또는 직접 고르고, 확정봉과 다음 유효 체결만으로 롱·숏 paper 결과를 검증합니다. 읽기 전용 키와 공개 시세 외에는 외부로 주문을 전송하지 않습니다."
-                : "보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 Kronos-base 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다."}
+                : "보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 선택한 AI 모델의 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다."}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "자동·직접 1~2계약" : "AI 또는 직접 선택"}</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "USDT · isolated" : "현금 100% · 0주"}</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "Kronos · FinCast" : "Kronos-base · Rust · 패턴"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "FinCast Main · Kronos Legacy" : request.strategy.mode === "pair" ? "Kronos-base Legacy · Rust · 패턴" : "FinCast Main · Rust · 패턴"}</p></div>
           </div>
         </div>
       </Card>
@@ -1353,13 +1354,13 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="kronos_base">Kronos-base</SelectItem>
-                  <SelectItem value="fincast">FinCast</SelectItem>
+                  <SelectItem value="fincast">FinCast · Main</SelectItem>
+                  <SelectItem value="kronos_base">Kronos-base · Legacy</SelectItem>
                 </SelectContent>
               </Select>
               <span className="mt-2 block text-[9px] leading-4 text-muted-foreground">
                 {request.strategy.mode === "pair"
-                  ? "페어는 Kronos-base + Rust 결합으로 고정됩니다."
+                  ? "페어는 레거시 Kronos-base worker + Rust 결합으로 고정됩니다."
                   : "선택한 한 모델만 실행하며 다른 모델로 대체하지 않습니다."}
               </span>
             </label>

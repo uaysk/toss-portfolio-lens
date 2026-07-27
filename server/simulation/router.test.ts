@@ -146,7 +146,7 @@ describe("AI paper simulation session-only router", () => {
         spreadBpsRoundTrip: 5,
         slippageBpsPerSide: 2,
       },
-      modelLanes: ["kronos_base"],
+      modelLanes: ["fincast"],
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     }, "owner");

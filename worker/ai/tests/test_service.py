@@ -215,6 +215,62 @@ def test_fincast_mixed_cadences_are_isolated_before_inference(tmp_path) -> None:
     )
 
 
+def test_fincast_replay_origins_are_processed_in_microbatches_of_four(tmp_path) -> None:
+    adapter = _CadenceFailingAdapter(failing_candle_seconds=30)
+    service = AIService(
+        settings(
+            tmp_path,
+            model_lane="fincast",
+            min_context_bars=512,
+            max_context_bars=512,
+            microbatch_size=4,
+        ),
+        adapter,
+    )
+    requested = tuple(
+        _native_series(f"BINANCE_USDM:ORIGIN-{index}", 15)
+        for index in range(9)
+    )
+
+    response = service.handle(
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="fincast-microbatch-four",
+            mode="forecast",
+            series=requested,
+        )
+    )
+
+    assert response.status == "available"
+    assert [len(attempt) for attempt in adapter.attempts] == [4, 4, 1]
+
+
+def test_realtime_forecast_returns_only_requested_horizons(tmp_path) -> None:
+    adapter = DeterministicAdapter()
+    service = AIService(settings(tmp_path), adapter)
+    full = _series("BINANCE_USDM:BTCUSDT")
+    requested = full.model_copy(
+        update={
+            "timezone": "UTC",
+            "future_timestamps": future(full.input_end_at, 15),
+        }
+    )
+    response = service.handle(
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="realtime-horizon-profile",
+            mode="forecast",
+            forecast_profile="realtime_5_15",
+            horizons_minutes=(5, 15),
+            series=(requested,),
+        )
+    )
+
+    assert response.status == "available"
+    assert tuple(item.horizon_minutes for item in response.series[0].horizons) == (5, 15)
+    assert len(adapter.calls[0][0].future_timestamps) == 15
+
+
 def test_service_enforces_environment_backed_series_limit(tmp_path) -> None:
     service = AIService(settings(tmp_path, max_series=1), DeterministicAdapter())
     request = ForecastRequest(

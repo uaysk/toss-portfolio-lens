@@ -4,6 +4,7 @@ import type { SimulationModelLane, SimulationStartRequest } from "../simulation/
 import {
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
+  SCALPING_AI_REALTIME_HORIZONS,
   type AiForecastRequest,
 } from "../worker/ai-contract.js";
 import type {
@@ -1264,7 +1265,7 @@ describe("CryptoPaperRuntime", () => {
       });
   });
 
-  it("publishes strict 5/15/30/60 minute price paths for the candle timeline", async () => {
+  it("publishes strict realtime 5/15 minute price paths for the candle timeline", async () => {
     const { result } = await runProvenanceSimulation({
       lane: "kronos_base",
       transform: (raw) => responseWithDisplayPath(raw),
@@ -1281,9 +1282,9 @@ describe("CryptoPaperRuntime", () => {
       status: "available",
       modelId: "NeoQuasar/Kronos-base",
     });
-    expect(points.map((point) => point.horizonMinutes)).toEqual([5, 15, 30, 60]);
+    expect(points.map((point) => point.horizonMinutes)).toEqual([5, 15]);
     expect(points.map((point) => Date.parse(point.targetTimestamp as string))).toEqual(
-      SCALPING_AI_HORIZONS.map((horizon) => (
+      SCALPING_AI_REALTIME_HORIZONS.map((horizon) => (
         Date.parse(forecast.origin as string) + horizon * 60_000
       )),
     );
@@ -2031,6 +2032,11 @@ describe("CryptoPaperRuntime", () => {
 
     expect(observed).toHaveLength(1);
     expect(analyze).toHaveBeenCalledTimes(1);
+    expect(observed[0]).toMatchObject({
+      forecast_profile: "realtime_5_15",
+      horizons_minutes: [5, 15],
+    });
+    expect(observed[0]!.series[0]!.future_timestamps).toHaveLength(15);
     const sentBars = observed[0]!.series[0]!.bars;
     expect(sentBars).toHaveLength(64);
     expect(sentBars.slice(1).every((bar, index) => (
@@ -2777,6 +2783,9 @@ describe("CryptoPaperRuntime", () => {
       snapshot: scannerSnapshot,
       selected: candidate,
       context: context().value,
+    });
+    expect((result.result as UnknownRecord).snapshot).toMatchObject({
+      executionLane: "fincast",
     });
     expect(kronosRequests).toEqual(fincastRequests);
 

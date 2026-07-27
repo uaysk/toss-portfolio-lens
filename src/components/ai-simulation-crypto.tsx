@@ -50,8 +50,8 @@ const CRITERION_LABELS: Record<AiSimulationCriterion, string> = {
 };
 
 const MODEL_LABELS: Record<AiSimulationModelLane, string> = {
-  kronos_base: "Kronos-base",
-  fincast: "FinCast",
+  kronos_base: "Kronos-base · Legacy",
+  fincast: "FinCast · Main",
 };
 
 const CRYPTO_PRESET_DETAILS: Record<
@@ -542,8 +542,8 @@ export function AiSimulationCryptoSetup({
           </div>
         </section>
         <section className="grid gap-3 sm:grid-cols-2" aria-label="모델 worker 상태">
-          <WorkerCard lane="kronos_base" status={status?.workers.kronos_base} />
           <WorkerCard lane="fincast" status={status?.workers.fincast} />
+          <WorkerCard lane="kronos_base" status={status?.workers.kronos_base} />
         </section>
       </div>
 
@@ -598,7 +598,7 @@ export function AiSimulationCryptoSetup({
         <fieldset className="rounded-2xl bg-secondary p-3">
           <legend className="px-1 text-[10px] font-black text-muted-foreground">독립 모델 lane</legend>
           <div className="mt-1 flex min-h-10 items-center gap-2">
-            {(["kronos_base", "fincast"] as const).map((lane) => {
+            {(["fincast", "kronos_base"] as const).map((lane) => {
               const selected = request.modelLanes.includes(lane);
               const workerAvailable = status?.workers[lane]?.available ?? false;
               return (

@@ -204,6 +204,10 @@ def test_default_settings_are_fixed_to_single_model_and_p40(monkeypatch) -> None
         "AI_ALLOW_CPU_FALLBACK",
         "AI_EXPECTED_CUDA_CAPABILITY",
         "AI_EXPECTED_CUDA_DEVICE_NAME",
+        "AI_MODEL_LANE",
+        "AI_MIN_CONTEXT_BARS",
+        "AI_MAX_CONTEXT_BARS",
+        "AI_KRONOS_KV_CACHE_ENABLED",
     ):
         monkeypatch.delenv(variable, raising=False)
 
@@ -216,6 +220,10 @@ def test_default_settings_are_fixed_to_single_model_and_p40(monkeypatch) -> None
     assert configured.allow_cpu_fallback is False
     assert configured.expected_cuda_capability == "6.1"
     assert configured.expected_cuda_device_name == "Tesla P40"
+    assert configured.model_lane == "fincast"
+    assert configured.min_context_bars == 512
+    assert configured.max_context_bars == 512
+    assert configured.kronos_kv_cache_enabled is False
 
 
 def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> None:
@@ -256,8 +264,21 @@ def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> No
     )
 
 
-def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(tmp_path, monkeypatch) -> None:
-    configured = settings(tmp_path)
+@pytest.mark.parametrize(
+    ("cache_enabled", "expected_install_count", "expected_loader_version"),
+    [
+        (False, 0, "kronos-source-67b630e"),
+        (True, 1, "kronos-source-67b630e-kv-cache-v1"),
+    ],
+)
+def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(
+    tmp_path,
+    monkeypatch,
+    cache_enabled: bool,
+    expected_install_count: int,
+    expected_loader_version: str,
+) -> None:
+    configured = settings(tmp_path, kronos_kv_cache_enabled=cache_enabled)
     source = _write_source_snapshot(configured.model_cache_dir)
     model_path = _write_file_snapshot(configured.model_cache_dir, "kronos-base", MODEL_REVISION)
     tokenizer_path = _write_file_snapshot(
@@ -289,6 +310,14 @@ def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(tmp_path, monkey
         "import_module",
         lambda name: fake_module if name == "model.kronos" else real_import(name),
     )
+    installed: list[tuple[object, object, str]] = []
+    monkeypatch.setattr(
+        adapters,
+        "install_kronos_kv_cache",
+        lambda module, model, *, source_revision: installed.append(
+            (module, model, source_revision)
+        ),
+    )
     runtime = adapters.RuntimeDevice(
         "cuda",
         SimpleNamespace(),
@@ -312,10 +341,16 @@ def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(tmp_path, monkey
     assert instance.provenance.model_id == "NeoQuasar/Kronos-base"
     assert instance.provenance.device_name == "Tesla P40"
     assert instance.provenance.cuda_capability == "6.1"
+    assert instance.provenance.loader_version == expected_loader_version
     assert captured == [
         (str(model_path), {"local_files_only": True}),
         (str(tokenizer_path), {"local_files_only": True}),
     ]
+    assert installed == (
+        [(fake_module, instance._predictor.kwargs["model"], SOURCE_REVISION)]
+        if expected_install_count
+        else []
+    )
 
 
 def test_model_suite_rejects_cpu_even_when_cpu_fallback_is_enabled(tmp_path, monkeypatch) -> None:

@@ -47,6 +47,45 @@ def test_versioned_request_round_trips_through_strict_json_contract() -> None:
     assert parsed.quantiles == (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 
 
+def test_realtime_forecast_profile_is_explicit_and_bounded_to_fifteen_minutes() -> None:
+    full = valid_series()
+    realtime = full.model_copy(
+        update={"future_timestamps": future(full.input_end_at, 15)}
+    )
+    request = ForecastRequest(
+        schema_version="scalping-ai/v1",
+        request_id="contract-realtime",
+        mode="forecast",
+        forecast_profile="realtime_5_15",
+        horizons_minutes=(5, 15),
+        series=(realtime,),
+    )
+
+    parsed = AI_REQUEST_ADAPTER.validate_json(request.model_dump_json())
+
+    assert parsed == request
+    assert parsed.forecast_profile == "realtime_5_15"
+    assert len(parsed.series[0].future_timestamps) == 15
+
+    with pytest.raises(ValidationError, match="requires exactly 15"):
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="contract-realtime-full-data",
+            mode="forecast",
+            forecast_profile="realtime_5_15",
+            horizons_minutes=(5, 15),
+            series=(full,),
+        )
+    with pytest.raises(ValidationError, match="requires horizons_minutes"):
+        ForecastRequest(
+            schema_version="scalping-ai/v1",
+            request_id="contract-realtime-full-horizons",
+            mode="forecast",
+            forecast_profile="realtime_5_15",
+            series=(realtime,),
+        )
+
+
 def test_stock_fincast_cadence_round_trips_as_explicit_prevalidated_policy() -> None:
     series = valid_series().model_copy(
         update={

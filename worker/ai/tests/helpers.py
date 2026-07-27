@@ -102,5 +102,6 @@ def settings(tmp_path: Path, **updates: object) -> AISettings:
         sample_count=4,
         max_request_bytes=4 * 1024 * 1024,
         max_response_bytes=8 * 1024 * 1024,
+        model_lane="kronos_base",
     )
     return replace(value, **updates).validate()

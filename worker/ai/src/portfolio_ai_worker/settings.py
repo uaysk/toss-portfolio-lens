@@ -44,7 +44,8 @@ class AISettings:
     sample_count: int
     max_request_bytes: int
     max_response_bytes: int
-    model_lane: str = "kronos_base"
+    model_lane: str = "fincast"
+    kronos_kv_cache_enabled: bool = False
     fincast_context_bars: int = 512
     fincast_min_vram_headroom_bytes: int = 2 * 1024 * 1024 * 1024
     fincast_nvml_device_index: int = 0
@@ -74,7 +75,7 @@ class AISettings:
         expected_device_name = os.getenv("AI_EXPECTED_CUDA_DEVICE_NAME", "Tesla P40").strip()
         if not expected_device_name:
             raise ValueError("AI_EXPECTED_CUDA_DEVICE_NAME cannot be empty")
-        model_lane = os.getenv("AI_MODEL_LANE", "kronos_base").strip().lower()
+        model_lane = os.getenv("AI_MODEL_LANE", "fincast").strip().lower()
         if model_lane not in {"kronos_base", "fincast"}:
             raise ValueError("AI_MODEL_LANE must be kronos_base or fincast")
         return cls(
@@ -87,12 +88,18 @@ class AISettings:
             microbatch_size=_bounded_int("AI_MICROBATCH_SIZE", 4, 1, 256),
             max_series=_bounded_int("AI_MAX_SERIES", 50, 1, 1_000),
             max_evaluation_origins=_bounded_int("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
-            min_context_bars=_bounded_int("AI_MIN_CONTEXT_BARS", 64, 8, 512),
+            min_context_bars=_bounded_int(
+                "AI_MIN_CONTEXT_BARS",
+                512 if model_lane == "fincast" else 64,
+                8,
+                512,
+            ),
             max_context_bars=_bounded_int("AI_MAX_CONTEXT_BARS", 512, 8, 512),
             sample_count=_bounded_int("AI_KRONOS_SAMPLE_COUNT", 20, 2, 256),
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             model_lane=model_lane,
+            kronos_kv_cache_enabled=_boolean("AI_KRONOS_KV_CACHE_ENABLED", False),
             fincast_context_bars=_bounded_int("AI_FINCAST_CONTEXT_BARS", 512, 512, 512),
             fincast_min_vram_headroom_bytes=(
                 _bounded_int("AI_FINCAST_MIN_VRAM_HEADROOM_MIB", 2_048, 0, 65_536) * 1024 * 1024

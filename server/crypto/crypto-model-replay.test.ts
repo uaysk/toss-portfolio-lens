@@ -358,6 +358,7 @@ describe("CryptoModelComparisonReplay", () => {
     expect(result.window).toEqual({
       startAt: "2026-07-18T00:00:00.000Z",
       endExclusiveAt: "2026-07-25T00:00:00.000Z",
+      durationHours: 168,
       completeUtcDays: 7,
       barCount: EVALUATION_BARS,
       contextPrefetchBarCount: CONTEXT_PREFIX_BARS,
@@ -423,6 +424,8 @@ describe("CryptoModelComparisonReplay", () => {
     });
     expect(result.lanes.kronos_base.effectiveContextDigest)
       .toMatch(/^[0-9a-f]{64}$/);
+    expect(result.lanes.kronos_base.predictionDigest)
+      .toMatch(/^[0-9a-f]{64}$/);
     expect(result.lanes.kronos_base.effectiveContextDigest)
       .toBe(result.lanes.fincast.effectiveContextDigest);
     expect(result.lanes.kronos_base.metrics).toHaveLength(4);
@@ -444,6 +447,82 @@ describe("CryptoModelComparisonReplay", () => {
       sameFillBarrier: true,
       automaticWinner: null,
       outcome: "review_required",
+    });
+  });
+
+  it("supports an explicit 48-hour qualification window without changing replay barriers", async () => {
+    const fixture = restWith();
+    let request: AiEvaluateRequest | undefined;
+    const result = await replay(fixture.rest, {
+      kronos_base: lane("kronos_base", (observed) => {
+        request = observed;
+      }),
+      fincast: lane("fincast"),
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+      durationHours: 48,
+      endExclusive: END_EXCLUSIVE,
+    });
+
+    expect(request?.series[0]?.origins).toHaveLength(48 * 4);
+    expect(result.window).toEqual({
+      startAt: "2026-07-23T00:00:00.000Z",
+      endExclusiveAt: "2026-07-25T00:00:00.000Z",
+      durationHours: 48,
+      completeUtcDays: 2,
+      barCount: 48 * 60,
+      contextPrefetchBarCount: CONTEXT_PREFIX_BARS,
+      outcomeTailBarCount: OUTCOME_TAIL_BARS,
+      inputBarCount: CONTEXT_PREFIX_BARS + 48 * 60 + OUTCOME_TAIL_BARS,
+      originCount: 48 * 4,
+      originStrideMinutes: 15,
+      futureBarsPerOrigin: 60,
+    });
+    expect(result.comparison).toMatchObject({
+      sameInputDigest: true,
+      sameRecords: true,
+      sameContext: true,
+      outcome: "review_required",
+    });
+  });
+
+  it("accepts only the explicitly selected experimental Kronos cache loader", async () => {
+    const cacheLoader = {
+      async request(request: AiEvaluateRequest) {
+        const raw = responseFor("kronos_base", request);
+        raw.model.loader_version = "kronos-source-67b630e-kv-cache-v1";
+        return raw;
+      },
+    };
+    const acceptedFixture = restWith();
+    const accepted = await replay(acceptedFixture.rest, {
+      kronos_base: cacheLoader,
+      fincast: lane("fincast"),
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+      kronosLoaderProfile: "kv_cache_v1",
+    });
+    expect(accepted.lanes.kronos_base).toMatchObject({
+      availability: "available",
+      identityVerified: true,
+      provenance: {
+        loaderVersion: "kronos-source-67b630e-kv-cache-v1",
+      },
+    });
+
+    const rejectedFixture = restWith();
+    const rejected = await replay(rejectedFixture.rest, {
+      kronos_base: cacheLoader,
+      fincast: lane("fincast"),
+    }).run({
+      symbol: "BTCUSDT",
+      costAssumptions: COSTS,
+    });
+    expect(rejected.lanes.kronos_base).toMatchObject({
+      availability: "unavailable",
+      error: { code: "MODEL_PROVENANCE_MISMATCH" },
     });
   });
 

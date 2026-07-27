@@ -38,6 +38,8 @@ export const DEFAULT_CRYPTO_FUTURES_MARKET: CryptoFuturesSimulationMarket = Obje
 
 export const SimulationModelLaneSchema = z.enum(["kronos_base", "fincast"]);
 export type SimulationModelLane = z.infer<typeof SimulationModelLaneSchema>;
+export const MAIN_SIMULATION_MODEL_LANE = "fincast" as const satisfies SimulationModelLane;
+export const LEGACY_SIMULATION_MODEL_LANE = "kronos_base" as const satisfies SimulationModelLane;
 export const FinCastCandleSecondsSchema = z.union([
   z.literal(15),
   z.literal(30),
@@ -48,7 +50,7 @@ export const SimulationModelLanesSchema = z.union([
   z.tuple([z.literal("kronos_base")]),
   z.tuple([z.literal("fincast")]),
   z.tuple([z.literal("kronos_base"), z.literal("fincast")]),
-]).default(["kronos_base"]);
+]).default([MAIN_SIMULATION_MODEL_LANE]);
 
 export const SimulationExecutionSchema = z.object({
   mode: z.literal("paper").default("paper"),

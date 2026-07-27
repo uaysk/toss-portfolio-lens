@@ -179,6 +179,7 @@ describe("ai simulation v7 crypto contract", () => {
   });
 
   it("allows paper only and requires at least one unique model lane", () => {
+    expect(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST.modelLanes).toEqual(["fincast"]);
     expect(validateAiSimulationCryptoRequest(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST)).toEqual([]);
     expect(validateAiSimulationCryptoRequest({
       ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,

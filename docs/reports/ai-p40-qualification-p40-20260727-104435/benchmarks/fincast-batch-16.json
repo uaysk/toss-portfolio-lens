@@ -1,0 +1,179 @@
+{
+  "schema_version": "scalping-ai-speed-benchmark/v1",
+  "profile": "full",
+  "candle_seconds": 60,
+  "series_count": 16,
+  "iterations": 5,
+  "warmups": 1,
+  "elapsed_ms": {
+    "minimum": 442.1369429999995,
+    "median": 465.2694809999998,
+    "mean": 483.17583939999986,
+    "p95": 553.3579284000001,
+    "maximum": 573.9461150000002
+  },
+  "model_latency_ms": {
+    "minimum": 186.52163801016286,
+    "median": 192.22808300401084,
+    "mean": 192.64965020120144,
+    "p95": 197.4486874009017,
+    "maximum": 198.11810000101104
+  },
+  "stable_output_digest": true,
+  "output_digests": [
+    "97d0319999100fa34548222cb5ff142e39f21b6160cf89cf1e224d6875ebf43c",
+    "97d0319999100fa34548222cb5ff142e39f21b6160cf89cf1e224d6875ebf43c",
+    "97d0319999100fa34548222cb5ff142e39f21b6160cf89cf1e224d6875ebf43c",
+    "97d0319999100fa34548222cb5ff142e39f21b6160cf89cf1e224d6875ebf43c",
+    "97d0319999100fa34548222cb5ff142e39f21b6160cf89cf1e224d6875ebf43c"
+  ],
+  "model": {
+    "model_id": "Vincent05R/FinCast",
+    "model_revision": "2d7d90b159db8961d27c2cf165d51195902ef92b",
+    "source_revision": "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
+    "loader_version": "fincast-source-488b19d",
+    "dtype": "float32",
+    "device": "cuda"
+  },
+  "first_series": {
+    "instrument_key": "BENCH:60:0",
+    "horizons": [
+      {
+        "horizon_minutes": 5,
+        "up_probability": 0.49855835184159036,
+        "return_quantiles": [
+          {
+            "quantile": 0.05,
+            "value": -0.0049051925684627795
+          },
+          {
+            "quantile": 0.1,
+            "value": -0.0049051925684627795
+          },
+          {
+            "quantile": 0.25,
+            "value": -0.0022899412108652317
+          },
+          {
+            "quantile": 0.5,
+            "value": -0.000015139241278716575
+          },
+          {
+            "quantile": 0.75,
+            "value": 0.002610196418876942
+          },
+          {
+            "quantile": 0.9,
+            "value": 0.006011023279875127
+          },
+          {
+            "quantile": 0.95,
+            "value": 0.006011023279875127
+          }
+        ]
+      },
+      {
+        "horizon_minutes": 15,
+        "up_probability": 0.4632645099096713,
+        "return_quantiles": [
+          {
+            "quantile": 0.05,
+            "value": -0.008768480544289359
+          },
+          {
+            "quantile": 0.1,
+            "value": -0.008768480544289359
+          },
+          {
+            "quantile": 0.25,
+            "value": -0.004286591446672872
+          },
+          {
+            "quantile": 0.5,
+            "value": -0.0005664422282292136
+          },
+          {
+            "quantile": 0.75,
+            "value": 0.003288428271908339
+          },
+          {
+            "quantile": 0.9,
+            "value": 0.009374763243036321
+          },
+          {
+            "quantile": 0.95,
+            "value": 0.009374763243036321
+          }
+        ]
+      },
+      {
+        "horizon_minutes": 30,
+        "up_probability": 0.43598845734782055,
+        "return_quantiles": [
+          {
+            "quantile": 0.05,
+            "value": -0.012839371806660616
+          },
+          {
+            "quantile": 0.1,
+            "value": -0.012839371806660616
+          },
+          {
+            "quantile": 0.25,
+            "value": -0.006692447678841473
+          },
+          {
+            "quantile": 0.5,
+            "value": -0.00141494044593804
+          },
+          {
+            "quantile": 0.75,
+            "value": 0.0041111740144896824
+          },
+          {
+            "quantile": 0.9,
+            "value": 0.012356549829146246
+          },
+          {
+            "quantile": 0.95,
+            "value": 0.012356549829146246
+          }
+        ]
+      },
+      {
+        "horizon_minutes": 60,
+        "up_probability": 0.3823868374421998,
+        "return_quantiles": [
+          {
+            "quantile": 0.05,
+            "value": -0.01993347030283865
+          },
+          {
+            "quantile": 0.1,
+            "value": -0.01993347030283865
+          },
+          {
+            "quantile": 0.25,
+            "value": -0.011284639044519706
+          },
+          {
+            "quantile": 0.5,
+            "value": -0.0035023077340956554
+          },
+          {
+            "quantile": 0.75,
+            "value": 0.003942241111307698
+          },
+          {
+            "quantile": 0.9,
+            "value": 0.01400779186700718
+          },
+          {
+            "quantile": 0.95,
+            "value": 0.01400779186700718
+          }
+        ]
+      }
+    ]
+  }
+}

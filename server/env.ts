@@ -138,8 +138,8 @@ export type CryptoAiLaneConfig = {
 };
 
 export type CryptoAiConfig = {
-  kronos: CryptoAiLaneConfig;
-  fincast?: CryptoAiLaneConfig;
+  fincast: CryptoAiLaneConfig;
+  kronos?: CryptoAiLaneConfig;
   sequentialDeadlineMs: number;
   circuitBreaker: {
     failureThreshold: number;
@@ -645,53 +645,53 @@ export function readCryptoAiConfig(): CryptoAiConfig {
     };
   };
 
-  const kronos = readLane({
+  const fincast = readLane({
     url: selectEnvironmentValue(
-      "AI_KRONOS_COMPUTE_URL",
+      "AI_FINCAST_COMPUTE_URL",
       "AI_COMPUTE_URL",
-      "ws://ai-worker:8765/ws/scalping-ai/v1",
+      "ws://fincast-worker:8766/ws/scalping-ai/v1",
     ),
     token: selectEnvironmentValue(
-      "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE",
+      "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE",
       "AI_COMPUTE_AUTH_TOKEN_FILE",
-      "/run/ai-auth/token",
+      "/run/fincast-auth/token",
     ),
     maximumInFlight: selectEnvironmentValue(
-      "AI_KRONOS_COMPUTE_MAX_IN_FLIGHT",
+      "AI_FINCAST_COMPUTE_MAX_IN_FLIGHT",
       "AI_COMPUTE_MAX_IN_FLIGHT",
       "1",
     ),
   });
 
-  const fincastUrl = optional("AI_FINCAST_COMPUTE_URL");
-  const fincast = fincastUrl
+  const kronosUrl = optional("AI_KRONOS_COMPUTE_URL");
+  const kronos = kronosUrl
     ? readLane({
-      url: { name: "AI_FINCAST_COMPUTE_URL", value: fincastUrl },
+      url: { name: "AI_KRONOS_COMPUTE_URL", value: kronosUrl },
       token: {
-        name: "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE",
-        value: optional("AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE") || "/run/fincast-auth/token",
+        name: "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE",
+        value: optional("AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE") || "/run/ai-auth/token",
       },
       maximumInFlight: {
-        name: "AI_FINCAST_COMPUTE_MAX_IN_FLIGHT",
-        value: optional("AI_FINCAST_COMPUTE_MAX_IN_FLIGHT") || "1",
+        name: "AI_KRONOS_COMPUTE_MAX_IN_FLIGHT",
+        value: optional("AI_KRONOS_COMPUTE_MAX_IN_FLIGHT") || "1",
       },
     })
     : undefined;
-  if (fincast && fincast.authTokenFile === kronos.authTokenFile) {
+  if (kronos && kronos.authTokenFile === fincast.authTokenFile) {
     throw new Error(
-      "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE은 Kronos와 분리된 token 절대 경로여야 합니다.",
+      "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE은 FinCast와 분리된 token 절대 경로여야 합니다.",
     );
   }
-  const guardedKronos = fincast
-    ? { ...kronos, authTokenMustDifferFromFile: fincast.authTokenFile }
-    : kronos;
-  const guardedFincast = fincast
+  const guardedFincast = kronos
     ? { ...fincast, authTokenMustDifferFromFile: kronos.authTokenFile }
+    : fincast;
+  const guardedKronos = kronos
+    ? { ...kronos, authTokenMustDifferFromFile: fincast.authTokenFile }
     : undefined;
 
   return {
-    kronos: guardedKronos,
-    ...(guardedFincast ? { fincast: guardedFincast } : {}),
+    fincast: guardedFincast,
+    ...(guardedKronos ? { kronos: guardedKronos } : {}),
     sequentialDeadlineMs: readBoundedInteger(
       "AI_CRYPTO_SEQUENTIAL_DEADLINE_MS",
       240_000,
@@ -938,11 +938,11 @@ function readScalpingConfig(): ScalpingConfig {
   let maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
   const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
   const aiUrl = readAiComputeUrl(
-    optional("AI_COMPUTE_URL") || "ws://ai-worker:8765/ws/scalping-ai/v1",
+    optional("AI_COMPUTE_URL") || "ws://fincast-worker:8766/ws/scalping-ai/v1",
     "AI_COMPUTE_URL",
     allowInsecurePrivateWs,
   );
-  const authTokenFile = optional("AI_COMPUTE_AUTH_TOKEN_FILE") || "/run/ai-auth/token";
+  const authTokenFile = optional("AI_COMPUTE_AUTH_TOKEN_FILE") || "/run/fincast-auth/token";
   if (!authTokenFile.startsWith("/")) throw new Error("AI_COMPUTE_AUTH_TOKEN_FILE은 절대 경로여야 합니다.");
   const reconnectBaseMs = readBoundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 250, 1, 60_000);
   const aiBase: ScalpingAiConfig = {
