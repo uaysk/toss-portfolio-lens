@@ -160,7 +160,11 @@ fi
 mkdir -p "${RUST_RUNTIME_DIR}"
 chmod 700 "${RUST_RUNTIME_DIR}"
 rm -f "${RUST_SOCKET}"
-"${RUST_BINARY}" serve --socket "${RUST_SOCKET}" >"${RUST_LOG}" 2>&1 &
+"${RUST_BINARY}" serve \
+  --socket "${RUST_SOCKET}" \
+  --max-active "${RUST_CONCURRENCY}" \
+  --max-connections "${RUST_CONCURRENCY}" \
+  >"${RUST_LOG}" 2>&1 &
 RUST_PID=$!
 for _attempt in $(seq 1 200); do
   [[ -S "${RUST_SOCKET}" ]] && break

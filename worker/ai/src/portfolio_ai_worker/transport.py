@@ -8,10 +8,12 @@ import secrets
 import signal
 import ssl
 import stat
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -28,6 +30,9 @@ HEALTH_PATH = "/health/live"
 MINIMUM_AUTH_TOKEN_BYTES = 32
 MAXIMUM_AUTH_TOKEN_BYTES = 4_096
 MAXIMUM_ENVELOPE_OVERHEAD_BYTES = 16 * 1_024
+CROSS_REQUEST_MICROBATCH_WINDOW_SECONDS = 0.005
+TELEMETRY_WINDOW_SECONDS = 5 * 60
+TELEMETRY_SAMPLE_LIMIT = 4_096
 
 
 class TransportError(ValueError):
@@ -49,6 +54,7 @@ class TransportEnvelope:
 class InferenceJob:
     request: AIRequest
     future: asyncio.Future[AIResponse]
+    enqueued_at: float
     cancelled: bool = False
     active: bool = False
     counted_as_queued: bool = True
@@ -147,17 +153,77 @@ class InferenceScheduler:
         )
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio-ai-inference")
         self.consumer: asyncio.Task[None] | None = None
-        self.active: InferenceJob | None = None
+        self.active: set[InferenceJob] = set()
         self.accepting = True
         self._queued_requests = 0
+        self._deferred: deque[InferenceJob | None] = deque()
+        self._queue_delay_samples: deque[tuple[float, float]] = deque(maxlen=TELEMETRY_SAMPLE_LIMIT)
+        self._rejection_samples: deque[float] = deque(maxlen=TELEMETRY_SAMPLE_LIMIT)
+        self._batch_samples: deque[tuple[float, int, float]] = deque(maxlen=TELEMETRY_SAMPLE_LIMIT)
 
     @property
     def active_requests(self) -> int:
-        return int(self.active is not None)
+        return len(self.active)
 
     @property
     def queued_requests(self) -> int:
         return self._queued_requests
+
+    @staticmethod
+    def _quantile(values: list[float], quantile: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * quantile
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        fraction = position - lower
+        return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction, 3)
+
+    def _purge_telemetry(self, now: float) -> None:
+        cutoff = now - TELEMETRY_WINDOW_SECONDS
+        while self._queue_delay_samples and self._queue_delay_samples[0][0] < cutoff:
+            self._queue_delay_samples.popleft()
+        while self._rejection_samples and self._rejection_samples[0] < cutoff:
+            self._rejection_samples.popleft()
+        while self._batch_samples and self._batch_samples[0][0] < cutoff:
+            self._batch_samples.popleft()
+
+    def telemetry(self) -> dict[str, object]:
+        now = monotonic()
+        self._purge_telemetry(now)
+        queue_delays = [delay_ms for _recorded_at, delay_ms in self._queue_delay_samples]
+        batch_waits = [wait_ms for _recorded_at, _size, wait_ms in self._batch_samples]
+        batch_sizes = [size for _recorded_at, size, _wait_ms in self._batch_samples]
+        return {
+            "rolling_window_seconds": TELEMETRY_WINDOW_SECONDS,
+            "queue": {
+                "capacity": self.queue.maxsize,
+                "depth": self.queued_requests,
+                "active": self.active_requests,
+                "rejected": len(self._rejection_samples),
+                "delay_ms": {
+                    "samples": len(queue_delays),
+                    "p50": self._quantile(queue_delays, 0.5),
+                    "p95": self._quantile(queue_delays, 0.95),
+                    "p99": self._quantile(queue_delays, 0.99),
+                    "max": round(max(queue_delays), 3) if queue_delays else None,
+                },
+            },
+            "cross_request_microbatch": {
+                "enabled": self.service.settings.cross_request_microbatch,
+                "window_ms": int(CROSS_REQUEST_MICROBATCH_WINDOW_SECONDS * 1_000),
+                "dispatches": len(batch_sizes),
+                "batched_dispatches": sum(size > 1 for size in batch_sizes),
+                "requests": sum(batch_sizes),
+                "max_batch_size": max(batch_sizes, default=0),
+                "wait_ms": {
+                    "p50": self._quantile(batch_waits, 0.5),
+                    "p95": self._quantile(batch_waits, 0.95),
+                    "max": round(max(batch_waits), 3) if batch_waits else None,
+                },
+            },
+        }
 
     def start(self) -> None:
         if self.consumer is None:
@@ -167,10 +233,13 @@ class InferenceScheduler:
         if not self.accepting:
             raise WorkerBusyError("AI worker is shutting down")
         future: asyncio.Future[AIResponse] = asyncio.get_running_loop().create_future()
-        job = InferenceJob(request=request, future=future)
+        job = InferenceJob(request=request, future=future, enqueued_at=monotonic())
         try:
             self.queue.put_nowait(job)
         except asyncio.QueueFull as error:
+            now = monotonic()
+            self._purge_telemetry(now)
+            self._rejection_samples.append(now)
             raise WorkerBusyError("AI inference queue is full") from error
         self._queued_requests += 1
         return job
@@ -183,64 +252,133 @@ class InferenceScheduler:
         if not job.future.done():
             job.future.cancel()
 
+    def _mark_dequeued(self, job: InferenceJob) -> None:
+        if not job.counted_as_queued:
+            return
+        job.counted_as_queued = False
+        self._queued_requests -= 1
+        now = monotonic()
+        self._purge_telemetry(now)
+        self._queue_delay_samples.append((now, max(0.0, (now - job.enqueued_at) * 1_000)))
+
+    async def _next_item(self) -> InferenceJob | None:
+        if self._deferred:
+            return self._deferred.popleft()
+        return await self.queue.get()
+
+    async def _collect_batch(self, first: InferenceJob) -> tuple[InferenceJob, ...]:
+        if not self.service.settings.cross_request_microbatch:
+            return (first,)
+        key = self.service.cross_request_batch_key(first.request)
+        capacity = self.service.cross_request_batch_capacity(first.request)
+        if key is None or capacity < 2:
+            return (first,)
+
+        started = monotonic()
+        deadline = started + CROSS_REQUEST_MICROBATCH_WINDOW_SECONDS
+        jobs = [first]
+        while len(jobs) < capacity:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            try:
+                candidate = await asyncio.wait_for(self._next_item(), timeout=remaining)
+            except TimeoutError:
+                break
+            if candidate is None:
+                self._deferred.appendleft(None)
+                break
+            if candidate.cancelled:
+                self._mark_dequeued(candidate)
+                self.queue.task_done()
+                continue
+            if self.service.cross_request_batch_key(candidate.request) != key:
+                self._deferred.appendleft(candidate)
+                break
+            self._mark_dequeued(candidate)
+            jobs.append(candidate)
+
+        recorded_at = monotonic()
+        self._purge_telemetry(recorded_at)
+        self._batch_samples.append((recorded_at, len(jobs), max(0.0, (recorded_at - started) * 1_000)))
+        return tuple(jobs)
+
     async def _consume(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            job = await self.queue.get()
-            if job is not None and job.counted_as_queued:
+            first = await self._next_item()
+            if first is not None:
+                self._mark_dequeued(first)
+            jobs: tuple[InferenceJob, ...] = () if first is None else (first,)
+            try:
+                if first is None:
+                    self.queue.task_done()
+                    return
+                if first.cancelled:
+                    continue
+                jobs = await self._collect_batch(first)
+                runnable = tuple(job for job in jobs if not job.cancelled)
+                if not runnable:
+                    continue
+                for job in runnable:
+                    job.active = True
+                    self.active.add(job)
+                responses = await loop.run_in_executor(
+                    self.executor,
+                    self.service.handle_batch,
+                    tuple(job.request for job in runnable),
+                )
+                if len(responses) != len(runnable):
+                    raise RuntimeError("AI service returned a misaligned cross-request batch")
+                for job, response in zip(runnable, responses, strict=True):
+                    if not job.cancelled and not job.future.done():
+                        job.future.set_result(response)
+            except Exception as error:
+                for job in jobs:
+                    if not job.cancelled and not job.future.done():
+                        job.future.set_result(
+                            self.service.protocol_error(
+                                request_id=job.request.request_id,
+                                mode=job.request.mode,
+                                code="INFERENCE_FAILED",
+                                message=f"AI inference failed ({type(error).__name__}); no forecast was fabricated.",
+                            )
+                        )
+            finally:
+                for job in jobs:
+                    job.active = False
+                    self.active.discard(job)
+                    self.queue.task_done()
+
+    def _shutdown_item(self, job: InferenceJob | None) -> None:
+        if job is not None:
+            if job.counted_as_queued:
                 job.counted_as_queued = False
                 self._queued_requests -= 1
-            try:
-                if job is None:
-                    return
-                if job.cancelled:
-                    continue
-                job.active = True
-                self.active = job
-                response = await loop.run_in_executor(self.executor, self.service.handle, job.request)
-                if not job.cancelled and not job.future.done():
-                    job.future.set_result(response)
-            except Exception as error:
-                if job is not None and not job.cancelled and not job.future.done():
-                    job.future.set_result(
-                        self.service.protocol_error(
-                            request_id=job.request.request_id,
-                            mode=job.request.mode,
-                            code="INFERENCE_FAILED",
-                            message=f"AI inference failed ({type(error).__name__}); no forecast was fabricated.",
-                        )
+            job.cancelled = True
+            if not job.future.done():
+                job.future.set_result(
+                    self.service.protocol_error(
+                        request_id=job.request.request_id,
+                        mode=job.request.mode,
+                        code="WORKER_SHUTTING_DOWN",
+                        message="AI worker is shutting down before this request started.",
                     )
-            finally:
-                if job is not None:
-                    job.active = False
-                    if self.active is job:
-                        self.active = None
-                self.queue.task_done()
+                )
+        self.queue.task_done()
 
     async def close(self) -> None:
         if not self.accepting:
             return
         self.accepting = False
+        while self._deferred:
+            self._shutdown_item(self._deferred.popleft())
         while True:
             try:
                 job = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if job is not None:
-                if job.counted_as_queued:
-                    job.counted_as_queued = False
-                    self._queued_requests -= 1
-                job.cancelled = True
-                if not job.future.done():
-                    job.future.set_result(
-                        self.service.protocol_error(
-                            request_id=job.request.request_id,
-                            mode=job.request.mode,
-                            code="WORKER_SHUTTING_DOWN",
-                            message="AI worker is shutting down before this request started.",
-                        )
-                    )
-            self.queue.task_done()
+            self._shutdown_item(job)
         await self.queue.put(None)
         if self.consumer is not None:
             await self.consumer
@@ -330,6 +468,7 @@ class WebSocketRuntime:
             },
             "active_requests": self.scheduler.active_requests,
             "queued_requests": self.scheduler.queued_requests,
+            "scheduler": self.scheduler.telemetry(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 

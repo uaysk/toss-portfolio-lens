@@ -1,0 +1,17 @@
+**
+!Dockerfile.worker.chronos2
+!worker/
+!worker/ai/
+!worker/ai/.python-version
+!worker/ai/pyproject.toml
+!worker/ai/uv.lock
+!worker/ai/model-manifest.json
+!worker/ai/THIRD_PARTY_NOTICES.md
+!worker/ai/README.md
+!worker/ai/src/
+!worker/ai/src/**
+!scripts/
+!scripts/prepare-chronos2-model-cache.py
+!scripts/prepare-chronos2-raw-artifact.py
+!scripts/convert-chronos2-output-to-policy-artifact.py
+!scripts/summarize-chronos2-qualification.py

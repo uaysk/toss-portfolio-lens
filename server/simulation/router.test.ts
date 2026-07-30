@@ -1,13 +1,38 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { createSimulationRouter, type SimulationRouterService } from "./router.js";
+import {
+  createSimulationRouter,
+  type SimulationRouterDependencies,
+  type SimulationRouterService,
+} from "./router.js";
+import { SimulationRunEventHub } from "./run-event-stream.js";
 
 const RUN_ID = "550e8400-e29b-41d4-a716-446655440000";
 
 function mockResponse() {
-  const response: Record<string, ReturnType<typeof vi.fn>> = {
+  const emitter = new EventEmitter();
+  const response = {
     setHeader: vi.fn(),
     status: vi.fn(),
     json: vi.fn(),
+    write: vi.fn((_chunk: unknown) => true),
+    flushHeaders: vi.fn(),
+    end: vi.fn(),
+    on: vi.fn((name: string, listener: (...args: unknown[]) => void) => {
+      emitter.on(name, listener);
+      return response;
+    }),
+    once: vi.fn((name: string, listener: (...args: unknown[]) => void) => {
+      emitter.once(name, listener);
+      return response;
+    }),
+    off: vi.fn((name: string, listener: (...args: unknown[]) => void) => {
+      emitter.off(name, listener);
+      return response;
+    }),
+    emit: emitter.emit.bind(emitter),
+    writableEnded: false,
+    destroyed: false,
   };
   response.status.mockReturnValue(response);
   response.json.mockReturnValue(response);
@@ -53,6 +78,8 @@ function router(input?: {
   enabled?: boolean;
   service?: SimulationRouterService;
   ownerSubject?: string;
+  events?: SimulationRunEventHub;
+  sseConnections?: SimulationRouterDependencies["sseConnections"];
 }) {
   const authenticate = vi.fn((_request, _response, next) => next());
   return {
@@ -60,6 +87,8 @@ function router(input?: {
     value: createSimulationRouter({
       authenticate,
       service: input?.service,
+      events: input?.events,
+      sseConnections: input?.sseConnections,
       config: {
         enabled: input?.enabled ?? true,
         maxDurationMinutes: 390,
@@ -88,10 +117,74 @@ describe("AI paper simulation session-only router", () => {
       "/runs",
       "/runs/current",
       "/runs/:runId/report",
+      "/runs/:runId/events",
       "/runs/:runId",
       "/runs/:runId/cancel",
     ]);
     expect(paths.some((path) => /order|mcp/i.test(String(path)))).toBe(false);
+  });
+
+  it("replays only revisions after Last-Event-ID, emits terminal, and cleans up disconnects", async () => {
+    const events = new SimulationRunEventHub();
+    events.publishSnapshot({
+      runId: RUN_ID,
+      ownerSubject: "owner",
+      status: "running",
+      payload: { snapshot: { progress: 0 } },
+    });
+    events.publishProgress({
+      runId: RUN_ID,
+      ownerSubject: "owner",
+      status: "running",
+      payload: { progress: 0.5 },
+    });
+    events.publishTerminal({
+      runId: RUN_ID,
+      ownerSubject: "owner",
+      status: "completed",
+      payload: { snapshot: { progress: 1 } },
+    });
+    const unregister = vi.fn();
+    const tracker = {
+      track: vi.fn(() => unregister),
+    };
+    const created = router({
+      service: service({
+        get: vi.fn().mockResolvedValue({
+          run: { id: RUN_ID, status: "completed" },
+          snapshot: { phase: "completed", progress: 1 },
+        }),
+      }),
+      events,
+      sseConnections: tracker as never,
+    });
+    const requestEvents = new EventEmitter();
+    const request = Object.assign(requestEvents, {
+      params: { runId: RUN_ID },
+      query: {},
+      get: (name: string) => name.toLowerCase() === "last-event-id" ? "1" : undefined,
+    });
+    const response = mockResponse();
+
+    await routeHandler(created.value, "/runs/:runId/events", "get")(
+      request as unknown as Record<string, unknown>,
+      response,
+    );
+
+    const output = response.write.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(output).not.toContain("id: 1\n");
+    expect(output).toContain("id: 2\nevent: progress");
+    expect(output).toContain("id: 3\nevent: terminal");
+    expect(output).toContain("\"schemaVersion\":1");
+    expect(output).toContain("\"payload\":");
+    expect(output).not.toContain("\"data\":");
+    expect(response.flushHeaders).toHaveBeenCalledTimes(1);
+    expect(events.telemetry.activeConnections).toBe(1);
+    expect(tracker.track).toHaveBeenCalledTimes(1);
+
+    requestEvents.emit("close");
+    expect(events.telemetry.activeConnections).toBe(0);
+    expect(unregister).toHaveBeenCalledTimes(1);
   });
 
   it("reports disabled status without invoking a service and returns 503 for execution", async () => {

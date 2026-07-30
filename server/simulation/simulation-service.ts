@@ -31,6 +31,7 @@ import type {
   StockSimulationMarket,
 } from "./contracts.js";
 import { AI_SIMULATION_CONTRACT_VERSION } from "./contracts.js";
+import type { SimulationRunEventPublisher } from "./run-event-stream.js";
 import {
   DEFAULT_PAIR_CATALOG,
   PAIR_CATALOG_VERSION,
@@ -128,6 +129,15 @@ import {
   simulationChartsFromWorkspace,
   type SimulationChartView,
 } from "./chart-data.js";
+import {
+  SimulationCheckpointStore,
+  type SimulationCheckpointSession,
+} from "./checkpoint-store.js";
+import type {
+  SimulationCheckpointEventTypeV2,
+  SimulationCheckpointPatchOperationV2,
+  SimulationCheckpointPathSegmentV2,
+} from "./checkpoint-contracts.js";
 
 const MINUTE_MS = 60_000;
 const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
@@ -164,10 +174,60 @@ export type SimulationHistoryListInput = {
 
 type UnknownRecord = Record<string, unknown>;
 
+type SimulationCheckpointScalarState = {
+  schemaVersion?: string;
+  phase?: string;
+  createdAt?: string;
+  startedAt?: string;
+  expiresAt?: string;
+  market?: string;
+  marketCountry?: string;
+  currency?: string;
+  initialCash?: number;
+  cash?: number;
+  equity?: number;
+  invested?: number;
+  realizedPnl?: number;
+  totalCosts?: number;
+  progress?: number;
+  decisionCount: number;
+  tradeCount: number;
+};
+
 function record(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as UnknownRecord
     : undefined;
+}
+
+function checkpointScalarState(snapshot: UnknownRecord): SimulationCheckpointScalarState {
+  const stringValue = (key: string): string | undefined => (
+    typeof snapshot[key] === "string" ? snapshot[key] : undefined
+  );
+  const numberValue = (key: string): number | undefined => (
+    typeof snapshot[key] === "number" && Number.isFinite(snapshot[key])
+      ? snapshot[key] as number
+      : undefined
+  );
+  return {
+    ...(stringValue("schemaVersion") ? { schemaVersion: stringValue("schemaVersion") } : {}),
+    ...(stringValue("phase") ? { phase: stringValue("phase") } : {}),
+    ...(stringValue("createdAt") ? { createdAt: stringValue("createdAt") } : {}),
+    ...(stringValue("startedAt") ? { startedAt: stringValue("startedAt") } : {}),
+    ...(stringValue("expiresAt") ? { expiresAt: stringValue("expiresAt") } : {}),
+    ...(stringValue("market") ? { market: stringValue("market") } : {}),
+    ...(stringValue("marketCountry") ? { marketCountry: stringValue("marketCountry") } : {}),
+    ...(stringValue("currency") ? { currency: stringValue("currency") } : {}),
+    ...(numberValue("initialCash") !== undefined ? { initialCash: numberValue("initialCash") } : {}),
+    ...(numberValue("cash") !== undefined ? { cash: numberValue("cash") } : {}),
+    ...(numberValue("equity") !== undefined ? { equity: numberValue("equity") } : {}),
+    ...(numberValue("invested") !== undefined ? { invested: numberValue("invested") } : {}),
+    ...(numberValue("realizedPnl") !== undefined ? { realizedPnl: numberValue("realizedPnl") } : {}),
+    ...(numberValue("totalCosts") !== undefined ? { totalCosts: numberValue("totalCosts") } : {}),
+    ...(numberValue("progress") !== undefined ? { progress: numberValue("progress") } : {}),
+    decisionCount: Array.isArray(snapshot.decisions) ? snapshot.decisions.length : 0,
+    tradeCount: Array.isArray(snapshot.trades) ? snapshot.trades.length : 0,
+  };
 }
 
 function finite(value: unknown): number | undefined {
@@ -532,6 +592,7 @@ export type AiTradingSimulationConfig = {
   selectionRetryDelayMs: number;
   progressUpdateMs?: number;
   now?: () => number;
+  runEvents?: SimulationRunEventPublisher;
 };
 
 type SimulationDecision = {
@@ -862,6 +923,14 @@ type ActiveSession = SimulationRuntimeHandles & {
   trades: SimulationTrade[];
   equity: EquityPoint[];
   charts: SimulationChartView[];
+  decisionAppendCount: number;
+  tradeAppendCount: number;
+  equityAppendCount: number;
+  provenanceAppendCount: number;
+  chartRevision: number;
+  comparisonRevision: number;
+  checkpointDirtyDecisionIndexes: Set<number>;
+  checkpointDirtyProvenanceIndexes: Set<number>;
   pair?: {
     catalog: Readonly<PairCatalogEntry>;
     direction: PairDirection;
@@ -900,8 +969,65 @@ type ActiveSession = SimulationRuntimeHandles & {
   lastArtifactPersistedAtMs?: number;
   analysisRunning: boolean;
   persistenceTail: Promise<void>;
+  checkpoint?: SimulationCheckpointSession<unknown, SimulationCheckpointScalarState>;
+  checkpointCursor?: SimulationCheckpointCursor;
+  legacyArtifactsInitialized?: boolean;
+  legacyArtifactsTerminalPhase?: "completed" | "cancelled" | "failed";
   finalizationTask?: Promise<void>;
 };
+
+type SimulationCheckpointCursor = {
+  decisionAppendCount: number;
+  decisionLength: number;
+  tradeAppendCount: number;
+  tradeLength: number;
+  equityAppendCount: number;
+  equityLength: number;
+  provenanceAppendCount: number;
+  provenanceLength: number;
+  chartRevision: number;
+  comparisonRevision: number;
+  snapshotKeys: Set<string>;
+  snapshotValues: Map<string, unknown>;
+};
+
+function appendRollingArrayPatch(
+  operations: SimulationCheckpointPatchOperationV2[],
+  path: SimulationCheckpointPathSegmentV2[],
+  values: readonly unknown[],
+  appendCount: number,
+  cursorAppendCount: number,
+  cursorLength: number,
+): void {
+  const appended = appendCount - cursorAppendCount;
+  const removed = cursorLength + appended - values.length;
+  if (!Number.isSafeInteger(appended)
+    || appended < 0
+    || appended > values.length
+    || !Number.isSafeInteger(removed)
+    || removed < 0
+    || removed > cursorLength) {
+    throw new Error(`simulation checkpoint append cursor가 어긋났습니다: ${path.join(".")}`);
+  }
+  if (removed) {
+    operations.push({
+      op: "splice",
+      path,
+      index: 0,
+      deleteCount: removed,
+      values: [],
+    });
+  }
+  if (appended) {
+    operations.push({
+      op: "splice",
+      path,
+      index: cursorLength - removed,
+      deleteCount: 0,
+      values: values.slice(values.length - appended),
+    });
+  }
+}
 
 function applyPhaseTransition(session: ActiveSession, event: SimulationPhaseEvent): boolean {
   const transition = transitionSimulationPhase(session.phase, event);
@@ -1926,6 +2052,7 @@ export class AiTradingSimulationService {
     private readonly repository: RunRepository,
     private readonly artifacts: ArtifactService,
     private readonly config: AiTradingSimulationConfig,
+    private readonly checkpoints?: SimulationCheckpointStore,
   ) {
     if (!Number.isInteger(config.maximumDurationMinutes) || config.maximumDurationMinutes < 1
       || !Number.isInteger(config.maximumActiveSessions) || config.maximumActiveSessions < 1
@@ -2169,6 +2296,21 @@ export class AiTradingSimulationService {
           retryable: true,
           real_order_api_used: false,
         }, [message], this.now());
+        this.config.runEvents?.publishTerminal({
+          runId: run.id,
+          ownerSubject,
+          status: "failed",
+          payload: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            runId: run.id,
+            status: "failed",
+            error: {
+              code: "AI_SIMULATION_START_FAILED",
+              message,
+              retryable: true,
+            },
+          },
+        });
       } catch (terminalError) {
         throw new AggregateError(
           [error, terminalError],
@@ -2195,6 +2337,14 @@ export class AiTradingSimulationService {
       trades: [],
       equity: [{ timestamp: createdAt, equity: input.initialCash, cash: input.initialCash, invested: 0 }],
       charts: [],
+      decisionAppendCount: 0,
+      tradeAppendCount: 0,
+      equityAppendCount: 1,
+      provenanceAppendCount: 0,
+      chartRevision: 0,
+      comparisonRevision: 0,
+      checkpointDirtyDecisionIndexes: new Set(),
+      checkpointDirtyProvenanceIndexes: new Set(),
       ...(pairCatalog ? {
         pair: {
           catalog: pairCatalog,
@@ -2220,36 +2370,71 @@ export class AiTradingSimulationService {
     };
     this.active.set(run.id, session);
     void this.initialize(session).catch((error) => this.fail(session, error));
-    return {
+    const response = {
       schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
       market,
       runId: run.id,
       status: "running",
       snapshot: this.snapshot(session),
     };
+    this.config.runEvents?.publishSnapshot({
+      runId: run.id,
+      ownerSubject,
+      status: "running",
+      payload: response,
+    });
+    return response;
+  }
+
+  private terminalCheckpointSnapshot(
+    run: PortfolioRunRecord,
+    snapshot: UnknownRecord,
+  ): UnknownRecord {
+    if (!["completed", "cancelled", "failed"].includes(run.status)) return snapshot;
+    const checkpointWarnings = Array.isArray(snapshot.warnings)
+      ? snapshot.warnings.filter((value): value is string => typeof value === "string")
+      : [];
+    const errorMessage = nonempty(record(run.error)?.message, 500);
+    return {
+      ...snapshot,
+      phase: run.status,
+      progress: 1,
+      pendingActions: [],
+      warnings: uniqueWarnings([
+        ...checkpointWarnings,
+        ...run.warnings,
+        ...(errorMessage ? [errorMessage] : []),
+      ]),
+    };
+  }
+
+  private async replayedCheckpointState(runId: string): Promise<UnknownRecord | undefined> {
+    if (!this.checkpoints) return undefined;
+    try {
+      return record((await this.checkpoints.replay<UnknownRecord>(runId))?.state);
+    } catch (error) {
+      console.warn(
+        `[simulation] v2 checkpoint replay 실패 (${runId}):`,
+        error instanceof Error ? error.message : error,
+      );
+      return undefined;
+    }
   }
 
   private async checkpointSnapshot(run: PortfolioRunRecord): Promise<unknown> {
+    const checkpointState = await this.replayedCheckpointState(run.id);
+    const checkpointV2Snapshot = record(checkpointState?.snapshot) ?? (
+      checkpointState?.schemaVersion === AI_SIMULATION_CONTRACT_VERSION
+        ? checkpointState
+        : undefined
+    );
+    if (checkpointV2Snapshot) {
+      return this.terminalCheckpointSnapshot(run, checkpointV2Snapshot);
+    }
     try {
       const artifact = await this.artifacts.get(run.id, "simulation-diagnostics");
       const snapshot = record(record(artifact?.content)?.snapshot);
-      if (!snapshot) return undefined;
-      if (!["completed", "cancelled", "failed"].includes(run.status)) return snapshot;
-      const checkpointWarnings = Array.isArray(snapshot.warnings)
-        ? snapshot.warnings.filter((value): value is string => typeof value === "string")
-        : [];
-      const errorMessage = nonempty(record(run.error)?.message, 500);
-      return {
-        ...snapshot,
-        phase: run.status,
-        progress: 1,
-        pendingActions: [],
-        warnings: uniqueWarnings([
-          ...checkpointWarnings,
-          ...run.warnings,
-          ...(errorMessage ? [errorMessage] : []),
-        ]),
-      };
+      return snapshot ? this.terminalCheckpointSnapshot(run, snapshot) : undefined;
     } catch {
       return undefined;
     }
@@ -2354,6 +2539,7 @@ export class AiTradingSimulationService {
       || run.ownerSubject !== ownerSubject
       || run.kind !== "ai_trading_simulation") return undefined;
 
+    const checkpointState = await this.replayedCheckpointState(run.id);
     const artifactFailures: string[] = [];
     const artifactEntries = await Promise.all(SIMULATION_ARTIFACT_TYPES.map(async (type) => {
       try {
@@ -2370,6 +2556,22 @@ export class AiTradingSimulationService {
       artifactContent.set(type, artifact.content);
       artifactDescriptors.set(type, artifact.descriptor);
     }
+    const checkpointV2Snapshot = record(checkpointState?.snapshot);
+    if (checkpointState && checkpointV2Snapshot) {
+      artifactContent.set("simulation-diagnostics", { snapshot: checkpointV2Snapshot });
+      artifactContent.set("simulation-decisions", values(checkpointV2Snapshot.decisions));
+      artifactContent.set("simulation-trades", values(checkpointV2Snapshot.trades));
+      artifactContent.set("simulation-equity", values(checkpointState.equity));
+      if (checkpointState.selection !== undefined) {
+        artifactContent.set("simulation-selection", checkpointState.selection);
+      }
+      if (checkpointState.comparison !== undefined) {
+        artifactContent.set("simulation-comparison", checkpointState.comparison);
+      }
+      if (checkpointState.provenance !== undefined) {
+        artifactContent.set("simulation-provenance", checkpointState.provenance);
+      }
+    }
 
     const diagnostic = record(artifactContent.get("simulation-diagnostics"));
     const comparisonArtifact = record(artifactContent.get("simulation-comparison"));
@@ -2377,7 +2579,7 @@ export class AiTradingSimulationService {
     const active = this.active.get(run.id);
     const rawSourceSnapshot = active
       ? record(this.snapshot(active)) ?? {}
-      : runSnapshot(run) ?? record(diagnostic?.snapshot) ?? {};
+      : runSnapshot(run) ?? checkpointV2Snapshot ?? record(diagnostic?.snapshot) ?? {};
     const market = active
       ? requestStockMarket(active.request)
       : runStockMarket(run, rawSourceSnapshot);
@@ -2413,21 +2615,15 @@ export class AiTradingSimulationService {
       ...stringValues(sourceSnapshot.warnings),
       ...artifactFailures,
     ]);
-    const decisionCount = countFromArtifact(
-      artifactDescriptors,
-      "simulation-decisions",
-      allDecisions.length,
-    );
-    const tradeCount = countFromArtifact(
-      artifactDescriptors,
-      "simulation-trades",
-      allTrades.length,
-    );
-    const equityPointCount = countFromArtifact(
-      artifactDescriptors,
-      "simulation-equity",
-      allEquity.length,
-    );
+    const decisionCount = checkpointState
+      ? allDecisions.length
+      : countFromArtifact(artifactDescriptors, "simulation-decisions", allDecisions.length);
+    const tradeCount = checkpointState
+      ? allTrades.length
+      : countFromArtifact(artifactDescriptors, "simulation-trades", allTrades.length);
+    const equityPointCount = checkpointState
+      ? allEquity.length
+      : countFromArtifact(artifactDescriptors, "simulation-equity", allEquity.length);
     const configuration = simulationConfiguration(run, sourceSnapshot);
     const cadence = firstDefined(sourceSnapshot, "decisionCadence", "decision_cadence")
       ?? firstDefined(diagnostic, "decisionCadence", "decision_cadence")
@@ -2766,6 +2962,7 @@ export class AiTradingSimulationService {
     for (const chart of session.charts) {
       mergeSimulationLatestTechnical(chart, initialTechnical);
     }
+    session.chartRevision += 1;
     const startedAtMs = this.now();
     session.startedAt = new Date(startedAtMs).toISOString();
     session.expiresAt = new Date(startedAtMs + session.request.durationMinutes * MINUTE_MS).toISOString();
@@ -2976,6 +3173,7 @@ export class AiTradingSimulationService {
     });
     if (signal.aborted || session.phase !== "selecting") return;
     for (const chart of session.charts) mergeSimulationLatestTechnical(chart, technical);
+    session.chartRevision += 1;
     const displaySelection = selectAiForecastSeries(forecastResult.forecast, {
       symbolCount: 1,
       roundTripCostRate: roundTripCostRate(
@@ -3102,7 +3300,15 @@ export class AiTradingSimulationService {
         model: action.model,
       };
       session.decisions.push(decision);
-      if (session.decisions.length > MAX_DECISIONS) session.decisions.shift();
+      session.decisionAppendCount += 1;
+      if (session.decisions.length > MAX_DECISIONS) {
+        session.decisions.shift();
+        session.checkpointDirtyDecisionIndexes = new Set(
+          [...session.checkpointDirtyDecisionIndexes]
+            .filter((index) => index > 0)
+            .map((index) => index - 1),
+        );
+      }
       if ((action.action === "buy" || action.action === "sell")
         && insideSessionBoundary(session, eligibleAfter)
         && eligibleAfter !== session.expiresAt) {
@@ -3270,6 +3476,7 @@ export class AiTradingSimulationService {
       },
     });
     session.pair.strategyComparison = buildPairStrategyComparison(session);
+    session.comparisonRevision += 1;
   }
 
   private refreshPairComparison(
@@ -3277,7 +3484,10 @@ export class AiTradingSimulationService {
     forceSkipIncomplete = false,
   ): void {
     if (!session.pair || !session.pair.comparisonPending.length) {
-      if (session.pair) session.pair.strategyComparison = buildPairStrategyComparison(session);
+      if (session.pair && session.pair.strategyComparison === undefined) {
+        session.pair.strategyComparison = buildPairStrategyComparison(session);
+        session.comparisonRevision += 1;
+      }
       return;
     }
     const remaining: PairPendingComparison[] = [];
@@ -3403,6 +3613,7 @@ export class AiTradingSimulationService {
       );
     }
     session.pair.strategyComparison = buildPairStrategyComparison(session);
+    session.comparisonRevision += 1;
   }
 
   private updatePairSizingProvenance(
@@ -3427,6 +3638,22 @@ export class AiTradingSimulationService {
       return;
     }
     session.pair.provenanceRecords[index] = updated;
+    session.checkpointDirtyProvenanceIndexes.add(index);
+  }
+
+  private updatePairDecisionSizing(
+    session: ActiveSession,
+    pairDecisionId: string | undefined,
+    sizing: PairSizingResult,
+  ): void {
+    if (!pairDecisionId) return;
+    for (let index = session.decisions.length - 1; index >= 0; index -= 1) {
+      const decision = session.decisions[index];
+      if (decision?.pairDecisionId !== pairDecisionId) continue;
+      decision.sizing = sizing;
+      session.checkpointDirtyDecisionIndexes.add(index);
+      return;
+    }
   }
 
   private recordPairDecision(
@@ -3665,6 +3892,11 @@ export class AiTradingSimulationService {
       pending: new Map(session.pending),
       decisions: [...session.decisions],
       warnings: [...session.warnings],
+      decisionAppendCount: session.decisionAppendCount,
+      provenanceAppendCount: session.provenanceAppendCount,
+      checkpointDirtyDecisionIndexes: new Set(session.checkpointDirtyDecisionIndexes),
+      checkpointDirtyProvenanceIndexes: new Set(session.checkpointDirtyProvenanceIndexes),
+      comparisonRevision: session.comparisonRevision,
     };
     try {
       session.pair.lastModels = models;
@@ -3764,8 +3996,14 @@ export class AiTradingSimulationService {
     }
     baseAction.pairDecisionId = provenanceRecord.decisionId;
     session.pair.provenanceRecords.push(provenanceRecord);
+    session.provenanceAppendCount += 1;
     if (session.pair.provenanceRecords.length > MAX_REPORT_DECISIONS) {
       session.pair.provenanceRecords.shift();
+      session.checkpointDirtyProvenanceIndexes = new Set(
+        [...session.checkpointDirtyProvenanceIndexes]
+          .filter((index) => index > 0)
+          .map((index) => index - 1),
+      );
     }
     const components = {
       kronosBull: decision.componentScores.kronos.bull,
@@ -3811,7 +4049,15 @@ export class AiTradingSimulationService {
       ...(etfSessionGate ? { etfSessionGate } : {}),
     };
     session.decisions.push(simulationDecision);
-    if (session.decisions.length > MAX_DECISIONS) session.decisions.shift();
+    session.decisionAppendCount += 1;
+    if (session.decisions.length > MAX_DECISIONS) {
+      session.decisions.shift();
+      session.checkpointDirtyDecisionIndexes = new Set(
+        [...session.checkpointDirtyDecisionIndexes]
+          .filter((index) => index > 0)
+          .map((index) => index - 1),
+      );
+    }
     this.queuePairComparison(session, models, rust, decision);
     this.refreshPairComparison(session);
     if (stateTransition.status === "applied") {
@@ -3846,6 +4092,11 @@ export class AiTradingSimulationService {
       session.pending = rollback.pending;
       session.decisions = rollback.decisions;
       session.warnings = rollback.warnings;
+      session.decisionAppendCount = rollback.decisionAppendCount;
+      session.provenanceAppendCount = rollback.provenanceAppendCount;
+      session.checkpointDirtyDecisionIndexes = rollback.checkpointDirtyDecisionIndexes;
+      session.checkpointDirtyProvenanceIndexes = rollback.checkpointDirtyProvenanceIndexes;
+      session.comparisonRevision = rollback.comparisonRevision;
       assertPairStateLedgerInvariant(session);
       throw error;
     }
@@ -3911,7 +4162,10 @@ export class AiTradingSimulationService {
         && payload.intervalMinutes === 1
         && payload.state === "forming") {
         const chart = session.charts.find((item) => item.symbol === event.symbol);
-        if (chart) mergeSimulationFormingBar(chart, payload, event.emittedAt);
+        if (chart) {
+          mergeSimulationFormingBar(chart, payload, event.emittedAt);
+          session.chartRevision += 1;
+        }
       } else if (event.type === "bar"
         && payload.intervalMinutes === 1
         && payload.state === "final") {
@@ -3919,6 +4173,7 @@ export class AiTradingSimulationService {
         const chartChanged = chart
           ? mergeSimulationFinalBar(chart, payload, event.emittedAt)
           : false;
+        if (chartChanged) session.chartRevision += 1;
         const closeTime = timestamp(payload.closeTime);
         const openTime = timestamp(payload.openTime);
         const open = finite(payload.open);
@@ -4043,6 +4298,7 @@ export class AiTradingSimulationService {
     for (const chart of session.charts) {
       mergeSimulationLatestTechnical(chart, technical);
     }
+    session.chartRevision += 1;
     const profile = resolvePaperPolicyProfile(
       session.request.preset,
       session.request.riskTolerance,
@@ -4083,6 +4339,7 @@ export class AiTradingSimulationService {
           symbol, action, eligible_after: eligibleAfter,
         })),
       });
+      await this.captureCheckpoint(session, "changed");
       if (checkpoint) await this.writeArtifacts(session);
     });
     if (checkpoint) session.lastArtifactPersistedAtMs = this.now();
@@ -4131,6 +4388,7 @@ export class AiTradingSimulationService {
       return;
     }
     for (const chart of session.charts) mergeSimulationLatestTechnical(chart, technical);
+    session.chartRevision += 1;
     const states = technicalStates(technical, session.charts, session.request.preset);
     const decisionRecord = this.recordPairDecision(
       session,
@@ -4170,6 +4428,7 @@ export class AiTradingSimulationService {
         })),
         real_order_api: false,
       });
+      await this.captureCheckpoint(session, "changed");
       if (checkpoint) await this.writeArtifacts(session);
     });
     if (checkpoint) session.lastArtifactPersistedAtMs = this.now();
@@ -4307,10 +4566,7 @@ export class AiTradingSimulationService {
       if (!sizing || sizing.status !== "sized" || sizing.targetExecutionGross <= 0) {
         if (sizing) {
           session.pair.lastSizing = sizing;
-          const relatedDecision = [...session.decisions].reverse().find(
-            (item) => item.pairDecisionId === action.pairDecisionId,
-          );
-          if (relatedDecision) relatedDecision.sizing = sizing;
+          this.updatePairDecisionSizing(session, action.pairDecisionId, sizing);
           this.updatePairSizingProvenance(
             session,
             action.pairDecisionId,
@@ -4358,10 +4614,7 @@ export class AiTradingSimulationService {
         return;
       }
       session.pair.lastSizing = sizing;
-      const relatedDecision = [...session.decisions].reverse().find(
-        (item) => item.pairDecisionId === action.pairDecisionId,
-      );
-      if (relatedDecision) relatedDecision.sizing = sizing;
+      this.updatePairDecisionSizing(session, action.pairDecisionId, sizing);
       this.updatePairSizingProvenance(session, action.pairDecisionId, sizing);
       action.targetAllocationRate = Math.max(
         Number.EPSILON,
@@ -4462,6 +4715,7 @@ export class AiTradingSimulationService {
       ...(action.pairDecisionId ? { pairDecisionId: action.pairDecisionId } : {}),
     };
     session.trades.push(trade);
+    session.tradeAppendCount += 1;
     if (session.pair) {
       for (const pendingSymbol of executionSymbols(session)) {
         if (pendingSymbol !== symbol) session.pending.delete(pendingSymbol);
@@ -4484,7 +4738,7 @@ export class AiTradingSimulationService {
         price: trade.price,
         real_order_api: false,
       });
-      await this.writeArtifacts(session);
+      await this.writeArtifacts(session, "fill", true);
     });
     session.lastArtifactPersistedAtMs = this.now();
   }
@@ -4497,6 +4751,7 @@ export class AiTradingSimulationService {
       cash: session.ledger.cash,
       invested: valuation.invested,
     });
+    session.equityAppendCount += 1;
     if (session.equity.length > MAX_EQUITY_POINTS) session.equity.shift();
     if (valuation.unavailable.length) {
       this.warn(session, `평가 가격 unavailable: ${valuation.unavailable.join(", ")}`);
@@ -4540,13 +4795,23 @@ export class AiTradingSimulationService {
       return;
     }
     const progress = expires > started ? (this.now() - started) / (expires - started) : 0;
-    await this.enqueuePersistence(session, () => this.repository.updateProgress(session.id, {
+    const detail = {
       progress,
       completedCandidates: selectedSymbols(session).length,
       totalCandidates: selectionSymbolCount(session.request),
       currentValidationWindow: new Date(this.now()).toISOString(),
       warnings: session.warnings,
-    }));
+    };
+    await this.enqueuePersistence(session, async () => {
+      await this.repository.updateProgress(session.id, detail);
+      await this.captureCheckpoint(session, "progress");
+    });
+    this.config.runEvents?.publishProgress({
+      runId: session.id,
+      ownerSubject: session.ownerSubject,
+      status: "running",
+      payload: detail,
+    });
   }
 
   private queueProgress(session: ActiveSession): void {
@@ -4715,6 +4980,214 @@ export class AiTradingSimulationService {
     };
   }
 
+  private checkpointState(
+    session: ActiveSession,
+    snapshot: ReturnType<AiTradingSimulationService["snapshot"]> = this.snapshot(session),
+  ): UnknownRecord {
+    return {
+      snapshot,
+      equity: session.equity,
+      selection: this.checkpointSelection(session),
+      ...(session.pair?.strategyComparison !== undefined
+        ? { comparison: session.pair.strategyComparison } : {}),
+      ...(session.pair ? { provenance: session.pair.provenanceRecords } : {}),
+    };
+  }
+
+  private checkpointSelection(session: ActiveSession): UnknownRecord {
+    return {
+      schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+      market: requestStockMarket(session.request),
+      policy_version: session.pair
+        ? PAIR_ENSEMBLE_POLICY_VERSION
+        : AI_PAPER_POLICY_VERSION,
+      selection: session.selection,
+      strategy: simulationStrategy(session.request),
+      simulationCase: session.request.simulationCase,
+      normalizedRequest: session.request,
+      modelPlan: simulationModelPlan(session.request),
+      modelLanes: [...session.request.modelLanes],
+      ...(session.pair ? { pair: session.pair.catalog } : {}),
+      metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
+    };
+  }
+
+  private checkpointSnapshotValues(
+    snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
+  ): Map<string, unknown> {
+    return new Map(Object.entries(snapshot as unknown as UnknownRecord));
+  }
+
+  private checkpointCursor(
+    session: ActiveSession,
+    snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
+  ): SimulationCheckpointCursor {
+    const snapshotValues = this.checkpointSnapshotValues(snapshot);
+    return {
+      decisionAppendCount: session.decisionAppendCount,
+      decisionLength: session.decisions.length,
+      tradeAppendCount: session.tradeAppendCount,
+      tradeLength: session.trades.length,
+      equityAppendCount: session.equityAppendCount,
+      equityLength: session.equity.length,
+      provenanceAppendCount: session.provenanceAppendCount,
+      provenanceLength: session.pair?.provenanceRecords.length ?? 0,
+      chartRevision: session.chartRevision,
+      comparisonRevision: session.comparisonRevision,
+      snapshotKeys: new Set(snapshotValues.keys()),
+      snapshotValues,
+    };
+  }
+
+  private checkpointPatch(
+    session: ActiveSession,
+    snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
+  ): {
+    operations: SimulationCheckpointPatchOperationV2[];
+    nextCursor: SimulationCheckpointCursor;
+  } {
+    const cursor = session.checkpointCursor;
+    if (!cursor) throw new Error("simulation checkpoint cursor가 없습니다.");
+    const operations: SimulationCheckpointPatchOperationV2[] = [];
+    const snapshotValues = this.checkpointSnapshotValues(snapshot);
+    const cumulativeKeys = new Set(["decisions", "trades", "charts", "strategyComparison"]);
+    for (const [key, value] of snapshotValues) {
+      if (cumulativeKeys.has(key) || Object.is(cursor.snapshotValues.get(key), value)) continue;
+      operations.push({ op: "set", path: ["snapshot", key], value });
+    }
+    for (const key of cursor.snapshotKeys) {
+      if (cumulativeKeys.has(key) || snapshotValues.has(key)) continue;
+      operations.push({ op: "delete", path: ["snapshot", key] });
+    }
+    if (session.chartRevision !== cursor.chartRevision) {
+      operations.push({ op: "set", path: ["snapshot", "charts"], value: session.charts });
+    }
+    if (session.comparisonRevision !== cursor.comparisonRevision) {
+      if (session.pair?.strategyComparison === undefined) {
+        operations.push(
+          { op: "delete", path: ["snapshot", "strategyComparison"] },
+          { op: "delete", path: ["comparison"] },
+        );
+      } else {
+        operations.push(
+          {
+            op: "set",
+            path: ["snapshot", "strategyComparison"],
+            value: session.pair.strategyComparison,
+          },
+          { op: "set", path: ["comparison"], value: session.pair.strategyComparison },
+        );
+      }
+    }
+    appendRollingArrayPatch(
+      operations,
+      ["snapshot", "decisions"],
+      session.decisions,
+      session.decisionAppendCount,
+      cursor.decisionAppendCount,
+      cursor.decisionLength,
+    );
+    appendRollingArrayPatch(
+      operations,
+      ["snapshot", "trades"],
+      session.trades,
+      session.tradeAppendCount,
+      cursor.tradeAppendCount,
+      cursor.tradeLength,
+    );
+    appendRollingArrayPatch(
+      operations,
+      ["equity"],
+      session.equity,
+      session.equityAppendCount,
+      cursor.equityAppendCount,
+      cursor.equityLength,
+    );
+    if (session.pair) {
+      appendRollingArrayPatch(
+        operations,
+        ["provenance"],
+        session.pair.provenanceRecords,
+        session.provenanceAppendCount,
+        cursor.provenanceAppendCount,
+        cursor.provenanceLength,
+      );
+    }
+    for (const index of session.checkpointDirtyDecisionIndexes) {
+      const value = session.decisions[index];
+      if (value !== undefined) {
+        operations.push({ op: "set", path: ["snapshot", "decisions", index], value });
+      }
+    }
+    for (const index of session.checkpointDirtyProvenanceIndexes) {
+      const value = session.pair?.provenanceRecords[index];
+      if (value !== undefined) operations.push({ op: "set", path: ["provenance", index], value });
+    }
+    operations.push({ op: "set", path: ["selection"], value: this.checkpointSelection(session) });
+    return {
+      operations,
+      nextCursor: this.checkpointCursor(session, snapshot),
+    };
+  }
+
+  private async ensureCheckpointSession(
+    session: ActiveSession,
+    state: UnknownRecord,
+    snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
+  ): Promise<"unavailable" | "created" | "existing"> {
+    if (session.checkpoint) {
+      session.checkpointCursor ??= this.checkpointCursor(session, snapshot);
+      return "existing";
+    }
+    if (!this.checkpoints) return "unavailable";
+    session.checkpoint = await this.checkpoints.startSession<
+      unknown,
+      SimulationCheckpointScalarState
+    >({
+      runId: session.id,
+      baseState: state,
+      scalarState: checkpointScalarState(snapshot),
+      now: this.now(),
+      onError: (error) => this.warn(
+        session,
+        `v2 checkpoint timer flush 실패: ${error instanceof Error ? error.message : "unknown"}`,
+      ),
+    });
+    session.checkpointCursor = this.checkpointCursor(session, snapshot);
+    session.checkpointDirtyDecisionIndexes.clear();
+    session.checkpointDirtyProvenanceIndexes.clear();
+    return "created";
+  }
+
+  private async captureCheckpoint(
+    session: ActiveSession,
+    type: SimulationCheckpointEventTypeV2,
+    flush = false,
+    prepared?: {
+      snapshot: ReturnType<AiTradingSimulationService["snapshot"]>;
+    },
+  ): Promise<boolean> {
+    const snapshot = prepared?.snapshot ?? this.snapshot(session);
+    const state = session.checkpoint ? {} : this.checkpointState(session, snapshot);
+    const checkpoint = await this.ensureCheckpointSession(session, state, snapshot);
+    if (checkpoint === "unavailable") return false;
+    if (checkpoint === "created" && type !== "terminal") return true;
+    const patch = checkpoint === "created"
+      ? { operations: [], nextCursor: this.checkpointCursor(session, snapshot) }
+      : this.checkpointPatch(session, snapshot);
+    await session.checkpoint!.appendPatch({
+      operations: patch.operations,
+      scalarState: checkpointScalarState(snapshot),
+      type,
+      occurredAt: this.now(),
+      flush,
+    });
+    session.checkpointCursor = patch.nextCursor;
+    session.checkpointDirtyDecisionIndexes.clear();
+    session.checkpointDirtyProvenanceIndexes.clear();
+    return true;
+  }
+
   private async enqueuePersistence(
     session: ActiveSession,
     operation: () => void | Promise<void>,
@@ -4724,28 +5197,29 @@ export class AiTradingSimulationService {
     await task;
   }
 
-  private async writeArtifacts(session: ActiveSession): Promise<void> {
+  private async writeArtifacts(
+    session: ActiveSession,
+    checkpointType: SimulationCheckpointEventTypeV2 = "changed",
+    flushCheckpoint = false,
+  ): Promise<void> {
     if (session.pair) this.refreshPairComparison(session);
     const snapshot = this.snapshot(session);
+    const checkpointState = this.checkpointState(session, snapshot);
+    const terminal = ["completed", "cancelled", "failed"].includes(session.phase);
+    const checkpointCaptured = await this.captureCheckpoint(
+      session,
+      terminal ? "terminal" : checkpointType,
+      terminal || flushCheckpoint,
+      { snapshot },
+    );
+    if (checkpointCaptured
+      && session.legacyArtifactsInitialized
+      && (!terminal || session.legacyArtifactsTerminalPhase === session.phase)) return;
     await Promise.all([
       this.artifacts.put({
         runId: session.id,
         type: "simulation-selection",
-        content: {
-          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
-          market: requestStockMarket(session.request),
-          policy_version: session.pair
-            ? PAIR_ENSEMBLE_POLICY_VERSION
-            : AI_PAPER_POLICY_VERSION,
-          selection: session.selection,
-          strategy: simulationStrategy(session.request),
-          simulationCase: session.request.simulationCase,
-          normalizedRequest: session.request,
-          modelPlan: simulationModelPlan(session.request),
-          modelLanes: [...session.request.modelLanes],
-          ...(session.pair ? { pair: session.pair.catalog } : {}),
-          metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
-        },
+        content: checkpointState.selection,
         rowCount: selectedSymbols(session).length,
         dataRevision: session.dataRevision,
       }),
@@ -4770,22 +5244,20 @@ export class AiTradingSimulationService {
         rowCount: session.trades.length,
         dataRevision: session.dataRevision,
       }),
-      ...(session.pair ? [
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-comparison",
-          content: session.pair.strategyComparison,
-          rowCount: session.pair.comparisonObservations.length,
-          dataRevision: session.dataRevision,
-        }),
-        this.artifacts.put({
-          runId: session.id,
-          type: "simulation-provenance",
-          content: session.pair.provenanceRecords,
-          rowCount: session.pair.provenanceRecords.length,
-          dataRevision: session.dataRevision,
-        }),
-      ] : []),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-comparison",
+        content: session.pair?.strategyComparison ?? null,
+        rowCount: session.pair?.comparisonObservations.length ?? 0,
+        dataRevision: session.dataRevision,
+      }),
+      this.artifacts.put({
+        runId: session.id,
+        type: "simulation-provenance",
+        content: session.pair?.provenanceRecords ?? [],
+        rowCount: session.pair?.provenanceRecords.length ?? 0,
+        dataRevision: session.dataRevision,
+      }),
       this.artifacts.put({
         runId: session.id,
         type: "simulation-diagnostics",
@@ -4852,11 +5324,34 @@ export class AiTradingSimulationService {
         dataRevision: session.dataRevision,
       }),
     ]);
+    if (checkpointCaptured) {
+      session.legacyArtifactsInitialized = true;
+      if (terminal) {
+        session.legacyArtifactsTerminalPhase = session.phase as
+          | "completed"
+          | "cancelled"
+          | "failed";
+      }
+    }
   }
 
   private async persistArtifacts(session: ActiveSession): Promise<void> {
     await this.enqueuePersistence(session, () => this.writeArtifacts(session));
     session.lastArtifactPersistedAtMs = this.now();
+    this.config.runEvents?.publishChanged({
+      runId: session.id,
+      ownerSubject: session.ownerSubject,
+      status: session.phase === "completed"
+        || session.phase === "cancelled"
+        || session.phase === "failed"
+        ? session.phase
+        : "running",
+      payload: {
+        phase: session.phase,
+        dataRevision: session.dataRevision,
+        persistedAt: new Date(session.lastArtifactPersistedAtMs).toISOString(),
+      },
+    });
   }
 
   private finish(
@@ -4892,6 +5387,8 @@ export class AiTradingSimulationService {
     this.warn(session, reason);
     const preTerminalEquityLength = session.equity.length;
     let effectiveTerminal = terminal;
+    let eventStatus: "completed" | "cancelled" | "failed" = terminal;
+    let eventData: unknown;
     try {
       if (session.pair) {
         const processedAt = new Date(this.now()).toISOString();
@@ -4912,6 +5409,7 @@ export class AiTradingSimulationService {
         effectiveTerminal = "cancelled";
         this.warn(session, "완료 처리와 동시에 도착한 취소 요청을 반영했습니다.");
       }
+      eventStatus = effectiveTerminal;
       const terminalPayload = async (phase: "completed" | "cancelled") => {
         if (!applyPhaseTransition(session, phase === "completed" ? "complete" : "cancel")) {
           throw new Error(`허용되지 않은 AI simulation phase 전이입니다: ${session.phase} -> ${phase}`);
@@ -4971,6 +5469,7 @@ export class AiTradingSimulationService {
         if (!completed) {
           if (await this.repository.isCancellationRequested(session.id)) {
             effectiveTerminal = "cancelled";
+            eventStatus = effectiveTerminal;
             this.warn(session, "완료 상태 전환 전에 도착한 취소 요청을 반영했습니다.");
             payload = await terminalPayload(effectiveTerminal);
             await this.repository.cancel(
@@ -4984,6 +5483,7 @@ export class AiTradingSimulationService {
             if (!stored || !["completed", "cancelled", "failed"].includes(stored.status)) {
               throw new Error("완료 상태 전환이 적용되지 않았습니다.");
             }
+            eventStatus = stored.status as "completed" | "cancelled" | "failed";
           }
         }
       } else {
@@ -4994,6 +5494,13 @@ export class AiTradingSimulationService {
           this.now(),
         );
       }
+      eventData = {
+        schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+        runId: session.id,
+        status: eventStatus,
+        reason,
+        snapshot: payload.snapshot,
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown terminal persistence error";
       await this.repository.fail(session.id, {
@@ -5003,7 +5510,37 @@ export class AiTradingSimulationService {
         intended_status: effectiveTerminal,
         real_order_api_used: false,
       }, uniqueWarnings([...session.warnings, `run 종료 상태 저장 실패: ${message}`]), this.now());
+      eventStatus = "failed";
+      eventData = {
+        schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+        runId: session.id,
+        status: "failed",
+        snapshot: this.snapshot(session),
+        error: {
+          code: "AI_SIMULATION_TERMINALIZATION_FAILED",
+          message,
+          retryable: true,
+        },
+      };
     } finally {
+      if (eventData !== undefined) {
+        this.config.runEvents?.publishTerminal({
+          runId: session.id,
+          ownerSubject: session.ownerSubject,
+          status: eventStatus,
+          payload: eventData,
+        });
+      }
+      try {
+        await session.checkpoint?.close();
+      } catch (checkpointError) {
+        this.warn(
+          session,
+          `v2 checkpoint 종료 실패: ${
+            checkpointError instanceof Error ? checkpointError.message : "unknown"
+          }`,
+        );
+      }
       this.active.delete(session.id);
     }
   }
@@ -5063,7 +5600,33 @@ export class AiTradingSimulationService {
         retryable: true,
         real_order_api_used: false,
       }, session.warnings, this.now());
+      this.config.runEvents?.publishTerminal({
+        runId: session.id,
+        ownerSubject: session.ownerSubject,
+        status: "failed",
+        payload: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          runId: session.id,
+          status: "failed",
+          snapshot: this.snapshot(session),
+          error: {
+            code: "AI_SIMULATION_FAILED",
+            message,
+            retryable: true,
+          },
+        },
+      });
     } finally {
+      try {
+        await session.checkpoint?.close();
+      } catch (checkpointError) {
+        this.warn(
+          session,
+          `v2 checkpoint 종료 실패: ${
+            checkpointError instanceof Error ? checkpointError.message : "unknown"
+          }`,
+        );
+      }
       this.active.delete(session.id);
     }
   }

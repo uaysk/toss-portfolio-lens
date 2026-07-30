@@ -81,6 +81,8 @@ DEFAULT_CANDIDATES = (
 CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT")
 ARCHIVE_ROOT = "https://data.binance.vision/data/futures/um/daily"
 FAPI_ROOT = "https://fapi.binance.com/fapi/v1"
+RESUME_MANIFEST_VERSION = "high-vol-stack-source-resume/v1"
+SOURCE_INPUT_MANIFEST_VERSION = "high-vol-stack-source-input/v1"
 
 
 def iso_ms(value: int | datetime) -> str:
@@ -194,6 +196,245 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_json(value: object) -> str:
+    source = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(source).hexdigest()
+
+
+def hash_tree(root: Path) -> dict[str, str]:
+    if not root.is_dir():
+        return {}
+    paths = sorted(
+        (
+            path
+            for path in root.rglob("*")
+            if path.is_file() and not path.name.endswith(".tmp")
+        ),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if any(path.is_symlink() for path in paths):
+        raise RuntimeError(f"resume hash tree contains a symlink: {root}")
+    with ThreadPoolExecutor(
+        max_workers=min(8, max(1, len(paths))),
+        thread_name_prefix="source-resume-hash",
+    ) as pool:
+        hashes = list(pool.map(sha256_file, paths))
+    return {
+        path.relative_to(root).as_posix(): digest
+        for path, digest in zip(paths, hashes, strict=True)
+    }
+
+
+def source_input_contract(
+    *,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    calibration_days: int,
+    candidates: Sequence[str],
+    smoke: bool,
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": SOURCE_INPUT_MANIFEST_VERSION,
+        "evaluationStart": iso_ms(evaluation_start),
+        "evaluationEndExclusive": iso_ms(evaluation_end),
+        "calibrationDays": calibration_days,
+        "candidateUniverse": list(candidates),
+        "smoke": smoke,
+        "sourceImplementationHash": sha256_file(Path(__file__).resolve()),
+        "dataContract": {
+            "archiveRoot": ARCHIVE_ROOT,
+            "fapiRoot": FAPI_ROOT,
+            "originIntervalMinutes": ORIGIN_INTERVAL_MINUTES,
+            "scannerIntervalMinutes": SCANNER_INTERVAL_MINUTES,
+            "contextWarmupDays": CONTEXT_WARMUP_DAYS,
+            "modelSelectorCandidateCount": MODEL_SELECTOR_CANDIDATE_COUNT,
+            "scannerRecordedTopCount": SCANNER_RECORDED_TOP_COUNT,
+        },
+    }
+
+
+def source_model_contract() -> dict[str, Any]:
+    return {
+        "modelIds": MODEL_IDS,
+        "modelRevisions": MODEL_REVISIONS,
+        "modelContexts": MODEL_CONTEXTS,
+        "horizons": HORIZONS,
+        "quantiles": QUANTILES,
+        "seed": SEED,
+        "inferenceTaskBatchSizes": INFERENCE_TASK_BATCH_SIZES,
+        "inferencePrefetchWorkers": INFERENCE_PREFETCH_WORKERS,
+        "executionOptimizationVersion": EXECUTION_OPTIMIZATION_VERSION,
+        "featureCacheVersion": FEATURE_CACHE_VERSION,
+    }
+
+
+def source_output_hashes(run_dir: Path, *, smoke: bool) -> dict[str, str]:
+    roots = ("prepared", "predictions")
+    values: dict[str, str] = {}
+    for root in roots:
+        tree = hash_tree(run_dir / root)
+        if not tree:
+            raise RuntimeError(f"source output tree is empty: {root}")
+        values.update(
+            (f"{root}/{relative}", digest)
+            for relative, digest in tree.items()
+        )
+    names = (
+        "origins.json",
+        "run-manifest.json",
+        "schedule.json",
+        "scanner-snapshots-smoke.json" if smoke else "scanner-snapshots.jsonl",
+    )
+    for name in names:
+        path = run_dir / name
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"source output is missing or unsafe: {name}")
+        values[name] = sha256_file(path)
+    return dict(sorted(values.items()))
+
+
+def parse_hash_manifest(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict) or not value:
+        return None
+    parsed: dict[str, str] = {}
+    for relative, digest in value.items():
+        if not isinstance(relative, str) or not relative:
+            return None
+        relative_path = Path(relative)
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or relative_path.as_posix() != relative
+        ):
+            return None
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            return None
+        parsed[relative] = digest
+    return parsed
+
+
+def verified_hashes(
+    expected: Mapping[str, str],
+    actual: Mapping[str, str],
+) -> tuple[bool, list[str]]:
+    mismatches = [
+        relative
+        for relative in sorted(set(expected) | set(actual))
+        if expected.get(relative) != actual.get(relative)
+    ]
+    return not mismatches, mismatches
+
+
+def preserve_invalid_resume(
+    run_dir: Path,
+    reasons: Sequence[str],
+    *,
+    archive_mismatches: Sequence[str] = (),
+) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    destination = run_dir / "failures" / f"source-resume-invalid-{stamp}"
+    destination.mkdir(parents=True, exist_ok=False)
+    for name in (
+        "SOURCE_COMPLETE",
+        "source-resume-manifest.json",
+        "source-input-manifest.json",
+        "state.json",
+        "run-manifest.json",
+        "origins.json",
+        "schedule.json",
+        "scanner-snapshots.jsonl",
+        "scanner-snapshots-smoke.json",
+        "prepared",
+        "predictions",
+    ):
+        source = run_dir / name
+        if source.exists() and not source.is_symlink():
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+    for relative in archive_mismatches:
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            continue
+        source = run_dir / "raw" / relative_path
+        if source.is_file() and not source.is_symlink():
+            target = destination / "raw" / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+    atomic_json(destination / "resume-rejection.json", {
+        "schemaVersion": "high-vol-stack-source-resume-rejection/v1",
+        "rejectedAt": iso_ms(datetime.now(UTC)),
+        "reasons": list(reasons),
+        "archiveMismatches": list(archive_mismatches),
+    })
+    return destination
+
+
+def completed_resume_is_valid(
+    run_dir: Path,
+    *,
+    input_hash: str,
+    model_hash: str,
+    smoke: bool,
+) -> tuple[bool, list[str], list[str]]:
+    marker = run_dir / "SOURCE_COMPLETE"
+    manifest_path = run_dir / "source-resume-manifest.json"
+    if not marker.is_file():
+        return False, ["source_complete_marker_missing"], []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False, ["resume_manifest_missing_or_invalid"], []
+    reasons: list[str] = []
+    if manifest.get("schemaVersion") != RESUME_MANIFEST_VERSION:
+        reasons.append("resume_schema_mismatch")
+    if manifest.get("inputHash") != input_hash:
+        reasons.append("input_hash_mismatch")
+    if manifest.get("modelHash") != model_hash:
+        reasons.append("model_hash_mismatch")
+    archives = parse_hash_manifest(manifest.get("archiveHashes"))
+    outputs = parse_hash_manifest(manifest.get("outputHashes"))
+    if archives is None:
+        reasons.append("archive_hash_manifest_invalid")
+        archives = {}
+    if outputs is None:
+        reasons.append("output_hash_manifest_invalid")
+        outputs = {}
+    try:
+        actual_archives = hash_tree(run_dir / "raw")
+    except (OSError, RuntimeError):
+        actual_archives = {}
+        reasons.append("archive_hash_tree_invalid")
+    if not actual_archives:
+        reasons.append("archive_hash_tree_empty")
+    try:
+        actual_outputs = source_output_hashes(run_dir, smoke=smoke)
+    except (OSError, RuntimeError):
+        actual_outputs = {}
+        reasons.append("output_hash_tree_invalid")
+    archive_ok, archive_mismatches = verified_hashes(
+        archives,
+        actual_archives,
+    )
+    output_ok, output_mismatches = verified_hashes(outputs, actual_outputs)
+    if not archive_ok:
+        reasons.append("archive_hash_mismatch")
+    if not output_ok:
+        reasons.append("output_hash_mismatch")
+    reasons.extend(f"output:{value}" for value in output_mismatches)
+    return not reasons, reasons, archive_mismatches
 
 
 def day_range(start: date, end_inclusive: date) -> Iterator[date]:
@@ -2165,6 +2406,76 @@ def main() -> int:
     )
     data_start = calibration_start - timedelta(days=CONTEXT_WARMUP_DAYS)
     data_end = evaluation_end + timedelta(minutes=60)
+    input_contract = source_input_contract(
+        evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end,
+        calibration_days=arguments.calibration_days,
+        candidates=candidates,
+        smoke=arguments.smoke,
+    )
+    input_hash = sha256_json(input_contract)
+    model_contract = source_model_contract()
+    model_hash = sha256_json(model_contract)
+    marker = run_dir / "SOURCE_COMPLETE"
+    input_manifest_path = run_dir / "source-input-manifest.json"
+    if marker.is_file() and arguments.resume:
+        valid, reasons, archive_mismatches = completed_resume_is_valid(
+            run_dir,
+            input_hash=input_hash,
+            model_hash=model_hash,
+            smoke=arguments.smoke,
+        )
+        if valid:
+            manifest = json.loads(
+                (run_dir / "run-manifest.json").read_text(encoding="utf-8")
+            )
+            schedule = json.loads(
+                (run_dir / "schedule.json").read_text(encoding="utf-8")
+            )
+            print(json.dumps({
+                "status": "source_complete",
+                "runDir": str(run_dir),
+                "scheduleCount": len(schedule),
+                "usableCandidates": manifest["candidateUniverse"],
+                "resumed": True,
+            }, separators=(",", ":")))
+            return 0
+        preserve_invalid_resume(
+            run_dir,
+            reasons,
+            archive_mismatches=archive_mismatches,
+        )
+    elif marker.is_file():
+        preserve_invalid_resume(run_dir, ["resume_not_requested"])
+    elif arguments.resume:
+        try:
+            previous_input = json.loads(
+                input_manifest_path.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            previous_input = None
+        has_partial_outputs = any(
+            (run_dir / name).exists()
+            for name in ("prepared", "predictions", "schedule.json", "origins.json")
+        )
+        partial_valid = (
+            isinstance(previous_input, dict)
+            and previous_input.get("inputHash") == input_hash
+            and previous_input.get("modelHash") == model_hash
+        )
+        if has_partial_outputs and not partial_valid:
+            preserve_invalid_resume(
+                run_dir,
+                ["partial_resume_input_or_model_hash_mismatch"],
+            )
+    atomic_json(input_manifest_path, {
+        "schemaVersion": SOURCE_INPUT_MANIFEST_VERSION,
+        "generatedAt": iso_ms(datetime.now(UTC)),
+        "input": input_contract,
+        "inputHash": input_hash,
+        "model": model_contract,
+        "modelHash": model_hash,
+    })
     state: dict[str, Any] = {
         "schemaVersion": STATE_VERSION,
         "status": "running",
@@ -2333,6 +2644,21 @@ def main() -> int:
         "smoke": arguments.smoke,
     }
     atomic_json(run_dir / "run-manifest.json", manifest)
+    archive_hashes = hash_tree(run_dir / "raw")
+    if not archive_hashes:
+        raise RuntimeError("source archive tree is empty")
+    resume_manifest = {
+        "schemaVersion": RESUME_MANIFEST_VERSION,
+        "generatedAt": iso_ms(datetime.now(UTC)),
+        "inputHash": input_hash,
+        "modelHash": model_hash,
+        "archiveHashes": archive_hashes,
+        "outputHashes": source_output_hashes(
+            run_dir,
+            smoke=arguments.smoke,
+        ),
+    }
+    atomic_json(run_dir / "source-resume-manifest.json", resume_manifest)
     state["status"] = "source_complete"
     state["phase"] = "source-complete"
     state["completedAt"] = iso_ms(datetime.now(UTC))

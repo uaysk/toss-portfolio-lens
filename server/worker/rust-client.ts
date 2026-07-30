@@ -1,8 +1,17 @@
 import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
-import { WorkerOutputSchema, WORKER_PAYLOAD_SCHEMA_VERSION, type WorkerOutput } from "./contracts.js";
+import {
+  WorkerOutputSchema,
+  WORKER_PAYLOAD_SCHEMA_VERSION,
+  type WorkerOutput,
+  type WorkerResultProjectionV1,
+} from "./contracts.js";
 import type { PortfolioRunKind } from "../repositories/run-repository.js";
 import { PORTFOLIO_ENGINE_VERSION } from "../services/service-envelope.js";
+import {
+  RustComputeScheduler,
+  type RustComputeSchedulerSnapshot,
+} from "./rust-compute-scheduler.js";
 
 type Pending = {
   resolve: (value: WorkerOutput) => void;
@@ -12,6 +21,7 @@ type Pending = {
   kind: PortfolioRunKind;
   dataRevision: string;
   requestHash: string;
+  projection: WorkerResultProjectionV1;
   cleanupAbort?: () => void;
 };
 
@@ -40,6 +50,7 @@ class RustSocketChannel {
     kind: PortfolioRunKind,
     payload: Record<string, unknown>,
     includeArtifacts: boolean,
+    projection: WorkerResultProjectionV1,
     signal?: AbortSignal,
   ): Promise<WorkerOutput> {
     if (signal?.aborted) throw abortReason(signal);
@@ -58,6 +69,8 @@ class RustSocketChannel {
       .update("\0")
       .update(kind)
       .update("\0")
+      .update(projection)
+      .update("\0")
       .update(payloadJson)
       .digest("hex");
     const metadataJson = JSON.stringify({
@@ -67,6 +80,7 @@ class RustSocketChannel {
       job_kind: kind,
       data_revision: dataRevision,
       request_hash: requestHash,
+      projection,
     });
     const source = Buffer.from(
       `${metadataJson.slice(0, -1)},"payload":${payloadJson},"include_artifacts":${includeArtifacts}}`,
@@ -97,6 +111,7 @@ class RustSocketChannel {
         kind,
         dataRevision,
         requestHash,
+        projection,
       };
       if (signal) {
         const onAbort = () => this.reset(abortReason(signal));
@@ -201,6 +216,7 @@ class RustSocketChannel {
           || output.job_kind !== pending.kind
           || output.data_revision !== pending.dataRevision
           || output.request_hash !== pending.requestHash
+          || output.projection !== pending.projection
           || output.payload_hash === undefined) {
           throw new Error("Rust compute 응답 identity가 요청과 일치하지 않습니다.");
         }
@@ -272,21 +288,36 @@ function jsonSafe(value: unknown): unknown {
 
 export class RustComputeClient {
   private readonly channels: RustSocketChannel[];
+  private readonly availableChannels: RustSocketChannel[];
   private readonly transientChannels = new Set<RustSocketChannel>();
+  private readonly scheduler: RustComputeScheduler;
   private readonly socketPath: string;
   private readonly timeoutMs: number;
-  private next = 0;
+  private closed = false;
 
-  constructor(input: { socketPath: string; poolSize?: number; timeoutMs?: number }) {
+  constructor(input: {
+    socketPath: string;
+    poolSize?: number;
+    timeoutMs?: number;
+    maxQueued?: number;
+    queueTimeoutMs?: number;
+  }) {
     const poolSize = Math.max(1, Math.min(32, Math.trunc(input.poolSize ?? 2)));
     const timeoutMs = Math.max(1_000, Math.min(3_600_000, Math.trunc(input.timeoutMs ?? 300_000)));
     this.socketPath = input.socketPath;
     this.timeoutMs = timeoutMs;
     this.channels = Array.from({ length: poolSize }, () => new RustSocketChannel(input.socketPath, timeoutMs));
+    this.availableChannels = [...this.channels];
+    this.scheduler = new RustComputeScheduler({
+      maxActive: poolSize,
+      maxQueued: input.maxQueued,
+      queueTimeoutMs: input.queueTimeoutMs,
+    });
   }
 
   async compute<T>(kind: PortfolioRunKind, payload: Record<string, unknown>, options: {
     includeArtifacts?: boolean;
+    projection?: WorkerResultProjectionV1;
     signal?: AbortSignal;
   } = {}): Promise<{
     result: T;
@@ -294,33 +325,54 @@ export class RustComputeClient {
     warnings: string[];
     artifacts: NonNullable<WorkerOutput["artifacts"]>;
   }> {
-    if (options.signal?.aborted) throw abortReason(options.signal);
-    // A cancellable request owns its connection. Closing a shared FIFO channel would
-    // otherwise abort unrelated requests that happen to be queued on the same pool slot.
-    const channel = options.signal
-      ? new RustSocketChannel(this.socketPath, this.timeoutMs)
-      : this.channels[this.next++ % this.channels.length];
-    if (options.signal) this.transientChannels.add(channel);
-    try {
-      const output = await channel.request(kind, payload, options.includeArtifacts ?? true, options.signal);
-      if (output.result === undefined) throw new Error("Rust compute 결과가 비어 있습니다.");
-      return {
-        result: output.result as T,
-        summary: output.summary,
-        warnings: output.warnings,
-        artifacts: output.artifacts ?? [],
-      };
-    } finally {
-      if (options.signal) {
-        this.transientChannels.delete(channel);
-        channel.close();
+    return this.scheduler.schedule(async () => {
+      // A cancellable request owns its connection. Closing a shared FIFO channel would
+      // otherwise abort unrelated work. Admission happens before this channel is created.
+      const channel = options.signal
+        ? new RustSocketChannel(this.socketPath, this.timeoutMs)
+        : this.availableChannels.shift();
+      if (!channel) {
+        throw new Error("Rust compute scheduler가 사용 가능한 shared channel 없이 작업을 승인했습니다.");
       }
-    }
+      if (options.signal) this.transientChannels.add(channel);
+      try {
+        const projection = options.projection ?? "full";
+        const output = await channel.request(
+          kind,
+          payload,
+          options.includeArtifacts ?? true,
+          projection,
+          options.signal,
+        );
+        if (output.result === undefined) throw new Error("Rust compute 결과가 비어 있습니다.");
+        return {
+          result: output.result as T,
+          summary: output.summary,
+          warnings: output.warnings,
+          artifacts: output.artifacts ?? [],
+        };
+      } finally {
+        if (options.signal) {
+          this.transientChannels.delete(channel);
+          channel.close();
+        } else if (!this.closed) {
+          this.availableChannels.push(channel);
+        }
+      }
+    }, { signal: options.signal });
+  }
+
+  snapshot(): RustComputeSchedulerSnapshot {
+    return this.scheduler.snapshot();
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.scheduler.close();
     for (const channel of this.channels) channel.close();
     for (const channel of this.transientChannels) channel.close();
     this.transientChannels.clear();
+    this.availableChannels.splice(0);
   }
 }

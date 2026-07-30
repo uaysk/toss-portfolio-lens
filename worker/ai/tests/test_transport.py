@@ -11,12 +11,20 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 
+from portfolio_ai_worker.adapters import ProductionModelBinding
+from portfolio_ai_worker.contracts import AI_REQUEST_ADAPTER
 from portfolio_ai_worker.main import _healthcheck
 from portfolio_ai_worker.service import AIService
 from portfolio_ai_worker.settings import AISettings
-from portfolio_ai_worker.transport import SUBPROTOCOL, TRANSPORT_VERSION, _atomic_token, serve_websocket
+from portfolio_ai_worker.transport import (
+    SUBPROTOCOL,
+    TRANSPORT_VERSION,
+    InferenceScheduler,
+    _atomic_token,
+    serve_websocket,
+)
 
-from .helpers import DeterministicAdapter, bars, future, settings
+from .helpers import DeterministicAdapter, bars, future, provenance, settings
 
 
 def _port() -> int:
@@ -121,6 +129,10 @@ def test_websocket_settings_are_bounded_and_tls_files_are_paired(monkeypatch, tm
     configured = AISettings.from_env()
     assert configured.websocket_port == 9876
     assert configured.websocket_generate_auth_token is True
+    assert configured.cross_request_microbatch is False
+
+    monkeypatch.setenv("AI_CROSS_REQUEST_MICROBATCH", "true")
+    assert AISettings.from_env().cross_request_microbatch is True
 
     monkeypatch.setenv("AI_WEBSOCKET_TLS_CERT_FILE", str(tmp_path / "certificate.pem"))
     with pytest.raises(ValueError, match="must be set together"):
@@ -169,6 +181,35 @@ async def _round_trip(tmp_path) -> None:
                     },
                     "active_requests": 0,
                     "queued_requests": 0,
+                    "scheduler": {
+                        "rolling_window_seconds": 300,
+                        "queue": {
+                            "capacity": 16,
+                            "depth": 0,
+                            "active": 0,
+                            "rejected": 0,
+                            "delay_ms": {
+                                "samples": 0,
+                                "p50": None,
+                                "p95": None,
+                                "p99": None,
+                                "max": None,
+                            },
+                        },
+                        "cross_request_microbatch": {
+                            "enabled": False,
+                            "window_ms": 5,
+                            "dispatches": 0,
+                            "batched_dispatches": 0,
+                            "requests": 0,
+                            "max_batch_size": 0,
+                            "wait_ms": {
+                                "p50": None,
+                                "p95": None,
+                                "max": None,
+                            },
+                        },
+                    },
                     "generated_at": status["status"]["generated_at"],
                 },
             }
@@ -296,6 +337,135 @@ class _SlowAdapter(DeterministicAdapter):
         if not self.release.wait(5):
             raise TimeoutError("test inference was not released")
         return super().predict_batch(series, seed=seed)
+
+
+def _validated_request(request_id: str, *, seed: int = 7):
+    payload = _payload(request_id)
+    payload["seed"] = seed
+    return AI_REQUEST_ADAPTER.validate_json(json.dumps(payload))
+
+
+async def _compatible_microbatch(tmp_path) -> None:
+    adapter = DeterministicAdapter(provenance().model_copy(update={"model_id": "NeoQuasar/Kronos-base"}))
+    service = AIService(
+        settings(tmp_path, cross_request_microbatch=True, microbatch_size=4),
+        adapter,
+        (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", adapter),),
+    )
+    scheduler = InferenceScheduler(service)
+    scheduler.start()
+    try:
+        first = scheduler.enqueue(_validated_request("batch-compatible-1"))
+        second = scheduler.enqueue(_validated_request("batch-compatible-2"))
+        responses = await asyncio.wait_for(
+            asyncio.gather(first.future, second.future),
+            2,
+        )
+        assert [response.request_id for response in responses] == [
+            "batch-compatible-1",
+            "batch-compatible-2",
+        ]
+        assert [response.series[0].instrument_key for response in responses] == [
+            "KRX:005930",
+            "KRX:005930",
+        ]
+        assert all(response.model_runs is not None for response in responses)
+        assert len(adapter.calls) == 1
+        assert len(adapter.calls[0]) == 2
+        telemetry = scheduler.telemetry()
+        assert telemetry["queue"]["delay_ms"]["samples"] == 2
+        assert telemetry["cross_request_microbatch"] == {
+            "enabled": True,
+            "window_ms": 5,
+            "dispatches": 1,
+            "batched_dispatches": 1,
+            "requests": 2,
+            "max_batch_size": 2,
+            "wait_ms": telemetry["cross_request_microbatch"]["wait_ms"],
+        }
+    finally:
+        await scheduler.close()
+
+
+def test_compatible_forecasts_share_one_cross_request_microbatch(tmp_path) -> None:
+    asyncio.run(_compatible_microbatch(tmp_path))
+
+
+async def _incompatible_microbatch(tmp_path) -> None:
+    adapter = DeterministicAdapter()
+    service = AIService(
+        settings(tmp_path, cross_request_microbatch=True, microbatch_size=4),
+        adapter,
+    )
+    scheduler = InferenceScheduler(service)
+    scheduler.start()
+    try:
+        first = scheduler.enqueue(_validated_request("batch-seed-7", seed=7))
+        second = scheduler.enqueue(_validated_request("batch-seed-8", seed=8))
+        await asyncio.wait_for(asyncio.gather(first.future, second.future), 2)
+        assert len(adapter.calls) == 2
+        assert all(len(call) == 1 for call in adapter.calls)
+        telemetry = scheduler.telemetry()["cross_request_microbatch"]
+        assert telemetry["batched_dispatches"] == 0
+        assert telemetry["requests"] == 2
+    finally:
+        await scheduler.close()
+
+
+def test_incompatible_forecast_seeds_are_never_cross_request_batched(tmp_path) -> None:
+    asyncio.run(_incompatible_microbatch(tmp_path))
+
+
+async def _disabled_microbatch(tmp_path) -> None:
+    adapter = DeterministicAdapter()
+    service = AIService(
+        settings(tmp_path, cross_request_microbatch=False, microbatch_size=4),
+        adapter,
+    )
+    scheduler = InferenceScheduler(service)
+    scheduler.start()
+    try:
+        first = scheduler.enqueue(_validated_request("batch-disabled-1"))
+        second = scheduler.enqueue(_validated_request("batch-disabled-2"))
+        await asyncio.wait_for(asyncio.gather(first.future, second.future), 2)
+        assert len(adapter.calls) == 2
+        assert scheduler.telemetry()["cross_request_microbatch"]["dispatches"] == 0
+    finally:
+        await scheduler.close()
+
+
+def test_cross_request_microbatch_is_disabled_by_default(tmp_path) -> None:
+    asyncio.run(_disabled_microbatch(tmp_path))
+
+
+async def _cancel_one_microbatch_subscriber(tmp_path) -> None:
+    adapter = _SlowAdapter()
+    service = AIService(
+        settings(tmp_path, cross_request_microbatch=True, microbatch_size=4),
+        adapter,
+    )
+    scheduler = InferenceScheduler(service)
+    scheduler.start()
+    try:
+        cancelled = scheduler.enqueue(_validated_request("batch-cancelled"))
+        survivor = scheduler.enqueue(_validated_request("batch-survivor"))
+        assert await asyncio.to_thread(adapter.started.wait, 2)
+        scheduler.cancel(cancelled)
+        adapter.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled.future
+        response = await asyncio.wait_for(survivor.future, 2)
+        assert response.request_id == "batch-survivor"
+        assert response.status == "available"
+        assert len(adapter.calls) == 1
+        assert len(adapter.calls[0]) == 2
+    finally:
+        adapter.release.set()
+        await scheduler.close()
+
+
+def test_cancelling_one_batched_caller_does_not_cancel_its_sibling(tmp_path) -> None:
+    asyncio.run(_cancel_one_microbatch_subscriber(tmp_path))
 
 
 async def _backpressure_and_cancel(tmp_path) -> None:

@@ -21,6 +21,193 @@ SPEC.loader.exec_module(SOURCE)
 
 
 class HighVolatilitySourceTests(unittest.TestCase):
+    def write_completed_resume_fixture(
+        self,
+        run_dir: Path,
+        *,
+        smoke: bool,
+    ) -> dict[str, object]:
+        archive = run_dir / "raw" / "klines" / "BTCUSDT.zip"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b"archive")
+        exchange_info = run_dir / "raw" / "exchange-info.json"
+        exchange_info.write_text("{}\n", encoding="utf-8")
+        prepared = run_dir / "prepared" / "rules.json"
+        prepared.parent.mkdir()
+        prepared.write_text("{}\n", encoding="utf-8")
+        prediction = run_dir / "predictions" / "chronos2.jsonl"
+        prediction.parent.mkdir()
+        prediction.write_text("{}\n", encoding="utf-8")
+        for name in ("origins.json", "run-manifest.json", "schedule.json"):
+            (run_dir / name).write_text("{}\n", encoding="utf-8")
+        snapshot = (
+            "scanner-snapshots-smoke.json"
+            if smoke
+            else "scanner-snapshots.jsonl"
+        )
+        (run_dir / snapshot).write_text("{}\n", encoding="utf-8")
+        (run_dir / "SOURCE_COMPLETE").write_text(
+            "2026-07-30T00:00:00.000Z\n",
+            encoding="utf-8",
+        )
+        manifest: dict[str, object] = {
+            "schemaVersion": SOURCE.RESUME_MANIFEST_VERSION,
+            "inputHash": "input",
+            "modelHash": "model",
+            "archiveHashes": SOURCE.hash_tree(run_dir / "raw"),
+            "outputHashes": SOURCE.source_output_hashes(
+                run_dir,
+                smoke=smoke,
+            ),
+        }
+        SOURCE.atomic_json(run_dir / "source-resume-manifest.json", manifest)
+        return manifest
+
+    def test_completed_resume_requires_exact_archive_and_output_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self.write_completed_resume_fixture(run_dir, smoke=False)
+
+            valid, reasons, mismatches = SOURCE.completed_resume_is_valid(
+                run_dir,
+                input_hash="input",
+                model_hash="model",
+                smoke=False,
+            )
+            self.assertTrue(valid)
+            self.assertEqual(reasons, [])
+            self.assertEqual(mismatches, [])
+
+            archive = run_dir / "raw" / "klines" / "BTCUSDT.zip"
+            archive.write_bytes(b"changed")
+            valid, reasons, mismatches = SOURCE.completed_resume_is_valid(
+                run_dir,
+                input_hash="input",
+                model_hash="model",
+                smoke=False,
+            )
+            self.assertFalse(valid)
+            self.assertIn("archive_hash_mismatch", reasons)
+            self.assertEqual(mismatches, ["klines/BTCUSDT.zip"])
+
+    def test_completed_resume_rejects_empty_or_partial_hash_manifests(self) -> None:
+        cases = (
+            ("archiveHashes", lambda values: {}),
+            ("outputHashes", lambda values: {}),
+            (
+                "archiveHashes",
+                lambda values: dict(list(values.items())[:-1]),
+            ),
+            (
+                "outputHashes",
+                lambda values: dict(list(values.items())[:-1]),
+            ),
+        )
+        for field, mutate in cases:
+            with self.subTest(field=field, mutation=mutate), (
+                tempfile.TemporaryDirectory()
+            ) as directory:
+                run_dir = Path(directory)
+                manifest = self.write_completed_resume_fixture(
+                    run_dir,
+                    smoke=False,
+                )
+                values = manifest[field]
+                assert isinstance(values, dict)
+                manifest[field] = mutate(values)
+                SOURCE.atomic_json(
+                    run_dir / "source-resume-manifest.json",
+                    manifest,
+                )
+
+                valid, reasons, _mismatches = (
+                    SOURCE.completed_resume_is_valid(
+                        run_dir,
+                        input_hash="input",
+                        model_hash="model",
+                        smoke=False,
+                    )
+                )
+
+                self.assertFalse(valid)
+                if manifest[field]:
+                    self.assertIn(
+                        "archive_hash_mismatch"
+                        if field == "archiveHashes"
+                        else "output_hash_mismatch",
+                        reasons,
+                    )
+                else:
+                    self.assertIn(
+                        "archive_hash_manifest_invalid"
+                        if field == "archiveHashes"
+                        else "output_hash_manifest_invalid",
+                        reasons,
+                    )
+
+    def test_completed_resume_uses_smoke_specific_output_tree(self) -> None:
+        for smoke in (False, True):
+            with self.subTest(smoke=smoke), (
+                tempfile.TemporaryDirectory()
+            ) as directory:
+                run_dir = Path(directory)
+                self.write_completed_resume_fixture(run_dir, smoke=smoke)
+
+                valid, reasons, _mismatches = (
+                    SOURCE.completed_resume_is_valid(
+                        run_dir,
+                        input_hash="input",
+                        model_hash="model",
+                        smoke=smoke,
+                    )
+                )
+                self.assertTrue(valid, reasons)
+
+                valid, reasons, _mismatches = (
+                    SOURCE.completed_resume_is_valid(
+                        run_dir,
+                        input_hash="input",
+                        model_hash="model",
+                        smoke=not smoke,
+                    )
+                )
+                self.assertFalse(valid)
+                self.assertIn("output_hash_tree_invalid", reasons)
+
+    def test_invalid_resume_is_preserved_in_failure_area(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "prepared").mkdir()
+            (run_dir / "prepared" / "rules.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (run_dir / "SOURCE_COMPLETE").write_text(
+                "complete\n",
+                encoding="utf-8",
+            )
+            SOURCE.atomic_json(
+                run_dir / "source-resume-manifest.json",
+                {"schemaVersion": SOURCE.RESUME_MANIFEST_VERSION},
+            )
+
+            destination = SOURCE.preserve_invalid_resume(
+                run_dir,
+                ["output_hash_mismatch"],
+            )
+
+            self.assertFalse((run_dir / "SOURCE_COMPLETE").exists())
+            self.assertTrue((destination / "SOURCE_COMPLETE").is_file())
+            self.assertTrue(
+                (destination / "prepared" / "rules.json").is_file()
+            )
+            rejection = json.loads(
+                (destination / "resume-rejection.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(rejection["reasons"], ["output_hash_mismatch"])
+
     def test_archive_days_exclude_the_unfinished_truth_tail_day(self) -> None:
         days = SOURCE.complete_archive_days(
             datetime(2026, 6, 1, tzinfo=timezone.utc),

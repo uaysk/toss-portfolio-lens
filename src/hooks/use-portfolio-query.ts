@@ -6,9 +6,14 @@ import {
   type PortfolioQueryPhase,
 } from "@/lib/portfolio-query-controller";
 import {
-  PORTFOLIO_REFRESH_INTERVAL_MS,
+  PORTFOLIO_FALLBACK_INITIAL_MS,
+  nextPortfolioFallbackDelay,
   shouldRefreshPortfolioInBackground,
 } from "@/lib/portfolio-refresh";
+import {
+  parsePortfolioEventMessage,
+  portfolioEventsUrl,
+} from "@/lib/portfolio-events";
 import type { Portfolio } from "@/types";
 
 export type PortfolioQuery = {
@@ -24,7 +29,10 @@ export type PortfolioQuery = {
   refresh: (accountId: string) => Promise<void>;
 };
 
-export function usePortfolioQuery(onUnauthorized: () => void): PortfolioQuery {
+export function usePortfolioQuery(
+  onUnauthorized: () => void,
+  liveUpdatesEnabled = true,
+): PortfolioQuery {
   const onUnauthorizedRef = useRef(onUnauthorized);
   onUnauthorizedRef.current = onUnauthorized;
 
@@ -49,14 +57,92 @@ export function usePortfolioQuery(onUnauthorized: () => void): PortfolioQuery {
 
   useEffect(() => {
     const accountId = state.portfolio?.selectedAccountId;
-    if (!accountId) return;
-    const interval = window.setInterval(() => {
-      if (shouldRefreshPortfolioInBackground(document.visibilityState)) {
-        void controller.refreshInBackground(accountId);
+    if (!accountId || !liveUpdatesEnabled) return;
+
+    let stopped = false;
+    let source: EventSource | undefined;
+    let retryTimer: number | undefined;
+    let fallbackDelayMs = PORTFOLIO_FALLBACK_INITIAL_MS;
+
+    const closeSource = () => {
+      source?.close();
+      source = undefined;
+    };
+    const clearRetry = () => {
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+    };
+
+    const openStream = () => {
+      if (stopped
+        || source
+        || !shouldRefreshPortfolioInBackground(document.visibilityState)) {
+        return;
       }
-    }, PORTFOLIO_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [controller, state.portfolio?.selectedAccountId]);
+      if (typeof EventSource === "undefined") {
+        scheduleFallback();
+        return;
+      }
+      const nextSource = new EventSource(
+        portfolioEventsUrl(accountId, controller.streamRevision(accountId)),
+      );
+      source = nextSource;
+      nextSource.onopen = () => {
+        fallbackDelayMs = PORTFOLIO_FALLBACK_INITIAL_MS;
+        clearRetry();
+      };
+      const receive = (message: MessageEvent<string>) => {
+        const event = parsePortfolioEventMessage(message.data);
+        if (!event || event.accountId !== accountId) return;
+        controller.applyPortfolioEvent(event);
+        fallbackDelayMs = PORTFOLIO_FALLBACK_INITIAL_MS;
+      };
+      nextSource.addEventListener("snapshot", receive as EventListener);
+      nextSource.addEventListener("changed", receive as EventListener);
+      nextSource.addEventListener("heartbeat", receive as EventListener);
+      nextSource.onerror = () => {
+        if (source !== nextSource) return;
+        closeSource();
+        scheduleFallback();
+      };
+    };
+
+    const scheduleFallback = () => {
+      if (stopped
+        || retryTimer !== undefined
+        || !shouldRefreshPortfolioInBackground(document.visibilityState)) {
+        return;
+      }
+      const waitMs = fallbackDelayMs;
+      fallbackDelayMs = nextPortfolioFallbackDelay(fallbackDelayMs);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        if (stopped || !shouldRefreshPortfolioInBackground(document.visibilityState)) return;
+        void controller.refreshInBackground(accountId).finally(() => {
+          if (!stopped) openStream();
+        });
+      }, waitMs);
+    };
+
+    const onVisibilityChange = () => {
+      if (!shouldRefreshPortfolioInBackground(document.visibilityState)) {
+        closeSource();
+        clearRetry();
+        return;
+      }
+      fallbackDelayMs = PORTFOLIO_FALLBACK_INITIAL_MS;
+      openStream();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    openStream();
+    return () => {
+      stopped = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      closeSource();
+      clearRetry();
+    };
+  }, [controller, liveUpdatesEnabled, state.portfolio?.selectedAccountId]);
 
   const retryInitial = useCallback(
     () => controller.loadInitial(),

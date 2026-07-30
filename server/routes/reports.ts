@@ -12,6 +12,7 @@ import { isHistoryDate } from "../history.js";
 import { ReportGenerationError } from "../report-ai.js";
 import { isReportId, type StoredReport } from "../reports.js";
 import type { BacktestRunResult } from "../services/backtest-service.js";
+import { ServiceError } from "../services/service-envelope.js";
 import { setNoStore } from "../auth.js";
 import { TossApiError } from "../toss.js";
 import { parseBacktestPayload } from "./backtest-payload.js";
@@ -54,6 +55,21 @@ function defaultLogError(scope: "reports" | "report-read", error: unknown): void
 }
 
 export function sendBacktestError(response: Response, error: unknown): void {
+  if (error instanceof ServiceError && error.detail.code === "RUST_COMPUTE_BUSY") {
+    const configuredRetryAfter = Number(error.detail.details?.retry_after_seconds);
+    const retryAfterSeconds = Number.isFinite(configuredRetryAfter) && configuredRetryAfter > 0
+      ? Math.ceil(configuredRetryAfter)
+      : 1;
+    response.setHeader("Retry-After", String(retryAfterSeconds));
+    response.status(503).json({
+      error: {
+        code: error.detail.code,
+        message: error.detail.message,
+        retryable: error.detail.retryable,
+      },
+    });
+    return;
+  }
   if (error instanceof BacktestValidationError) {
     response.status(400).json({ error: { code: "invalid-backtest", message: error.message } });
     return;
@@ -162,7 +178,9 @@ export function createReportsRouter<
         storage: dependencies.portfolioReports.storageBackend,
       });
     } catch (error) {
-      if (error instanceof BacktestValidationError || error instanceof TossApiError) {
+      if (error instanceof BacktestValidationError
+        || error instanceof TossApiError
+        || (error instanceof ServiceError && error.detail.code === "RUST_COMPUTE_BUSY")) {
         sendBacktestError(response, error);
         return;
       }

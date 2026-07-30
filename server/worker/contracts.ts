@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gunzipSync, gzip, gzipSync } from "node:zlib";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { PortfolioRunKind } from "../repositories/run-repository.js";
+import { ArtifactCodec } from "../services/artifact-codec.js";
 import { backtestArtifacts } from "../services/backtest-artifacts.js";
 import { TechnicalAnalysisWorkerResultSchema } from "../services/technical-analysis-contract.js";
 import { TechnicalStrategyWorkerResultSchema } from "../services/technical-strategy-contract.js";
+import { canonicalJson } from "./canonical-json.js";
+
+export { canonicalJson } from "./canonical-json.js";
 
 export const WORKER_PAYLOAD_SCHEMA_VERSION = "1.0";
 export const WORKER_ARTIFACT_FORMAT = "application/json";
@@ -29,6 +33,8 @@ const jobKinds = [
 ] as const satisfies readonly PortfolioRunKind[];
 
 export const WorkerJobKindSchema = z.enum(jobKinds);
+export const WorkerResultProjectionV1Schema = z.enum(["summary", "full"]);
+export type WorkerResultProjectionV1 = z.infer<typeof WorkerResultProjectionV1Schema>;
 
 export const WorkerMetricsContentSchema = z.object({
   compute_ms: z.number().finite().nonnegative(),
@@ -45,6 +51,7 @@ export const WorkerInputSchema = z.object({
   data_revision: z.string().min(1).max(128),
   request_hash: z.string().regex(/^[a-f0-9]{64}$/),
   payload: z.record(z.string(), z.unknown()),
+  projection: WorkerResultProjectionV1Schema.default("full"),
 }).strict();
 
 export type WorkerInput = z.infer<typeof WorkerInputSchema>;
@@ -55,6 +62,7 @@ const WorkerOutputBaseSchema = z.object({
   run_id: z.string().min(1).max(64),
   job_kind: WorkerJobKindSchema,
   status: z.enum(["completed", "failed", "cancelled"]),
+  projection: WorkerResultProjectionV1Schema.default("full"),
   summary: z.unknown().optional(),
   result: z.unknown().optional(),
   error: z.unknown().optional(),
@@ -71,6 +79,7 @@ const WorkerOutputBaseSchema = z.object({
 
 export const WorkerOutputSchema = WorkerOutputBaseSchema.superRefine((output, context) => {
   if (output.status !== "completed") return;
+  if (output.projection === "summary") return;
   if (output.job_kind === "technical_analysis") {
     const parsed = TechnicalAnalysisWorkerResultSchema.safeParse(output.result);
     if (!parsed.success) {
@@ -156,58 +165,64 @@ export const WorkerOutputSchema = WorkerOutputBaseSchema.superRefine((output, co
 
 export type WorkerOutput = z.infer<typeof WorkerOutputSchema>;
 
-function rawKeyCompare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonicalValue(value: unknown, path = "$"): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`worker payload의 ${path} 값은 유한한 숫자여야 합니다.`);
-    return Object.is(value, -0) ? 0 : value;
-  }
-  if (Array.isArray(value)) return value.map((item, index) => canonicalValue(item, `${path}[${index}]`));
-  if (value instanceof Map) {
-    return Object.fromEntries(
-      Array.from(value.entries())
-        .map(([key, item]) => [String(key), canonicalValue(item, `${path}.${String(key)}`)] as const)
-        .sort(([left], [right]) => rawKeyCompare(left, right)),
-    );
-  }
-  if (typeof value === "object" && value) {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => rawKeyCompare(left, right))
-      .map(([key, item]) => [key, canonicalValue(item, `${path}.${key}`)] as const);
-    return Object.fromEntries(entries);
-  }
-  throw new Error(`worker payload의 ${path} 값은 JSON으로 직렬화할 수 없습니다.`);
-}
-
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
-export function encodeWorkerArtifact(value: WorkerInput | WorkerOutput): {
+export type EncodedWorkerArtifact = {
   content: Buffer;
   checksum: string;
   byteCount: number;
   uncompressedByteCount: number;
-} {
-  const validated = "payload" in value ? WorkerInputSchema.parse(value) : WorkerOutputSchema.parse(value);
-  const source = Buffer.from(canonicalJson(validated), "utf8");
+};
+
+const workerArtifactCodec = new ArtifactCodec();
+
+type WorkerArtifactSource =
+  | z.input<typeof WorkerInputSchema>
+  | z.input<typeof WorkerOutputSchema>;
+
+function validatedWorkerArtifact(value: WorkerArtifactSource): WorkerInput | WorkerOutput {
+  return "payload" in value ? WorkerInputSchema.parse(value) : WorkerOutputSchema.parse(value);
+}
+
+function assertWorkerArtifactSize(source: Buffer, compressed = false): void {
   if (source.byteLength > WORKER_ARTIFACT_MAX_BYTES) {
-    throw new Error("worker artifact가 압축 전 128MiB 상한을 초과했습니다.");
+    throw new Error(
+      `worker artifact가 ${compressed ? "압축 후" : "압축 전"} 128MiB 상한을 초과했습니다.`,
+    );
   }
+}
+
+export function encodeWorkerArtifact(value: WorkerArtifactSource): EncodedWorkerArtifact {
+  const validated = validatedWorkerArtifact(value);
+  const source = Buffer.from(canonicalJson(validated), "utf8");
+  assertWorkerArtifactSize(source);
   const content = gzipSync(source, { level: 6 });
-  if (content.byteLength > WORKER_ARTIFACT_MAX_BYTES) {
-    throw new Error("worker artifact가 압축 후 128MiB 상한을 초과했습니다.");
-  }
+  assertWorkerArtifactSize(content, true);
   return {
     content,
     checksum: createHash("sha256").update(source).digest("hex"),
     byteCount: content.byteLength,
     uncompressedByteCount: source.byteLength,
+  };
+}
+
+export async function encodeWorkerArtifactAsync(
+  value: WorkerArtifactSource,
+): Promise<EncodedWorkerArtifact> {
+  const validated = validatedWorkerArtifact(value);
+  const encoded = await workerArtifactCodec.encode(validated);
+  const source = Buffer.from(encoded.contentJson, "utf8");
+  assertWorkerArtifactSize(source);
+  const content = await new Promise<Buffer>((resolve, reject) => {
+    gzip(source, { level: 6 }, (error, result) => {
+      if (error) reject(error);
+      else resolve(result);
+    });
+  });
+  assertWorkerArtifactSize(content, true);
+  return {
+    content,
+    checksum: encoded.checksum,
+    byteCount: content.byteLength,
+    uncompressedByteCount: encoded.byteCount,
   };
 }
 

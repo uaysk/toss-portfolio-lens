@@ -14,6 +14,7 @@ import {
   YAxis,
 } from "recharts";
 import { Card } from "@/components/ui/card";
+import { createAnimationFrameCoalescer } from "@/lib/chart-interaction";
 import { formatMoney, formatQuantity } from "@/lib/format";
 import type { AiSimulationCurrency } from "@/lib/ai-simulation";
 import type {
@@ -225,13 +226,19 @@ function normalizedBars(
     .slice(-AI_SIMULATION_CHART_MAX_BARS);
 }
 
-function chartRows(bars: readonly AiSimulationChartBar[]): ChartRow[] {
-  return normalizedBars(bars).map((bar) => ({
+function chartRowsFromNormalizedBars(
+  bars: readonly AiSimulationChartBar[],
+): ChartRow[] {
+  return bars.map((bar) => ({
     ...bar.indicatorValues,
     ...bar,
     time: Date.parse(bar.timestamp),
     candleRange: [bar.low, bar.high],
   }));
+}
+
+function chartRows(bars: readonly AiSimulationChartBar[]): ChartRow[] {
+  return chartRowsFromNormalizedBars(normalizedBars(bars));
 }
 
 function forecastKey(
@@ -252,7 +259,13 @@ export function aiSimulationCombinedChartRows(
   bars: readonly AiSimulationChartBar[],
   forecasts: readonly AiSimulationModelForecast[] = [],
 ): AiSimulationCombinedChartRow[] {
-  const rows = chartRows(bars);
+  return combinedChartRows(chartRows(bars), forecasts);
+}
+
+function combinedChartRows(
+  rows: readonly ChartRow[],
+  forecasts: readonly AiSimulationModelForecast[],
+): AiSimulationCombinedChartRow[] {
   const byTime = new Map(rows.map((row) => [row.time, row]));
   const exactFinalClose = new Map(
     rows.flatMap((row) => (
@@ -317,7 +330,14 @@ export function aiSimulationCurrentModelForecasts(
   bars: readonly AiSimulationChartBar[],
   forecasts: readonly AiSimulationModelForecast[],
 ): AiSimulationModelForecast[] {
-  const latestFinalTime = normalizedBars(bars).flatMap((bar) => (
+  return currentModelForecasts(normalizedBars(bars), forecasts);
+}
+
+function currentModelForecasts(
+  bars: readonly AiSimulationChartBar[],
+  forecasts: readonly AiSimulationModelForecast[],
+): AiSimulationModelForecast[] {
+  const latestFinalTime = bars.flatMap((bar) => (
     bar.status === "final" ? [Date.parse(bar.timestamp)] : []
   )).at(-1);
   if (latestFinalTime === undefined) return [];
@@ -353,17 +373,24 @@ export function aiSimulationNearestChartRow(
   rows: readonly AiSimulationCombinedChartRow[],
   coordinate: number,
 ): AiSimulationCombinedChartRow | undefined {
-  if (!Number.isFinite(coordinate)) return undefined;
-  return rows.reduce<AiSimulationCombinedChartRow | undefined>(
-    (selected, row) => (
-      !selected
-      || Math.abs((row.chartTime ?? row.time) - coordinate)
-        < Math.abs((selected.chartTime ?? selected.time) - coordinate)
-        ? row
-        : selected
-    ),
-    undefined,
-  );
+  if (!Number.isFinite(coordinate) || rows.length === 0) return undefined;
+  let low = 0;
+  let high = rows.length - 1;
+  while (low <= high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const value = rows[middle]!.chartTime ?? rows[middle]!.time;
+    if (value < coordinate) low = middle + 1;
+    else if (value > coordinate) high = middle - 1;
+    else return rows[middle];
+  }
+  const left = rows[Math.max(0, high)];
+  const right = rows[Math.min(rows.length - 1, low)];
+  if (!left) return right;
+  if (!right) return left;
+  return coordinate - (left.chartTime ?? left.time)
+    <= (right.chartTime ?? right.time) - coordinate
+    ? left
+    : right;
 }
 
 /**
@@ -425,7 +452,14 @@ export function aiSimulationChartCoordinateRows(
         chartTime: forecastCoordinate ?? lastCoordinate + (row.time - lastActual.time),
       };
     }
-    const nextIndex = actualRows.findIndex((actual) => actual.time > row.time);
+    let low = 0;
+    let high = actualRows.length;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (actualRows[middle]!.time <= row.time) low = middle + 1;
+      else high = middle;
+    }
+    const nextIndex = low;
     const next = actualRows[nextIndex]!;
     const previous = actualRows[nextIndex - 1]!;
     const previousCoordinate = coordinates.get(previous.time)!;
@@ -484,7 +518,13 @@ export function aiSimulationChartTradePoints(
   bars: readonly AiSimulationChartBar[],
   trades: readonly AiSimulationChartTrade[],
 ): AiSimulationChartTradePoint[] {
-  const visibleBars = normalizedBars(bars);
+  return chartTradePoints(normalizedBars(bars), trades);
+}
+
+function chartTradePoints(
+  visibleBars: readonly AiSimulationChartBar[],
+  trades: readonly AiSimulationChartTrade[],
+): AiSimulationChartTradePoint[] {
   const tradeByMarkerId = new Map<string, AiSimulationChartTrade>();
   const markers: ScalpingTradeMarker[] = trades.flatMap((trade, index) => {
     if (!Number.isFinite(Date.parse(trade.executedAt))
@@ -687,14 +727,18 @@ export function AiSimulationChart({
 }: AiSimulationChartProps) {
   const [expanded, setExpanded] = useState(false);
   const [selectedTime, setSelectedTime] = useState<number>();
-  const actualRows = useMemo(() => chartRows(bars), [bars]);
+  const visibleBars = useMemo(() => normalizedBars(bars), [bars]);
+  const actualRows = useMemo(
+    () => chartRowsFromNormalizedBars(visibleBars),
+    [visibleBars],
+  );
   const currentForecasts = useMemo(
-    () => aiSimulationCurrentModelForecasts(bars, forecasts),
-    [bars, forecasts],
+    () => currentModelForecasts(visibleBars, forecasts),
+    [visibleBars, forecasts],
   );
   const rows = useMemo(
-    () => aiSimulationCombinedChartRows(bars, currentForecasts),
-    [bars, currentForecasts],
+    () => combinedChartRows(actualRows, currentForecasts),
+    [actualRows, currentForecasts],
   );
   const coordinateRows = useMemo(
     () => aiSimulationChartCoordinateRows(rows, currency === "USDT"),
@@ -702,6 +746,10 @@ export function AiSimulationChart({
   );
   const coordinateByTimestamp = useMemo(
     () => new Map(coordinateRows.map((row) => [row.time, row.chartTime ?? row.time])),
+    [coordinateRows],
+  );
+  const rowByTimestamp = useMemo(
+    () => new Map(coordinateRows.map((row) => [row.time, row])),
     [coordinateRows],
   );
   const timestampAtCoordinate = (coordinate: number): string => {
@@ -713,11 +761,11 @@ export function AiSimulationChart({
     [actualRows, indicators],
   );
   const tradePoints = useMemo(
-    () => aiSimulationChartTradePoints(bars, trades),
-    [bars, trades],
+    () => chartTradePoints(visibleBars, trades),
+    [visibleBars, trades],
   );
   const latestBar = actualRows.at(-1);
-  const selectedRow = coordinateRows.find((row) => row.time === selectedTime)
+  const selectedRow = (selectedTime === undefined ? undefined : rowByTimestamp.get(selectedTime))
     ?? latestBar
     ?? coordinateRows.at(-1);
   const availableForecasts = currentForecasts;
@@ -744,6 +792,18 @@ export function AiSimulationChart({
       .sort((left, right) => Date.parse(right.detectedAt) - Date.parse(left.detectedAt))
       .slice(0, AI_SIMULATION_CHART_MAX_PATTERN_BADGES),
     [patterns],
+  );
+  const selectedTimeCoalescer = useMemo(() => (
+    typeof window === "undefined"
+      ? undefined
+      : createAnimationFrameCoalescer<number>({
+          request: (callback) => window.requestAnimationFrame(callback),
+          cancel: (handle) => window.cancelAnimationFrame(handle),
+        }, (time) => setSelectedTime((current) => current === time ? current : time))
+  ), []);
+  useEffect(
+    () => () => selectedTimeCoalescer?.cancel(),
+    [selectedTimeCoalescer],
   );
   useEffect(() => {
     if (!expanded) return undefined;
@@ -885,7 +945,7 @@ export function AiSimulationChart({
               coordinateRows,
               firstCoordinate + (lastCoordinate - firstCoordinate) * ratio,
             );
-            if (nearest) setSelectedTime(nearest.time);
+            if (nearest) selectedTimeCoalescer?.schedule(nearest.time);
           }}
         >
           <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
@@ -908,7 +968,9 @@ export function AiSimulationChart({
                 const activeLabel = Number(interaction?.activeLabel);
                 const nearest = aiSimulationNearestChartRow(coordinateRows, activeLabel);
                 const selected = payloadRow ?? indexedRow ?? nearest;
-                if (selected && Number.isFinite(selected.time)) setSelectedTime(selected.time);
+                if (selected && Number.isFinite(selected.time)) {
+                  selectedTimeCoalescer?.schedule(selected.time);
+                }
               }}
             >
               <CartesianGrid

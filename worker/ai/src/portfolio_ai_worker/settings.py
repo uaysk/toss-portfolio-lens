@@ -45,6 +45,7 @@ class AISettings:
     max_request_bytes: int
     max_response_bytes: int
     model_lane: str = "fincast"
+    cross_request_microbatch: bool = False
     kronos_kv_cache_enabled: bool = False
     chronos2_input_profile: str = "compact_causal_v1"
     chronos2_batch_size: int = 32
@@ -108,6 +109,7 @@ class AISettings:
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             model_lane=model_lane,
+            cross_request_microbatch=_boolean("AI_CROSS_REQUEST_MICROBATCH", False),
             kronos_kv_cache_enabled=_boolean("AI_KRONOS_KV_CACHE_ENABLED", False),
             chronos2_input_profile=os.getenv(
                 "AI_CHRONOS2_INPUT_PROFILE",

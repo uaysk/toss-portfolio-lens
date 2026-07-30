@@ -3,7 +3,7 @@ import type { RelationalDatabase } from "../database.js";
 import type { PortfolioRunKind } from "./run-repository.js";
 import {
   decodeWorkerArtifact,
-  encodeWorkerArtifact,
+  encodeWorkerArtifactAsync,
   WORKER_ARTIFACT_ENCODING,
   WORKER_ARTIFACT_FORMAT,
   WORKER_PAYLOAD_SCHEMA_VERSION,
@@ -723,7 +723,7 @@ export class RunJobRepository {
     dataRevision: string,
     now: number,
   ): Promise<WorkerArtifactRecord> {
-    const encoded = encodeWorkerArtifact(value);
+    const encoded = await encodeWorkerArtifactAsync(value);
     const id = randomUUID();
     await database.run(`
       INSERT INTO portfolio_worker_artifacts (

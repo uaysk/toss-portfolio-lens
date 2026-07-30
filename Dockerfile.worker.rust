@@ -1,8 +1,15 @@
-FROM rust:1.97-bookworm AS build
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
 WORKDIR /build
 COPY worker/rust/Cargo.toml worker/rust/Cargo.lock ./
 COPY worker/rust/src ./src
-RUN cargo build --release --locked \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/portfolio-lens-worker \
+      /runtime/usr/local/bin/portfolio-lens-worker \
     && install -d -m 0755 -o 10001 -g 10001 /runtime/app/run
 
 FROM gcr.io/distroless/cc-debian12@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e AS runtime
@@ -11,7 +18,7 @@ LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
 ENV RUST_BACKTRACE=1
 WORKDIR /app
 COPY --from=build --chown=10001:10001 /runtime/app/run /app/run
-COPY --from=build --chown=10001:10001 /build/target/release/portfolio-lens-worker /usr/local/bin/portfolio-lens-worker
+COPY --from=build --chown=10001:10001 /runtime/usr/local/bin/portfolio-lens-worker /usr/local/bin/portfolio-lens-worker
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/portfolio-lens-worker"]
 CMD ["run"]

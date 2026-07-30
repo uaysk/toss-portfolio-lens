@@ -1,12 +1,49 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useState,
+} from "react";
 import { LoaderCircle } from "lucide-react";
-import { Dashboard } from "@/components/dashboard";
 import { LoginPage } from "@/components/login-page";
 import { Logo } from "@/components/logo";
-import { ReportPage } from "@/components/report-page";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { safeLocalStorage } from "@/lib/safe-storage";
 import type { Theme } from "@/types";
+
+const Dashboard = lazy(() => import("@/components/dashboard").then((module) => ({
+  default: module.Dashboard,
+})));
+const ReportPage = lazy(() => import("@/components/report-page").then((module) => ({
+  default: module.ReportPage,
+})));
+
+function AppLoading({
+  theme,
+  onToggleTheme,
+  label = "불러오는 중",
+}: {
+  theme: Theme;
+  onToggleTheme: () => void;
+  label?: string;
+}) {
+  return (
+    <main className="relative grid min-h-screen place-items-center bg-[var(--shell)]">
+      <div className="absolute right-5 top-5">
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+      </div>
+      <div className="flex flex-col items-center gap-5">
+        <Logo />
+        <div className="flex items-center gap-2 text-sm font-semibold text-muted-foreground" role="status">
+          <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />
+          <span>{label}</span>
+        </div>
+      </div>
+    </main>
+  );
+}
 
 export default function App() {
   const reportRoute = window.location.pathname.match(/^\/reports(?:\/([^/]+))?\/?$/);
@@ -46,19 +83,23 @@ export default function App() {
   }, [Boolean(reportRoute)]);
 
   if (reportRoute) {
-    return <ReportPage reportId={reportId} theme={theme} onToggleTheme={toggleTheme} />;
+    return (
+      <Suspense
+        fallback={(
+          <AppLoading
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            label="보고서 화면을 불러오는 중"
+          />
+        )}
+      >
+        <ReportPage reportId={reportId} theme={theme} onToggleTheme={toggleTheme} />
+      </Suspense>
+    );
   }
 
   if (authenticated === null) {
-    return (
-      <main className="relative grid min-h-screen place-items-center bg-[var(--shell)]">
-        <div className="absolute right-5 top-5"><ThemeToggle theme={theme} onToggle={toggleTheme} /></div>
-        <div className="flex flex-col items-center gap-5">
-          <Logo />
-          <LoaderCircle className="size-5 animate-spin text-muted-foreground" aria-label="불러오는 중" />
-        </div>
-      </main>
-    );
+    return <AppLoading theme={theme} onToggleTheme={toggleTheme} />;
   }
 
   if (!authenticated) {
@@ -66,11 +107,21 @@ export default function App() {
   }
 
   return (
-    <Dashboard
-      onLogout={markUnauthenticated}
-      onUnauthorized={markUnauthenticated}
-      theme={theme}
-      onToggleTheme={toggleTheme}
-    />
+    <Suspense
+      fallback={(
+        <AppLoading
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          label="대시보드 화면을 불러오는 중"
+        />
+      )}
+    >
+      <Dashboard
+        onLogout={markUnauthenticated}
+        onUnauthorized={markUnauthenticated}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+    </Suspense>
   );
 }

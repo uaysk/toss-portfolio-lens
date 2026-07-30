@@ -27,6 +27,7 @@
       ]
     },
     "status": { "enum": ["completed", "failed", "cancelled"] },
+    "projection": { "enum": ["summary", "full"], "default": "full" },
     "summary": {},
     "result": {},
     "error": {},

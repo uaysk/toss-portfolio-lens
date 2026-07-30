@@ -278,6 +278,7 @@ try {
     data_revision: unsupportedRun.dataRevision,
     request_hash: unsupportedRun.requestHash,
     payload: { optimization: optimizationInput, objective: "robust_score" },
+    projection: "full",
   };
   const unsupportedArtifact = await jobs.putInput(unsupportedInput);
   await jobs.enqueue({

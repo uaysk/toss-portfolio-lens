@@ -55,6 +55,7 @@ async function createJob(input: {
     data_revision: run.dataRevision,
     request_hash: requestHash,
     payload: { counter },
+    projection: "full",
   };
   const artifact = await jobs.putInput(payload, now);
   const job = await jobs.enqueue({
@@ -101,6 +102,7 @@ try {
     data_revision: identityRun.dataRevision,
     request_hash: identityHash,
     payload: { identity: true },
+    projection: "full",
   }, identityNow);
   await assert.rejects(jobs.enqueue({
     runId: identityRun.id,
@@ -155,6 +157,7 @@ try {
     run_id: runningCancellation.run.id,
     job_kind: runningCancellation.payload.job_kind,
     status: "completed",
+    projection: "full",
     summary: {},
     result: {},
     warnings: [],
@@ -197,6 +200,7 @@ try {
     run_id: completed.run.id,
     job_kind: completed.payload.job_kind,
     status: "completed",
+    projection: "full",
     summary: { totalReturnPercent: 1.25 },
     result: { points: [{ date: "2026-01-01", balance: 100 }] },
     warnings: [],

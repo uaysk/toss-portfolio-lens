@@ -1,0 +1,8 @@
+**
+!Dockerfile.worker.rust
+!worker/
+!worker/rust/
+!worker/rust/Cargo.toml
+!worker/rust/Cargo.lock
+!worker/rust/src/
+!worker/rust/src/**

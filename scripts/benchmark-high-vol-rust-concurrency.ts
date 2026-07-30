@@ -133,7 +133,15 @@ if (!request || typeof request !== "object" || typeof request.kind !== "string"
 
 const runtimeDirectory = await mkdtemp(join(tmpdir(), "tpl-high-vol-rust-concurrency-"));
 const socketPath = join(runtimeDirectory, "compute.sock");
-const worker = spawn(arguments_.binary, ["serve", "--socket", socketPath], {
+const worker = spawn(arguments_.binary, [
+  "serve",
+  "--socket",
+  socketPath,
+  "--max-active",
+  String(arguments_.concurrency),
+  "--max-connections",
+  String(arguments_.concurrency + 1),
+], {
   stdio: ["ignore", "ignore", "pipe"],
 });
 let workerStderr = "";

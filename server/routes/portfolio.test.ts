@@ -1,6 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { SseConnectionTracker } from "../lifecycle.js";
+import { PortfolioLiveHub } from "../portfolio/live-hub.js";
 import type { Portfolio } from "../toss.js";
 import { TossApiError } from "../toss.js";
 import { createPortfolioRouter } from "./portfolio.js";
@@ -37,6 +39,7 @@ async function startServer(routeRegistrars: Parameters<typeof createApp>[0]["rou
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
+    server.closeAllConnections?.();
   })));
 });
 
@@ -124,5 +127,44 @@ describe("portfolio route", () => {
     });
     expect(JSON.stringify(unexpectedPayload)).not.toContain("private upstream detail");
     expect(unexpectedLog).toHaveBeenCalledOnce();
+  });
+
+  it("resets a future SSE cursor to the current safe revision and tracks disconnects", async () => {
+    const live = new PortfolioLiveHub({
+      getPortfolio: vi.fn(async () => portfolio),
+      refreshIntervalMs: 10_000,
+    });
+    const sseConnections = new SseConnectionTracker();
+    const router = createPortfolioRouter({
+      authenticate: (_request, _response, next) => next(),
+      getPortfolio: vi.fn(async () => portfolio),
+      recordPortfolio: vi.fn(async () => undefined),
+      live,
+      sseConnections,
+      heartbeatMs: 1_000,
+    });
+    const baseUrl = await startServer([(app) => app.use(router)]);
+    const abort = new AbortController();
+
+    const response = await fetch(
+      `${baseUrl}/api/portfolio/events?account=account-1&lastEventId=${Number.MAX_SAFE_INTEGER}`,
+      { signal: abort.signal },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(sseConnections.size).toBe(1);
+    const reader = response.body!.getReader();
+    const read = await reader.read();
+    const chunk = new TextDecoder().decode(read.value);
+    expect(chunk).toContain("id: 1");
+    expect(chunk).not.toContain(`id: ${Number.MAX_SAFE_INTEGER}`);
+    expect(chunk).toContain("event: snapshot");
+    expect(chunk).toContain('"schemaVersion":1');
+    expect(chunk).toContain('"selectedAccountId":"account-1"');
+
+    abort.abort();
+    await reader.cancel().catch(() => undefined);
+    await vi.waitFor(() => expect(sseConnections.size).toBe(0), { timeout: 1_000 });
+    await live.close();
   });
 });

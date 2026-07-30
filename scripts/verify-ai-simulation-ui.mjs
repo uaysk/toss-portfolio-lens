@@ -647,6 +647,8 @@ export async function routeSimulationUiApi(page) {
   const state = {
     starts: [],
     polls: 0,
+    streams: 0,
+    terminalStreams: 0,
     cancels: [],
     searches: [],
     active: new Map(),
@@ -972,7 +974,7 @@ export async function routeSimulationUiApi(page) {
       }
       const runId = `00000000-0000-4000-8000-${String(state.starts.length + 1).padStart(12, "0")}`;
       state.starts.push(body);
-      state.active.set(runId, { body, cancelled: false });
+      state.active.set(runId, { body, cancelled: false, revision: 0 });
       return route.fulfill({
         status: 202,
         contentType: "application/json",
@@ -980,6 +982,52 @@ export async function routeSimulationUiApi(page) {
           runId,
           status: "running",
         }),
+      });
+    }
+    const eventsMatch = url.pathname.match(
+      /^\/api\/portfolio\/simulation\/runs\/([^/]+)\/events$/,
+    );
+    if (eventsMatch && request.method() === "GET") {
+      const runId = decodeURIComponent(eventsMatch[1]);
+      const active = state.active.get(runId);
+      if (!active) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { message: "fixture stream not found" } }),
+        });
+      }
+      active.revision += 1;
+      state.streams += 1;
+      if (active.cancelled) state.terminalStreams += 1;
+      const status = active.cancelled ? "cancelled" : "running";
+      const type = active.cancelled ? "terminal" : "snapshot";
+      const event = {
+        schemaVersion: 1,
+        runId,
+        revision: active.revision,
+        emittedAt: new Date(
+          Date.parse("2026-07-24T00:20:00.000Z") + active.revision * 1_000,
+        ).toISOString(),
+        type,
+        payload: {
+          runId,
+          status,
+          snapshot: snapshot({
+            phase: active.cancelled ? "cancelled" : "monitoring",
+            request: active.body,
+            cancelled: active.cancelled,
+          }),
+        },
+      };
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream; charset=utf-8",
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Accel-Buffering": "no",
+        },
+        body: `id: ${event.revision}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`,
       });
     }
     const reportMatch = url.pathname.match(/^\/api\/portfolio\/simulation\/runs\/([^/]+)\/report$/);
@@ -1128,6 +1176,83 @@ async function verify(browser, baseUrl, viewport, theme) {
   await context.addInitScript(({ selectedTheme }) => {
     window.localStorage.setItem("portfolio-theme", selectedTheme);
     history.scrollRestoration = "manual";
+    let fixtureVisibility = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => fixtureVisibility,
+    });
+    window.__setSimulationFixtureVisibility = (visibility) => {
+      fixtureVisibility = visibility;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    window.__simulationEventSourceStats = { opened: 0, closed: 0 };
+    class FixtureEventSource extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+
+      constructor(url) {
+        super();
+        this.url = String(url);
+        this.withCredentials = false;
+        this.readyState = FixtureEventSource.CONNECTING;
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        this.controller = new AbortController();
+        window.__simulationEventSourceStats.opened += 1;
+        void this.connect();
+      }
+
+      async connect() {
+        try {
+          const response = await fetch(this.url, {
+            headers: { Accept: "text/event-stream" },
+            signal: this.controller.signal,
+          });
+          if (!response.ok) throw new Error(`fixture EventSource HTTP ${response.status}`);
+          const body = await response.text();
+          if (this.readyState === FixtureEventSource.CLOSED) return;
+          this.readyState = FixtureEventSource.OPEN;
+          const openEvent = new Event("open");
+          this.dispatchEvent(openEvent);
+          this.onopen?.call(this, openEvent);
+          for (const block of body.trim().split(/\n\n+/)) {
+            let type = "message";
+            let lastEventId = "";
+            const data = [];
+            for (const line of block.split(/\n/)) {
+              if (line.startsWith("event:")) type = line.slice(6).trim();
+              else if (line.startsWith("id:")) lastEventId = line.slice(3).trim();
+              else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+            }
+            const message = new MessageEvent(type, {
+              data: data.join("\n"),
+              lastEventId,
+              origin: window.location.origin,
+            });
+            this.dispatchEvent(message);
+            if (type === "message") this.onmessage?.call(this, message);
+          }
+        } catch (error) {
+          if (this.readyState === FixtureEventSource.CLOSED) return;
+          const event = new Event("error");
+          this.dispatchEvent(event);
+          this.onerror?.call(this, event);
+        }
+      }
+
+      close() {
+        if (this.readyState === FixtureEventSource.CLOSED) return;
+        this.readyState = FixtureEventSource.CLOSED;
+        this.controller.abort();
+        window.__simulationEventSourceStats.closed += 1;
+      }
+    }
+    Object.defineProperty(window, "EventSource", {
+      configurable: true,
+      value: FixtureEventSource,
+    });
   }, { selectedTheme: theme });
   const page = await context.newPage();
   const errors = { console: [], page: [], request: [], response: [] };
@@ -1169,9 +1294,19 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("heading", { name: "시뮬레이션", exact: true }).waitFor();
     await page.locator("[data-ai-simulation]").waitFor();
     await page.getByText("선물 paper 전용 · 실주문 capability false", { exact: true }).waitFor();
+    const historyDisclosure = page.locator("[data-simulation-history-disclosure]");
+    await historyDisclosure.waitFor();
+    check(state.historyRequests === 0, "기록을 펼치기 전에 시뮬레이션 기록 API가 호출됐습니다.");
+    check(state.reportRequests === 0, "실행을 선택하기 전에 시뮬레이션 보고서 API가 호출됐습니다.");
+    await historyDisclosure.locator("[data-simulation-history-toggle]").click();
     const historyPanel = page.locator("[data-simulation-history]");
     await historyPanel.waitFor();
-    await historyPanel.locator(`[data-simulation-history-item="${state.archivedRunId}"]`).waitFor();
+    const archivedHistoryItem = historyPanel.locator(
+      `[data-simulation-history-item="${state.archivedRunId}"]`,
+    );
+    await archivedHistoryItem.waitFor();
+    check(state.reportRequests === 0, "기록 목록만 펼쳤는데 첫 보고서 API가 자동 호출됐습니다.");
+    await archivedHistoryItem.click();
     await historyPanel.locator(`[data-simulation-report="${state.archivedRunId}"]`).waitFor({ timeout: 10_000 });
     await historyPanel.getByText("실행 설정", { exact: true }).waitFor();
     await historyPanel.getByText("캔들·지표·패턴 근거", { exact: true }).waitFor();
@@ -1700,7 +1835,29 @@ async function verify(browser, baseUrl, viewport, theme) {
     await currentRunPanel.getByText("SIM1 · 가상 매수", { exact: true }).first().waitFor();
     await currentRunPanel.getByText("positive_risk_adjusted_score · entry_probability_threshold", { exact: true }).waitFor();
     await currentRunPanel.getByText(/next_valid_quote/).first().waitFor();
-    check(state.polls >= 1, "시작 후 run snapshot을 polling하지 않았습니다.");
+    check(state.streams >= 1, "시작 후 simulation SSE를 열지 않았습니다.");
+    check(state.polls === 0, "정상 simulation SSE 중 run GET polling이 발생했습니다.");
+    const streamStatsBeforeHidden = await page.evaluate(
+      () => ({ ...window.__simulationEventSourceStats }),
+    );
+    await page.evaluate(() => window.__setSimulationFixtureVisibility("hidden"));
+    await page.waitForFunction(
+      (before) => window.__simulationEventSourceStats.closed > before.closed,
+      streamStatsBeforeHidden,
+    );
+    const streamsWhileHidden = state.streams;
+    await page.waitForTimeout(1_100);
+    check(
+      state.streams === streamsWhileHidden && state.polls === 0,
+      "hidden tab에서 simulation 요청이 반복됐습니다.",
+    );
+    await page.evaluate(() => window.__setSimulationFixtureVisibility("visible"));
+    await page.waitForFunction(
+      (before) => window.__simulationEventSourceStats.opened > before.opened,
+      streamStatsBeforeHidden,
+    );
+    await page.waitForTimeout(50);
+    check(state.streams > streamsWhileHidden, "visible 복귀 후 simulation SSE를 재연결하지 않았습니다.");
 
     const chartGrid = page.locator("[data-simulation-charts]");
     await chartGrid.waitFor();
@@ -1904,6 +2061,8 @@ async function verify(browser, baseUrl, viewport, theme) {
       .getByText("취소됨", { exact: true })
       .waitFor({ timeout: 10_000 });
     check(state.cancels.length === cancelsBeforeEtf + 1, "ETF cancel API가 정확히 한 번 호출되지 않았습니다.");
+    check(state.polls === 0, "terminal event 이후 run GET polling이 발생했습니다.");
+    check(state.terminalStreams >= 1, "cancel terminal SSE가 전달되지 않았습니다.");
     check(
       Object.values(errors).every((items) => items.length === 0),
       `브라우저 오류: ${JSON.stringify(errors)}`,
@@ -1932,6 +2091,8 @@ async function verify(browser, baseUrl, viewport, theme) {
       reportRequests: state.reportRequests,
       scrollMetrics,
       polls: state.polls,
+      streams: state.streams,
+      terminalStreams: state.terminalStreams,
       cancels: state.cancels.length,
       zeroSize: zeroSize.length,
       overflow,

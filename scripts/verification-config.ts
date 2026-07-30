@@ -12,6 +12,8 @@ export const verificationConfigDefaults = {
     rustSocketPath: "/tmp/toss-portfolio-lens-compute.sock",
     rustSocketPoolSize: 2,
     rustSocketTimeoutMs: 300_000,
+    rustComputeMaxQueued: 32,
+    rustComputeQueueTimeoutMs: 30_000,
   },
   mcp: {
     enabled: false,

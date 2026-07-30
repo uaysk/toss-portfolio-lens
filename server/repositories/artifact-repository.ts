@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
-import { canonicalJson } from "../worker/contracts.js";
+import type { ArtifactWriteTelemetry } from "../observability/runtime-telemetry.js";
+import { ArtifactCodec } from "../services/artifact-codec.js";
 
 export const ARTIFACT_TYPES = [
   "equity", "drawdown", "holdings", "trades", "rolling", "correlation",
@@ -40,17 +41,20 @@ export type ArtifactDescriptor = {
   dataRevision: string;
 };
 
-type ArtifactRow = {
+type ArtifactDescriptorRow = {
   artifact_id: string;
   run_id: string;
   artifact_type: ArtifactType;
-  content_json: string;
   row_count: number;
   byte_count: number;
   checksum: string;
   generated_at: string;
   schema_version: string;
   data_revision: string;
+};
+
+type ArtifactRow = ArtifactDescriptorRow & {
+  content_json: string;
 };
 
 function uriFor(runId: string, type: ArtifactType): string {
@@ -63,7 +67,7 @@ function uriFor(runId: string, type: ArtifactType): string {
   return `portfolio://runs/${runId}/artifacts/${type}`;
 }
 
-function descriptor(row: ArtifactRow): ArtifactDescriptor {
+function descriptor(row: ArtifactDescriptorRow): ArtifactDescriptor {
   return {
     id: row.artifact_id,
     runId: row.run_id,
@@ -80,7 +84,11 @@ function descriptor(row: ArtifactRow): ArtifactDescriptor {
 }
 
 export class ArtifactRepository {
-  constructor(private readonly database: RelationalDatabase) {}
+  constructor(
+    private readonly database: RelationalDatabase,
+    private readonly codec = new ArtifactCodec(),
+    private readonly telemetry?: ArtifactWriteTelemetry,
+  ) {}
 
   async initialize(): Promise<void> {
     if (this.database.dialect === "mysql") {
@@ -129,9 +137,9 @@ export class ArtifactRepository {
     dataRevision: string;
     generatedAt?: string;
   }): Promise<ArtifactDescriptor> {
-    const contentJson = canonicalJson(input.content);
-    const checksum = createHash("sha256").update(contentJson).digest("hex");
-    const byteCount = Buffer.byteLength(contentJson);
+    const serializationStartedAt = performance.now();
+    const encoded = await this.codec.encode(input.content);
+    const serializationMs = performance.now() - serializationStartedAt;
     const rowCount = input.rowCount ?? (Array.isArray(input.content) ? input.content.length : 1);
     const id = randomUUID();
     const generatedAt = input.generatedAt ?? new Date().toISOString();
@@ -139,14 +147,15 @@ export class ArtifactRepository {
       id,
       input.runId,
       input.type,
-      contentJson,
+      encoded.contentJson,
       rowCount,
-      byteCount,
-      checksum,
+      encoded.byteCount,
+      encoded.checksum,
       generatedAt,
       input.schemaVersion,
       input.dataRevision,
     ];
+    const storageStartedAt = performance.now();
     if (this.database.dialect === "mysql") {
       await this.database.run(`
         INSERT INTO portfolio_backtest_artifacts (
@@ -172,9 +181,27 @@ export class ArtifactRepository {
           data_revision = excluded.data_revision
       `, values);
     }
-    const stored = await this.get(input.runId, input.type);
+    const stored = await this.getDescriptor(input.runId, input.type);
     if (!stored) throw new Error("artifact를 저장하지 못했습니다.");
-    return stored.descriptor;
+    this.telemetry?.recordArtifactWrite({
+      byteCount: encoded.byteCount,
+      serializationMs,
+      storageMs: performance.now() - storageStartedAt,
+      offloaded: encoded.offloaded,
+    });
+    return stored;
+  }
+
+  private async getDescriptor(
+    runId: string,
+    type: ArtifactType,
+  ): Promise<ArtifactDescriptor | undefined> {
+    const [row] = await this.database.query<ArtifactDescriptorRow>(`
+      SELECT artifact_id, run_id, artifact_type, row_count, byte_count,
+             checksum, generated_at, schema_version, data_revision
+      FROM portfolio_backtest_artifacts WHERE run_id = ? AND artifact_type = ?
+    `, [runId, type]);
+    return row ? descriptor(row) : undefined;
   }
 
   async get(runId: string, type: ArtifactType): Promise<{
@@ -195,8 +222,8 @@ export class ArtifactRepository {
   }
 
   async list(runId: string): Promise<ArtifactDescriptor[]> {
-    const rows = await this.database.query<ArtifactRow>(`
-      SELECT artifact_id, run_id, artifact_type, '' AS content_json, row_count, byte_count,
+    const rows = await this.database.query<ArtifactDescriptorRow>(`
+      SELECT artifact_id, run_id, artifact_type, row_count, byte_count,
              checksum, generated_at, schema_version, data_revision
       FROM portfolio_backtest_artifacts WHERE run_id = ? ORDER BY artifact_type ASC
     `, [runId]);

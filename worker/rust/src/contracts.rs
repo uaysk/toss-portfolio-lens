@@ -30,6 +30,14 @@ pub enum JobKind {
     ScalpingAnalysis,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerResultProjection {
+    Summary,
+    #[default]
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerInput {
     pub schema_version: String,
@@ -39,6 +47,8 @@ pub struct WorkerInput {
     pub data_revision: String,
     pub request_hash: String,
     pub payload: Value,
+    #[serde(default)]
+    pub projection: WorkerResultProjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +67,7 @@ pub struct WorkerOutput {
     pub run_id: String,
     pub job_kind: JobKind,
     pub status: String,
+    pub projection: WorkerResultProjection,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,12 +129,17 @@ impl WorkerOutput {
                 deduplicated.push(warning);
             }
         }
+        let (result, artifacts) = match input.projection {
+            WorkerResultProjection::Summary => (summary.clone(), Vec::new()),
+            WorkerResultProjection::Full => (result, artifacts),
+        };
         Ok(Self {
             schema_version: WORKER_SCHEMA_VERSION.into(),
             engine_version: ENGINE_VERSION.into(),
             run_id: input.run_id.clone(),
             job_kind: input.job_kind,
             status: "completed".into(),
+            projection: input.projection,
             summary: Some(summary),
             result: Some(result),
             error: None,
@@ -298,6 +314,7 @@ pub fn parse_raw_job(kind: JobKind, payload: Value) -> Result<WorkerInput> {
         data_revision: "direct".into(),
         request_hash,
         payload,
+        projection: WorkerResultProjection::Full,
     };
     input.validate()?;
     Ok(input)

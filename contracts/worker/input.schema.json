@@ -39,6 +39,7 @@
     "job_kind": { "$ref": "#/$defs/job_kind" },
     "data_revision": { "type": "string", "minLength": 1, "maxLength": 128 },
     "request_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "projection": { "enum": ["summary", "full"], "default": "full" },
     "payload": { "type": "object" }
   }
 }

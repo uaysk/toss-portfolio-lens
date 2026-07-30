@@ -254,6 +254,205 @@ class AIService:
             )
         return self._handle_evaluate(request)
 
+    def cross_request_batch_key(self, request: AIRequest) -> tuple[object, ...] | None:
+        """Return a conservative compatibility key for transport microbatching.
+
+        A key is available only when at least two whole requests fit in the
+        model's configured microbatch. Request IDs and instrument identities
+        are intentionally excluded: they are caller metadata, not model input
+        shape, and are restored after the shared inference call.
+        """
+
+        if not isinstance(request, ForecastRequest):
+            return None
+        if len(request.series) > self.settings.max_series:
+            return None
+        if self.settings.microbatch_size // len(request.series) < 2:
+            return None
+
+        bindings = self.model_run_adapters
+        model_identity = tuple(
+            (
+                binding.role,
+                binding.expected_model_id,
+                binding.adapter.provenance.model_id,
+                binding.adapter.provenance.model_revision,
+                binding.adapter.provenance.source_revision,
+                binding.adapter.provenance.dtype,
+            )
+            for binding in bindings
+        ) or (
+            (
+                "primary",
+                self.adapter.provenance.model_id,
+                self.adapter.provenance.model_id,
+                self.adapter.provenance.model_revision,
+                self.adapter.provenance.source_revision,
+                self.adapter.provenance.dtype,
+            ),
+        )
+        shape_items: list[tuple[object, ...]] = []
+        for item in request.series:
+            if self.settings.model_lane == "fincast":
+                # Keep admission work constant-time on the event loop. Legacy
+                # undeclared cadence is still supported by isolated service
+                # calls, while cross-request batching requires an explicit
+                # cadence declaration.
+                if item.input_cadence is None:
+                    return None
+                cadence_shape: object = (
+                    item.input_cadence.candle_seconds,
+                    item.input_cadence.gap_policy,
+                )
+            else:
+                cadence_shape = (
+                    (
+                        item.input_cadence.candle_seconds,
+                        item.input_cadence.gap_policy,
+                    )
+                    if item.input_cadence is not None
+                    else None
+                )
+            shape_items.append((len(item.bars), len(item.future_timestamps), cadence_shape))
+        shape = tuple(shape_items)
+        lane_profile = (
+            self.settings.chronos2_input_profile
+            if self.settings.model_lane == "chronos_2"
+            else self.settings.model_lane
+        )
+        return (
+            model_identity,
+            self.settings.model_lane,
+            lane_profile,
+            request.forecast_profile,
+            shape,
+            request.horizons_minutes,
+            request.quantiles,
+            request.seed,
+        )
+
+    def cross_request_batch_capacity(self, request: AIRequest) -> int:
+        if self.cross_request_batch_key(request) is None:
+            return 1
+        return max(1, self.settings.microbatch_size // len(request.series))
+
+    def _run_cross_request_forecasts(
+        self,
+        requests: Sequence[ForecastRequest],
+        adapter: ModelAdapter,
+    ) -> tuple[tuple[tuple[SeriesForecastResult, ...], ...], float, datetime]:
+        synthetic: list[ForecastSeries] = []
+        original_keys: list[tuple[str, ...]] = []
+        for request_ordinal, request in enumerate(requests):
+            request_keys: list[str] = []
+            for series_ordinal, item in enumerate(request.series):
+                request_keys.append(item.instrument_key)
+                synthetic.append(
+                    item.model_copy(
+                        update={
+                            "instrument_key": f"cross-request-{request_ordinal}-{series_ordinal}",
+                        }
+                    )
+                )
+            original_keys.append(tuple(request_keys))
+
+        started = perf_counter()
+        combined = self._run_forecasts(synthetic, requests[0].seed, adapter)
+        latency_ms = (perf_counter() - started) * 1_000
+        generated_at = datetime.now(timezone.utc)
+
+        split: list[tuple[SeriesForecastResult, ...]] = []
+        offset = 0
+        for request, request_keys in zip(requests, original_keys, strict=True):
+            end = offset + len(request.series)
+            restored = tuple(
+                result.model_copy(update={"instrument_key": instrument_key})
+                for result, instrument_key in zip(combined[offset:end], request_keys, strict=True)
+            )
+            split.append(restored)
+            offset = end
+        return tuple(split), latency_ms, generated_at
+
+    def handle_batch(self, requests: Sequence[AIRequest]) -> tuple[AIResponse, ...]:
+        """Handle one compatible cross-request microbatch.
+
+        This is deliberately defensive because the service can be called
+        independently of the WebSocket scheduler. Any mismatch falls back to
+        isolated handling, preserving the existing request contract.
+        """
+
+        if len(requests) < 2:
+            return tuple(self.handle(request) for request in requests)
+        key = self.cross_request_batch_key(requests[0])
+        if key is None or any(self.cross_request_batch_key(request) != key for request in requests[1:]):
+            return tuple(self.handle(request) for request in requests)
+        if sum(len(request.series) for request in requests) > self.settings.microbatch_size:
+            return tuple(self.handle(request) for request in requests)
+
+        forecast_requests = tuple(request for request in requests if isinstance(request, ForecastRequest))
+        if len(forecast_requests) != len(requests):
+            return tuple(self.handle(request) for request in requests)
+
+        if self.model_run_adapters:
+            batched_runs = [
+                (
+                    binding,
+                    *self._run_cross_request_forecasts(forecast_requests, binding.adapter),
+                )
+                for binding in self.model_run_adapters
+            ]
+            responses: list[AIResponse] = []
+            for request_ordinal, request in enumerate(forecast_requests):
+                input_origins = _model_run_input_origins(request.series, self.settings.max_context_bars)
+                model_runs = tuple(
+                    ModelRun(
+                        role=binding.role,
+                        expected_model_id=binding.expected_model_id,
+                        status=_response_status(results_by_request[request_ordinal]),
+                        model=binding.adapter.provenance,
+                        generated_at=generated_at,
+                        latency_ms=latency_ms,
+                        degraded=False,
+                        fallback_used=False,
+                        fallback_reason=None,
+                        input_origins=input_origins,
+                        input_end_aligned=True,
+                        raw_series=results_by_request[request_ordinal],
+                    )
+                    for binding, results_by_request, latency_ms, generated_at in batched_runs
+                )
+                primary = model_runs[0]
+                responses.append(
+                    AIResponse(
+                        schema_version=SCHEMA_VERSION,
+                        request_id=request.request_id,
+                        mode="forecast",
+                        status=primary.status,
+                        model=primary.model,
+                        generated_at=datetime.now(timezone.utc),
+                        series=primary.raw_series,
+                        model_runs=model_runs,
+                    )
+                )
+            return tuple(responses)
+
+        results_by_request, _latency_ms, _generated_at = self._run_cross_request_forecasts(
+            forecast_requests,
+            self.adapter,
+        )
+        return tuple(
+            AIResponse(
+                schema_version=SCHEMA_VERSION,
+                request_id=request.request_id,
+                mode="forecast",
+                status=_response_status(results),
+                model=self.adapter.provenance,
+                generated_at=datetime.now(timezone.utc),
+                series=results,
+            )
+            for request, results in zip(forecast_requests, results_by_request, strict=True)
+        )
+
     def _run_forecasts(
         self,
         series: Sequence[ForecastSeries],

@@ -40,6 +40,7 @@ import { McpResourceRegistry } from "./mcp/resources.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
 import { EventLoopLagMonitor } from "./observability/event-loop-monitor.js";
+import { RuntimeTelemetry } from "./observability/runtime-telemetry.js";
 import { RustComputeClient } from "./worker/rust-client.js";
 import { AiComputeClient } from "./worker/ai-client.js";
 import { ScalpingAiService } from "./services/scalping-ai-service.js";
@@ -54,6 +55,9 @@ import { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
 import { AiTradingSimulationService } from "./simulation/simulation-service.js";
 import { createSimulationRouter } from "./simulation/router.js";
+import { SimulationRunEventHub } from "./simulation/run-event-stream.js";
+import { SimulationCheckpointStore } from "./simulation/checkpoint-store.js";
+import { PortfolioLiveHub } from "./portfolio/live-hub.js";
 import {
   normalizeBinanceUniverse,
   OfficialBinanceUsdmPublicStreams,
@@ -94,7 +98,11 @@ export async function bootstrap(config: AppConfig): Promise<void> {
 warnReadOnlyApiTokenFallbackOnce(config.readOnlyApiTokenSource);
 const eventLoopLag = new EventLoopLagMonitor();
 eventLoopLag.start();
+const runtimeTelemetry = new RuntimeTelemetry();
 const toss = new TossClient(config);
+const portfolioLive = new PortfolioLiveHub({
+  getPortfolio: (_ownerSubject, accountId) => toss.getPortfolio(accountId),
+});
 const historyStore = await openConfiguredHistoryStore(config);
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
@@ -109,6 +117,8 @@ const rustCompute = config.compute.executionMode === "rust_socket"
     socketPath: config.compute.rustSocketPath,
     poolSize: config.compute.rustSocketPoolSize,
     timeoutMs: config.compute.rustSocketTimeoutMs,
+    maxQueued: config.compute.rustComputeMaxQueued,
+    queueTimeoutMs: config.compute.rustComputeQueueTimeoutMs,
   })
   : undefined;
 const reportWriter = config.bedrock
@@ -131,13 +141,15 @@ let mcpAuditCleanupTask: Promise<void> | undefined;
 const database = historyStore.relationalDatabase;
 const runRepository = new RunRepository(database);
 const presetRepository = new PresetRepository(database);
-const artifactRepository = new ArtifactRepository(database);
+const artifactRepository = new ArtifactRepository(database, undefined, runtimeTelemetry);
 const optimizationRepository = new OptimizationRepository(database);
 const reportRepository = new ReportRepository(database);
 const runJobRepository = database.dialect === "postgres" ? new RunJobRepository(database) : undefined;
 const mcpAuditRepository = new McpAuditRepository(database);
 const scalpingRepository = config.scalping.enabled ? new ScalpingRepository(database) : undefined;
+const simulationCheckpoints = new SimulationCheckpointStore(database);
 await runRepository.initialize();
+await simulationCheckpoints.initialize();
 const presetService = new PresetService(presetRepository);
 await presetService.initialize();
 await artifactRepository.initialize();
@@ -211,6 +223,7 @@ const runService = new RunService(
     optimizationRepository,
   },
 );
+const simulationRunEvents = new SimulationRunEventHub();
 const recoveredRuns = await runService.initialize();
 if (recoveredRuns > 0) console.warn(`[compute] ${recoveredRuns}개의 stale 실행을 복구했습니다.`);
 const reportService = new ReportService(
@@ -320,6 +333,7 @@ const cryptoSimulationService = new CryptoSimulationCoordinator({
   runtime: cryptoPaperRuntime,
   runtimeSnapshots: cryptoRuntimeSnapshots,
   maximumActiveSessions: config.cryptoSimulation.maximumActiveSessions,
+  runEvents: simulationRunEvents,
   credentials: {
     configured: binanceSignedRead.configured,
     signedReadSucceeded: binanceSignedRead.signedReadSucceeded,
@@ -438,7 +452,9 @@ if (config.scalping.enabled && scalpingRepository) {
         candidatePoolSize: Math.max(2, config.scalping.minimumTopCount),
         selectionMaximumAttempts: config.scalping.simulation.selectionMaximumAttempts,
         selectionRetryDelayMs: config.scalping.simulation.selectionRetryDelayMs,
+        runEvents: simulationRunEvents,
       },
+      simulationCheckpoints,
     );
   }
 }
@@ -542,12 +558,16 @@ const scalpingRouter = createScalpingRouter({
 const simulationRouter = createSimulationRouter({
   authenticate: requireSession,
   service: new SimulationServiceMultiplexer(cryptoSimulationService, simulationService),
+  events: simulationRunEvents,
+  sseConnections,
   config: {
     // Public Binance scanning is independent of the stock scalping/KIS stack.
     // The deployed execution adapter remains paper-only and never sends orders.
     enabled: true,
     maxDurationMinutes: config.scalping.simulation.maximumDurationMinutes,
     ownerSubject: "owner",
+    heartbeatMs: 15_000,
+    backpressureEventLimit: 128,
   },
 });
 const healthRouter = createHealthRouter({
@@ -561,13 +581,19 @@ const healthRouter = createHealthRouter({
   buildInfo,
   executionMode: config.compute.executionMode,
   rustSocketPath: config.compute.rustSocketPath,
+  rustSchedulerSnapshot: () => rustCompute?.snapshot(),
   eventLoopLagSnapshot: () => eventLoopLag.snapshot(),
+  simulationSseSnapshot: () => simulationRunEvents.telemetry,
+  portfolioLiveSnapshot: () => portfolioLive.telemetry,
+  runtimeTelemetrySnapshot: () => runtimeTelemetry.snapshot(),
   simulationEnabled: true,
 });
 const portfolioRouter = createPortfolioRouter({
   authenticate: requireSession,
   getPortfolio: (account, force) => toss.getPortfolio(account, force),
   recordPortfolio: (portfolio) => historyStore.recordPortfolio(portfolio),
+  live: portfolioLive,
+  sseConnections,
 });
 const compatibleApiRouter = createCompatibleApiRouter({
   authenticate: requireReadOnlyApiToken,
@@ -603,6 +629,7 @@ const app = createApp({
   trustProxy: config.trustProxy,
   oauthCallbackOrigin,
   shutdownGate: shutdownGate.middleware,
+  requestTelemetry: runtimeTelemetry.middleware,
   routeRegistrars: [
     (application) => {
       if (mcpOAuthRuntime) application.use(mcpOAuthRuntime.router);
@@ -717,6 +744,7 @@ const lifecycle = new GracefulLifecycle({
         cryptoFincastClient.close();
       }),
       shutdownStep("Rust client", () => rustCompute?.close()),
+      shutdownStep("portfolio live hub", () => portfolioLive.close()),
       shutdownStep("MCP transport", () => mcpHttpRuntime?.close()),
       shutdownStep("MCP OAuth cleanup tail", async () => {
         await mcpCleanupTask;

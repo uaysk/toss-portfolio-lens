@@ -1684,7 +1684,7 @@ describe("ScalpingService", () => {
       .toBe(marketLocalTimestamp(maximumInputEndAt, "KR"));
   });
 
-  it("propagates cancellation into realtime Rust computation", async () => {
+  it("cancels upstream Rust computation after its final subscriber leaves", async () => {
     const parts = dependencies();
     let rustSignal: AbortSignal | undefined;
     parts.rust.compute.mockImplementation((
@@ -1704,12 +1704,53 @@ describe("ScalpingService", () => {
       signal: controller.signal,
       skipAutomaticRefresh: true,
     });
-    await vi.waitFor(() => expect(rustSignal).toBe(controller.signal));
+    await vi.waitFor(() => expect(rustSignal).toBeDefined());
+    expect(rustSignal).not.toBe(controller.signal);
 
     controller.abort(new Error("simulation stopped during Rust analysis"));
 
     await expect(pending).rejects.toThrow("simulation stopped during Rust analysis");
     expect(rustSignal?.aborted).toBe(true);
+  });
+
+  it("keeps shared Rust computation alive when one caller cancels", async () => {
+    const parts = dependencies();
+    let rustSignal: AbortSignal | undefined;
+    let resolveRust!: (value: unknown) => void;
+    parts.rust.compute.mockImplementation((
+      _kind: unknown,
+      _payload: unknown,
+      options: { signal?: AbortSignal },
+    ) => new Promise((resolve, reject) => {
+      resolveRust = resolve;
+      rustSignal = options.signal;
+      options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+    }));
+    const subject = service(parts);
+    const controller = new AbortController();
+    const request = {
+      symbols: ["005930"],
+      interval: "1m" as const,
+      preset: "trend" as const,
+    };
+    const cancelled = subject.realtimeAnalysis(request, {
+      signal: controller.signal,
+      skipAutomaticRefresh: true,
+    });
+    const retained = subject.realtimeAnalysis(request, {
+      skipAutomaticRefresh: true,
+    });
+    await vi.waitFor(() => expect(parts.rust.compute).toHaveBeenCalledTimes(1));
+
+    controller.abort(new Error("only the first caller stopped"));
+    await expect(cancelled).rejects.toThrow("only the first caller stopped");
+    expect(rustSignal?.aborted).toBe(false);
+
+    resolveRust({ result: parts.analysis, summary: {}, warnings: [], artifacts: [] });
+    await expect(retained).resolves.toMatchObject({
+      schemaVersion: "scalping-realtime-analysis/v1",
+    });
+    expect(rustSignal?.aborted).toBe(false);
   });
 
   it("keeps full KR session evidence while bounding the model context", async () => {

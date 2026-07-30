@@ -4,6 +4,7 @@ import {
   canonicalJson,
   decodeWorkerArtifact,
   encodeWorkerArtifact,
+  encodeWorkerArtifactAsync,
   WorkerInputSchema,
   WorkerJobKindSchema,
   WorkerOutputSchema,
@@ -42,6 +43,23 @@ describe("worker contract", () => {
       uncompressedByteCount: encoded.uncompressedByteCount + 1,
     })).toThrow("metadata");
     expect(() => canonicalJson({ value: Number.NaN })).toThrow("유한한 숫자");
+  });
+
+  it("repository용 async codec이 동기 contract와 동일한 canonical bytes를 만든다", async () => {
+    const large = {
+      ...input,
+      payload: { values: ["x".repeat(1024 * 1024)] },
+    };
+    const synchronous = encodeWorkerArtifact(large);
+    const asynchronous = await encodeWorkerArtifactAsync(large);
+
+    expect(asynchronous.checksum).toBe(synchronous.checksum);
+    expect(asynchronous.uncompressedByteCount).toBe(synchronous.uncompressedByteCount);
+    expect(decodeWorkerArtifact(
+      asynchronous.content,
+      asynchronous.checksum,
+      asynchronous,
+    )).toEqual(WorkerInputSchema.parse(large));
   });
 
   it("TypeScript와 공개 JSON Schema의 job kind 목록이 일치한다", () => {

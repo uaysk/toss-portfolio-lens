@@ -344,6 +344,7 @@ try {
     data_revision: cancellableRun.dataRevision,
     request_hash: cancellableRun.requestHash,
     payload: { optimization: optimizationInput, objective: "robust_score" },
+    projection: "full",
   };
   const cancellationArtifact = await jobs.putInput(cancellationInput);
   const cancellationNow = Date.now();

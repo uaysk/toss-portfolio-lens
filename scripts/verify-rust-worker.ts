@@ -196,6 +196,7 @@ function workerInput(
     data_revision: dataRevision,
     request_hash: sha256(payload),
     payload,
+    projection: "full",
   };
 }
 

@@ -45,6 +45,15 @@ type AiSimulationHistoryProps = {
   refreshKey?: string;
 };
 
+export function retainedSimulationHistorySelection(
+  items: readonly AiSimulationHistoryItem[],
+  current?: string,
+): string | undefined {
+  return current && items.some(({ runId }) => runId === current)
+    ? current
+    : undefined;
+}
+
 const PRESET_LABELS: Record<AiSimulationPreset, string> = {
   trend: "추세 수익",
   breakout: "돌파 가속 · 최대 공격",
@@ -779,9 +788,7 @@ export function AiSimulationHistory({
       });
       setNextCursor(page.nextCursor);
       if (!append) {
-        setSelectedRunId((current) => page.items.some(({ runId }) => runId === current)
-          ? current
-          : page.items[0]?.runId);
+        setSelectedRunId((current) => retainedSimulationHistorySelection(page.items, current));
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "시뮬레이션 기록을 불러오지 못했습니다.");

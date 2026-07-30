@@ -48,6 +48,15 @@ function objectValue(value: unknown): Record<string, unknown> {
 function sendDashboardAnalysisError(response: Response, error: unknown): void {
   const adapted = dashboardAnalysisError(error);
   if (error instanceof ServiceError) {
+    if (error.detail.code === "RUST_COMPUTE_BUSY") {
+      const configuredRetryAfter = Number(error.detail.details?.retry_after_seconds);
+      response.setHeader(
+        "Retry-After",
+        String(Number.isFinite(configuredRetryAfter) && configuredRetryAfter > 0
+          ? Math.ceil(configuredRetryAfter)
+          : 1),
+      );
+    }
     if (["PRESET_NOT_FOUND", "CANDIDATE_NOT_FOUND"].includes(error.detail.code)) {
       adapted.status = 404;
     }

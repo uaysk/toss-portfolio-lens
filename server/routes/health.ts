@@ -12,7 +12,11 @@ export type HealthRouteDependencies = {
   buildInfo: () => unknown;
   executionMode: ComputeExecutionMode;
   rustSocketPath: string;
+  rustSchedulerSnapshot: () => unknown;
   eventLoopLagSnapshot: () => unknown;
+  simulationSseSnapshot?: () => unknown;
+  portfolioLiveSnapshot?: () => unknown;
+  runtimeTelemetrySnapshot?: () => unknown;
   simulationEnabled: boolean;
 };
 
@@ -34,10 +38,14 @@ export function createHealthRouter(dependencies: HealthRouteDependencies): Route
         ? "disabled"
         : dependencies.mcpAuthMode === "oauth" ? "oauth" : "local-none",
       build: dependencies.buildInfo(),
+      runtime: dependencies.runtimeTelemetrySnapshot?.(),
       compute: {
         executionMode: dependencies.executionMode,
         rustSocket: dependencies.executionMode === "rust_socket"
           ? dependencies.rustSocketPath
+          : undefined,
+        scheduler: dependencies.executionMode === "rust_socket"
+          ? dependencies.rustSchedulerSnapshot()
           : undefined,
         eventLoopLagMs: dependencies.eventLoopLagSnapshot(),
       },
@@ -45,6 +53,10 @@ export function createHealthRouter(dependencies: HealthRouteDependencies): Route
         enabled: dependencies.simulationEnabled,
         realOrder: false,
         mcp: false,
+        sse: dependencies.simulationSseSnapshot?.(),
+      },
+      portfolio: {
+        live: dependencies.portfolioLiveSnapshot?.(),
       },
     });
   });

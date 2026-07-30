@@ -5,8 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,88 @@ use serde_json::{Value, json};
 const MAX_SOCKET_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const SOCKET_PEER_CHECK_INTERVAL: usize = 32;
 const SOCKET_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_SOCKET_MAX_ACTIVE: usize = 2;
+const DEFAULT_SOCKET_MAX_CONNECTIONS: usize = 34;
+const MAX_SOCKET_ADMISSION_LIMIT: usize = 4_096;
+
+#[derive(Debug)]
+struct Admission {
+    limit: usize,
+    active: Mutex<usize>,
+    available: Condvar,
+}
+
+impl Admission {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            active: Mutex::new(0),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> AdmissionPermit {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *active >= self.limit {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        *active += 1;
+        AdmissionPermit {
+            admission: self.clone(),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<AdmissionPermit> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *active >= self.limit {
+            return None;
+        }
+        *active += 1;
+        Some(AdmissionPermit {
+            admission: self.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+struct AdmissionPermit {
+    admission: Arc<Admission>,
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        let mut active = self
+            .admission
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = active.saturating_sub(1);
+        self.admission.available.notify_one();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ServeOptions {
+    socket_path: String,
+    max_active: usize,
+    max_connections: usize,
+}
 
 fn peak_process_rss_bytes() -> Option<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -163,7 +245,7 @@ fn read_socket_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
     Ok(Some(source))
 }
 
-fn write_socket_frame(stream: &mut UnixStream, value: &impl serde::Serialize) -> Result<()> {
+fn encode_socket_frame(value: &impl serde::Serialize) -> Result<Vec<u8>> {
     let source = serde_json::to_vec(value)?;
     if source.len() > MAX_SOCKET_FRAME_BYTES {
         bail!("socket response exceeds 128 MiB");
@@ -171,10 +253,20 @@ fn write_socket_frame(stream: &mut UnixStream, value: &impl serde::Serialize) ->
     if source.len() > u32::MAX as usize {
         bail!("socket response exceeds frame length field");
     }
+    Ok(source)
+}
+
+fn write_socket_bytes(stream: &mut UnixStream, source: &[u8]) -> Result<()> {
     stream.write_all(&(source.len() as u32).to_be_bytes())?;
-    stream.write_all(&source)?;
+    stream.write_all(source)?;
     stream.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+fn write_socket_frame(stream: &mut UnixStream, value: &impl serde::Serialize) -> Result<()> {
+    let source = encode_socket_frame(value)?;
+    write_socket_bytes(stream, &source)
 }
 
 struct SocketControl {
@@ -234,7 +326,10 @@ impl ComputeControl for SocketControl {
     }
 }
 
-fn handle_socket(mut stream: UnixStream) -> Result<()> {
+fn handle_socket_with_admission(
+    mut stream: UnixStream,
+    active_admission: Option<Arc<Admission>>,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(300)))?;
     stream.set_write_timeout(Some(Duration::from_secs(300)))?;
     while let Some(source) = read_socket_frame(&mut stream)? {
@@ -242,19 +337,21 @@ fn handle_socket(mut stream: UnixStream) -> Result<()> {
         let response = (|| -> Result<WorkerOutput> {
             let value: Value =
                 serde_json::from_slice(&source).context("invalid framed JSON request")?;
-            let include_artifacts = value
+            let requested_artifacts = value
                 .get("include_artifacts")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             let input = parse_socket_input(value)?;
+            let include_artifacts = requested_artifacts
+                && input.projection
+                    == portfolio_lens_compute::contracts::WorkerResultProjection::Full;
             let compute_started = Instant::now();
             let control = SocketControl::new(stream.as_raw_fd());
-            let mut output =
-                compute::compute_with_control(&input, include_artifacts, Some(&control))?;
+            let active_permit = active_admission.as_ref().map(Admission::acquire);
+            let output = compute::compute_with_control(&input, include_artifacts, Some(&control));
+            drop(active_permit);
+            let mut output = output?;
             let compute_ms = compute_started.elapsed().as_secs_f64() * 1000.0;
-            let serialization_started = Instant::now();
-            let serialized_result_bytes = serde_json::to_vec(&output)?.len();
-            let serialization_ms = serialization_started.elapsed().as_secs_f64() * 1000.0;
             output
                 .artifacts
                 .get_or_insert_with(Vec::new)
@@ -263,8 +360,6 @@ fn handle_socket(mut stream: UnixStream) -> Result<()> {
                     content: json!({
                         "request_decode_ms": compute_started.duration_since(started).as_secs_f64() * 1000.0,
                         "compute_ms": compute_ms,
-                        "serialization_ms": serialization_ms,
-                        "serialized_result_bytes": serialized_result_bytes,
                         "peak_process_rss_bytes": peak_process_rss_bytes(),
                         "worker_elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
                         "engine": portfolio_lens_compute::ENGINE_VERSION,
@@ -276,20 +371,29 @@ fn handle_socket(mut stream: UnixStream) -> Result<()> {
             Ok(output)
         })();
         match response {
-            Ok(output) => write_socket_frame(&mut stream, &output)?,
-            Err(error) => write_socket_frame(
-                &mut stream,
-                &json!({
+            Ok(output) => {
+                let source = encode_socket_frame(&output)?;
+                write_socket_bytes(&mut stream, &source)?;
+            }
+            Err(error) => {
+                let source = encode_socket_frame(&json!({
                     "status": "failed",
                     "error": {"code":"RUST_COMPUTE_FAILED", "message": error.to_string(), "retryable": false},
-                }),
-            )?,
+                }))?;
+                write_socket_bytes(&mut stream, &source)?;
+            }
         }
     }
     Ok(())
 }
 
-fn serve(socket_path: &str) -> Result<()> {
+#[cfg(test)]
+fn handle_socket(stream: UnixStream) -> Result<()> {
+    handle_socket_with_admission(stream, None)
+}
+
+fn serve(options: &ServeOptions) -> Result<()> {
+    let socket_path = options.socket_path.as_str();
     let path = Path::new(socket_path);
     if path.exists() {
         let metadata = fs::symlink_metadata(path)?;
@@ -304,12 +408,25 @@ fn serve(socket_path: &str) -> Result<()> {
     let listener =
         UnixListener::bind(path).with_context(|| format!("bind Unix socket {socket_path}"))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
-    eprintln!("portfolio-lens Rust compute listening on {socket_path}");
+    eprintln!(
+        "portfolio-lens Rust compute listening on {socket_path} (max-active={}, max-connections={})",
+        options.max_active, options.max_connections
+    );
+    let active_admission = Arc::new(Admission::new(options.max_active));
+    let connection_admission = Arc::new(Admission::new(options.max_connections));
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
+                let Some(connection_permit) = connection_admission.try_acquire() else {
+                    eprintln!("socket connection rejected: max-connections reached");
+                    drop(stream);
+                    continue;
+                };
+                let active_admission = active_admission.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_socket(stream) {
+                    let _connection_permit = connection_permit;
+                    if let Err(error) = handle_socket_with_admission(stream, Some(active_admission))
+                    {
                         eprintln!("socket request failed: {error:#}");
                     }
                 });
@@ -320,18 +437,56 @@ fn serve(socket_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn socket_path_arg<'a>(args: &'a [String], command: &str) -> Result<&'a str> {
+fn string_arg<'a>(args: &'a [String], name: &str, command: &str) -> Result<&'a str> {
     let index = args
         .iter()
-        .position(|value| value == "--socket")
-        .with_context(|| format!("{command} requires --socket <path>"))?;
-    let socket_path = args
+        .position(|value| value == name)
+        .with_context(|| format!("{command} requires {name} <value>"))?;
+    let value = args
         .get(index + 1)
-        .with_context(|| format!("{command} requires --socket <path>"))?;
-    if socket_path.starts_with("--") {
-        bail!("{command} requires --socket <path>");
+        .with_context(|| format!("{command} requires {name} <value>"))?;
+    if value.starts_with("--") {
+        bail!("{command} requires {name} <value>");
     }
-    Ok(socket_path)
+    Ok(value)
+}
+
+fn socket_path_arg<'a>(args: &'a [String], command: &str) -> Result<&'a str> {
+    string_arg(args, "--socket", command)
+        .map_err(|_| anyhow::anyhow!("{command} requires --socket <path>"))
+}
+
+fn optional_bounded_usize_arg(args: &[String], name: &str, fallback: usize) -> Result<usize> {
+    let Some(index) = args.iter().position(|value| value == name) else {
+        return Ok(fallback);
+    };
+    let raw = args
+        .get(index + 1)
+        .with_context(|| format!("{name} requires a positive integer"))?;
+    if raw.starts_with("--") {
+        bail!("{name} requires a positive integer");
+    }
+    let value = raw
+        .parse::<usize>()
+        .with_context(|| format!("{name} must be a positive integer"))?;
+    if value == 0 || value > MAX_SOCKET_ADMISSION_LIMIT {
+        bail!("{name} must be in 1..={MAX_SOCKET_ADMISSION_LIMIT}");
+    }
+    Ok(value)
+}
+
+fn serve_options(args: &[String]) -> Result<ServeOptions> {
+    let max_active = optional_bounded_usize_arg(args, "--max-active", DEFAULT_SOCKET_MAX_ACTIVE)?;
+    let max_connections =
+        optional_bounded_usize_arg(args, "--max-connections", DEFAULT_SOCKET_MAX_CONNECTIONS)?;
+    if max_connections < max_active {
+        bail!("--max-connections must be greater than or equal to --max-active");
+    }
+    Ok(ServeOptions {
+        socket_path: socket_path_arg(args, "serve")?.to_owned(),
+        max_active,
+        max_connections,
+    })
 }
 
 fn socket_health_with_timeout(socket_path: &str, timeout: Duration) -> Result<()> {
@@ -547,7 +702,7 @@ fn durable(once: bool) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "portfolio-lens-worker commands:\n  backtest-json\n  optimize-json\n  monte-carlo-json\n  compute-json <job-kind>\n  serve --socket <path>\n  health --socket <path>\n  run\n  once"
+        "portfolio-lens-worker commands:\n  backtest-json\n  optimize-json\n  monte-carlo-json\n  compute-json <job-kind>\n  serve --socket <path> [--max-active <count>] [--max-connections <count>]\n  health --socket <path>\n  run\n  once"
     );
 }
 
@@ -561,7 +716,7 @@ fn main() -> Result<()> {
             job_kind(args.get(1).context("compute-json requires a job kind")?)?,
             false,
         ),
-        Some("serve") => serve(socket_path_arg(&args, "serve")?),
+        Some("serve") => serve(&serve_options(&args)?),
         Some("health") => socket_health(socket_path_arg(&args, "health")?),
         Some("run") => durable(false),
         Some("once") => durable(true),
@@ -623,6 +778,82 @@ mod tests {
             socket_path_arg(&valid, "health").unwrap(),
             "/app/run/compute.sock"
         );
+    }
+
+    #[test]
+    fn serve_options_apply_bounded_defaults_and_validate_capacity() {
+        let defaults = vec![
+            "serve".to_string(),
+            "--socket".to_string(),
+            "/app/run/compute.sock".to_string(),
+        ];
+        assert_eq!(
+            serve_options(&defaults).unwrap(),
+            ServeOptions {
+                socket_path: "/app/run/compute.sock".to_string(),
+                max_active: DEFAULT_SOCKET_MAX_ACTIVE,
+                max_connections: DEFAULT_SOCKET_MAX_CONNECTIONS,
+            }
+        );
+
+        let explicit = vec![
+            "serve".to_string(),
+            "--socket".to_string(),
+            "/tmp/compute.sock".to_string(),
+            "--max-active".to_string(),
+            "6".to_string(),
+            "--max-connections".to_string(),
+            "12".to_string(),
+        ];
+        assert_eq!(
+            serve_options(&explicit).unwrap(),
+            ServeOptions {
+                socket_path: "/tmp/compute.sock".to_string(),
+                max_active: 6,
+                max_connections: 12,
+            }
+        );
+
+        for invalid in [
+            vec![
+                "serve".to_string(),
+                "--socket".to_string(),
+                "/tmp/compute.sock".to_string(),
+                "--max-active".to_string(),
+                "0".to_string(),
+            ],
+            vec![
+                "serve".to_string(),
+                "--socket".to_string(),
+                "/tmp/compute.sock".to_string(),
+                "--max-active".to_string(),
+                "4".to_string(),
+                "--max-connections".to_string(),
+                "2".to_string(),
+            ],
+        ] {
+            assert!(serve_options(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn admission_bounds_waiters_and_releases_raii_permits() {
+        let admission = Arc::new(Admission::new(1));
+        let first = admission.try_acquire().expect("first permit");
+        assert_eq!(admission.active(), 1);
+        assert!(admission.try_acquire().is_none());
+
+        let waiting_admission = admission.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            let _permit = waiting_admission.acquire();
+            sender.send(()).unwrap();
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(25)).is_err());
+        drop(first);
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        waiter.join().unwrap();
+        assert_eq!(admission.active(), 0);
     }
 
     #[test]

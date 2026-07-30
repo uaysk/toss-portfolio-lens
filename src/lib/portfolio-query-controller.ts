@@ -1,4 +1,5 @@
 import { portfolioRequestUrl } from "@/lib/portfolio-refresh";
+import type { PortfolioEventV1 } from "@/lib/portfolio-events";
 import type { ApiError, Portfolio } from "@/types";
 
 export type PortfolioQueryKind = "initial" | "account-change" | "manual-refresh" | "background";
@@ -73,6 +74,7 @@ export class PortfolioQueryController {
   private foreground?: ActiveRequest;
   private background?: ActiveRequest;
   private nextRequestId = 0;
+  private readonly streamRevisions = new Map<string, number>();
   private disposed = false;
 
   constructor(options: PortfolioQueryControllerOptions) {
@@ -110,6 +112,23 @@ export class PortfolioQueryController {
     this.background = request;
     this.update({ phase: "background" });
     return this.execute(request, accountId, false, false);
+  }
+
+  streamRevision(accountId: string): number | undefined {
+    return this.streamRevisions.get(accountId);
+  }
+
+  applyPortfolioEvent(event: PortfolioEventV1): boolean {
+    if (this.disposed) return false;
+    const knownRevision = this.streamRevisions.get(event.accountId) ?? 0;
+    if (event.revision <= knownRevision) return false;
+    this.streamRevisions.set(event.accountId, event.revision);
+    if (event.type === "heartbeat" || !event.payload) return true;
+    if (event.payload.selectedAccountId !== event.accountId) return false;
+    const selectedAccountId = this.state.portfolio?.selectedAccountId;
+    if (selectedAccountId && selectedAccountId !== event.accountId) return false;
+    this.update({ portfolio: event.payload, error: undefined });
+    return true;
   }
 
   dispose(): void {

@@ -902,6 +902,12 @@ fincast = [
     { name = "safetensors" },
     { name = "torch" },
 ]
+gpu-core = [
+    { name = "einops" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch" },
+]
 model = [
     { name = "einops" },
     { name = "huggingface-hub" },
@@ -918,11 +924,13 @@ requires-dist = [
     { name = "colt5-attention", marker = "extra == 'fincast'", specifier = "==0.11.1" },
     { name = "einops", marker = "extra == 'chronos2'", specifier = "==0.8.1" },
     { name = "einops", marker = "extra == 'fincast'", specifier = "==0.8.1" },
+    { name = "einops", marker = "extra == 'gpu-core'", specifier = "==0.8.1" },
     { name = "einops", marker = "extra == 'model'", specifier = "==0.8.1" },
     { name = "einx", marker = "extra == 'fincast'", specifier = "==0.3.0" },
     { name = "huggingface-hub", marker = "extra == 'model'", specifier = "==0.33.1" },
     { name = "numpy", marker = "extra == 'chronos2'", specifier = "==2.2.6" },
     { name = "numpy", marker = "extra == 'fincast'", specifier = "==2.2.6" },
+    { name = "numpy", marker = "extra == 'gpu-core'", specifier = "==2.2.6" },
     { name = "numpy", marker = "extra == 'model'", specifier = "==2.2.6" },
     { name = "pandas", marker = "extra == 'chronos2'", specifier = "==2.2.3" },
     { name = "pandas", marker = "extra == 'model'", specifier = "==2.2.3" },
@@ -931,13 +939,15 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.12.12" },
     { name = "safetensors", marker = "extra == 'chronos2'", specifier = "==0.6.2" },
     { name = "safetensors", marker = "extra == 'fincast'", specifier = "==0.6.2" },
+    { name = "safetensors", marker = "extra == 'gpu-core'", specifier = "==0.6.2" },
     { name = "safetensors", marker = "extra == 'model'", specifier = "==0.6.2" },
     { name = "torch", marker = "extra == 'chronos2'", specifier = "==2.6.0" },
     { name = "torch", marker = "extra == 'fincast'", specifier = "==2.6.0" },
+    { name = "torch", marker = "extra == 'gpu-core'", specifier = "==2.6.0" },
     { name = "torch", marker = "extra == 'model'", specifier = "==2.6.0" },
     { name = "websockets", specifier = "==15.0.1" },
 ]
-provides-extras = ["model", "fincast", "chronos2", "dev"]
+provides-extras = ["gpu-core", "model", "fincast", "chronos2", "dev"]
 
 [[package]]
 name = "tqdm"

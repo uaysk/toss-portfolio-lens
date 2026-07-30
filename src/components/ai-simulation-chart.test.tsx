@@ -273,6 +273,20 @@ describe("AiSimulationChart", () => {
       .toBe(wanted.time);
   });
 
+  it("uses ordered timestamp lookup with stable boundary and tie behavior", () => {
+    const rows = Array.from({ length: 10_000 }, (_, index) => ({
+      timestamp: new Date(index * 1_000).toISOString(),
+      time: index * 1_000,
+      chartTime: index * 1_000,
+      indicatorValues: {},
+    }));
+
+    expect(aiSimulationNearestChartRow(rows, -1)?.time).toBe(0);
+    expect(aiSimulationNearestChartRow(rows, 10_000_000)?.time).toBe(9_999_000);
+    expect(aiSimulationNearestChartRow(rows, 5_000_500)?.time).toBe(5_000_000);
+    expect(aiSimulationNearestChartRow(rows, 5_000_501)?.time).toBe(5_001_000);
+  });
+
   it("renders an outside cursor metrics panel and an accessible fullscreen control", () => {
     const markup = renderToStaticMarkup(
       <AiSimulationChart

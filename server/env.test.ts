@@ -62,6 +62,9 @@ describe("database environment configuration", () => {
       executionMode: "rust_socket",
       resultPollMs: 250,
       resultDeadlineMs: 300_000,
+      rustSocketPoolSize: 2,
+      rustComputeMaxQueued: 32,
+      rustComputeQueueTimeoutMs: 30_000,
     });
     expect(config.kisExchangeRate).toBeUndefined();
     expect(config.scalping).toMatchObject({
@@ -561,6 +564,8 @@ describe("database environment configuration", () => {
       POSTGRES_URL: "postgresql://portfolio:password@postgres.internal:5432/portfolio_lens",
       PYTHON_WORKER_RESULT_POLL_MS: "50",
       PYTHON_WORKER_RESULT_DEADLINE_MS: "120000",
+      RUST_COMPUTE_MAX_QUEUED: "48",
+      RUST_COMPUTE_QUEUE_TIMEOUT_MS: "45000",
       MCP_MAX_QUEUED_RUNS: "8",
       MCP_RUN_DEADLINE_MS: "90000",
     });
@@ -569,6 +574,8 @@ describe("database environment configuration", () => {
         executionMode: "external",
         resultPollMs: 50,
         resultDeadlineMs: 120_000,
+        rustComputeMaxQueued: 48,
+        rustComputeQueueTimeoutMs: 45_000,
       },
       mcp: { maxQueuedRuns: 8, runDeadlineMs: 90_000 },
     });

@@ -72,6 +72,8 @@ export type ComputeConfig = {
   rustSocketPath: string;
   rustSocketPoolSize: number;
   rustSocketTimeoutMs: number;
+  rustComputeMaxQueued: number;
+  rustComputeQueueTimeoutMs: number;
 };
 
 export type McpAuthMode = "oauth" | "none";
@@ -885,6 +887,13 @@ function readComputeConfig(dbProvider: DatabaseProvider): ComputeConfig {
     rustSocketPath: optional("RUST_COMPUTE_SOCKET") || "/tmp/toss-portfolio-lens-compute.sock",
     rustSocketPoolSize: readBoundedInteger("RUST_COMPUTE_POOL_SIZE", 2, 1, 32),
     rustSocketTimeoutMs: readBoundedInteger("RUST_COMPUTE_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
+    rustComputeMaxQueued: readBoundedInteger("RUST_COMPUTE_MAX_QUEUED", 32, 1, 10_000),
+    rustComputeQueueTimeoutMs: readBoundedInteger(
+      "RUST_COMPUTE_QUEUE_TIMEOUT_MS",
+      30_000,
+      100,
+      3_600_000,
+    ),
   };
 }
 

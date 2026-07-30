@@ -4,6 +4,7 @@ import {
   portfolioQueryActivity,
   type PortfolioQueryFetch,
 } from "./portfolio-query-controller";
+import type { PortfolioEventV1 } from "./portfolio-events";
 import type { Portfolio } from "@/types";
 
 type Deferred<T> = {
@@ -220,5 +221,27 @@ describe("PortfolioQueryController", () => {
       message: "조회 공급자를 사용할 수 없습니다.",
       requestId: "request-123",
     });
+  });
+
+  it("stream revision을 계좌별로 적용하고 stale delta를 무시한다", async () => {
+    const { controller, requests } = harness();
+    const loading = controller.loadInitial();
+    requests[0].response.resolve(response(portfolio("account-1")));
+    await loading;
+    const event = (revision: number, accountId = "account-1"): PortfolioEventV1 => ({
+      schemaVersion: 1,
+      accountId,
+      revision,
+      emittedAt: "2026-07-30T00:00:00.000Z",
+      type: "changed",
+      payload: portfolio(accountId),
+    });
+
+    expect(controller.applyPortfolioEvent(event(2))).toBe(true);
+    expect(controller.streamRevision("account-1")).toBe(2);
+    expect(controller.applyPortfolioEvent(event(1))).toBe(false);
+    expect(controller.getSnapshot().portfolio?.selectedAccountId).toBe("account-1");
+    expect(controller.applyPortfolioEvent(event(3, "account-2"))).toBe(false);
+    expect(controller.getSnapshot().portfolio?.selectedAccountId).toBe("account-1");
   });
 });

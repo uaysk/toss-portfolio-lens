@@ -1,4 +1,4 @@
-import type { PortfolioHistory } from "@/types";
+import type { BackfillStatus, PortfolioHistory } from "@/types";
 
 export type ValueChartPoint = {
   date: string;
@@ -9,6 +9,12 @@ export type ValueChartPoint = {
 function round(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
+}
+
+export function shouldPollPortfolioHistoryBackfill(
+  status: BackfillStatus["status"],
+): boolean {
+  return status === "idle" || status === "running";
 }
 
 export function filterPortfolioHistory(

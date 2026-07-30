@@ -2918,10 +2918,11 @@ fn rust_market_evidence(
         }
     }
     ema_values.sort_by_key(|(period, _)| *period);
-    if let (Some((_, fast)), Some((_, slow))) = (ema_values.first(), ema_values.last()) {
-        if latest_bar.close > 0.0 && ema_values.len() >= 2 {
-            trend_components.push(((fast - slow) / latest_bar.close * 100.0).clamp(-1.0, 1.0));
-        }
+    if let (Some((_, fast)), Some((_, slow))) = (ema_values.first(), ema_values.last())
+        && latest_bar.close > 0.0
+        && ema_values.len() >= 2
+    {
+        trend_components.push(((fast - slow) / latest_bar.close * 100.0).clamp(-1.0, 1.0));
     }
     let trend_score = mean_score(&trend_components);
     let momentum_score = mean_score(&momentum_components);
@@ -3032,7 +3033,8 @@ fn rust_market_evidence(
     ];
     let unavailable_fields = named_fields
         .iter()
-        .filter_map(|(name, value)| value.is_none().then(|| (*name).to_owned()))
+        .filter(|(_, value)| value.is_none())
+        .map(|(name, _)| (*name).to_owned())
         .collect();
     RustMarketEvidenceV2 {
         schema_version: RUST_MARKET_EVIDENCE_VERSION.into(),
@@ -5065,6 +5067,7 @@ mod tests {
             data_revision: "intraday-revision-1".into(),
             request_hash: "a".repeat(64),
             payload: json!({"scalping_analysis": request}),
+            projection: Default::default(),
         };
         let output = crate::compute::compute(&input).unwrap();
         output.validate_for(&input).unwrap();

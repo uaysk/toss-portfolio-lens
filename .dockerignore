@@ -18,6 +18,12 @@ models
 **/token
 dist
 .git
+.agents
+.codex
+.graphifyignore
+AGENTS.md
+graphify-out
+kiro-workspace
 .env
 .env.*
 *.log
@@ -26,6 +32,9 @@ dist
 *.sqlite
 *.sqlite3
 screenshots
+docs/reports
+model-tester*.png
+tpl-*.png
 data
 .playwright-mcp
 playwright-report

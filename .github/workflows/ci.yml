@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: docker build --target verify .
+      - run: docker build --target runtime-verify .
 
   rust:
     runs-on: ubuntu-latest

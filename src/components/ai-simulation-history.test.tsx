@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  retainedSimulationHistorySelection,
   SimulationRunHistoryList,
   SimulationRunReportView,
 } from "./ai-simulation-history";
@@ -40,6 +41,17 @@ const strategyComparison: AiSimulationStrategyComparison = {
 };
 
 describe("AI simulation history", () => {
+  it("keeps report selection empty until the user chooses a run", () => {
+    const items = [
+      { runId: "run-1" },
+      { runId: "run-2" },
+    ] as AiSimulationHistoryItem[];
+
+    expect(retainedSimulationHistorySelection(items)).toBeUndefined();
+    expect(retainedSimulationHistorySelection(items, "missing")).toBeUndefined();
+    expect(retainedSimulationHistorySelection(items, "run-2")).toBe("run-2");
+  });
+
   it("keeps complete run summaries in a bounded, keyboard-scrollable archive", () => {
     const items: AiSimulationHistoryItem[] = Array.from({ length: 24 }, (_, index) => ({
       runId: `run-${index + 1}`,

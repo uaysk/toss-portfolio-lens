@@ -6,6 +6,7 @@ import type { McpToolDependencies } from "../mcp/tools/handlers.js";
 import type { ArtifactService } from "../services/artifact-service.js";
 import type { RunService } from "../services/run-service.js";
 import type { TechnicalTradeMarkerService } from "../services/technical-trade-marker-service.js";
+import { RustComputeBusyError } from "../worker/rust-compute-scheduler.js";
 import { createDashboardToolsRouter } from "./dashboard-tools.js";
 
 const servers: Server[] = [];
@@ -116,6 +117,31 @@ describe("dashboard tools routes", () => {
       accountId: "account-1",
       fromDate: "2026-07-01",
       symbols: ["005930", "AAPL"],
+    });
+  });
+
+  it("returns Rust overload as HTTP 503 with Retry-After", async () => {
+    const runGet = vi.fn().mockRejectedValue(new RustComputeBusyError("queue_full"));
+    const baseUrl = await start(dependencies({ runGet }));
+
+    const response = await fetch(`${baseUrl}/api/portfolio/advanced/compare-backtests`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runIds: [
+          "123e4567-e89b-42d3-a456-426614174000",
+          "123e4567-e89b-42d3-a456-426614174001",
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "RUST_COMPUTE_BUSY",
+        retryable: true,
+      },
     });
   });
 });

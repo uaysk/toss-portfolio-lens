@@ -10,6 +10,7 @@ export type CreateAppOptions = {
   trustProxy: readonly string[];
   oauthCallbackOrigin?: string;
   shutdownGate?: RequestHandler;
+  requestTelemetry?: RequestHandler;
   routeRegistrars?: readonly AppRouteRegistrar[];
 };
 
@@ -86,6 +87,7 @@ export function createApp(options: CreateAppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   if (options.trustProxy.length) app.set("trust proxy", [...options.trustProxy]);
+  if (options.requestTelemetry) app.use(options.requestTelemetry);
 
   app.use((request, response, next) => {
     const comparisonReport = request.path

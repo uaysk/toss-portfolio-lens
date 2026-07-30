@@ -104,7 +104,11 @@ describe("AiSimulation", () => {
     expect(markup).toContain("AI 시뮬레이션 시작");
     expect(markup).toContain('data-simulation-empty="true"');
     expect(markup).toContain("시뮬레이션 기록·결과 보고서");
-    expect(markup).toContain('data-simulation-history="true"');
+    expect(markup).toContain('data-simulation-history-disclosure="true"');
+    expect(markup).toContain('data-simulation-history-toggle="true"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("기록 펼치기");
+    expect(markup).not.toContain('data-simulation-history="true"');
   });
 
   it("builds explicit v8 payloads for every top-level strategy case", () => {

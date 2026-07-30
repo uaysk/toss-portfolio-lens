@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SqliteDatabase } from "../database.js";
 import { ArtifactRepository } from "./artifact-repository.js";
 import { RunRepository } from "./run-repository.js";
@@ -71,6 +71,84 @@ describe("ArtifactRepository canonical checksum", () => {
         });
         expect(stored.uri).toBe(`portfolio://runs/${run.id}/artifacts/${type}`);
       }
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("같은 run/type을 덮어써도 artifact ID를 유지하고 새 content를 반환한다", async () => {
+    const database = new SqliteDatabase(":memory:");
+    try {
+      const runs = new RunRepository(database);
+      const artifacts = new ArtifactRepository(database);
+      await runs.initialize();
+      await artifacts.initialize();
+      const run = await runs.create({
+        kind: "backtest",
+        ownerSubject: "owner",
+        requestHash: "stable-artifact-id",
+        dataRevision: "revision-1",
+        engineVersion: "engine-v1",
+        config: {},
+      });
+
+      const first = await artifacts.put({
+        runId: run.id,
+        type: "equity",
+        content: [{ date: "2026-01-01", balance: 100 }],
+        schemaVersion: "1.0",
+        dataRevision: run.dataRevision,
+      });
+      const second = await artifacts.put({
+        runId: run.id,
+        type: "equity",
+        content: [{ date: "2026-01-02", balance: 125 }],
+        schemaVersion: "1.0",
+        dataRevision: run.dataRevision,
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(second.checksum).not.toBe(first.checksum);
+      await expect(artifacts.get(run.id, "equity")).resolves.toEqual({
+        descriptor: second,
+        content: [{ date: "2026-01-02", balance: 125 }],
+      });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("put 이후 descriptor metadata만 조회하고 content_json을 다시 읽지 않는다", async () => {
+    const database = new SqliteDatabase(":memory:");
+    try {
+      const runs = new RunRepository(database);
+      const artifacts = new ArtifactRepository(database);
+      await runs.initialize();
+      await artifacts.initialize();
+      const run = await runs.create({
+        kind: "backtest",
+        ownerSubject: "owner",
+        requestHash: "descriptor-only-query",
+        dataRevision: "revision-1",
+        engineVersion: "engine-v1",
+        config: {},
+      });
+      const query = vi.spyOn(database, "query");
+      query.mockClear();
+
+      await artifacts.put({
+        runId: run.id,
+        type: "equity",
+        content: [{ date: "2026-01-01", balance: 100 }],
+        schemaVersion: "1.0",
+        dataRevision: run.dataRevision,
+      });
+
+      expect(query).toHaveBeenCalledTimes(1);
+      const sql = String(query.mock.calls[0]?.[0]).replace(/\s+/g, " ").trim();
+      expect(sql).toMatch(/^SELECT artifact_id, run_id, artifact_type, row_count, byte_count,/);
+      expect(sql).not.toContain("content_json");
+      expect(sql).not.toMatch(/SELECT \*/i);
     } finally {
       await database.close();
     }

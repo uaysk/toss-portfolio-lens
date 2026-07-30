@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { SharedComputationRegistry } from "../concurrency/shared-computation-registry.js";
 import type { Portfolio, InstrumentInfo } from "../toss.js";
 import type { RustComputeClient } from "../worker/rust-client.js";
 import {
@@ -763,7 +764,7 @@ export class ScalpingService {
   private readonly forecastRequestSchema: ReturnType<typeof createScalpingForecastRequestSchema>;
   private readonly realtimeAnalysisRequestSchema: ReturnType<typeof createScalpingRealtimeAnalysisRequestSchema>;
   private readonly evaluationRequestSchema: ReturnType<typeof createScalpingEvaluationRequestSchema>;
-  private readonly realtimeAnalysisInFlight = new Map<string, Promise<ScalpingRealtimeAnalysisResult>>();
+  private readonly realtimeAnalysisComputations = new SharedComputationRegistry();
   private readonly workspaceContexts: WorkspaceContextCache<WorkspaceContext>;
   private readonly candidateUniverse: CandidateUniverseSelector;
 
@@ -1377,9 +1378,6 @@ export class ScalpingService {
           .map((position) => `${position.symbol}:${position.quantity}:${position.averagePrice}:${position.asOf}`)
           .join("|") || "empty"
       : `workspace:${workspaceContext?.revision ?? "unavailable"}`;
-    // A cancellable simulation request must not share its promise with another
-    // caller: cancelling one run must never abort a dashboard analysis. The
-    // retained-feed and provider-refresh paths are also intentionally isolated.
     const key = [
       parsed.marketCountry,
       parsed.interval,
@@ -1387,12 +1385,9 @@ export class ScalpingService {
       positionRevision,
       revision,
       options.skipAutomaticRefresh ? "retained" : "refresh",
-      options.signal ? `cancelable:${randomUUID()}` : "shared",
     ].join(":");
-    const existing = this.realtimeAnalysisInFlight.get(key);
-    if (existing) return existing;
-    const task: Promise<ScalpingRealtimeAnalysisResult> = (async () => {
-      throwIfAborted(options.signal);
+    return this.realtimeAnalysisComputations.run(key, async (upstreamSignal) => {
+      throwIfAborted(upstreamSignal);
       const context = workspaceContext?.value;
       const books = new Map<string, NormalizedOrderbook>();
       const trades = new Map<string, NormalizedTrade[]>();
@@ -1413,9 +1408,9 @@ export class ScalpingService {
         marketCountry: parsed.marketCountry,
         responseMode: "latest_summary",
         includeVolumeProfile: false,
-        signal: options.signal,
+        signal: upstreamSignal,
       });
-      throwIfAborted(options.signal);
+      throwIfAborted(upstreamSignal);
       return {
         schemaVersion: SCALPING_REALTIME_ANALYSIS_SCHEMA_VERSION,
         generatedAt: new Date(this.now()).toISOString(),
@@ -1437,13 +1432,7 @@ export class ScalpingService {
             : context ? "latest_workspace_snapshot" : "unavailable",
         },
       };
-    })();
-    this.realtimeAnalysisInFlight.set(key, task);
-    try {
-      return await task;
-    } finally {
-      if (this.realtimeAnalysisInFlight.get(key) === task) this.realtimeAnalysisInFlight.delete(key);
-    }
+    }, options.signal);
   }
 
   async evaluate(

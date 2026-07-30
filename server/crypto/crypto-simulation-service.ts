@@ -16,6 +16,7 @@ import type {
   SimulationRouterService,
 } from "../simulation/router.js";
 import type { SimulationHistoryListInput } from "../simulation/simulation-service.js";
+import type { SimulationRunEventPublisher } from "../simulation/run-event-stream.js";
 import { BinanceUsdmScanner } from "./binance-scanner.js";
 import type { BinanceScannerCandidate, BinanceScannerSnapshot } from "./contracts.js";
 import type { HighVolatilityScannerSnapshot } from "../simulation/high-volatility-scanner.js";
@@ -73,6 +74,7 @@ export type CryptoSimulationCoordinatorOptions = {
   workerState?: () => Partial<Record<"kronos_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
   runtimeSnapshots?: Map<string, unknown>;
   maximumActiveSessions?: number;
+  runEvents?: SimulationRunEventPublisher;
 };
 
 type ActiveCryptoSession = {
@@ -348,6 +350,21 @@ export class CryptoSimulationCoordinator {
           retryable: true,
           realOrderApiUsed: false,
         });
+        this.options.runEvents?.publishTerminal({
+          runId: run.id,
+          ownerSubject,
+          status: "failed",
+          payload: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            runId: run.id,
+            status: "failed",
+            error: {
+              code: "CRYPTO_SIMULATION_SERVER_SHUTDOWN",
+              message: "Crypto simulation coordinator closed during run admission.",
+              retryable: true,
+            },
+          },
+        });
         throw new Error("Crypto simulation coordinator is closed.");
       }
       if (!await this.options.repository.markRunning(run.id)) {
@@ -357,12 +374,37 @@ export class CryptoSimulationCoordinator {
             { phase: "cancelled", realOrderApiUsed: false },
             ["Crypto paper session was cancelled during admission."],
           );
+          this.options.runEvents?.publishTerminal({
+            runId: run.id,
+            ownerSubject,
+            status: "cancelled",
+            payload: {
+              schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+              runId: run.id,
+              status: "cancelled",
+            },
+          });
         } else {
           await this.options.repository.fail(run.id, {
             code: "CRYPTO_SIMULATION_START_FAILED",
             message: "The crypto paper run could not enter the running state.",
             retryable: true,
             realOrderApiUsed: false,
+          });
+          this.options.runEvents?.publishTerminal({
+            runId: run.id,
+            ownerSubject,
+            status: "failed",
+            payload: {
+              schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+              runId: run.id,
+              status: "failed",
+              error: {
+                code: "CRYPTO_SIMULATION_START_FAILED",
+                message: "The crypto paper run could not enter the running state.",
+                retryable: true,
+              },
+            },
           });
         }
         throw new Error("The crypto paper run could not enter the running state.");
@@ -397,6 +439,25 @@ export class CryptoSimulationCoordinator {
           retryable: true,
           realOrderApiUsed: false,
         });
+        this.options.runEvents?.publishTerminal({
+          runId: run.id,
+          ownerSubject,
+          status: "failed",
+          payload: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            runId: run.id,
+            status: "failed",
+            error: {
+              code: shuttingDown
+                ? "CRYPTO_SIMULATION_SERVER_SHUTDOWN"
+                : "CRYPTO_SIMULATION_START_FAILED",
+              message: error instanceof Error
+                ? error.message.slice(0, 500)
+                : "Crypto simulation admission failed.",
+              retryable: true,
+            },
+          },
+        });
         throw error;
       }
       const controller = new AbortController();
@@ -423,7 +484,7 @@ export class CryptoSimulationCoordinator {
       this.active.set(run.id, session);
       this.tasks.add(task);
       void task.finally(() => this.tasks.delete(task)).catch(() => undefined);
-      return {
+      const response = {
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         market: input.market,
         run: {
@@ -452,6 +513,13 @@ export class CryptoSimulationCoordinator {
           execution: { mode: "paper", realOrder: false },
         },
       };
+      this.options.runEvents?.publishSnapshot({
+        runId: run.id,
+        ownerSubject,
+        status: "running",
+        payload: response,
+      });
+      return response;
     } finally {
       this.startingOwners.delete(ownerSubject);
     }
@@ -482,9 +550,8 @@ export class CryptoSimulationCoordinator {
     const context: RunTaskContext = {
       runId: input.runId,
       signal: input.controller.signal,
-      updateProgress: (progress, detail) => this.options.repository.updateProgress(
-        input.runId,
-        {
+      updateProgress: async (progress, detail) => {
+        const update = {
           progress,
           ...(detail?.completedCandidates !== undefined
             ? { completedCandidates: detail.completedCandidates } : {}),
@@ -493,8 +560,15 @@ export class CryptoSimulationCoordinator {
           ...(detail?.currentValidationWindow
             ? { currentValidationWindow: detail.currentValidationWindow } : {}),
           ...(detail?.warnings ? { warnings: detail.warnings } : {}),
-        },
-      ),
+        };
+        await this.options.repository.updateProgress(input.runId, update);
+        this.options.runEvents?.publishProgress({
+          runId: input.runId,
+          ownerSubject: input.ownerSubject,
+          status: "running",
+          payload: update,
+        });
+      },
       isCancelled: cancelled,
       throwIfCancelled,
     };
@@ -554,6 +628,22 @@ export class CryptoSimulationCoordinator {
           retryable: failure.retryable,
           realOrderApiUsed: false,
         }, completed.warnings ?? []);
+        this.options.runEvents?.publishTerminal({
+          runId: input.runId,
+          ownerSubject: input.ownerSubject,
+          status: "failed",
+          payload: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            runId: input.runId,
+            status: "failed",
+            summary: completed.summary,
+            result: completed.result,
+            snapshot: this.options.runtimeSnapshots?.get(input.runId)
+              ?? genericRecord(completed.result).snapshot
+              ?? genericRecord(completed.summary).snapshot,
+            error: failure,
+          },
+        });
         return;
       }
       const stored = await this.options.repository.complete(
@@ -568,6 +658,22 @@ export class CryptoSimulationCoordinator {
         }
         throw new Error("Crypto paper completion state was not persisted.");
       }
+      this.options.runEvents?.publishTerminal({
+        runId: input.runId,
+        ownerSubject: input.ownerSubject,
+        status: "completed",
+        payload: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          runId: input.runId,
+          status: "completed",
+          summary: completed.summary,
+          result: completed.result,
+          snapshot: this.options.runtimeSnapshots?.get(input.runId)
+            ?? genericRecord(completed.result).snapshot
+            ?? genericRecord(completed.summary).snapshot,
+          warnings: completed.warnings ?? [],
+        },
+      });
     } catch (error) {
       if (error instanceof CryptoRunCancelledError
         || (input.controller.signal.aborted
@@ -582,6 +688,17 @@ export class CryptoSimulationCoordinator {
           },
           ["사용자 요청으로 crypto paper session을 취소했습니다."],
         );
+        this.options.runEvents?.publishTerminal({
+          runId: input.runId,
+          ownerSubject: input.ownerSubject,
+          status: "cancelled",
+          payload: {
+            schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+            runId: input.runId,
+            status: "cancelled",
+            snapshot: this.options.runtimeSnapshots?.get(input.runId),
+          },
+        });
         return;
       }
       const runtimeError = error && typeof error === "object"
@@ -627,6 +744,22 @@ export class CryptoSimulationCoordinator {
         retryable: code !== "CRYPTO_INVALID_RUNTIME_INPUT",
         realOrderApiUsed: false,
       }, [message]);
+      this.options.runEvents?.publishTerminal({
+        runId: input.runId,
+        ownerSubject: input.ownerSubject,
+        status: "failed",
+        payload: {
+          schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
+          runId: input.runId,
+          status: "failed",
+          snapshot: runtimeError?.snapshot ?? this.options.runtimeSnapshots?.get(input.runId),
+          error: {
+            code,
+            message,
+            retryable: code !== "CRYPTO_INVALID_RUNTIME_INPUT",
+          },
+        },
+      });
     }
   }
 

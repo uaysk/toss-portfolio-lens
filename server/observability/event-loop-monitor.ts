@@ -25,7 +25,7 @@ export class EventLoopLagMonitor {
 
   constructor(
     private readonly intervalMs = 250,
-    private readonly maximumSamples = 240,
+    private readonly maximumSamples = 1_200,
   ) {}
 
   start(): void {

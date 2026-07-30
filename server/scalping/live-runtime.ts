@@ -20,6 +20,7 @@ import type {
   ScalpingRepository,
 } from "../repositories/scalping-repository.js";
 import type { MarketCountry, NormalizedOrderbook, NormalizedTrade } from "./contracts.js";
+import { BarWriteBuffer } from "./bar-write-buffer.js";
 import {
   marketLocalParts,
   marketSessionAnchor,
@@ -60,6 +61,8 @@ export type ScalpingLiveRuntimeConfig = {
   recoveryMaximumRequests: number;
   recoveryBarLimit: number;
   snapshotStaleAfterMs?: number;
+  barWriteMaximumEntries?: number;
+  barWriteBatchSize?: number;
   krSessionWindows?: readonly MarketSessionWindow[];
   now?: () => number;
 };
@@ -563,9 +566,9 @@ export class ScalpingLiveRuntime {
   private readonly now: () => number;
   private readonly snapshotStaleAfterMs: number;
   private readonly krSessionWindows: readonly MarketSessionWindow[];
+  private readonly barWrites: BarWriteBuffer;
   private readonly removeSocketListener: () => void;
   private readonly watermarkTimer: NodeJS.Timeout;
-  private persistenceTail: Promise<void> = Promise.resolve();
   private nextEventId = 1;
   private previouslyConnected = false;
   private closed = false;
@@ -598,6 +601,20 @@ export class ScalpingLiveRuntime {
     this.krSessionWindows = config.krSessionWindows ?? DEFAULT_KR_INTEGRATED_SESSION_WINDOWS;
     validateSessionWindows(this.krSessionWindows);
     this.now = config.now ?? Date.now;
+    this.barWrites = new BarWriteBuffer(
+      (records) => this.bars.putBars(records),
+      {
+        maximumEntries: config.barWriteMaximumEntries,
+        batchSize: config.barWriteBatchSize,
+        now: this.now,
+        onError: (error) => {
+          this.emit("diagnostic", undefined, undefined, {
+            code: "bar-persistence-failed",
+            message: error instanceof Error ? error.message : "unknown bar persistence error",
+          });
+        },
+      },
+    );
     this.removeSocketListener = socket.onEvent((event) => this.onSocketEvent(event));
     this.watermarkTimer = setInterval(() => this.advanceWallClock(), config.watermarkAdvanceMs);
     this.watermarkTimer.unref();
@@ -616,6 +633,7 @@ export class ScalpingLiveRuntime {
         standardOrderbookDepth: "top_of_book" as const,
         dayMarketOrderbook: "unavailable" as const,
       },
+      barWriteBuffer: this.barWrites.snapshot(),
     };
   }
 
@@ -884,7 +902,10 @@ export class ScalpingLiveRuntime {
   }
 
   async waitForIdle(): Promise<void> {
-    await Promise.allSettled([...this.recoveryInFlight.values(), this.persistenceTail]);
+    await Promise.allSettled([
+      ...this.recoveryInFlight.values(),
+      this.barWrites.waitForIdle(),
+    ]);
   }
 
   close(): void {
@@ -1095,12 +1116,13 @@ export class ScalpingLiveRuntime {
     const records = [...byBar.values()];
     if (!records.length) return;
     for (const record of records) this.emit("bar", record.symbol, marketCountry, record);
-    this.persistenceTail = this.persistenceTail.then(() => this.bars.putBars(records)).catch((error) => {
+    if (!this.barWrites.enqueue(records)) {
       this.emit("diagnostic", undefined, marketCountry, {
-        code: "bar-persistence-failed",
-        message: error instanceof Error ? error.message : "unknown bar persistence error",
+        code: "bar-persistence-overflow",
+        message: "bar persistence queue capacity was exhausted",
+        ...this.barWrites.snapshot(),
       });
-    });
+    }
   }
 
   private unsubscribeReference(reference: LiveReference): void {

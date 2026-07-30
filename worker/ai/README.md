@@ -95,6 +95,11 @@ Important configuration includes `AI_MODEL_CACHE_DIR`, `AI_MODEL_MANIFEST`, `AI_
 `AI_MAX_CONTEXT_BARS`, `AI_KRONOS_SAMPLE_COUNT`, `AI_MAX_REQUEST_BYTES`, `AI_MAX_RESPONSE_BYTES`, and the
 `AI_WEBSOCKET_*` transport limits.
 
+`AI_CROSS_REQUEST_MICROBATCH` is disabled by default. When enabled, the WebSocket scheduler waits at most 5ms and
+coalesces only requests with the same model lane and revision, forecast/input profile, tensor shape, horizons,
+quantiles, and seed. Keep it disabled in production until a lane-specific benchmark shows at least 20% more
+throughput with no more than a 10% single-request p95 regression.
+
 ## Worker-local raw artifacts
 
 `raw-generate` is an offline FinCast or Chronos-2 path selected by `AI_MODEL_LANE`. It does not start the service,

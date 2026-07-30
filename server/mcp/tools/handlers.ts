@@ -49,6 +49,7 @@ import { randomUUID } from "node:crypto";
 import { enforceToolRequestLimits } from "../../services/tool-request-limits.js";
 import { TossApiError } from "../../toss.js";
 import { MCP_VISIBLE_RUN_KINDS, mcpVisibleRun } from "../run-visibility.js";
+import { createMcpDomainRegistry } from "./domain-registry.js";
 
 export type ToolHandler = (input: unknown, ownerSubject: string) => Promise<unknown>;
 
@@ -2807,7 +2808,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       return envelope({ request: value, dataRevision: report.data_revision, result: { report }, dataQuality: {} });
     },
   };
-  return handlers;
+  return createMcpDomainRegistry(handlers).handlers;
 }
 
 async function enqueueSensitivity(

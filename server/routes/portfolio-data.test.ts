@@ -7,6 +7,7 @@ import type { PortfolioBacktestService } from "../backtest.js";
 import type { PortfolioHistoryStore } from "../history.js";
 import type { BacktestService } from "../services/backtest-service.js";
 import type { TossClient } from "../toss.js";
+import { RustComputeBusyError } from "../worker/rust-compute-scheduler.js";
 import { createPortfolioDataRouter } from "./portfolio-data.js";
 
 const servers: Server[] = [];
@@ -138,6 +139,38 @@ describe("portfolio data routes", () => {
         assets: [{ symbol: "005930", weight: 100 }],
         startDate: "2026-01-01",
         endDate: "2026-06-30",
+      },
+    });
+  });
+
+  it("preserves retryable Rust overload at the backtest HTTP boundary", async () => {
+    const runRawWithMetadata = vi.fn().mockRejectedValue(
+      new RustComputeBusyError("queue_timeout"),
+    );
+    const baseUrl = await start(dependencies({
+      backtests: { runRawWithMetadata },
+    }));
+
+    const response = await fetch(`${baseUrl}/api/portfolio/backtest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        assets: [{ symbol: "005930", weight: 100 }],
+        startDate: "2026-01-01",
+        endDate: "2026-06-30",
+        initialAmount: 1_000_000,
+        monthlyCashFlow: 0,
+        rebalanceFrequency: "none",
+        benchmark: "NONE",
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "RUST_COMPUTE_BUSY",
+        retryable: true,
       },
     });
   });

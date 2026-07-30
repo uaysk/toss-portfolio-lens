@@ -22,7 +22,12 @@ import {
 } from "@/lib/date-range";
 import { layoutAreaLabels } from "@/lib/allocation-labels";
 import { formatMoney } from "@/lib/format";
-import { buildValueChartData, filterPortfolioHistory, type ValueChartPoint } from "@/lib/history-chart";
+import {
+  buildValueChartData,
+  filterPortfolioHistory,
+  shouldPollPortfolioHistoryBackfill,
+  type ValueChartPoint,
+} from "@/lib/history-chart";
 import { stockColor } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
@@ -179,7 +184,9 @@ export function AllocationHistoryChart({
           setRetryKey((value) => value + 1);
         }
         previousStatus = payload.status;
-        timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
+        if (shouldPollPortfolioHistoryBackfill(payload.status)) {
+          timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
+        }
       } catch {
         if (active) timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
       }

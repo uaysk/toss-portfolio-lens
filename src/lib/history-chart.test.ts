@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { buildValueChartData, filterPortfolioHistory } from "./history-chart";
+import {
+  buildValueChartData,
+  filterPortfolioHistory,
+  shouldPollPortfolioHistoryBackfill,
+} from "./history-chart";
 import type { PortfolioHistory } from "@/types";
 
 describe("buildValueChartData", () => {
+  it.each([
+    ["idle", true],
+    ["running", true],
+    ["complete", false],
+    ["partial", false],
+    ["error", false],
+  ] as const)("backfill %s 상태의 polling 여부를 고정한다", (status, expected) => {
+    expect(shouldPollPortfolioHistoryBackfill(status)).toBe(expected);
+  });
+
   it("종목 비중을 평가금으로 변환해 스택 합계가 전체 평가금이 되게 한다", () => {
     const history: PortfolioHistory = {
       accountId: "account-1",

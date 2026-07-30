@@ -669,7 +669,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
     retryInitial,
     changeAccount,
     refresh,
-  } = usePortfolioQuery(onUnauthorized);
+  } = usePortfolioQuery(onUnauthorized, view === "overview");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historySeries, setHistorySeries] = useState<PortfolioHistorySeries[]>([]);
   const [hiddenStockKeys, setHiddenStockKeys] = useState<Set<string>>(

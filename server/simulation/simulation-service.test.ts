@@ -381,6 +381,7 @@ function harness(options: {
   releaseFailureCalls?: number[];
   selectionMaximumAttempts?: number;
   selectionRetryDelayMs?: number;
+  checkpointStore?: ConstructorParameters<typeof AiTradingSimulationService>[6];
 } = {}) {
   let currentRun: PortfolioRunRecord | undefined;
   let liveListener: ((event: ScalpingLiveEvent) => void) | undefined;
@@ -572,10 +573,26 @@ function harness(options: {
         artifact.runId === runId && artifact.type === type
       )).at(-1);
       return stored ? {
-        descriptor: {} as never,
+        descriptor: {
+          runId,
+          type,
+          rowCount: stored.rowCount,
+          format: "json",
+          uri: `portfolio://runs/${runId}/artifacts/${type}`,
+        } as never,
         content: clone(stored.content),
       } : undefined;
     }),
+    list: vi.fn(async (runId: string) => (
+      [...new Set(artifacts.filter((artifact) => artifact.runId === runId)
+        .map(({ type }) => type))]
+        .map((type) => ({
+          runId,
+          type,
+          format: "json",
+          uri: `portfolio://runs/${runId}/artifacts/${type}`,
+        }))
+    )),
   };
   const service = new AiTradingSimulationService(
     market as unknown as ConstructorParameters<typeof AiTradingSimulationService>[0],
@@ -592,6 +609,7 @@ function harness(options: {
       progressUpdateMs: 60_000,
       now: options.now ?? (() => Date.parse(CREATED_AT)),
     },
+    options.checkpointStore,
   );
 
   return {
@@ -696,6 +714,148 @@ describe("AI trading simulation service", () => {
     expect(methods.filter((name) => /order/i.test(name))).toEqual([]);
     await setup.service.close("test_complete");
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps v2 additive with initial/terminal legacy artifacts and O(delta) patches", async () => {
+    let persistedState: unknown;
+    const appendPatch = vi.fn(async (input: {
+      type: string;
+      operations: Array<{
+        op: "set" | "delete" | "splice" | "truncate";
+        path: Array<string | number>;
+        value?: unknown;
+        values?: unknown[];
+        index?: number;
+        deleteCount?: number;
+        length?: number;
+      }>;
+    }) => {
+      for (const operation of input.operations) {
+        let parent = persistedState as Record<string | number, unknown>;
+        for (const segment of operation.path.slice(0, -1)) {
+          parent = parent[segment] as Record<string | number, unknown>;
+        }
+        const key = operation.path.at(-1)!;
+        if (operation.op === "set") parent[key] = clone(operation.value);
+        if (operation.op === "delete") delete parent[key];
+        if (operation.op === "truncate") {
+          (parent[key] as unknown[]).length = operation.length!;
+        }
+        if (operation.op === "splice") {
+          (parent[key] as unknown[]).splice(
+            operation.index!,
+            operation.deleteCount!,
+            ...(clone(operation.values) ?? []),
+          );
+        }
+      }
+    });
+    const capture = vi.fn(async () => {
+      throw new Error("live simulation must not traverse a cumulative checkpoint state");
+    });
+    const close = vi.fn(async () => undefined);
+    const startSession = vi.fn(async (input: { baseState: unknown }) => {
+      persistedState = clone(input.baseState);
+      return { appendPatch, capture, close };
+    });
+    const checkpointStore = {
+      startSession,
+      replay: vi.fn(async () => (
+        persistedState === undefined ? undefined : { state: clone(persistedState) }
+      )),
+    } as unknown as ConstructorParameters<typeof AiTradingSimulationService>[6];
+    const setup = harness({ checkpointStore });
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+
+    expect(startSession).toHaveBeenCalledTimes(1);
+    expect(startSession).toHaveBeenCalledWith(expect.objectContaining({
+      runId: started.runId,
+      baseState: expect.objectContaining({
+        snapshot: expect.objectContaining({ phase: "running" }),
+        equity: expect.any(Array),
+        selection: expect.any(Object),
+      }),
+      scalarState: expect.objectContaining({
+        phase: "running",
+        decisionCount: expect.any(Number),
+        tradeCount: 0,
+      }),
+    }));
+    await eventually(
+      () => setup.artifacts.length,
+      (length) => length === 7,
+      "initial compatibility artifacts",
+    );
+    const expectedTypes = [
+      "simulation-selection",
+      "simulation-decisions",
+      "simulation-equity",
+      "simulation-trades",
+      "simulation-comparison",
+      "simulation-provenance",
+      "simulation-diagnostics",
+    ].sort();
+    expect(setup.artifacts.map(({ type }) => type).sort()).toEqual(expectedTypes);
+
+    const internals = setup.service as unknown as {
+      active: Map<string, unknown>;
+      progress(session: unknown): Promise<void>;
+    };
+    await internals.progress(internals.active.get(started.runId)!);
+    expect(setup.artifactService.put).toHaveBeenCalledTimes(7);
+    expect(appendPatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "progress",
+      operations: expect.not.arrayContaining([
+        expect.objectContaining({ op: "set", path: ["snapshot", "charts"] }),
+      ]),
+    }));
+
+    const cancelled = await setup.service.cancel(started.runId, "owner") as unknown as {
+      snapshot: { decisions: unknown[]; trades: unknown[]; phase: string };
+    };
+    expect(appendPatch.mock.calls.map(([input]) => (
+      input.type
+    ))).toEqual(expect.arrayContaining(["progress", "terminal"]));
+    expect(appendPatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "terminal",
+      flush: true,
+    }));
+    expect(capture).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(setup.artifactService.put).toHaveBeenCalledTimes(14);
+    expect(setup.artifacts.map(({ type }) => type).sort()).toEqual(
+      [...expectedTypes, ...expectedTypes].sort(),
+    );
+    expect(setup.latestArtifact("simulation-decisions")?.content)
+      .toEqual(cancelled.snapshot.decisions);
+    expect(setup.latestArtifact("simulation-trades")?.content)
+      .toEqual(cancelled.snapshot.trades);
+    expect(setup.latestArtifact("simulation-diagnostics")?.content).toMatchObject({
+      phase: "cancelled",
+      snapshot: cancelled.snapshot,
+    });
+    await expect(Promise.all(expectedTypes.map((type) => (
+      setup.artifactService.get(started.runId, type as ArtifactType)
+    )))).resolves.toEqual(expect.not.arrayContaining([undefined]));
+    await expect(setup.artifactService.list(started.runId)).resolves.toEqual(
+      expect.arrayContaining(expectedTypes.map((type) => expect.objectContaining({ type }))),
+    );
+    await expect(setup.service.report(started.runId, "owner")).resolves.toMatchObject({
+      report: {
+        evidence: {
+          selection: expect.objectContaining({
+            schemaVersion: "ai-paper-simulation/v8",
+          }),
+          artifacts: expect.arrayContaining(
+            expectedTypes.map((type) => expect.objectContaining({ type })),
+          ),
+        },
+        equity: expect.any(Array),
+      },
+      snapshot: expect.objectContaining({ phase: "cancelled" }),
+    });
+    await setup.service.close("test_complete");
   });
 
   it("runs one FinCast stock lane with the same causal Rust cutoff and no Kronos fallback", async () => {
@@ -2220,6 +2380,8 @@ describe("AI trading simulation service", () => {
       "simulation-decisions",
       "simulation-equity",
       "simulation-trades",
+      "simulation-comparison",
+      "simulation-provenance",
       "simulation-diagnostics",
     ]));
     expect(setup.latestArtifact("simulation-trades")?.content).toEqual(cancelled.snapshot.trades);
@@ -2367,7 +2529,7 @@ describe("AI trading simulation service", () => {
   });
 
   it("terminalizes cancellation even when final artifact persistence fails", async () => {
-    const setup = harness({ artifactFailureAfter: 5 });
+    const setup = harness({ artifactFailureAfter: 7 });
     const started = await setup.service.start(request(1), "owner");
     await waitForPhase(setup, started.runId, "running");
 

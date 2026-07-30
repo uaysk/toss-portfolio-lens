@@ -30,6 +30,7 @@ uuid = { version = "1.18.1", features = ["v4"] }
 codegen-units = 1
 lto = "thin"
 panic = "abort"
+strip = "symbols"
 
 [dev-dependencies]
 approx = "0.5.1"

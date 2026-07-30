@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -26,10 +34,8 @@ import {
   AiSimulationFuturesLedger,
   AiSimulationModelComparisonPanel,
 } from "@/components/ai-simulation-futures";
-import { AiSimulationHistory } from "@/components/ai-simulation-history";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -62,13 +68,28 @@ import {
   type AiSimulationSnapshot,
   type AiSimulationStatus,
 } from "@/lib/ai-simulation";
+import { groupByNormalizedSymbol } from "@/lib/chart-interaction";
 import { formatMoney, formatQuantity } from "@/lib/format";
+import {
+  SIMULATION_RUN_FALLBACK_INITIAL_MS,
+  isStaleSimulationRunRevision,
+  mergeSimulationRunEvent,
+  mergeSimulationRunResponse,
+  nextSimulationRunFallbackDelay,
+  parseSimulationRunMessage,
+  simulationRunEventsUrl,
+  type SimulationRunEventV1,
+} from "@/lib/simulation-run-events";
 import {
   searchTechnicalInstruments,
   TechnicalAnalysisApiError,
 } from "@/lib/technical-analysis-api";
 import type { TechnicalInstrumentChoice } from "@/lib/technical-analysis";
 import { cn } from "@/lib/utils";
+
+const AiSimulationHistory = lazy(() => import("@/components/ai-simulation-history").then((module) => ({
+  default: module.AiSimulationHistory,
+})));
 
 type AiSimulationProps = {
   onUnauthorized: () => void;
@@ -1011,6 +1032,26 @@ function RunPanel({
   const chartLayout = aiSimulationChartLayout(snapshot, modelForecasts);
   const pairPrimarySymbol = chartLayout.primarySymbol;
   const orderedCharts = chartLayout.charts;
+  const modelForecastsBySymbol = groupByNormalizedSymbol(
+    modelForecasts,
+    (forecast) => forecast.signalSymbol,
+  );
+  const chartTrades = snapshot.trades.flatMap((trade) => {
+    const side = trade.side.toLowerCase();
+    if (side !== "buy" && side !== "sell") return [];
+    return [{
+      symbol: trade.symbol,
+      executedAt: trade.executedAt,
+      price: trade.price,
+      side: side as "buy" | "sell",
+      quantity: trade.quantity,
+      positionSide: trade.positionSide,
+    }];
+  });
+  const chartTradesBySymbol = groupByNormalizedSymbol(
+    chartTrades,
+    (trade) => trade.symbol,
+  );
 
   return (
     <div className="space-y-3" data-simulation-run={run.runId ?? "unknown"}>
@@ -1119,21 +1160,8 @@ function RunPanel({
               indicators={chart.indicators}
               patterns={chart.patterns}
               updatedAt={chart.updatedAt}
-              forecasts={modelForecasts.filter(
-                (forecast) => forecast.signalSymbol === chart.symbol,
-              )}
-              trades={snapshot.trades.flatMap((trade) => {
-                if (trade.symbol !== chart.symbol) return [];
-                const side = trade.side.toLowerCase();
-                if (side !== "buy" && side !== "sell") return [];
-                return [{
-                  executedAt: trade.executedAt,
-                  price: trade.price,
-                  side,
-                  quantity: trade.quantity,
-                  positionSide: trade.positionSide,
-                }];
-              })}
+              forecasts={modelForecastsBySymbol.get(chart.symbol.toUpperCase()) ?? []}
+              trades={chartTradesBySymbol.get(chart.symbol.toUpperCase()) ?? []}
               className={cn(
                 pairPrimarySymbol
                   && chart.symbol.toUpperCase() === pairPrimarySymbol
@@ -1265,8 +1293,15 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const [candidateSnapshot, setCandidateSnapshot] = useState<AiSimulationCandidateSnapshot>();
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [candidateError, setCandidateError] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [documentVisible, setDocumentVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
   const cancellingRef = useRef(false);
-  const pollingGeneration = useRef(0);
+  const runConnectionGeneration = useRef(0);
+  const acceptedRunEvent = useRef<{ runId?: string; revision: number }>({
+    revision: -1,
+  });
 
   const issues = useMemo(
     () => assetClass !== "us_etf_pair"
@@ -1429,12 +1464,51 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   }, [onUnauthorized]);
 
   useEffect(() => {
+    const updateVisibility = () => setDocumentVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  useEffect(() => {
     const runId = run?.runId;
-    if (!runId || !runActive || cancelling) return;
-    const generation = ++pollingGeneration.current;
+    if (!runId || !runActive || cancelling || !documentVisible) return;
+    if (acceptedRunEvent.current.runId !== runId) {
+      acceptedRunEvent.current = { runId, revision: -1 };
+    }
+    const generation = ++runConnectionGeneration.current;
     const controller = new AbortController();
+    let source: EventSource | undefined;
     let timer: number | undefined;
+    let stopped = false;
+    let fallbackDelay = SIMULATION_RUN_FALLBACK_INITIAL_MS;
+
+    const isCurrent = () => (
+      !stopped
+      && !controller.signal.aborted
+      && generation === runConnectionGeneration.current
+    );
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      source?.close();
+      source = undefined;
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+    };
+
+    const schedulePoll = (delayMs: number) => {
+      if (!isCurrent()) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void poll();
+      }, delayMs);
+    };
+
     const poll = async () => {
+      if (!isCurrent()) return;
       try {
         const response = await fetch(`/api/portfolio/simulation/runs/${encodeURIComponent(runId)}`, {
           headers: { Accept: "application/json" },
@@ -1443,29 +1517,78 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         const payload = await readJson(response);
         if (response.status === 401) {
           onUnauthorized();
+          stop();
           return;
         }
         if (!response.ok) throw new Error(aiSimulationErrorMessage(payload, "시뮬레이션 상태를 불러오지 못했습니다."));
         const next = normalizeAiSimulationRun(payload);
-        if (controller.signal.aborted || generation !== pollingGeneration.current) return;
+        if (!isCurrent()) return;
         setError("");
-        setRun({ ...next, runId: next.runId ?? runId });
+        setRun((current) => mergeSimulationRunResponse(current, payload, runId));
         if (ACTIVE_RUN_STATUSES.has(next.status)) {
-          timer = window.setTimeout(() => void poll(), CHART_UPDATE_INTERVAL_MS);
+          fallbackDelay = nextSimulationRunFallbackDelay(fallbackDelay, true);
+          schedulePoll(fallbackDelay);
+        } else {
+          stop();
         }
       } catch (caught) {
-        if (controller.signal.aborted || generation !== pollingGeneration.current) return;
+        if (!isCurrent()) return;
         setError(caught instanceof Error ? caught.message : "시뮬레이션 상태를 불러오지 못했습니다.");
-        timer = window.setTimeout(() => void poll(), CHART_UPDATE_INTERVAL_MS);
+        fallbackDelay = nextSimulationRunFallbackDelay(fallbackDelay, false);
+        schedulePoll(fallbackDelay);
       }
     };
-    void poll();
-    return () => {
-      controller.abort();
-      if (timer !== undefined) window.clearTimeout(timer);
-      if (pollingGeneration.current === generation) pollingGeneration.current += 1;
+
+    const acceptEvent = (event: SimulationRunEventV1) => {
+      if (
+        !isCurrent()
+        || event.runId !== runId
+        || isStaleSimulationRunRevision(event, acceptedRunEvent.current)
+      ) {
+        return;
+      }
+      acceptedRunEvent.current = { runId, revision: event.revision };
+      if (event.type !== "heartbeat") {
+        setError("");
+        setRun((current) => mergeSimulationRunEvent(current, event));
+      }
+      if (event.type === "terminal") stop();
     };
-  }, [run?.runId, runActive, cancelling, onUnauthorized]);
+
+    const handleMessage = (message: MessageEvent<string>) => {
+      const event = parseSimulationRunMessage(message.data);
+      if (event) acceptEvent(event);
+    };
+
+    if (typeof EventSource === "undefined") {
+      schedulePoll(fallbackDelay);
+    } else {
+      source = new EventSource(simulationRunEventsUrl(
+        runId,
+        acceptedRunEvent.current.revision,
+      ));
+      for (const type of ["snapshot", "progress", "changed", "terminal", "heartbeat"]) {
+        source.addEventListener(type, handleMessage as EventListener);
+      }
+      source.onmessage = handleMessage;
+      source.onopen = () => {
+        if (isCurrent()) setError("");
+      };
+      source.onerror = () => {
+        if (!isCurrent()) return;
+        source?.close();
+        source = undefined;
+        schedulePoll(fallbackDelay);
+      };
+    }
+
+    return () => {
+      stop();
+      if (runConnectionGeneration.current === generation) {
+        runConnectionGeneration.current += 1;
+      }
+    };
+  }, [run?.runId, runActive, cancelling, documentVisible, onUnauthorized]);
 
   const startSimulation = useCallback(async () => {
     const validation = assetClass !== "us_etf_pair"
@@ -1507,7 +1630,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const cancelSimulation = useCallback(async () => {
     if (!run?.runId || cancellingRef.current) return;
     cancellingRef.current = true;
-    pollingGeneration.current += 1;
+    runConnectionGeneration.current += 1;
     setCancelling(true);
     setError("");
     try {
@@ -2084,10 +2207,53 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           </div>
         </Card>
       )}
-      <AiSimulationHistory
-        onUnauthorized={onUnauthorized}
-        refreshKey={run ? `${run.runId ?? "unknown"}:${run.status}` : "initial"}
-      />
+      <Card className="min-w-0 bg-card p-5 sm:p-6" data-simulation-history-disclosure>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">
+              SIMULATION ARCHIVE
+            </p>
+            <h2 className="mt-1 text-lg font-black">시뮬레이션 기록·결과 보고서</h2>
+            <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+              필요할 때 기록을 열어 실행별 설정, 체결과 최종 손익을 확인할 수 있습니다.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            onClick={() => setHistoryOpen((value) => !value)}
+            aria-expanded={historyOpen}
+            aria-controls="simulation-history-panel"
+            data-simulation-history-toggle
+          >
+            <Clock className="size-3.5" />
+            {historyOpen ? "기록 닫기" : "기록 펼치기"}
+          </Button>
+        </div>
+        {historyOpen ? (
+          <div id="simulation-history-panel" className="mt-5">
+            <Suspense
+              fallback={(
+                <div
+                  className="grid min-h-40 place-items-center rounded-2xl bg-secondary"
+                  role="status"
+                >
+                  <div className="text-center">
+                    <LoaderCircle className="mx-auto size-5 animate-spin" aria-hidden="true" />
+                    <p className="mt-2 text-[10px] font-black">시뮬레이션 기록 화면을 불러오는 중</p>
+                  </div>
+                </div>
+              )}
+            >
+              <AiSimulationHistory
+                onUnauthorized={onUnauthorized}
+                refreshKey={run ? `${run.runId ?? "unknown"}:${run.status}` : "initial"}
+              />
+            </Suspense>
+          </div>
+        ) : null}
+      </Card>
     </section>
   );
 }

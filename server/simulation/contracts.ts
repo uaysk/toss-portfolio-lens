@@ -6,6 +6,36 @@ import {
 import { defaultSimulationCostsForMarket } from "./cost-profile.js";
 
 export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v8" as const;
+export const SIMULATION_RUN_EVENT_SCHEMA_VERSION = 1 as const;
+
+export const SimulationRunEventTypeSchema = z.enum([
+  "snapshot",
+  "progress",
+  "changed",
+  "terminal",
+  "heartbeat",
+]);
+export type SimulationRunEventType = z.infer<typeof SimulationRunEventTypeSchema>;
+
+export const SimulationRunEventStatusSchema = z.enum([
+  "queued",
+  "running",
+  "cancel_requested",
+  "cancelled",
+  "completed",
+  "failed",
+]);
+export type SimulationRunEventStatus = z.infer<typeof SimulationRunEventStatusSchema>;
+
+export const SimulationRunEventV1Schema = z.object({
+  schemaVersion: z.literal(SIMULATION_RUN_EVENT_SCHEMA_VERSION),
+  runId: z.string().uuid(),
+  revision: z.number().int().positive(),
+  type: SimulationRunEventTypeSchema,
+  emittedAt: z.string().datetime({ offset: true }),
+  payload: z.unknown(),
+}).strict();
+export type SimulationRunEventV1 = z.infer<typeof SimulationRunEventV1Schema>;
 
 export const SimulationCaseSchema = z.enum([
   "btc_eth",

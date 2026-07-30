@@ -121,6 +121,7 @@ def _preflight(service: AIService) -> int:
         "models": models,
         "features": {
             "kronos_kv_cache_enabled": service.settings.kronos_kv_cache_enabled,
+            "cross_request_microbatch": service.settings.cross_request_microbatch,
         },
         "limits": {
             "microbatch_size": service.settings.microbatch_size,

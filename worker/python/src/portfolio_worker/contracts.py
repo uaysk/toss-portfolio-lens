@@ -37,6 +37,7 @@ class WorkerInput(BaseModel):
     data_revision: str = Field(min_length=1, max_length=128)
     request_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     payload: dict[str, Any]
+    projection: Literal["summary", "full"] = "full"
 
     @field_validator("job_kind", mode="before")
     @classmethod

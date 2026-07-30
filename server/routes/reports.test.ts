@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { ReportGenerationError } from "../report-ai.js";
+import { RustComputeBusyError } from "../worker/rust-compute-scheduler.js";
 import { createReportsRouter } from "./reports.js";
 
 const servers: Server[] = [];
@@ -160,6 +161,41 @@ describe("report routes", () => {
     });
     expect(dependencies.portfolioReports.createBacktest)
       .toHaveBeenCalledExactlyOnceWith(dependencies.backtest);
+  });
+
+  it("returns retryable Rust overload with HTTP 503 and Retry-After", async () => {
+    const dependencies = routeDependencies();
+    dependencies.backtests.runRaw.mockRejectedValue(new RustComputeBusyError("queue_full"));
+    const router = createReportsRouter({
+      ...dependencies,
+      authenticate: (_request, _response, next) => next(),
+    });
+    const baseUrl = await startServer(router);
+
+    const response = await fetch(`${baseUrl}/api/reports/backtest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        assets: [{ symbol: "005930", weight: 100 }],
+        startDate: "2026-01-01",
+        endDate: "2026-06-30",
+        initialAmount: 1_000_000,
+        monthlyCashFlow: 0,
+        rebalanceFrequency: "none",
+        benchmark: "NONE",
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toEqual({
+      error: {
+        code: "RUST_COMPUTE_BUSY",
+        message: "Rust compute 대기열이 가득 찼습니다. 잠시 후 다시 시도해 주세요.",
+        retryable: true,
+      },
+    });
+    expect(dependencies.portfolioReports.createBacktest).not.toHaveBeenCalled();
   });
 
   it("keeps validation, authentication, and public report lookup contracts distinct", async () => {

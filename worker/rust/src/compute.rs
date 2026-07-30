@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 use crate::backtest;
+#[cfg(test)]
+use crate::contracts::WorkerResultProjection;
 use crate::contracts::{JobKind, OutputArtifact, WorkerInput, WorkerOutput};
 use crate::control::{ComputeControl, checkpoint};
 use crate::date::civil_from_days;
@@ -1726,6 +1728,7 @@ mod tests {
             data_revision: "revision-1".into(),
             request_hash: "a".repeat(64),
             payload,
+            projection: Default::default(),
         };
         let output = compute_with_artifacts(&input, true).unwrap();
         assert_eq!(output.status, "completed");
@@ -1758,6 +1761,13 @@ mod tests {
 
         let without_artifacts = compute_with_artifacts(&input, false).unwrap();
         assert!(without_artifacts.artifacts.unwrap().is_empty());
+
+        let mut summary_input = input.clone();
+        summary_input.projection = WorkerResultProjection::Summary;
+        let summary_only = compute_with_artifacts(&summary_input, true).unwrap();
+        assert_eq!(summary_only.projection, WorkerResultProjection::Summary);
+        assert_eq!(summary_only.result, summary_only.summary);
+        assert!(summary_only.artifacts.unwrap().is_empty());
 
         let mut partial_input = input.clone();
         partial_input.payload["technical_analysis"] = json!({
@@ -1934,6 +1944,7 @@ mod tests {
                 "strategy": strategy,
                 "simulation": simulation
             }),
+            projection: Default::default(),
         };
         let missing_context_error = compute_with_artifacts(&input, true).unwrap_err();
         assert!(missing_context_error.to_string().contains(
@@ -2061,6 +2072,7 @@ mod tests {
                     "seed": 42,
                 }
             }),
+            projection: Default::default(),
         };
         let output = compute(&input).unwrap();
         let artifact_types = output
@@ -2114,6 +2126,7 @@ mod tests {
                     }
                 }
             }),
+            projection: Default::default(),
         };
         let output = compute(&input).unwrap();
         assert!(
@@ -2192,6 +2205,7 @@ mod tests {
                 },
                 "market_warnings": []
             }),
+            projection: Default::default(),
         };
         let output = compute(&input).unwrap();
         let result = output.result.as_ref().unwrap();

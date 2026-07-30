@@ -76,6 +76,7 @@ services:
 
   compute-worker:
     profiles: ["external-compute"]
+    image: ${RUST_WORKER_IMAGE:-toss-portfolio-lens-rust-worker:local}
     build:
       context: .
       dockerfile: Dockerfile.worker.rust
@@ -108,12 +109,22 @@ services:
       - ${POSTGRES_CA_HOST_PATH:-/dev/null}:/app/certs/cnpg-ca.crt:ro
 
   compute-ipc:
+    image: ${RUST_WORKER_IMAGE:-toss-portfolio-lens-rust-worker:local}
     build:
       context: .
       dockerfile: Dockerfile.worker.rust
       args:
         APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
-    command: ["serve", "--socket", "/app/run/compute.sock"]
+    command:
+      [
+        "serve",
+        "--socket",
+        "/app/run/compute.sock",
+        "--max-active",
+        "${RUST_COMPUTE_POOL_SIZE:-2}",
+        "--max-connections",
+        "34",
+      ]
     environment:
       TZ: Asia/Seoul
     restart: unless-stopped
@@ -160,6 +171,7 @@ services:
       AI_EXPECTED_CUDA_DEVICE_NAME: ${AI_EXPECTED_CUDA_DEVICE_NAME:-Tesla P40}
       AI_KRONOS_KV_CACHE_ENABLED: ${AI_KRONOS_KV_CACHE_ENABLED:-false}
       AI_MICROBATCH_SIZE: ${AI_MICROBATCH_SIZE:-4}
+      AI_CROSS_REQUEST_MICROBATCH: ${AI_CROSS_REQUEST_MICROBATCH:-false}
       AI_MAX_SERIES: ${AI_MAX_SERIES:-50}
       AI_MAX_EVALUATION_ORIGINS: ${AI_MAX_EVALUATION_ORIGINS:-10000}
       AI_MIN_CONTEXT_BARS: ${AI_MIN_CONTEXT_BARS:-64}
@@ -228,6 +240,7 @@ services:
       AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}
       AI_EXPECTED_CUDA_DEVICE_NAME: ${AI_EXPECTED_CUDA_DEVICE_NAME:-Tesla P40}
       AI_MICROBATCH_SIZE: "4"
+      AI_CROSS_REQUEST_MICROBATCH: ${AI_CROSS_REQUEST_MICROBATCH:-false}
       AI_MAX_SERIES: ${AI_FINCAST_MAX_SERIES:-50}
       AI_MAX_EVALUATION_ORIGINS: ${AI_MAX_EVALUATION_ORIGINS:-10000}
       AI_MIN_CONTEXT_BARS: "512"
@@ -299,6 +312,7 @@ services:
       AI_EXPECTED_CUDA_CAPABILITY: ${AI_EXPECTED_CUDA_CAPABILITY:-6.1}
       AI_EXPECTED_CUDA_DEVICE_NAME: ${AI_EXPECTED_CUDA_DEVICE_NAME:-Tesla P40}
       AI_MICROBATCH_SIZE: ${AI_CHRONOS2_MICROBATCH_SIZE:-4}
+      AI_CROSS_REQUEST_MICROBATCH: ${AI_CROSS_REQUEST_MICROBATCH:-false}
       AI_MAX_SERIES: ${AI_CHRONOS2_MAX_SERIES:-50}
       AI_MAX_EVALUATION_ORIGINS: ${AI_MAX_EVALUATION_ORIGINS:-10000}
       AI_MIN_CONTEXT_BARS: "1024"

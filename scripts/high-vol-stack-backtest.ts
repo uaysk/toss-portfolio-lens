@@ -1134,7 +1134,15 @@ async function run(): Promise<void> {
     ?? join(socketDirectory!, "compute.sock");
   const worker = arguments_.rustSocket
     ? undefined
-    : spawn(arguments_.rustBinary, ["serve", "--socket", socketPath], {
+    : spawn(arguments_.rustBinary, [
+        "serve",
+        "--socket",
+        socketPath,
+        "--max-active",
+        String(arguments_.rustConcurrency),
+        "--max-connections",
+        String(arguments_.rustConcurrency),
+      ], {
         stdio: ["ignore", "ignore", "pipe"],
       });
   let rustStderr = "";
