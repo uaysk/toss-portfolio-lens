@@ -13,16 +13,30 @@ describe("pair catalog", () => {
   it("contains the versioned supported mappings with explicit leverage", () => {
     expect([...DEFAULT_PAIR_CATALOG.keys()]).toEqual([
       "qqq-tqqq-sqqq",
+      "semiconductor-soxl-soxs",
       "smh-soxl-soxs",
       "sndk-snxx-sndq",
       "soxx-soxl-soxs",
+      "spy-spxl-spxs",
       "tsla-tsll-tslq",
       "tsla-tsll-tsls",
     ]);
     expect(getPairCatalogEntry(" SOXX-SOXL-SOXS ")).toMatchObject({
       signalSymbol: "SOXX",
+      modelTargetSymbol: "SOXX",
+      auxiliarySymbols: [],
       bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
       bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
+    });
+    expect(getPairCatalogEntry("semiconductor-soxl-soxs")).toMatchObject({
+      displaySignalSymbol: "SMH",
+      modelTargetSymbol: "SOXX",
+      auxiliarySymbols: ["SMH", "QQQ"],
+    });
+    expect(getPairCatalogEntry("spy-spxl-spxs")).toMatchObject({
+      modelTargetSymbol: "SPY",
+      bull: { executionSymbol: "SPXL" },
+      bear: { executionSymbol: "SPXS" },
     });
     expect(getPairCatalogEntry("tsla-tsll-tsls").bear.leverageMultiplier).toBe(-1);
     expect(getPairCatalogEntry("tsla-tsll-tslq").bear.leverageMultiplier).toBe(-2);
@@ -44,6 +58,8 @@ describe("pair catalog", () => {
     expect(mapPairDirection(pair, "bull")).toEqual({
       pairId: pair.pairId,
       signalSymbol: "QQQ",
+      modelTargetSymbol: "QQQ",
+      auxiliarySymbols: [],
       direction: "bull",
       executionSymbol: "TQQQ",
       leverageMultiplier: 3,
@@ -51,6 +67,8 @@ describe("pair catalog", () => {
     expect(mapPairDirection(pair, "cash")).toEqual({
       pairId: pair.pairId,
       signalSymbol: "QQQ",
+      modelTargetSymbol: "QQQ",
+      auxiliarySymbols: [],
       direction: "cash",
       executionSymbol: null,
       leverageMultiplier: 0,
@@ -59,7 +77,7 @@ describe("pair catalog", () => {
 
   it("strictly rejects malformed, ambiguous, and duplicate entries", () => {
     const valid = {
-      catalogVersion: PAIR_CATALOG_VERSION,
+      catalogVersion: "scalping-pair-catalog/v2",
       pairId: "abc-bull-bear",
       marketCountry: "US",
       currency: "USD",
@@ -70,6 +88,10 @@ describe("pair catalog", () => {
       maxSpreadBps: 25,
     };
     expect(validatePairCatalogEntry(valid)).toMatchObject({
+      catalogVersion: PAIR_CATALOG_VERSION,
+      displaySignalSymbol: "ABC",
+      modelTargetSymbol: "ABC",
+      auxiliarySymbols: [],
       signalSymbol: "ABC",
       bull: { executionSymbol: "BULL" },
     });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v2" as const;
+export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v3" as const;
+export const LEGACY_PAIR_CATALOG_VERSION = "scalping-pair-catalog/v2" as const;
 
 const PairSymbolSchema = z.string()
   .trim()
@@ -39,6 +40,10 @@ export const PairCatalogEntrySchema = z.object({
   pairId: z.string().trim().min(1).max(96).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   marketCountry: z.literal("US"),
   currency: z.literal("USD"),
+  displaySignalSymbol: PairSymbolSchema,
+  modelTargetSymbol: PairSymbolSchema,
+  auxiliarySymbols: z.array(PairSymbolSchema).max(8),
+  /** @deprecated v2 compatibility alias for modelTargetSymbol. */
   signalSymbol: PairSymbolSchema,
   bull: PairExecutionLegSchema,
   bear: PairExecutionLegSchema,
@@ -46,6 +51,13 @@ export const PairCatalogEntrySchema = z.object({
   maxSpreadBps: z.number().finite().positive().max(5_000),
   selectionProvenance: PairSelectionProvenanceSchema.optional(),
 }).strict().superRefine((entry, context) => {
+  if (entry.signalSymbol !== entry.modelTargetSymbol) {
+    context.addIssue({
+      code: "custom",
+      path: ["signalSymbol"],
+      message: "signalSymbol must remain an alias of modelTargetSymbol.",
+    });
+  }
   if (entry.bull.leverageMultiplier <= 0) {
     context.addIssue({
       code: "custom",
@@ -61,7 +73,7 @@ export const PairCatalogEntrySchema = z.object({
     });
   }
   const symbols = [
-    entry.signalSymbol,
+    entry.modelTargetSymbol,
     entry.bull.executionSymbol,
     entry.bear.executionSymbol,
   ];
@@ -79,8 +91,35 @@ export const PairCatalogEntrySchema = z.object({
       message: "allowedSessions must not contain duplicates.",
     });
   }
+  if (new Set(entry.auxiliarySymbols).size !== entry.auxiliarySymbols.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["auxiliarySymbols"],
+      message: "auxiliarySymbols must not contain duplicates.",
+    });
+  }
+  if (entry.auxiliarySymbols.includes(entry.modelTargetSymbol)) {
+    context.addIssue({
+      code: "custom",
+      path: ["auxiliarySymbols"],
+      message: "modelTargetSymbol must not be repeated in auxiliarySymbols.",
+    });
+  }
 });
 export type PairCatalogEntry = z.infer<typeof PairCatalogEntrySchema>;
+
+const LegacyPairCatalogEntryV2Schema = z.object({
+  catalogVersion: z.literal(LEGACY_PAIR_CATALOG_VERSION),
+  pairId: z.string().trim().min(1).max(96).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  marketCountry: z.literal("US"),
+  currency: z.literal("USD"),
+  signalSymbol: PairSymbolSchema,
+  bull: PairExecutionLegSchema,
+  bear: PairExecutionLegSchema,
+  allowedSessions: z.array(PairSessionSchema).min(1).max(4),
+  maxSpreadBps: z.number().finite().positive().max(5_000),
+  selectionProvenance: PairSelectionProvenanceSchema.optional(),
+}).strict();
 
 export type PairCatalog = ReadonlyMap<string, Readonly<PairCatalogEntry>>;
 
@@ -88,6 +127,8 @@ export type PairExecutionMapping =
   | {
       pairId: string;
       signalSymbol: string;
+      modelTargetSymbol: string;
+      auxiliarySymbols: string[];
       direction: "cash";
       executionSymbol: null;
       leverageMultiplier: 0;
@@ -95,13 +136,24 @@ export type PairExecutionMapping =
   | {
       pairId: string;
       signalSymbol: string;
+      modelTargetSymbol: string;
+      auxiliarySymbols: string[];
       direction: "bull" | "bear";
       executionSymbol: string;
       leverageMultiplier: number;
     };
 
 export function validatePairCatalogEntry(input: unknown): PairCatalogEntry {
-  return PairCatalogEntrySchema.parse(input);
+  const current = PairCatalogEntrySchema.safeParse(input);
+  if (current.success) return current.data;
+  const legacy = LegacyPairCatalogEntryV2Schema.parse(input);
+  return PairCatalogEntrySchema.parse({
+    ...legacy,
+    catalogVersion: PAIR_CATALOG_VERSION,
+    displaySignalSymbol: legacy.signalSymbol,
+    modelTargetSymbol: legacy.signalSymbol,
+    auxiliarySymbols: [],
+  });
 }
 
 export function createPairCatalog(entries: readonly unknown[]): PairCatalog {
@@ -120,6 +172,7 @@ export function createPairCatalog(entries: readonly unknown[]): PairCatalog {
         ...entry,
         bull: Object.freeze({ ...entry.bull }),
         bear: Object.freeze({ ...entry.bear }),
+        auxiliarySymbols: Object.freeze([...entry.auxiliarySymbols]) as unknown as string[],
         // Zod's output type is mutable, while the catalog is deliberately
         // immutable at runtime. Keep the public parsed-entry type compatible
         // with callers and freeze the owned copy.
@@ -134,6 +187,9 @@ const DEFAULT_PAIR_ENTRIES = [
     pairId: "qqq-tqqq-sqqq",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "QQQ",
+    modelTargetSymbol: "QQQ",
+    auxiliarySymbols: [],
     signalSymbol: "QQQ",
     bull: { executionSymbol: "TQQQ", leverageMultiplier: 3 },
     bear: { executionSymbol: "SQQQ", leverageMultiplier: -3 },
@@ -142,9 +198,26 @@ const DEFAULT_PAIR_ENTRIES = [
   },
   {
     catalogVersion: PAIR_CATALOG_VERSION,
+    pairId: "semiconductor-soxl-soxs",
+    marketCountry: "US",
+    currency: "USD",
+    displaySignalSymbol: "SMH",
+    modelTargetSymbol: "SOXX",
+    auxiliarySymbols: ["SMH", "QQQ"],
+    signalSymbol: "SOXX",
+    bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
+    bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
+    allowedSessions: ["regular"],
+    maxSpreadBps: 35,
+  },
+  {
+    catalogVersion: PAIR_CATALOG_VERSION,
     pairId: "smh-soxl-soxs",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "SMH",
+    modelTargetSymbol: "SMH",
+    auxiliarySymbols: [],
     signalSymbol: "SMH",
     bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
@@ -156,6 +229,9 @@ const DEFAULT_PAIR_ENTRIES = [
     pairId: "sndk-snxx-sndq",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "SNDK",
+    modelTargetSymbol: "SNDK",
+    auxiliarySymbols: [],
     signalSymbol: "SNDK",
     bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
     bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
@@ -177,6 +253,9 @@ const DEFAULT_PAIR_ENTRIES = [
     pairId: "soxx-soxl-soxs",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "SOXX",
+    modelTargetSymbol: "SOXX",
+    auxiliarySymbols: [],
     signalSymbol: "SOXX",
     bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
@@ -185,9 +264,26 @@ const DEFAULT_PAIR_ENTRIES = [
   },
   {
     catalogVersion: PAIR_CATALOG_VERSION,
+    pairId: "spy-spxl-spxs",
+    marketCountry: "US",
+    currency: "USD",
+    displaySignalSymbol: "SPY",
+    modelTargetSymbol: "SPY",
+    auxiliarySymbols: [],
+    signalSymbol: "SPY",
+    bull: { executionSymbol: "SPXL", leverageMultiplier: 3 },
+    bear: { executionSymbol: "SPXS", leverageMultiplier: -3 },
+    allowedSessions: ["regular"],
+    maxSpreadBps: 35,
+  },
+  {
+    catalogVersion: PAIR_CATALOG_VERSION,
     pairId: "tsla-tsll-tslq",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "TSLA",
+    modelTargetSymbol: "TSLA",
+    auxiliarySymbols: [],
     signalSymbol: "TSLA",
     bull: { executionSymbol: "TSLL", leverageMultiplier: 2 },
     bear: { executionSymbol: "TSLQ", leverageMultiplier: -2 },
@@ -199,6 +295,9 @@ const DEFAULT_PAIR_ENTRIES = [
     pairId: "tsla-tsll-tsls",
     marketCountry: "US",
     currency: "USD",
+    displaySignalSymbol: "TSLA",
+    modelTargetSymbol: "TSLA",
+    auxiliarySymbols: [],
     signalSymbol: "TSLA",
     bull: { executionSymbol: "TSLL", leverageMultiplier: 2 },
     bear: { executionSymbol: "TSLS", leverageMultiplier: -1 },
@@ -208,6 +307,20 @@ const DEFAULT_PAIR_ENTRIES = [
 ] as const;
 
 export const DEFAULT_PAIR_CATALOG = createPairCatalog(DEFAULT_PAIR_ENTRIES);
+
+export const PRIMARY_ETF_PAIR_IDS = Object.freeze([
+  "qqq-tqqq-sqqq",
+  "semiconductor-soxl-soxs",
+  "spy-spxl-spxs",
+] as const);
+
+export function normalizePairIdForNewStrategy(pairId: string): string {
+  const normalized = pairId.trim().toLowerCase();
+  if (normalized === "smh-soxl-soxs" || normalized === "soxx-soxl-soxs") {
+    return "semiconductor-soxl-soxs";
+  }
+  return normalized;
+}
 
 export function getPairCatalogEntry(
   pairId: string,
@@ -229,6 +342,8 @@ export function mapPairDirection(
     return {
       pairId: entry.pairId,
       signalSymbol: entry.signalSymbol,
+      modelTargetSymbol: entry.modelTargetSymbol,
+      auxiliarySymbols: [...entry.auxiliarySymbols],
       direction,
       executionSymbol: null,
       leverageMultiplier: 0,
@@ -238,6 +353,8 @@ export function mapPairDirection(
   return {
     pairId: entry.pairId,
     signalSymbol: entry.signalSymbol,
+    modelTargetSymbol: entry.modelTargetSymbol,
+    auxiliarySymbols: [...entry.auxiliarySymbols],
     direction,
     executionSymbol: leg.executionSymbol,
     leverageMultiplier: leg.leverageMultiplier,

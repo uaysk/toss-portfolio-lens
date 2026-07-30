@@ -1,0 +1,60 @@
+FROM ghcr.io/astral-sh/uv:0.7.19 AS uv
+
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    CUDA_MODULE_LOADING=LAZY \
+    AI_MODEL_CACHE_DIR=/models \
+    AI_MODEL_LANE=chronos_2 \
+    AI_CHRONOS2_INPUT_PROFILE=compact_causal_v1 \
+    AI_CHRONOS2_CONTEXT_BARS=1024 \
+    AI_CHRONOS2_BATCH_SIZE=32 \
+    AI_CHRONOS2_INFERENCE_BACKEND=cuda_graph \
+    AI_CHRONOS2_RAW_BACKEND=gpu_gather \
+    AI_CHRONOS2_RAW_BATCH=32 \
+    AI_MIN_CONTEXT_BARS=1024 \
+    AI_MAX_CONTEXT_BARS=8192 \
+    AI_MICROBATCH_SIZE=4 \
+    AI_WEBSOCKET_MAX_IN_FLIGHT=1 \
+    AI_WEBSOCKET_HOST=0.0.0.0 \
+    AI_WEBSOCKET_PORT=8767 \
+    AI_WEBSOCKET_PATH=/ws/scalping-ai/v1 \
+    AI_WEBSOCKET_AUTH_TOKEN_FILE=/app/chronos2-auth/token \
+    AI_DEVICE=cuda \
+    AI_ALLOW_CPU_FALLBACK=false \
+    AI_EXPECTED_CUDA_CAPABILITY=6.1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 portfolio \
+    && useradd --uid 10001 --gid portfolio --no-create-home portfolio \
+    && mkdir -p /app/chronos2-auth /models \
+    && touch /app/chronos2-auth/.volume-owner \
+    && chown -R portfolio:portfolio /app/chronos2-auth
+COPY --from=uv /uv /uvx /bin/
+COPY worker/ai/pyproject.toml worker/ai/uv.lock worker/ai/.python-version ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 uv sync --frozen --no-dev --extra chronos2 --no-install-project
+COPY worker/ai/model-manifest.json worker/ai/THIRD_PARTY_NOTICES.md worker/ai/README.md ./
+COPY worker/ai/src ./src
+COPY scripts/prepare-chronos2-model-cache.py \
+    scripts/prepare-chronos2-raw-artifact.py \
+    scripts/convert-chronos2-output-to-policy-artifact.py \
+    scripts/summarize-chronos2-qualification.py \
+    /app/scripts/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 uv sync --frozen --no-dev --extra chronos2
+ARG APP_GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
+ENV UV_OFFLINE=1
+USER portfolio
+HEALTHCHECK --interval=30s --timeout=3s --start-period=180s --retries=3 \
+  CMD ["/app/.venv/bin/portfolio-ai-worker", "healthcheck"]
+ENTRYPOINT ["/app/.venv/bin/portfolio-ai-worker"]
+CMD ["serve"]

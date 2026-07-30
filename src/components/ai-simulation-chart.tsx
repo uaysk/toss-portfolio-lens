@@ -143,6 +143,11 @@ const MODEL_FORECAST_STYLE: Readonly<Record<AiSimulationForecastLane, {
   stroke: string;
   fill: string;
 }>> = {
+  chronos2: {
+    label: "Chronos-2",
+    stroke: "#c2410c",
+    fill: "#f97316",
+  },
   kronos_base: {
     label: "Kronos-base",
     stroke: "#6d28d9",
@@ -238,8 +243,10 @@ function forecastKey(
 
 /**
  * Extends finalized/forming candle rows with exact model target timestamps.
- * Only an exact finalized origin close may anchor a forecast path; missing
- * targets are never interpolated and no return-to-price conversion occurs.
+ * Native paths anchor to an exact finalized close. A versioned live-price
+ * projection may instead anchor to its explicitly persisted observed price;
+ * missing targets are never interpolated and no return-to-price conversion
+ * occurs in the browser.
  */
 export function aiSimulationCombinedChartRows(
   bars: readonly AiSimulationChartBar[],
@@ -258,7 +265,8 @@ export function aiSimulationCombinedChartRows(
     const originTime = Date.parse(forecast.origin);
     if (!Number.isFinite(originTime)) continue;
     const originClose = exactFinalClose.get(originTime)
-      ?? (forecast.lane === "fincast" && finite(forecast.originPrice)
+      ?? ((forecast.projectionPolicy === "live_price_rebase/v1"
+        || forecast.lane === "fincast") && finite(forecast.originPrice)
         && forecast.originPrice > 0
         ? forecast.originPrice
         : undefined);
@@ -300,10 +308,10 @@ export function aiSimulationCombinedChartRows(
 }
 
 /**
- * A future path is current only when it was produced from the newest finalized
- * candle and every advertised target is still ahead of that candle. This also
- * protects archived/legacy payloads when a worker's last success was later
- * followed by failures.
+ * Native paths must use the newest finalized candle. A five-second live
+ * projection may retain one finalized-candle grace window while the next
+ * worker response is in flight, which prevents a minute-boundary flicker
+ * without keeping a failed lane visible indefinitely.
  */
 export function aiSimulationCurrentModelForecasts(
   bars: readonly AiSimulationChartBar[],
@@ -313,24 +321,32 @@ export function aiSimulationCurrentModelForecasts(
     bar.status === "final" ? [Date.parse(bar.timestamp)] : []
   )).at(-1);
   if (latestFinalTime === undefined) return [];
-  return forecasts.filter((forecast) => (
-    forecast.status === "available"
-    && forecast.origin !== undefined
-    && (
-      Date.parse(forecast.origin) === latestFinalTime
-      || (
-        forecast.lane === "fincast"
-        && finite(forecast.originPrice)
-        && forecast.originPrice > 0
-        && Date.parse(forecast.origin) > latestFinalTime
-        && Date.parse(forecast.origin) - latestFinalTime <= 60_000
-      )
-    )
-    && forecast.points.length > 0
-    && forecast.points.every((point) => (
-      Date.parse(point.targetTimestamp) > latestFinalTime
-    ))
-  ));
+  return forecasts.filter((forecast) => {
+    if (forecast.status !== "available" || forecast.origin === undefined) return false;
+    const origin = Date.parse(forecast.origin);
+    const inputOrigin = Date.parse(forecast.inputOrigin ?? forecast.origin);
+    const hasLiveOrigin = forecast.projectionPolicy === "live_price_rebase/v1"
+      && finite(forecast.originPrice)
+      && forecast.originPrice > 0
+      && Number.isFinite(inputOrigin)
+      && inputOrigin <= latestFinalTime
+      && latestFinalTime - inputOrigin <= 60_000
+      && origin >= inputOrigin
+      && Math.abs(origin - latestFinalTime) <= 60_000;
+    const legacyLiveFinCast = forecast.lane === "fincast"
+      && forecast.projectionPolicy === undefined
+      && finite(forecast.originPrice)
+      && forecast.originPrice > 0
+      && origin > latestFinalTime
+      && origin - latestFinalTime <= 60_000;
+    return (
+      (origin === latestFinalTime || hasLiveOrigin || legacyLiveFinCast)
+      && forecast.points.length > 0
+      && forecast.points.every((point) => (
+        Date.parse(point.targetTimestamp) > origin
+      ))
+    );
+  });
 }
 
 export function aiSimulationNearestChartRow(

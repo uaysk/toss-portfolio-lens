@@ -18,12 +18,14 @@ describe("AI simulation request validation", () => {
     expect(DEFAULT_AI_SIMULATION_REQUEST.modelLanes).toEqual(["fincast"]);
     expect(DEFAULT_AI_SIMULATION_REQUEST.execution).toEqual({ mode: "paper" });
     expect(AI_SIMULATION_PAIR_CATALOG.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: "qqq-tqqq-sqqq", label: "QQQ → TQQQ / SQQQ" },
+      { id: "semiconductor-soxl-soxs", label: "SMH/반도체 · SOXX → SOXL / SOXS" },
+      { id: "spy-spxl-spxs", label: "SPY → SPXL / SPXS" },
       { id: "sndk-snxx-sndq", label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)" },
       { id: "soxx-soxl-soxs", label: "SOXX · SOXL · SOXS" },
       { id: "smh-soxl-soxs", label: "SMH · SOXL · SOXS" },
       { id: "tsla-tsll-tsls", label: "TSLA · TSLL · TSLS" },
       { id: "tsla-tsll-tslq", label: "TSLA · TSLL · TSLQ" },
-      { id: "qqq-tqqq-sqqq", label: "QQQ · TQQQ · SQQQ" },
     ]);
     expect(DEFAULT_AI_SIMULATION_REQUEST.costs).toEqual({
       commissionBpsPerSide: 1.5,
@@ -698,6 +700,14 @@ describe("AI simulation response normalization", () => {
     });
     expect(aiSimulationErrorMessage({ error: { message: "기간이 올바르지 않습니다." } }, "fallback"))
       .toBe("기간이 올바르지 않습니다.");
+    expect(aiSimulationErrorMessage({
+      error: {
+        message: "AI 모의투자 요청 값을 확인해 주세요.",
+        issues: [{ message: "modelPlan이 고정 모델 역할 정책과 일치하지 않습니다." }],
+      },
+    }, "fallback")).toBe(
+      "AI 모의투자 요청 값을 확인해 주세요. · modelPlan이 고정 모델 역할 정책과 일치하지 않습니다.",
+    );
   });
 
   it("normalizes durable run history summaries without requiring the live snapshot shape", () => {

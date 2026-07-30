@@ -14,14 +14,49 @@ import { DEFAULT_AI_SIMULATION_CRYPTO_REQUEST } from "@/lib/ai-simulation";
 describe("crypto futures simulation UI", () => {
   it("renders the accessible asset switch and paper-only setup", () => {
     const asset = renderToStaticMarkup(
-      <AiSimulationAssetClassControl value="crypto_futures" onChange={() => undefined} />,
+      <AiSimulationAssetClassControl value="btc_eth" onChange={() => undefined} />,
     );
-    expect(asset).toContain('role="radiogroup"');
-    expect(asset).toContain('aria-checked="true"');
+    expect(asset).toContain('role="tablist"');
+    expect(asset).toContain('aria-selected="true"');
+    expect(asset).toContain('data-simulation-asset-class-option="btc_eth"');
+    expect(asset).toContain('data-simulation-asset-class-option="high_vol_crypto"');
+    expect(asset).toContain('data-simulation-asset-class-option="us_etf_pair"');
 
     const setup = renderToStaticMarkup(
       <AiSimulationCryptoSetup
-        request={DEFAULT_AI_SIMULATION_CRYPTO_REQUEST}
+        request={{
+          ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+          contractVersion: "ai-paper-simulation/v8",
+          simulationCase: "high_vol_crypto",
+          modelLanes: ["chronos2", "fincast"],
+          modelPlan: [
+            {
+              symbol: "*",
+              modelLane: "chronos2",
+              role: "primary",
+              required: true,
+              preferredHorizonsMinutes: [15, 30, 60],
+            },
+            {
+              symbol: "*",
+              modelLane: "fincast",
+              role: "veto",
+              required: true,
+              preferredHorizonsMinutes: [15, 30, 60],
+            },
+          ],
+          scanner: {
+            symbolCount: 1,
+            minimumListingDays: 90,
+            minimumTradingAmountUsd: 25_000_000,
+            maximumSpreadBps: 12,
+            depthRangeBps: 10,
+            minimumDepthUsd: 250_000,
+            maximumMissingRate: 0.02,
+            rescanIntervalMinutes: 30,
+            riskAppetite: "balanced",
+          },
+        }}
         status={{
           credentialsConfigured: true,
           signedReadSucceeded: true,
@@ -57,7 +92,9 @@ describe("crypto futures simulation UI", () => {
         limits={{ minimumDurationMinutes: 1, maximumDurationMinutes: 390 }}
       />,
     );
-    expect(setup).toContain("realOrder capability false");
+    expect(setup).toContain("Paper 전용 안전 모드");
+    expect(setup).toContain("모든 체결은 가상 원장에만 기록됩니다.");
+    expect(setup).toContain("data-paper-safety-notice");
     expect(setup).toContain("fixture risk bracket unavailable");
     expect(setup).toContain("서버의 paper 실행 gate가 열릴 때까지 시작할 수 없습니다.");
     expect(setup).toContain("자동 선정 · BTCUSDT");
@@ -66,11 +103,15 @@ describe("crypto futures simulation UI", () => {
     expect(setup).toContain('data-crypto-candidate="ALT9USDT"');
     expect(setup).toContain('data-candidate-selected="true"');
     for (const label of [
-      "암호화폐 종목 선택 방식",
+      "암호화폐 대상 시장",
       "암호화폐 판단 프리셋",
       "암호화폐 공격 방어 성향",
       "암호화폐 scanner 기준",
       "암호화폐 선정 계약 수",
+      "고변동성 최소 거래대금",
+      "고변동성 최대 스프레드",
+      "고변동성 재스캔 주기",
+      "고변동성 scanner 위험 성향",
     ]) {
       expect(setup).toContain(`aria-label="${label}"`);
     }
@@ -90,6 +131,9 @@ describe("crypto futures simulation UI", () => {
     ]) {
       expect(setup).toMatch(new RegExp(`aria-label="${label}"[^>]*value="${value}"`));
     }
+    expect(setup).toMatch(
+      /aria-label="암호화폐 증거금 사용률 상한"[^>]*max="100"/,
+    );
     expect(setup).toContain('data-execution-capability="live"');
     expect(
       setup.match(/<button[^>]*data-crypto-simulation-start[^>]*>/)?.[0],

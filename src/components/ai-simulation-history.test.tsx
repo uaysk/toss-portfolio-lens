@@ -260,5 +260,33 @@ describe("AI simulation history", () => {
     expect(fincastOnlyMarkup).toContain("판단 provenance 1건 · FinCast · Main");
     expect(fincastOnlyMarkup).toContain('data-simulation-model-provenance="fincast"');
     expect(fincastOnlyMarkup).not.toContain("Kronos-base · FinCast lane");
+
+    const chronos2Markup = renderToStaticMarkup(
+      <SimulationRunReportView
+        report={{
+          ...report,
+          modelProvenance: ["amazon/chronos-2 · pinned-revision · CUDA:0"],
+          decisionProvenance: [{
+            decisionId: "chronos2-decision",
+            signalSymbol: "SPY",
+            direction: "bull",
+            origin: "2026-07-24T01:01:00.000Z",
+            decisionAt: "2026-07-24T01:01:01.000Z",
+            degraded: false,
+            models: [{
+              component: "chronos2",
+              status: "available",
+              modelId: "amazon/chronos-2",
+              modelRevision: "pinned-revision",
+              degraded: false,
+            }],
+          }],
+          modelComparison: undefined,
+          strategyComparison: undefined,
+        }}
+      />,
+    );
+    expect(chronos2Markup).toContain('data-simulation-model-provenance="chronos2"');
+    expect(chronos2Markup).toContain("Chronos-2 · Primary");
   });
 });

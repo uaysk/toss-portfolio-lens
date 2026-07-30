@@ -57,6 +57,20 @@ const modelForecasts: AiSimulationModelForecast[] = [{
     q90Price: 106,
   }],
 }, {
+  lane: "chronos2",
+  signalSymbol: "SOXL",
+  status: "available",
+  origin: "2026-07-24T09:02:00+09:00",
+  generatedAt: "2026-07-24T00:02:00.275Z",
+  modelId: "amazon/chronos-2",
+  points: [{
+    horizonMinutes: 30,
+    targetTimestamp: "2026-07-24T09:32:00+09:00",
+    q10Price: 97,
+    medianPrice: 105,
+    q90Price: 110,
+  }],
+}, {
   lane: "fincast",
   signalSymbol: "SOXL",
   status: "available",
@@ -173,11 +187,12 @@ describe("AiSimulationChart", () => {
     expect(aiSimulationTradeMarkerColor("sell")).toBe("var(--candle-fall)");
   });
 
-  it("appends independent Kronos and FinCast targets on the numeric candle timeline", () => {
+  it("appends independent Chronos-2, Kronos-base, and FinCast targets on the numeric candle timeline", () => {
     const rows = aiSimulationCombinedChartRows(bars, modelForecasts);
     const originTime = Date.parse("2026-07-24T09:02:00+09:00");
     const kronosTargetTime = Date.parse("2026-07-24T09:07:00+09:00");
     const fincastTargetTime = Date.parse("2026-07-24T09:17:00+09:00");
+    const chronos2TargetTime = Date.parse("2026-07-24T09:32:00+09:00");
     const origin = rows.find((row) => row.time === originTime);
     const kronosTarget = rows.find((row) => row.time === kronosTargetTime);
     const fincastTarget = rows.find((row) => row.time === fincastTargetTime);
@@ -188,12 +203,15 @@ describe("AiSimulationChart", () => {
       Date.parse("2026-07-24T09:03:00+09:00"),
       kronosTargetTime,
       fincastTargetTime,
+      chronos2TargetTime,
     ]);
     expect(rows.every((row) => Number.isFinite(row.time))).toBe(true);
     expect(origin).toMatchObject({
       close: 101,
       "forecast:kronos_base:range": [101, 101],
       "forecast:kronos_base:median": 101,
+      "forecast:chronos2:range": [101, 101],
+      "forecast:chronos2:median": 101,
       "forecast:fincast:range": [101, 101],
       "forecast:fincast:median": 101,
     });
@@ -365,6 +383,60 @@ describe("AiSimulationChart", () => {
     expect(rows).toHaveLength(bars.length + 1);
   });
 
+  it("anchors a five-second live projection to its observed price and keeps one-bar grace", () => {
+    const liveForecast: AiSimulationModelForecast = {
+      ...modelForecasts[1]!,
+      origin: "2026-07-24T09:02:55+09:00",
+      inputOrigin: "2026-07-24T09:02:00+09:00",
+      originPrice: 101.75,
+      projectionPolicy: "live_price_rebase/v1",
+      generatedAt: "2026-07-24T00:02:55.500Z",
+    };
+    const rows = aiSimulationCombinedChartRows(bars, [liveForecast]);
+    const origin = rows.find(
+      (row) => row.time === Date.parse(liveForecast.origin!),
+    );
+
+    expect(origin).toMatchObject({
+      "forecast:chronos2:range": [101.75, 101.75],
+      "forecast:chronos2:median": 101.75,
+    });
+    expect(aiSimulationCurrentModelForecasts(bars, [liveForecast]))
+      .toEqual([liveForecast]);
+
+    const nextMinuteBars: AiSimulationChartBar[] = [
+      ...bars.slice(0, -1),
+      { ...bars.at(-1)!, status: "final" },
+      {
+        ...bars.at(-1)!,
+        timestamp: "2026-07-24T09:04:00+09:00",
+        status: "forming",
+      },
+    ];
+    expect(aiSimulationCurrentModelForecasts(nextMinuteBars, [liveForecast]))
+      .toEqual([liveForecast]);
+
+    const delayedBoundaryForecast: AiSimulationModelForecast = {
+      ...liveForecast,
+      origin: "2026-07-24T09:03:00.500+09:00",
+      generatedAt: "2026-07-24T00:03:01.000Z",
+    };
+    expect(
+      Date.parse(delayedBoundaryForecast.origin!)
+        - Date.parse(delayedBoundaryForecast.inputOrigin!),
+    ).toBeGreaterThan(60_000);
+    expect(aiSimulationCurrentModelForecasts(nextMinuteBars, [delayedBoundaryForecast]))
+      .toEqual([delayedBoundaryForecast]);
+
+    const twoMinutesLater = nextMinuteBars.map((bar, index) => (
+      index === nextMinuteBars.length - 1
+        ? { ...bar, status: "final" as const }
+        : bar
+    ));
+    expect(aiSimulationCurrentModelForecasts(twoMinutesLater, [liveForecast]))
+      .toEqual([]);
+  });
+
   it("fails stale forecasts closed once a newer finalized candle exists", () => {
     const stale = [{
       ...modelForecasts[0]!,
@@ -424,6 +496,7 @@ describe("AiSimulationChart", () => {
 
     expect(markup).toContain('data-ai-simulation-price-chart="true"');
     expect(markup).toContain('data-ai-simulation-model-forecast-overlay="true"');
+    expect(markup).toContain('data-ai-simulation-model-forecast="chronos2"');
     expect(markup).toContain('data-ai-simulation-model-forecast="kronos_base"');
     expect(markup).toContain('data-ai-simulation-model-forecast="fincast"');
     expect(markup).toContain('data-ai-simulation-model-forecast-origin="exact-final"');

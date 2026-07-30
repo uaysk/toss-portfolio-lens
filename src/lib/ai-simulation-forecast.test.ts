@@ -253,6 +253,26 @@ describe("Kronos-base simulation forecast normalization", () => {
     ]);
   });
 
+  it("preserves live-price projection provenance for five-second chart refreshes", () => {
+    const inputOrigin = ORIGIN;
+    const origin = new Date(Date.parse(ORIGIN) + 5_000).toISOString();
+    const forecast = normalizeAiSimulationModelForecasts([{
+      ...directForecast("fincast", { origin }),
+      inputOrigin,
+      originPrice: 251.25,
+      priceObservedAt: origin,
+      projectionPolicy: "live_price_rebase/v1",
+    }])[0];
+
+    expect(forecast).toMatchObject({
+      inputOrigin,
+      origin,
+      originPrice: 251.25,
+      priceObservedAt: origin,
+      projectionPolicy: "live_price_rebase/v1",
+    });
+  });
+
   it("rejects a direct forecast whose known model identity contradicts its lane", () => {
     expect(normalizeAiSimulationModelForecasts([{
       ...directForecast("fincast"),
@@ -262,6 +282,26 @@ describe("Kronos-base simulation forecast normalization", () => {
       ...directForecast("kronos_base"),
       modelId: "Vincent05R/FinCast",
     }])).toEqual([]);
+    expect(normalizeAiSimulationModelForecasts([{
+      ...directForecast("fincast"),
+      modelId: "amazon/chronos-2",
+    }])).toEqual([]);
+  });
+
+  it("preserves the formal Chronos-2 forecast lane and identity", () => {
+    expect(normalizeAiSimulationModelForecasts([{
+      ...directForecast("kronos_base"),
+      lane: "chronos2",
+      modelId: "amazon/chronos-2",
+      modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+    }])).toEqual([
+      expect.objectContaining({
+        lane: "chronos2",
+        signalSymbol: "TSLA",
+        modelId: "amazon/chronos-2",
+        modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+      }),
+    ]);
   });
 
   it("merges direct lane forecasts with legacy decision-derived Kronos output", () => {

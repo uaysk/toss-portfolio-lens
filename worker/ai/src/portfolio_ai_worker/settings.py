@@ -46,6 +46,10 @@ class AISettings:
     max_response_bytes: int
     model_lane: str = "fincast"
     kronos_kv_cache_enabled: bool = False
+    chronos2_input_profile: str = "compact_causal_v1"
+    chronos2_batch_size: int = 32
+    chronos2_context_bars: int = 1024
+    chronos2_inference_backend: str = "pipeline_eager"
     fincast_context_bars: int = 512
     fincast_min_vram_headroom_bytes: int = 2 * 1024 * 1024 * 1024
     fincast_nvml_device_index: int = 0
@@ -76,8 +80,8 @@ class AISettings:
         if not expected_device_name:
             raise ValueError("AI_EXPECTED_CUDA_DEVICE_NAME cannot be empty")
         model_lane = os.getenv("AI_MODEL_LANE", "fincast").strip().lower()
-        if model_lane not in {"kronos_base", "fincast"}:
-            raise ValueError("AI_MODEL_LANE must be kronos_base or fincast")
+        if model_lane not in {"kronos_base", "fincast", "chronos_2"}:
+            raise ValueError("AI_MODEL_LANE must be kronos_base, fincast, or chronos_2")
         return cls(
             model_cache_dir=Path(os.getenv("AI_MODEL_CACHE_DIR", "/models")),
             manifest_path=Path(os.getenv("AI_MODEL_MANIFEST", str(package_root / "model-manifest.json"))),
@@ -90,16 +94,40 @@ class AISettings:
             max_evaluation_origins=_bounded_int("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
             min_context_bars=_bounded_int(
                 "AI_MIN_CONTEXT_BARS",
-                512 if model_lane == "fincast" else 64,
+                1024 if model_lane == "chronos_2" else 512 if model_lane == "fincast" else 64,
                 8,
-                512,
+                8_192,
             ),
-            max_context_bars=_bounded_int("AI_MAX_CONTEXT_BARS", 512, 8, 512),
+            max_context_bars=_bounded_int(
+                "AI_MAX_CONTEXT_BARS",
+                8192 if model_lane == "chronos_2" else 512,
+                8,
+                8_192,
+            ),
             sample_count=_bounded_int("AI_KRONOS_SAMPLE_COUNT", 20, 2, 256),
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             model_lane=model_lane,
             kronos_kv_cache_enabled=_boolean("AI_KRONOS_KV_CACHE_ENABLED", False),
+            chronos2_input_profile=os.getenv(
+                "AI_CHRONOS2_INPUT_PROFILE",
+                "compact_causal_v1",
+            )
+            .strip()
+            .lower(),
+            chronos2_batch_size=_bounded_int("AI_CHRONOS2_BATCH_SIZE", 32, 1, 4_096),
+            chronos2_context_bars=_bounded_int(
+                "AI_CHRONOS2_CONTEXT_BARS",
+                1024,
+                512,
+                8_192,
+            ),
+            chronos2_inference_backend=os.getenv(
+                "AI_CHRONOS2_INFERENCE_BACKEND",
+                "pipeline_eager",
+            )
+            .strip()
+            .lower(),
             fincast_context_bars=_bounded_int("AI_FINCAST_CONTEXT_BARS", 512, 512, 512),
             fincast_min_vram_headroom_bytes=(
                 _bounded_int("AI_FINCAST_MIN_VRAM_HEADROOM_MIB", 2_048, 0, 65_536) * 1024 * 1024
@@ -127,13 +155,34 @@ class AISettings:
     def validate(self) -> "AISettings":
         if self.min_context_bars > self.max_context_bars:
             raise ValueError("AI_MIN_CONTEXT_BARS cannot exceed AI_MAX_CONTEXT_BARS")
-        if self.model_lane not in {"kronos_base", "fincast"}:
-            raise ValueError("AI_MODEL_LANE must be kronos_base or fincast")
+        if self.model_lane not in {"kronos_base", "fincast", "chronos_2"}:
+            raise ValueError("AI_MODEL_LANE must be kronos_base, fincast, or chronos_2")
+        if self.chronos2_input_profile not in {
+            "close_only",
+            "ohlcv_calendar",
+            "microstructure_calendar",
+            "derivatives_calendar",
+            "compact_causal_v1",
+        }:
+            raise ValueError(
+                "AI_CHRONOS2_INPUT_PROFILE must be close_only, ohlcv_calendar, "
+                "microstructure_calendar, derivatives_calendar, or compact_causal_v1"
+            )
         if self.model_lane == "fincast" and (
-            self.min_context_bars != self.fincast_context_bars
-            or self.max_context_bars != self.fincast_context_bars
+            self.min_context_bars != self.fincast_context_bars or self.max_context_bars != self.fincast_context_bars
         ):
             raise ValueError("FinCast requires AI_MIN/MAX_CONTEXT_BARS=AI_FINCAST_CONTEXT_BARS=512")
+        if self.model_lane == "chronos_2" and not (
+            self.min_context_bars <= self.chronos2_context_bars <= self.max_context_bars
+        ):
+            raise ValueError("Chronos-2 default context must be inside AI_MIN/MAX_CONTEXT_BARS")
+        if self.chronos2_context_bars not in {512, 1024, 2048, 4096, 8192}:
+            raise ValueError("AI_CHRONOS2_CONTEXT_BARS must be a supported Chronos-2 window")
+        if self.chronos2_inference_backend not in {
+            "pipeline_eager",
+            "cuda_graph",
+        }:
+            raise ValueError("AI_CHRONOS2_INFERENCE_BACKEND must be pipeline_eager or cuda_graph")
         if not self.model_cache_dir.is_absolute():
             raise ValueError("AI model cache path must be absolute")
         if not self.expected_cuda_device_name.strip():

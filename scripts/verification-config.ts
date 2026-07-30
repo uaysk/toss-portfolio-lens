@@ -54,6 +54,17 @@ export const verificationConfigDefaults = {
     recorder: { enabled: false },
   },
   cryptoAi: {
+    fincast: {
+      url: "ws://127.0.0.1:18766/ws/scalping-ai/v1",
+      authTokenFile: "/tmp/toss-portfolio-lens-fincast-token",
+      timeoutMs: 120_000,
+      connectTimeoutMs: 10_000,
+      reconnectBaseMs: 250,
+      reconnectMaxMs: 10_000,
+      maximumInFlight: 1,
+      maximumRequestBytes: 64 * 1024 * 1024,
+      maximumResponseBytes: 128 * 1024 * 1024,
+    },
     kronos: {
       url: "ws://127.0.0.1:18765/ws/scalping-ai/v1",
       authTokenFile: "/tmp/toss-portfolio-lens-kronos-token",

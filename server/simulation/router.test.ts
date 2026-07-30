@@ -129,6 +129,8 @@ describe("AI paper simulation session-only router", () => {
     }, response);
 
     expect(api.start).toHaveBeenCalledWith({
+      contractVersion: "ai-paper-simulation/v8",
+      sourceContractVersion: "ai-paper-simulation/v7",
       marketCountry: "KR",
       market: { kind: "stock", country: "KR" },
       initialCash: 1_000_000,
@@ -147,9 +149,101 @@ describe("AI paper simulation session-only router", () => {
         slippageBpsPerSide: 2,
       },
       modelLanes: ["fincast"],
+      modelPlan: [{
+        symbol: "*",
+        modelLane: "fincast",
+        role: "primary",
+        required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }],
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     }, "owner");
+    expect(response.status).toHaveBeenCalledWith(202);
+  });
+
+  it("accepts the explicit v8 BTC·ETH modelPlan emitted by the simulation UI", async () => {
+    const api = service();
+    const created = router({ service: api });
+    const response = mockResponse();
+    await routeHandler(created.value, "/runs", "post")({
+      body: {
+        contractVersion: "ai-paper-simulation/v8",
+        simulationCase: "btc_eth",
+        market: {
+          kind: "crypto_futures",
+          venue: "BINANCE_USDM",
+          quoteAsset: "USDT",
+          contractType: "PERPETUAL",
+        },
+        initialCash: 10_000,
+        durationMinutes: 120,
+        selection: { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
+        strategy: { mode: "single" },
+        preset: "risk_management",
+        riskTolerance: 25,
+        costs: {
+          commissionBpsPerSide: 4,
+          taxBpsOnExit: 0,
+          spreadBpsRoundTrip: 2,
+          slippageBpsPerSide: 1,
+        },
+        riskLimits: {
+          riskPerTradeRate: 0.005,
+          dailyLossLimitRate: 0.03,
+          maximumLeverage: 15,
+          grossExposureLimitRate: 1.5,
+          marginUsageLimitRate: 0.2,
+          liquidationBufferMultiple: 2,
+        },
+        modelLanes: ["chronos2", "fincast"],
+        modelPlan: [
+          {
+            symbol: "BTCUSDT",
+            modelLane: "chronos2",
+            role: "primary",
+            required: true,
+            preferredHorizonsMinutes: [30, 60, 15],
+          },
+          {
+            symbol: "BTCUSDT",
+            modelLane: "fincast",
+            role: "veto",
+            required: true,
+            preferredHorizonsMinutes: [30, 60, 15],
+          },
+          {
+            symbol: "ETHUSDT",
+            modelLane: "fincast",
+            role: "primary",
+            required: true,
+            preferredHorizonsMinutes: [15, 30, 60],
+          },
+          {
+            symbol: "ETHUSDT",
+            modelLane: "chronos2",
+            role: "shadow",
+            required: false,
+            preferredHorizonsMinutes: [15, 30, 60],
+          },
+        ],
+        fincastCandleSeconds: 60,
+        execution: { mode: "paper" },
+      },
+    }, response);
+
+    expect(api.start).toHaveBeenCalledWith(expect.objectContaining({
+      contractVersion: "ai-paper-simulation/v8",
+      sourceContractVersion: "ai-paper-simulation/v8",
+      simulationCase: "btc_eth",
+      modelLanes: ["chronos2", "fincast"],
+      modelPlan: expect.arrayContaining([
+        expect.objectContaining({ symbol: "BTCUSDT", modelLane: "chronos2", role: "primary" }),
+        expect.objectContaining({ symbol: "BTCUSDT", modelLane: "fincast", role: "veto" }),
+        expect.objectContaining({ symbol: "ETHUSDT", modelLane: "fincast", role: "primary" }),
+        expect.objectContaining({ symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow" }),
+      ]),
+    }), "owner");
     expect(response.status).toHaveBeenCalledWith(202);
   });
 

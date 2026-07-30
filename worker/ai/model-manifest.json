@@ -19,6 +19,13 @@
     },
     "license": "Apache-2.0"
   },
+  "chronos2_source": {
+    "repository": "https://github.com/amazon-science/chronos-forecasting",
+    "package": "chronos-forecasting",
+    "version": "2.3.1",
+    "revision": "v2.3.1",
+    "license": "Apache-2.0"
+  },
   "fincast_paper": {
     "url": "https://arxiv.org/pdf/2508.19609v1",
     "revision": "2508.19609v1",
@@ -50,6 +57,41 @@
       "quantile_monotonicity_policy": "fp32_monotone_rearrangement_v1",
       "license": "Apache-2.0",
       "loader_version": "fincast-source-488b19d"
+    },
+    "chronos-2": {
+      "model_id": "amazon/chronos-2",
+      "revision": "254b5357164a84326913b0695216f690752ac55d",
+      "checkpoint_file": "model.safetensors",
+      "checkpoint_sha256": "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42",
+      "native_quantiles": [
+        0.01,
+        0.05,
+        0.1,
+        0.15,
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.65,
+        0.7,
+        0.75,
+        0.8,
+        0.85,
+        0.9,
+        0.95,
+        0.99
+      ],
+      "context_length": 8192,
+      "input_patch_size": 16,
+      "output_patch_size": 16,
+      "max_output_patches": 64,
+      "license": "Apache-2.0",
+      "loader_version": "chronos-forecasting-2.3.1"
     }
   }
 }

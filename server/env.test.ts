@@ -439,7 +439,7 @@ describe("database environment configuration", () => {
     process.env.AI_KRONOS_COMPUTE_URL = "ws://10.20.30.40:18765/ws/scalping-ai/v1";
     expect(() => loadConfig()).toThrow("원격 AI_KRONOS_COMPUTE_URL은 wss://");
     process.env.AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS = "true";
-    expect(loadConfig().cryptoAi.kronos.url).toBe(
+    expect(loadConfig().cryptoAi.kronos?.url).toBe(
       "ws://10.20.30.40:18765/ws/scalping-ai/v1",
     );
 

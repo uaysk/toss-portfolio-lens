@@ -196,8 +196,48 @@ function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed
   return response;
 }
 
+function chronos2ForecastResponse(): unknown {
+  const response = structuredClone(kronosForecastResponse()) as {
+    model: Record<string, unknown>;
+    model_runs: Array<{
+      role: string;
+      expected_model_id: string;
+      model: Record<string, unknown>;
+    }>;
+  };
+  const model = {
+    ...response.model,
+    model_id: "amazon/chronos-2",
+    model_revision: "254b5357164a84326913b0695216f690752ac55d",
+    tokenizer_id: null,
+    tokenizer_revision: null,
+    source_revision: "v2.3.1",
+    loader_version: "chronos-forecasting-2.3.1-derivatives_calendar",
+    license: "Apache-2.0",
+    precision_validation: "not_required",
+    memory_status: "ok",
+    quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+    quantile_tail_policy: "native",
+    fp32_quantile_observations: null,
+    mixed_quantile_observations: null,
+    precision_failure_reasons: [],
+  };
+  response.model = model;
+  response.model_runs[0]!.role = "chronos_2";
+  response.model_runs[0]!.expected_model_id = "amazon/chronos-2";
+  response.model_runs[0]!.model = structuredClone(model);
+  return response;
+}
+
 describe("AI worker response contract", () => {
   it("forecast/evaluate series의 명시적 입력 cadence를 strict하게 검증한다", () => {
+    expect(AiSeriesCadenceSchema.parse({
+      candle_seconds: 5,
+      gap_policy: "continuous",
+    })).toEqual({
+      candle_seconds: 5,
+      gap_policy: "continuous",
+    });
     expect(AiSeriesCadenceSchema.parse({
       candle_seconds: 15,
       gap_policy: "continuous",
@@ -287,6 +327,22 @@ describe("AI worker response contract", () => {
       ...valid,
       probability_method: "unavailable",
     })).toThrow(/must all be null/);
+    expect(AiHorizonForecastSchema.parse({
+      ...valid,
+      native_return_quantiles: [],
+      native_price_quantiles: [],
+    })).toMatchObject({
+      native_return_quantiles: [],
+      native_price_quantiles: [],
+    });
+    const undersizedNative = [0.1, 0.25, 0.5, 0.75, 0.9, 0.95].map(
+      (quantile) => ({ quantile, value: quantile / 100 }),
+    );
+    expect(() => AiHorizonForecastSchema.parse({
+      ...valid,
+      native_return_quantiles: undersizedNative,
+      native_price_quantiles: undersizedNative,
+    })).toThrow(/at least seven points/);
   });
 
   it("Python walk-forward target/stop first-hit metrics와 동일한 필드를 검증한다", () => {
@@ -553,8 +609,31 @@ describe("AI worker response contract", () => {
     expect(() => AiResponseSchema.parse(fallback)).toThrow(/cannot contain degraded or model fallback/);
 
     const otherModel = structuredClone(evaluatedResponse);
-    otherModel.model.model_id = "amazon/chronos-2";
-    expect(() => AiResponseSchema.parse(otherModel)).toThrow(/supported pinned Kronos-base or FinCast/);
+    otherModel.model.model_id = "untrusted/example-model";
+    expect(() => AiResponseSchema.parse(otherModel)).toThrow(/supported pinned/);
+  });
+
+  it("Chronos-2의 pinned 독립 lane과 FP32 quantile provenance를 검증한다", () => {
+    const parsed = AiResponseSchema.parse(chronos2ForecastResponse());
+    expect(parsed.model_runs?.[0]).toMatchObject({
+      role: "chronos_2",
+      expected_model_id: "amazon/chronos-2",
+      model: {
+        model_id: "amazon/chronos-2",
+        dtype: "float32",
+        quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+      },
+    });
+
+    const nativePolicy = structuredClone(chronos2ForecastResponse()) as {
+      model: { quantile_monotonicity_policy: string };
+      model_runs: Array<{ model: { quantile_monotonicity_policy: string } }>;
+    };
+    nativePolicy.model.quantile_monotonicity_policy = "native";
+    nativePolicy.model_runs[0]!.model.quantile_monotonicity_policy = "native";
+    expect(() => AiResponseSchema.parse(nativePolicy)).toThrow(
+      /Chronos-2 requires monotone-rearranged native float32 provenance/,
+    );
   });
 
   it("FinCast의 검증된 mixed FP16과 손실 없는 FP32 precision fallback을 각각 수용한다", () => {

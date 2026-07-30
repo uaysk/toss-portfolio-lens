@@ -27,7 +27,7 @@ function bracketFixture() {
       },
       {
         bracket: 1,
-        initialLeverage: 125,
+        initialLeverage: 150,
         notionalCap: 50000,
         notionalFloor: 0,
         maintMarginRatio: 0.004,
@@ -45,7 +45,7 @@ function bracketFixture() {
       // Exact duplicate rows are harmlessly deduplicated.
       {
         bracket: 1,
-        initialLeverage: 125,
+        initialLeverage: 150,
         notionalCap: 50000,
         notionalFloor: 0,
         maintMarginRatio: 0.004,
@@ -122,6 +122,18 @@ describe("Binance USER_DATA maintenance-margin brackets", () => {
     // (therefore conservative) maintenance amount.
     expect(resolution.maintenanceMarginAtMaximumNotional).toBe(150);
     expect(resolution.provenance.cumulativePolicy).toBe("assume_zero_conservative");
+  });
+
+  it("accepts Binance's current 150x bracket evidence but rejects values above it", () => {
+    const schedule = normalizeBinanceMaintenanceMarginSchedule(bracketFixture(), SYMBOL);
+    expect(resolveConservativeMaintenanceMargin(schedule, 10_000).maximumInitialLeverage)
+      .toBe(150);
+    expect(() => normalizeBinanceMaintenanceMarginSchedule({
+      ...bracketFixture(),
+      brackets: bracketFixture().brackets.map((item) => (
+        Number(item.bracket) === 1 ? { ...item, initialLeverage: 151 } : item
+      )),
+    }, SYMBOL)).toThrow(BinanceMaintenanceMarginUnavailableError);
   });
 
   it("fails closed beyond the conservatively covered maximum notional", () => {

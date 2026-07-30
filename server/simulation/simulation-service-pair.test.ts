@@ -352,6 +352,8 @@ function workspace(scenario: Scenario, symbols: readonly string[]) {
 
 function pairRequest(): SimulationStartRequest {
   return {
+    contractVersion: "ai-paper-simulation/v8",
+    sourceContractVersion: "ai-paper-simulation/v7",
     market: { kind: "stock", country: "US" },
     marketCountry: "US",
     initialCash: 100_000,
@@ -375,6 +377,13 @@ function pairRequest(): SimulationStartRequest {
       slippageBpsPerSide: 2,
     },
     modelLanes: ["kronos_base"],
+    modelPlan: [{
+      symbol: "*",
+      modelLane: "kronos_base",
+      role: "primary",
+      required: true,
+      preferredHorizonsMinutes: [15, 30, 60],
+    }],
     fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };

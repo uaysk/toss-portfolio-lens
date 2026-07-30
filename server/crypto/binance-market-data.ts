@@ -23,6 +23,8 @@ export type BinanceKline = {
   volume: number;
   quoteVolume: number;
   tradeCount: number;
+  takerBuyVolume?: number;
+  takerBuyQuoteVolume?: number;
   final: boolean;
 };
 
@@ -85,10 +87,35 @@ export type BinanceRestAggregateTradeRequest = {
   limit?: number;
 };
 
+export type BinanceRestReferenceKlineRequest = {
+  symbol: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+};
+
+export type BinanceRestFundingRateRequest = {
+  symbol: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+};
+
+export type BinanceRestOrderBookRequest = {
+  symbol: string;
+  limit?: 5 | 10 | 20 | 50 | 100 | 500 | 1_000;
+};
+
 export interface BinanceRestMarketData {
   exchangeInformation(): Promise<unknown>;
   klines(input: BinanceRestKlineRequest): Promise<unknown>;
   aggregateTrades?(input: BinanceRestAggregateTradeRequest): Promise<unknown>;
+  markPriceKlines?(input: BinanceRestReferenceKlineRequest): Promise<unknown>;
+  indexPriceKlines?(input: BinanceRestReferenceKlineRequest): Promise<unknown>;
+  premiumIndexKlines?(input: BinanceRestReferenceKlineRequest): Promise<unknown>;
+  fundingRateHistory?(input: BinanceRestFundingRateRequest): Promise<unknown>;
+  orderBook?(input: BinanceRestOrderBookRequest): Promise<unknown>;
+  markPrices?(): Promise<unknown>;
   tickers24h(): Promise<unknown>;
   bookTickers(): Promise<unknown>;
 }
@@ -209,6 +236,8 @@ function normalizeKlineTuple(
   const closeTime = nonNegative(raw[6]);
   const quoteVolume = nonNegative(raw[7]);
   const tradeCount = nonNegative(raw[8]);
+  const takerBuyVolume = nonNegative(raw[9]);
+  const takerBuyQuoteVolume = nonNegative(raw[10]);
   if ([openTime, open, high, low, close, volume, closeTime, quoteVolume, tradeCount]
     .some((value) => value === undefined)) {
     return undefined;
@@ -228,6 +257,8 @@ function normalizeKlineTuple(
     volume: volume!,
     quoteVolume: quoteVolume!,
     tradeCount: Math.trunc(tradeCount!),
+    ...(takerBuyVolume !== undefined ? { takerBuyVolume } : {}),
+    ...(takerBuyQuoteVolume !== undefined ? { takerBuyQuoteVolume } : {}),
     // REST has no close flag. Only time strictly after the exchange close time
     // is authoritative enough to call the interval final.
     final: closeTime! < authoritativeNow,
@@ -342,6 +373,73 @@ export class OfficialBinanceUsdmRestMarketData implements BinanceRestMarketData 
     }));
   }
 
+  markPriceKlines(input: BinanceRestReferenceKlineRequest): Promise<unknown> {
+    const symbol = upper(input.symbol);
+    if (!symbol) throw new Error("Binance mark-price kline symbol is required.");
+    const limit = Math.max(1, Math.min(1_500, Math.trunc(input.limit ?? 1_000)));
+    return this.data(this.client.restAPI.markPriceKlineCandlestickData({
+      symbol,
+      interval: DerivativesTradingUsdsFuturesRestAPI
+        .MarkPriceKlineCandlestickDataIntervalEnum.INTERVAL_1m,
+      limit,
+      ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
+      ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
+    }));
+  }
+
+  indexPriceKlines(input: BinanceRestReferenceKlineRequest): Promise<unknown> {
+    const pair = upper(input.symbol);
+    if (!pair) throw new Error("Binance index-price kline pair is required.");
+    const limit = Math.max(1, Math.min(1_500, Math.trunc(input.limit ?? 1_000)));
+    return this.data(this.client.restAPI.indexPriceKlineCandlestickData({
+      pair,
+      interval: DerivativesTradingUsdsFuturesRestAPI
+        .IndexPriceKlineCandlestickDataIntervalEnum.INTERVAL_1m,
+      limit,
+      ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
+      ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
+    }));
+  }
+
+  premiumIndexKlines(input: BinanceRestReferenceKlineRequest): Promise<unknown> {
+    const symbol = upper(input.symbol);
+    if (!symbol) throw new Error("Binance premium-index kline symbol is required.");
+    const limit = Math.max(1, Math.min(1_500, Math.trunc(input.limit ?? 1_000)));
+    return this.data(this.client.restAPI.premiumIndexKlineData({
+      symbol,
+      interval: DerivativesTradingUsdsFuturesRestAPI
+        .PremiumIndexKlineDataIntervalEnum.INTERVAL_1m,
+      limit,
+      ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
+      ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
+    }));
+  }
+
+  fundingRateHistory(input: BinanceRestFundingRateRequest): Promise<unknown> {
+    const symbol = upper(input.symbol);
+    if (!symbol) throw new Error("Binance funding-rate symbol is required.");
+    const limit = Math.max(1, Math.min(1_000, Math.trunc(input.limit ?? 1_000)));
+    return this.data(this.client.restAPI.getFundingRateHistory({
+      symbol,
+      limit,
+      ...(input.startTime !== undefined ? { startTime: input.startTime } : {}),
+      ...(input.endTime !== undefined ? { endTime: input.endTime } : {}),
+    }));
+  }
+
+  orderBook(input: BinanceRestOrderBookRequest): Promise<unknown> {
+    const symbol = upper(input.symbol);
+    if (!symbol) throw new Error("Binance order-book symbol is required.");
+    return this.data(this.client.restAPI.orderBook({
+      symbol,
+      limit: input.limit ?? 100,
+    }));
+  }
+
+  markPrices(): Promise<unknown> {
+    return this.data(this.client.restAPI.markPrice());
+  }
+
   tickers24h(): Promise<unknown> {
     return this.data(this.client.restAPI.ticker24hrPriceChangeStatistics());
   }
@@ -386,6 +484,8 @@ export function normalizeBinanceWebsocketEvent(
     const volume = nonNegative(kline?.v);
     const quoteVolume = nonNegative(kline?.q);
     const tradeCount = nonNegative(kline?.n);
+    const takerBuyVolume = nonNegative(kline?.V);
+    const takerBuyQuoteVolume = nonNegative(kline?.Q);
     if ([openTime, closeTime, open, high, low, close, volume, quoteVolume, tradeCount]
       .some((value) => value === undefined) || kline?.i !== "1m") {
       return undefined;
@@ -404,6 +504,8 @@ export function normalizeBinanceWebsocketEvent(
       volume: volume!,
       quoteVolume: quoteVolume!,
       tradeCount: Math.trunc(tradeCount!),
+      ...(takerBuyVolume !== undefined ? { takerBuyVolume } : {}),
+      ...(takerBuyQuoteVolume !== undefined ? { takerBuyQuoteVolume } : {}),
       final: kline?.x === true,
       receivedAt,
     };

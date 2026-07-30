@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   AiResponseSchema,
@@ -234,6 +237,10 @@ function clientFixture(mutate?: (request: AiForecastRequest, response: any) => v
 
 function replay(input?: {
   mutate?: (request: AiForecastRequest, response: any) => void;
+  rawInputArtifacts?: {
+    root: string;
+    modelSeed: number;
+  };
 }) {
   const rest = restFixture();
   const client = clientFixture(input?.mutate);
@@ -252,6 +259,9 @@ function replay(input?: {
       deadlineMs: 10_000,
       aggregateTradePageDelayMs: 0,
       aggregateTradePace: async () => undefined,
+      ...(input?.rawInputArtifacts
+        ? { rawInputArtifacts: input.rawInputArtifacts }
+        : {}),
     }),
   };
 }
@@ -365,6 +375,48 @@ describe("FinCast four-hour cadence comparison replay", () => {
       executionReturn: 0,
       roundTripCostRate: 0.0012,
     });
+  }, 15_000);
+
+  it("can publish the exact replay contexts as three worker-local raw artifacts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fincast-cadence-raw-"));
+    try {
+      const fixture = replay({
+        rawInputArtifacts: {
+          root,
+          modelSeed: 41,
+        },
+      });
+      const result = await fixture.replay.run({
+        symbol: "EULUSDT",
+        endExclusive: END_EXCLUSIVE,
+        costAssumptions: COSTS,
+      });
+
+      for (const cadence of ["15", "30", "60"] as const) {
+        const evidence = result.cadences[cadence].rawInputArtifact;
+        expect(evidence).toBeDefined();
+        const manifest = JSON.parse(
+          await readFile(join(root, cadence, "manifest.json"), "utf8"),
+        ) as Record<string, any>;
+        expect(manifest).toMatchObject({
+          schema_version: "fincast-raw-input/v1",
+          cadence_seconds: Number(cadence),
+          row_count: 240,
+          context_bars: 512,
+          model_seed: 41,
+        });
+        expect(manifest.files.contexts.size_bytes).toBe(240 * 512 * 4);
+        expect(evidence?.manifestPath).toBe(join(root, cadence, "manifest.json"));
+        const origin = JSON.parse(
+          (await readFile(join(root, cadence, "origins.jsonl"), "utf8"))
+            .split("\n")[0]!,
+        ) as Record<string, unknown>;
+        expect(origin).not.toHaveProperty("close");
+        expect(origin).not.toHaveProperty("closes");
+      }
+    } finally {
+      await rm(root, { recursive: true });
+    }
   }, 15_000);
 
   it("fails closed when a response changes the common target timestamp", async () => {

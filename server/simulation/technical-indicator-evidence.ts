@@ -4,6 +4,8 @@ export const RUST_INDICATOR_EVIDENCE_VERSION =
   "rust-indicator-evidence/v1" as const;
 export const RUST_SCANNER_EVIDENCE_VERSION =
   "rust-scanner-evidence/v1" as const;
+export const RUST_MARKET_EVIDENCE_VERSION =
+  "rust-market-evidence/v2" as const;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -56,6 +58,39 @@ export type RustScannerEvidenceInput = Readonly<{
   relativeVolume: RustScannerMetricEvidence;
 }>;
 
+export type RustMarketEvidenceV2 = Readonly<{
+  schemaVersion: typeof RUST_MARKET_EVIDENCE_VERSION;
+  trendScore: number | null;
+  momentumScore: number | null;
+  breakoutScore: number | null;
+  choppiness: number | null;
+  normalizedAtr: number | null;
+  realizedVolatility: number | null;
+  dayRangeRatio: number | null;
+  bollingerWidthExpansion: number | null;
+  relativeVolume: number | null;
+  tradingAmount: number | null;
+  spreadBps: number | null;
+  orderbookDepth: number | null;
+  orderbookImbalance: number | null;
+  executionStrength: number | null;
+  liquidityQuality: number | null;
+  exitRisk: number | null;
+  sessionVwap: number | null;
+  openingRange5: number | null;
+  openingRange15: number | null;
+  openingRange30: number | null;
+  timeOfDayRelativeVolume: number | null;
+  benchmarkRelativeStrength: number | null;
+  quoteFreshnessMs: number | null;
+  regime: string;
+  passedGates: string[];
+  blockedGates: string[];
+  unavailableFields: string[];
+  originAt: string;
+  observedAt: string;
+}>;
+
 export function parseRustIndicatorEvidence(value: unknown): RustIndicatorEvidence | undefined {
   const source = record(value);
   if (source?.schemaVersion !== RUST_INDICATOR_EVIDENCE_VERSION) return undefined;
@@ -91,6 +126,10 @@ function record(value: unknown): UnknownRecord | undefined {
 
 function finite(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function finiteOrNull(value: unknown): number | null | undefined {
+  return value === null ? null : finite(value);
 }
 
 function text(value: unknown, maximum = 128): string | undefined {
@@ -209,6 +248,177 @@ export function projectRustScannerEvidence(
     },
     tradingAmount,
     relativeVolume,
+  };
+}
+
+const RUST_MARKET_NUMERIC_FIELDS = [
+  "trendScore",
+  "momentumScore",
+  "breakoutScore",
+  "choppiness",
+  "normalizedAtr",
+  "realizedVolatility",
+  "dayRangeRatio",
+  "bollingerWidthExpansion",
+  "relativeVolume",
+  "tradingAmount",
+  "spreadBps",
+  "orderbookDepth",
+  "orderbookImbalance",
+  "executionStrength",
+  "liquidityQuality",
+  "exitRisk",
+  "sessionVwap",
+  "openingRange5",
+  "openingRange15",
+  "openingRange30",
+  "timeOfDayRelativeVolume",
+  "benchmarkRelativeStrength",
+  "quoteFreshnessMs",
+] as const satisfies readonly (keyof RustMarketEvidenceV2)[];
+
+const SNAKE_CASE_MARKET_FIELDS: Readonly<Record<
+  (typeof RUST_MARKET_NUMERIC_FIELDS)[number],
+  string
+>> = {
+  trendScore: "trend_score",
+  momentumScore: "momentum_score",
+  breakoutScore: "breakout_score",
+  choppiness: "choppiness",
+  normalizedAtr: "normalized_atr",
+  realizedVolatility: "realized_volatility",
+  dayRangeRatio: "day_range_ratio",
+  bollingerWidthExpansion: "bollinger_width_expansion",
+  relativeVolume: "relative_volume",
+  tradingAmount: "trading_amount",
+  spreadBps: "spread_bps",
+  orderbookDepth: "orderbook_depth",
+  orderbookImbalance: "orderbook_imbalance",
+  executionStrength: "execution_strength",
+  liquidityQuality: "liquidity_quality",
+  exitRisk: "exit_risk",
+  sessionVwap: "session_vwap",
+  openingRange5: "opening_range_5",
+  openingRange15: "opening_range_15",
+  openingRange30: "opening_range_30",
+  timeOfDayRelativeVolume: "time_of_day_relative_volume",
+  benchmarkRelativeStrength: "benchmark_relative_strength",
+  quoteFreshnessMs: "quote_freshness_ms",
+};
+
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > 128) return undefined;
+  const normalized = value.map((item) => text(item, 128));
+  return normalized.every((item): item is string => item !== undefined)
+    ? [...new Set(normalized)]
+    : undefined;
+}
+
+/**
+ * Strictly projects the Rust v2 policy boundary. Non-finite numeric data or an
+ * observation newer than its decision origin invalidates the whole evidence
+ * instead of silently replacing it with a policy-friendly value.
+ */
+export function parseRustMarketEvidenceV2(value: unknown): RustMarketEvidenceV2 | undefined {
+  const source = record(value);
+  if (!source || source.schemaVersion !== RUST_MARKET_EVIDENCE_VERSION) return undefined;
+  const numeric: Record<string, number | null> = {};
+  for (const key of RUST_MARKET_NUMERIC_FIELDS) {
+    const raw = Object.hasOwn(source, key)
+      ? source[key]
+      : source[SNAKE_CASE_MARKET_FIELDS[key]];
+    const parsed = finiteOrNull(raw);
+    if (parsed === undefined) return undefined;
+    numeric[key] = parsed;
+  }
+  for (const nonNegativeKey of [
+    "choppiness",
+    "normalizedAtr",
+    "realizedVolatility",
+    "dayRangeRatio",
+    "relativeVolume",
+    "tradingAmount",
+    "spreadBps",
+    "orderbookDepth",
+    "sessionVwap",
+    "openingRange5",
+    "openingRange15",
+    "openingRange30",
+    "timeOfDayRelativeVolume",
+    "quoteFreshnessMs",
+  ] as const) {
+    const metric = numeric[nonNegativeKey];
+    if (metric !== null && metric! < 0) return undefined;
+  }
+  for (const boundedKey of [
+    "trendScore",
+    "momentumScore",
+    "breakoutScore",
+    "orderbookImbalance",
+    "executionStrength",
+    "benchmarkRelativeStrength",
+  ] as const) {
+    const metric = numeric[boundedKey];
+    if (metric !== null && (metric! < -1 || metric! > 1)) return undefined;
+  }
+  for (const unitKey of ["liquidityQuality", "exitRisk"] as const) {
+    const metric = numeric[unitKey];
+    if (metric !== null && (metric! < 0 || metric! > 1)) return undefined;
+  }
+  const regime = text(source.regime, 64);
+  const passedGates = stringList(source.passedGates ?? source.passed_gates);
+  const blockedGates = stringList(source.blockedGates ?? source.blocked_gates);
+  const unavailableFields = stringList(
+    source.unavailableFields ?? source.unavailable_fields,
+  );
+  const originAt = text(source.originAt ?? source.origin_at, 64);
+  const observedAt = text(source.observedAt ?? source.observed_at, 64);
+  if (
+    !regime
+    || !passedGates
+    || !blockedGates
+    || !unavailableFields
+    || !originAt
+    || !observedAt
+  ) return undefined;
+  const originMs = Date.parse(originAt);
+  const observedMs = Date.parse(observedAt);
+  if (
+    !Number.isFinite(originMs)
+    || !Number.isFinite(observedMs)
+    || observedMs > originMs
+  ) return undefined;
+  return {
+    schemaVersion: RUST_MARKET_EVIDENCE_VERSION,
+    trendScore: numeric.trendScore!,
+    momentumScore: numeric.momentumScore!,
+    breakoutScore: numeric.breakoutScore!,
+    choppiness: numeric.choppiness!,
+    normalizedAtr: numeric.normalizedAtr!,
+    realizedVolatility: numeric.realizedVolatility!,
+    dayRangeRatio: numeric.dayRangeRatio!,
+    bollingerWidthExpansion: numeric.bollingerWidthExpansion!,
+    relativeVolume: numeric.relativeVolume!,
+    tradingAmount: numeric.tradingAmount!,
+    spreadBps: numeric.spreadBps!,
+    orderbookDepth: numeric.orderbookDepth!,
+    orderbookImbalance: numeric.orderbookImbalance!,
+    executionStrength: numeric.executionStrength!,
+    liquidityQuality: numeric.liquidityQuality!,
+    exitRisk: numeric.exitRisk!,
+    sessionVwap: numeric.sessionVwap!,
+    openingRange5: numeric.openingRange5!,
+    openingRange15: numeric.openingRange15!,
+    openingRange30: numeric.openingRange30!,
+    timeOfDayRelativeVolume: numeric.timeOfDayRelativeVolume!,
+    benchmarkRelativeStrength: numeric.benchmarkRelativeStrength!,
+    quoteFreshnessMs: numeric.quoteFreshnessMs!,
+    regime,
+    passedGates,
+    blockedGates,
+    unavailableFields,
+    originAt,
+    observedAt,
   };
 }
 

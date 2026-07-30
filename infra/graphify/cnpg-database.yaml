@@ -1,0 +1,16 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: graphify
+  namespace: pg
+spec:
+  name: graphify
+  owner: graphify
+  cluster:
+    name: pg-prod-block
+  allowConnections: true
+  connectionLimit: 12
+  extensions:
+    - name: vector
+      ensure: present
+

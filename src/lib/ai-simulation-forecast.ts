@@ -1,7 +1,8 @@
 export const AI_SIMULATION_KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
+export const AI_SIMULATION_CHRONOS2_MODEL_ID = "amazon/chronos-2" as const;
 export const AI_SIMULATION_FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
 
-export type AiSimulationForecastLane = "kronos_base" | "fincast";
+export type AiSimulationForecastLane = "chronos2" | "kronos_base" | "fincast";
 
 export type AiSimulationKronosForecastPoint = {
   horizonMinutes: number;
@@ -16,7 +17,10 @@ export type AiSimulationKronosForecast = {
   signalSymbol: string;
   status: "available" | "unavailable";
   origin?: string;
+  inputOrigin?: string;
   originPrice?: number;
+  priceObservedAt?: string;
+  projectionPolicy?: "native_input_origin" | "live_price_rebase/v1";
   generatedAt?: string;
   modelId?: string;
   modelRevision?: string;
@@ -396,12 +400,17 @@ export function mergeLatestKronosForecasts(
 
 function directForecastLane(value: unknown, modelId: string | undefined): AiSimulationForecastLane | undefined {
   const normalized = text(value)?.toLowerCase().replaceAll("-", "_");
-  const explicitLane = normalized === "kronos" || normalized === "kronos_base"
-    ? "kronos_base"
-    : normalized === "fincast"
-      ? "fincast"
-      : undefined;
+  const explicitLane = normalized === "chronos2" || normalized === "chronos_2"
+    ? "chronos2"
+    : normalized === "kronos" || normalized === "kronos_base"
+      ? "kronos_base"
+      : normalized === "fincast"
+        ? "fincast"
+        : undefined;
   let modelLane: AiSimulationForecastLane | undefined;
+  if (modelId?.toLowerCase() === AI_SIMULATION_CHRONOS2_MODEL_ID.toLowerCase()) {
+    modelLane = "chronos2";
+  }
   if (modelId?.toLowerCase() === AI_SIMULATION_KRONOS_BASE_MODEL_ID.toLowerCase()) {
     modelLane = "kronos_base";
   }
@@ -421,7 +430,18 @@ function normalizeDirectModelForecast(value: unknown): AiSimulationModelForecast
   const modelId = text(first(source, "modelId", "model_id"));
   const lane = directForecastLane(first(source, "lane", "modelLane", "model_lane"), modelId);
   const origin = timestamp(first(source, "origin", "inputEndAt", "input_end_at"));
+  const inputOrigin = timestamp(first(source, "inputOrigin", "input_origin", "inputEndAt", "input_end_at"));
   const originPrice = finite(first(source, "originPrice", "origin_price"));
+  const priceObservedAt = timestamp(first(source, "priceObservedAt", "price_observed_at"));
+  const rawProjectionPolicy = text(first(
+    source,
+    "projectionPolicy",
+    "projection_policy",
+  ));
+  const projectionPolicy = rawProjectionPolicy === "native_input_origin"
+    || rawProjectionPolicy === "live_price_rebase/v1"
+    ? rawProjectionPolicy
+    : undefined;
   const generatedAt = timestamp(first(source, "generatedAt", "generated_at"));
   const rawStatus = text(source.status)?.toLowerCase();
   const rawPoints = first(source, "points", "horizons");
@@ -446,7 +466,10 @@ function normalizeDirectModelForecast(value: unknown): AiSimulationModelForecast
     signalSymbol,
     status: available ? "available" : "unavailable",
     ...(origin ? { origin } : {}),
+    ...(inputOrigin ? { inputOrigin } : {}),
     ...(originPrice !== undefined && originPrice > 0 ? { originPrice } : {}),
+    ...(priceObservedAt ? { priceObservedAt } : {}),
+    ...(projectionPolicy ? { projectionPolicy } : {}),
     ...(generatedAt ? { generatedAt } : {}),
     ...(modelId ? { modelId } : {}),
     ...(text(first(source, "modelRevision", "model_revision", "revision"))

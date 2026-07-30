@@ -434,6 +434,43 @@ pub struct ScannerMetrics {
     pub spread_bps: ScannerMetric,
 }
 
+pub const RUST_MARKET_EVIDENCE_VERSION: &str = "rust-market-evidence/v2";
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustMarketEvidenceV2 {
+    pub schema_version: String,
+    pub trend_score: Option<f64>,
+    pub momentum_score: Option<f64>,
+    pub breakout_score: Option<f64>,
+    pub choppiness: Option<f64>,
+    pub normalized_atr: Option<f64>,
+    pub realized_volatility: Option<f64>,
+    pub day_range_ratio: Option<f64>,
+    pub bollinger_width_expansion: Option<f64>,
+    pub relative_volume: Option<f64>,
+    pub trading_amount: Option<f64>,
+    pub spread_bps: Option<f64>,
+    pub orderbook_depth: Option<f64>,
+    pub orderbook_imbalance: Option<f64>,
+    pub execution_strength: Option<f64>,
+    pub liquidity_quality: Option<f64>,
+    pub exit_risk: Option<f64>,
+    pub session_vwap: Option<f64>,
+    pub opening_range_5: Option<f64>,
+    pub opening_range_15: Option<f64>,
+    pub opening_range_30: Option<f64>,
+    pub time_of_day_relative_volume: Option<f64>,
+    pub benchmark_relative_strength: Option<f64>,
+    pub quote_freshness_ms: Option<f64>,
+    pub regime: String,
+    pub passed_gates: Vec<String>,
+    pub blocked_gates: Vec<String>,
+    pub unavailable_fields: Vec<String>,
+    pub origin_at: String,
+    pub observed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ScalpingInstrumentResult {
@@ -447,6 +484,7 @@ pub struct ScalpingInstrumentResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub signal_snapshots: Vec<ScalpingSignalSnapshot>,
     pub scanner_metrics: ScannerMetrics,
+    pub market_evidence: RustMarketEvidenceV2,
     pub data_quality: ScalpingDataQuality,
 }
 
@@ -1059,7 +1097,13 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
             );
         }
         if let Some(snapshot) = &instrument.orderbook {
-            validate_snapshot_timestamp(&snapshot.timestamp, "orderbook timestamp")?;
+            let snapshot_epoch =
+                validate_snapshot_timestamp(&snapshot.timestamp, "orderbook timestamp")?;
+            ensure!(
+                snapshot_epoch <= last_epoch,
+                "instrument {} orderbook timestamp must not be after the decision origin",
+                instrument.key
+            );
             ensure!(
                 snapshot.bid_volume.is_finite()
                     && snapshot.bid_volume >= 0.0
@@ -1082,7 +1126,13 @@ fn validate_request(request: &ScalpingAnalysisRequest) -> Result<()> {
             }
         }
         if let Some(snapshot) = &instrument.trade_stats {
-            validate_snapshot_timestamp(&snapshot.timestamp, "trade stats timestamp")?;
+            let snapshot_epoch =
+                validate_snapshot_timestamp(&snapshot.timestamp, "trade stats timestamp")?;
+            ensure!(
+                snapshot_epoch <= last_epoch,
+                "instrument {} trade stats timestamp must not be after the decision origin",
+                instrument.key
+            );
             ensure!(
                 snapshot.buy_volume.is_finite()
                     && snapshot.buy_volume >= 0.0
@@ -1989,10 +2039,11 @@ fn snapshot_metrics(instrument: &ScalpingInstrument) -> (SnapshotMetric, Snapsho
             .epoch_millis;
     let orderbook = match &instrument.orderbook {
         Some(snapshot) => {
-            let fresh = parse_timestamp(&snapshot.timestamp)
+            let snapshot_epoch = parse_timestamp(&snapshot.timestamp)
                 .expect("validated orderbook timestamp")
-                .epoch_millis
-                >= last_bar_epoch;
+                .epoch_millis;
+            let fresh =
+                snapshot_epoch <= last_bar_epoch && last_bar_epoch - snapshot_epoch <= 60_000;
             let denominator = snapshot.bid_volume + snapshot.ask_volume;
             let imbalance = (fresh && denominator > 0.0)
                 .then(|| round((snapshot.bid_volume - snapshot.ask_volume) / denominator, 8));
@@ -2003,8 +2054,10 @@ fn snapshot_metrics(instrument: &ScalpingInstrument) -> (SnapshotMetric, Snapsho
                     } else {
                         AvailabilityStatus::Unavailable
                     },
-                    reason: if !fresh {
-                        "snapshot_precedes_last_finalized_bar".into()
+                    reason: if snapshot_epoch > last_bar_epoch {
+                        "snapshot_is_after_decision_origin".into()
+                    } else if !fresh {
+                        "snapshot_is_stale_at_decision_origin".into()
                     } else if imbalance.is_some() {
                         "calculated_from_current_snapshot".into()
                     } else {
@@ -2038,10 +2091,11 @@ fn snapshot_metrics(instrument: &ScalpingInstrument) -> (SnapshotMetric, Snapsho
     };
     let execution = match &instrument.trade_stats {
         Some(snapshot) => {
-            let fresh = parse_timestamp(&snapshot.timestamp)
+            let snapshot_epoch = parse_timestamp(&snapshot.timestamp)
                 .expect("validated trade stats timestamp")
-                .epoch_millis
-                >= last_bar_epoch;
+                .epoch_millis;
+            let fresh =
+                snapshot_epoch <= last_bar_epoch && last_bar_epoch - snapshot_epoch <= 60_000;
             let strength = (fresh && snapshot.sell_volume > 0.0)
                 .then(|| round(snapshot.buy_volume / snapshot.sell_volume * 100.0, 8));
             SnapshotMetric {
@@ -2051,8 +2105,10 @@ fn snapshot_metrics(instrument: &ScalpingInstrument) -> (SnapshotMetric, Snapsho
                     } else {
                         AvailabilityStatus::Unavailable
                     },
-                    reason: if !fresh {
-                        "trade_window_precedes_last_finalized_bar".into()
+                    reason: if snapshot_epoch > last_bar_epoch {
+                        "trade_window_is_after_decision_origin".into()
+                    } else if !fresh {
+                        "trade_window_is_stale_at_decision_origin".into()
                     } else if strength.is_some() {
                         "calculated_from_current_trade_window".into()
                     } else {
@@ -2568,7 +2624,9 @@ fn scanner_metrics(
         let snapshot_epoch = parse_timestamp(&snapshot.timestamp)
             .expect("validated orderbook timestamp")
             .epoch_millis;
-        if snapshot_epoch < last_bar_epoch {
+        if snapshot_epoch > last_bar_epoch
+            || last_bar_epoch - snapshot_epoch > i64::from(interval_minutes) * 60_000
+        {
             return None;
         }
         let (bid, ask) = (snapshot.best_bid?, snapshot.best_ask?);
@@ -2650,23 +2708,17 @@ fn scanner_metrics(
                 } else {
                     AvailabilityStatus::Unavailable
                 },
-                reason: if instrument.orderbook.as_ref().is_some_and(|snapshot| {
-                    snapshot.best_bid.is_some()
-                        && parse_timestamp(&snapshot.timestamp)
-                            .expect("validated orderbook timestamp")
-                            .epoch_millis
-                            >= last_bar_epoch
-                }) {
+                reason: if spread.is_some() {
                     "calculated".into()
                 } else if instrument.orderbook.as_ref().is_some_and(|snapshot| {
                     parse_timestamp(&snapshot.timestamp)
                         .expect("validated orderbook timestamp")
                         .epoch_millis
-                        < last_bar_epoch
+                        > last_bar_epoch
                 }) {
-                    "snapshot_precedes_last_finalized_bar".into()
+                    "snapshot_is_after_decision_origin".into()
                 } else {
-                    "best_bid_and_best_ask_not_supplied".into()
+                    "best_bid_and_best_ask_not_supplied_or_stale".into()
                 },
             },
             value: spread,
@@ -2679,6 +2731,340 @@ fn scanner_metrics(
                 ("historical_orderbook_used".into(), json!(false)),
             ]),
         },
+    }
+}
+
+fn latest_indicator_value(calculation: &ScalpingIndicatorCalculation, field: &str) -> Option<f64> {
+    calculation
+        .points
+        .as_ref()
+        .and_then(|points| {
+            points
+                .iter()
+                .rev()
+                .find(|point| point.state == PointState::Available)
+        })
+        .or(calculation.latest.as_ref())
+        .and_then(|point| point.values.get(field).copied().flatten())
+        .filter(|value| value.is_finite())
+}
+
+fn latest_intraday_value(series: &IntradayMetricSeries, field: &str) -> Option<f64> {
+    series
+        .points
+        .as_ref()
+        .and_then(|points| {
+            points
+                .iter()
+                .rev()
+                .find(|point| point.state == PointState::Available)
+        })
+        .or(series.latest.as_ref())
+        .and_then(|point| point.values.get(field).copied().flatten())
+        .filter(|value| value.is_finite())
+}
+
+fn opening_range_ratio(series: &IntradayMetricSeries, close: f64) -> Option<f64> {
+    let high = latest_intraday_value(series, "high")?;
+    let low = latest_intraday_value(series, "low")?;
+    (close > 0.0 && high >= low).then(|| round((high - low) / close, 8))
+}
+
+fn mean_score(values: &[f64]) -> Option<f64> {
+    (!values.is_empty()).then(|| {
+        round(
+            (values.iter().sum::<f64>() / values.len() as f64).clamp(-1.0, 1.0),
+            8,
+        )
+    })
+}
+
+fn causal_orderbook_metrics(
+    instrument: &ScalpingInstrument,
+    origin_epoch: i64,
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    let Some(snapshot) = instrument.orderbook.as_ref() else {
+        return (None, None, None, None);
+    };
+    let snapshot_epoch = parse_timestamp(&snapshot.timestamp)
+        .expect("validated orderbook timestamp")
+        .epoch_millis;
+    if snapshot_epoch > origin_epoch {
+        return (None, None, None, None);
+    }
+    let denominator = snapshot.bid_volume + snapshot.ask_volume;
+    let imbalance = (denominator > 0.0)
+        .then(|| round((snapshot.bid_volume - snapshot.ask_volume) / denominator, 8));
+    let midpoint = snapshot
+        .best_bid
+        .zip(snapshot.best_ask)
+        .map(|(bid, ask)| (bid + ask) / 2.0)
+        .filter(|midpoint| *midpoint > 0.0);
+    let depth = midpoint.map(|midpoint| round(denominator * midpoint, 4));
+    let spread = snapshot
+        .best_bid
+        .zip(snapshot.best_ask)
+        .and_then(|(bid, ask)| {
+            let midpoint = (bid + ask) / 2.0;
+            (midpoint > 0.0).then(|| round((ask - bid) / midpoint * 10_000.0, 8))
+        });
+    (
+        depth,
+        imbalance,
+        spread,
+        Some((origin_epoch - snapshot_epoch) as f64),
+    )
+}
+
+fn causal_execution_strength(instrument: &ScalpingInstrument, origin_epoch: i64) -> Option<f64> {
+    let snapshot = instrument.trade_stats.as_ref()?;
+    let snapshot_epoch = parse_timestamp(&snapshot.timestamp)
+        .expect("validated trade-stats timestamp")
+        .epoch_millis;
+    if snapshot_epoch > origin_epoch {
+        return None;
+    }
+    let denominator = snapshot.buy_volume + snapshot.sell_volume;
+    (denominator > 0.0).then(|| {
+        round(
+            (snapshot.buy_volume - snapshot.sell_volume) / denominator,
+            8,
+        )
+    })
+}
+
+fn rust_market_evidence(
+    instrument: &ScalpingInstrument,
+    calculations: &[ScalpingIndicatorCalculation],
+    intraday: &IntradayMetrics,
+    scanner: &ScannerMetrics,
+    quality: &ScalpingDataQuality,
+) -> RustMarketEvidenceV2 {
+    let latest_bar = instrument.bars.last().expect("validated bars");
+    let origin_epoch = parse_timestamp(&latest_bar.timestamp)
+        .expect("validated latest timestamp")
+        .epoch_millis;
+    let mut trend_components = Vec::new();
+    let mut momentum_components = Vec::new();
+    let mut breakout_components = Vec::new();
+    let mut ema_values = Vec::new();
+    let mut choppiness = None;
+    for calculation in calculations {
+        match calculation.kind {
+            IndicatorKind::Ema => {
+                if let Some(value) = latest_indicator_value(calculation, "value") {
+                    let period = calculation
+                        .parameters
+                        .get("period")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(u64::MAX);
+                    ema_values.push((period, value));
+                }
+            }
+            IndicatorKind::AdxDmi => {
+                if let (Some(adx), Some(plus), Some(minus)) = (
+                    latest_indicator_value(calculation, "adx"),
+                    latest_indicator_value(calculation, "plus_di"),
+                    latest_indicator_value(calculation, "minus_di"),
+                ) {
+                    let denominator = plus + minus;
+                    if denominator > 0.0 {
+                        trend_components.push(
+                            ((plus - minus) / denominator * (adx / 25.0).min(1.0)).clamp(-1.0, 1.0),
+                        );
+                    }
+                }
+            }
+            IndicatorKind::Supertrend => {
+                if let Some(direction) = latest_indicator_value(calculation, "direction") {
+                    trend_components.push(direction.clamp(-1.0, 1.0));
+                }
+            }
+            IndicatorKind::Rsi => {
+                if let Some(value) = latest_indicator_value(calculation, "value") {
+                    momentum_components.push(((value - 50.0) / 50.0).clamp(-1.0, 1.0));
+                }
+            }
+            IndicatorKind::Macd => {
+                if let Some(value) = latest_indicator_value(calculation, "histogram") {
+                    momentum_components.push(value.signum() * 0.6);
+                }
+            }
+            IndicatorKind::Roc => {
+                if let Some(value) = latest_indicator_value(calculation, "value") {
+                    momentum_components.push((value / 5.0).tanh());
+                }
+            }
+            IndicatorKind::DonchianChannel
+            | IndicatorKind::KeltnerChannel
+            | IndicatorKind::BollingerBands => {
+                if let (Some(upper), Some(lower)) = (
+                    latest_indicator_value(calculation, "upper"),
+                    latest_indicator_value(calculation, "lower"),
+                ) {
+                    let half_width = (upper - lower) / 2.0;
+                    if half_width > 0.0 {
+                        breakout_components.push(
+                            ((latest_bar.close - (upper + lower) / 2.0) / half_width)
+                                .clamp(-1.0, 1.0),
+                        );
+                    }
+                }
+            }
+            IndicatorKind::ChoppinessIndex => {
+                choppiness = latest_indicator_value(calculation, "value");
+            }
+            _ => {}
+        }
+    }
+    ema_values.sort_by_key(|(period, _)| *period);
+    if let (Some((_, fast)), Some((_, slow))) = (ema_values.first(), ema_values.last()) {
+        if latest_bar.close > 0.0 && ema_values.len() >= 2 {
+            trend_components.push(((fast - slow) / latest_bar.close * 100.0).clamp(-1.0, 1.0));
+        }
+    }
+    let trend_score = mean_score(&trend_components);
+    let momentum_score = mean_score(&momentum_components);
+    let breakout_score = mean_score(&breakout_components);
+    let normalized_atr = scanner.normalized_atr.value;
+    let realized_volatility = scanner.realized_volatility.value;
+    let day_range_ratio = scanner.day_range_ratio.value;
+    let bollinger_width_expansion = scanner.bollinger_width_expansion.value;
+    let relative_volume = scanner.relative_volume.value;
+    let trading_amount = scanner.trading_amount.value;
+    let (orderbook_depth, orderbook_imbalance, causal_spread, quote_freshness_ms) =
+        causal_orderbook_metrics(instrument, origin_epoch);
+    let spread_bps = causal_spread;
+    let execution_strength = causal_execution_strength(instrument, origin_epoch);
+    let mut liquidity_components = Vec::new();
+    if let Some(spread) = spread_bps {
+        liquidity_components.push((1.0 - spread / 50.0).clamp(0.0, 1.0));
+    }
+    if let Some(depth) = orderbook_depth {
+        liquidity_components.push((depth / 250_000.0).clamp(0.0, 1.0));
+    }
+    if let Some(rvol) = relative_volume {
+        liquidity_components.push((rvol / 1.0).clamp(0.0, 1.0));
+    }
+    let liquidity_quality = (!liquidity_components.is_empty()).then(|| {
+        round(
+            liquidity_components.iter().sum::<f64>() / liquidity_components.len() as f64,
+            8,
+        )
+    });
+    let mut exit_components = Vec::new();
+    if let Some(value) = normalized_atr {
+        exit_components.push((value / 10.0).clamp(0.0, 1.0));
+    }
+    if let Some(value) = choppiness {
+        exit_components.push((value / 100.0).clamp(0.0, 1.0));
+    }
+    if let Some(value) = spread_bps {
+        exit_components.push((value / 50.0).clamp(0.0, 1.0));
+    }
+    let exit_risk = (!exit_components.is_empty()).then(|| {
+        round(
+            exit_components.iter().sum::<f64>() / exit_components.len() as f64,
+            8,
+        )
+    });
+    let regime = if choppiness.is_some_and(|value| value >= 61.8) {
+        "choppy"
+    } else if trend_score.is_some_and(|value| value.abs() >= 0.35) {
+        "trend"
+    } else if normalized_atr.is_some_and(|value| value >= 3.0) {
+        "high_volatility"
+    } else {
+        "neutral"
+    };
+    let mut passed_gates = vec!["FINALIZED_BAR".to_owned()];
+    let mut blocked_gates = Vec::new();
+    if quality.status == AvailabilityStatus::Available {
+        passed_gates.push("DATA_QUALITY".into());
+    } else {
+        blocked_gates.push("DATA_QUALITY".into());
+    }
+    match spread_bps {
+        Some(value) if value <= 35.0 => passed_gates.push("SPREAD".into()),
+        Some(_) => blocked_gates.push("SPREAD".into()),
+        None => blocked_gates.push("SPREAD_UNAVAILABLE".into()),
+    }
+    match liquidity_quality {
+        Some(value) if value >= 0.25 => passed_gates.push("LIQUIDITY".into()),
+        Some(_) => blocked_gates.push("LIQUIDITY".into()),
+        None => blocked_gates.push("LIQUIDITY_UNAVAILABLE".into()),
+    }
+    match quote_freshness_ms {
+        Some(value) if value <= 60_000.0 => passed_gates.push("QUOTE_FRESHNESS".into()),
+        Some(_) => blocked_gates.push("QUOTE_STALE".into()),
+        None => blocked_gates.push("QUOTE_FRESHNESS_UNAVAILABLE".into()),
+    }
+    let session_vwap = latest_intraday_value(&intraday.session_vwap, "session_vwap");
+    let opening_range_5 = opening_range_ratio(&intraday.opening_range_5, latest_bar.close);
+    let opening_range_15 = opening_range_ratio(&intraday.opening_range_15, latest_bar.close);
+    let opening_range_30 = opening_range_ratio(&intraday.opening_range_30, latest_bar.close);
+    let time_of_day_relative_volume =
+        latest_intraday_value(&intraday.time_of_day_relative_volume, "relative_volume");
+    let named_fields = [
+        ("trendScore", trend_score),
+        ("momentumScore", momentum_score),
+        ("breakoutScore", breakout_score),
+        ("choppiness", choppiness),
+        ("normalizedAtr", normalized_atr),
+        ("realizedVolatility", realized_volatility),
+        ("dayRangeRatio", day_range_ratio),
+        ("bollingerWidthExpansion", bollinger_width_expansion),
+        ("relativeVolume", relative_volume),
+        ("tradingAmount", trading_amount),
+        ("spreadBps", spread_bps),
+        ("orderbookDepth", orderbook_depth),
+        ("orderbookImbalance", orderbook_imbalance),
+        ("executionStrength", execution_strength),
+        ("liquidityQuality", liquidity_quality),
+        ("exitRisk", exit_risk),
+        ("sessionVwap", session_vwap),
+        ("openingRange5", opening_range_5),
+        ("openingRange15", opening_range_15),
+        ("openingRange30", opening_range_30),
+        ("timeOfDayRelativeVolume", time_of_day_relative_volume),
+        ("benchmarkRelativeStrength", None),
+        ("quoteFreshnessMs", quote_freshness_ms),
+    ];
+    let unavailable_fields = named_fields
+        .iter()
+        .filter_map(|(name, value)| value.is_none().then(|| (*name).to_owned()))
+        .collect();
+    RustMarketEvidenceV2 {
+        schema_version: RUST_MARKET_EVIDENCE_VERSION.into(),
+        trend_score,
+        momentum_score,
+        breakout_score,
+        choppiness,
+        normalized_atr,
+        realized_volatility,
+        day_range_ratio,
+        bollinger_width_expansion,
+        relative_volume,
+        trading_amount,
+        spread_bps,
+        orderbook_depth,
+        orderbook_imbalance,
+        execution_strength,
+        liquidity_quality,
+        exit_risk,
+        session_vwap,
+        opening_range_5,
+        opening_range_15,
+        opening_range_30,
+        time_of_day_relative_volume,
+        benchmark_relative_strength: None,
+        quote_freshness_ms,
+        regime: regime.into(),
+        passed_gates,
+        blocked_gates,
+        unavailable_fields,
+        origin_at: latest_bar.timestamp.clone(),
+        observed_at: latest_bar.timestamp.clone(),
     }
 }
 
@@ -3203,6 +3589,14 @@ pub fn analyze_scalping(
             .unwrap_or_default();
         let (signals, signal_snapshots) =
             assistance_signals(instrument, request, &calculations, &selected_timestamps)?;
+        let instrument_quality = data_quality(instrument, request.interval_minutes);
+        let market_evidence = rust_market_evidence(
+            instrument,
+            &calculations,
+            &intraday,
+            &scanner_metrics,
+            &instrument_quality,
+        );
         results.push(ScalpingInstrumentResult {
             instrument_key: instrument.key.clone(),
             interval_minutes: request.interval_minutes,
@@ -3213,7 +3607,8 @@ pub fn analyze_scalping(
             signals,
             signal_snapshots,
             scanner_metrics,
-            data_quality: data_quality(instrument, request.interval_minutes),
+            market_evidence,
+            data_quality: instrument_quality,
         });
     }
     let total_bar_count = request
@@ -3601,6 +3996,169 @@ mod tests {
                 .is_some()
         );
         assert!(result.instruments[0].volume_profile.is_none());
+    }
+
+    #[test]
+    fn market_evidence_v2_preserves_policy_indicators_and_causal_liquidity() {
+        let mut input = request(ResponseMode::LatestSummary, false);
+        input.volume_profile = None;
+        input.indicators = vec![
+            IndicatorDefinition {
+                id: "ema-fast-9".into(),
+                kind: IndicatorKind::Ema,
+                parameters: BTreeMap::from([("period".into(), json!(9))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "ema-slow-21".into(),
+                kind: IndicatorKind::Ema,
+                parameters: BTreeMap::from([("period".into(), json!(21))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "adx-dmi-14".into(),
+                kind: IndicatorKind::AdxDmi,
+                parameters: BTreeMap::from([("period".into(), json!(14))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "choppiness-14".into(),
+                kind: IndicatorKind::ChoppinessIndex,
+                parameters: BTreeMap::from([("period".into(), json!(14))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "supertrend-10-3".into(),
+                kind: IndicatorKind::Supertrend,
+                parameters: BTreeMap::from([
+                    ("atr_period".into(), json!(10)),
+                    ("multiplier".into(), json!(3)),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "donchian-20".into(),
+                kind: IndicatorKind::DonchianChannel,
+                parameters: BTreeMap::from([("period".into(), json!(20))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "keltner-20-10-2".into(),
+                kind: IndicatorKind::KeltnerChannel,
+                parameters: BTreeMap::from([
+                    ("ema_period".into(), json!(20)),
+                    ("atr_period".into(), json!(10)),
+                    ("multiplier".into(), json!(2)),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "historical-volatility-20".into(),
+                kind: IndicatorKind::HistoricalVolatility,
+                parameters: BTreeMap::from([
+                    ("period".into(), json!(20)),
+                    ("annualization".into(), json!(525_600)),
+                    ("return_type".into(), json!("log")),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "normalized-atr-14".into(),
+                kind: IndicatorKind::NormalizedAtr,
+                parameters: BTreeMap::from([("period".into(), json!(14))]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "bollinger-width-20".into(),
+                kind: IndicatorKind::BollingerBandWidthPercentB,
+                parameters: BTreeMap::from([
+                    ("period".into(), json!(20)),
+                    ("stddev_multiplier".into(), json!(2)),
+                ]),
+                instrument_keys: None,
+            },
+            IndicatorDefinition {
+                id: "relative-volume-20".into(),
+                kind: IndicatorKind::RelativeVolume,
+                parameters: BTreeMap::from([("period".into(), json!(20))]),
+                instrument_keys: None,
+            },
+        ];
+
+        let result = analyze_scalping(&input, None).unwrap();
+        let evidence = &result.instruments[0].market_evidence;
+        let origin = input.instruments[0].bars.last().unwrap().timestamp.as_str();
+        assert_eq!(evidence.schema_version, RUST_MARKET_EVIDENCE_VERSION);
+        assert_eq!(evidence.origin_at, origin);
+        assert_eq!(evidence.observed_at, origin);
+        assert!(evidence.trend_score.is_some());
+        assert!(evidence.choppiness.is_some());
+        assert!(evidence.normalized_atr.is_some());
+        assert!(evidence.realized_volatility.is_some());
+        assert!(evidence.bollinger_width_expansion.is_some());
+        assert!(evidence.relative_volume.is_some());
+        assert!(evidence.trading_amount.is_some());
+        assert!(evidence.orderbook_depth.is_some_and(|value| value > 0.0));
+        assert!(evidence.orderbook_imbalance.is_some());
+        assert!(evidence.execution_strength.is_some());
+        assert!(evidence.liquidity_quality.is_some());
+        assert!(
+            evidence
+                .quote_freshness_ms
+                .is_some_and(|value| value == 0.0)
+        );
+
+        let encoded = serde_json::to_value(evidence).unwrap();
+        assert_eq!(encoded["schemaVersion"], RUST_MARKET_EVIDENCE_VERSION);
+        assert_eq!(encoded["originAt"], origin);
+        assert!(encoded.get("orderbookDepth").is_some());
+        assert!(!serde_json::to_string(&encoded).unwrap().contains("NaN"));
+    }
+
+    #[test]
+    fn market_evidence_rejects_future_or_non_finite_liquidity_snapshots() {
+        let mut future_book = request(ResponseMode::LatestSummary, false);
+        let last_epoch =
+            parse_timestamp(&future_book.instruments[0].bars.last().unwrap().timestamp)
+                .unwrap()
+                .epoch_millis;
+        future_book.instruments[0]
+            .orderbook
+            .as_mut()
+            .unwrap()
+            .timestamp = format_utc_timestamp(last_epoch + 60_000);
+        assert!(
+            analyze_scalping(&future_book, None)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be after the decision origin")
+        );
+
+        let mut future_trades = request(ResponseMode::LatestSummary, false);
+        future_trades.instruments[0]
+            .trade_stats
+            .as_mut()
+            .unwrap()
+            .timestamp = format_utc_timestamp(last_epoch + 60_000);
+        assert!(
+            analyze_scalping(&future_trades, None)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be after the decision origin")
+        );
+
+        let mut non_finite = request(ResponseMode::LatestSummary, false);
+        non_finite.instruments[0]
+            .orderbook
+            .as_mut()
+            .unwrap()
+            .bid_volume = f64::NAN;
+        assert!(
+            analyze_scalping(&non_finite, None)
+                .unwrap_err()
+                .to_string()
+                .contains("must be finite and non-negative")
+        );
     }
 
     #[test]

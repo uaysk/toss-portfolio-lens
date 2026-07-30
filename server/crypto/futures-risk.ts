@@ -19,7 +19,8 @@ export const PAPER_MAINTENANCE_MARGIN_COVERAGE_RATE = (
   * PAPER_MAINTENANCE_MARGIN_COVERAGE_MULTIPLIER
 );
 export const LIVE_MAX_GROSS_EXPOSURE_RATE = 1;
-export const MAX_MARGIN_USAGE_RATE = 0.2;
+export const DEFAULT_MARGIN_USAGE_RATE = 0.2;
+export const MAX_MARGIN_USAGE_RATE = 1;
 
 export type ReturnQuantile = {
   quantile: number;
@@ -164,7 +165,7 @@ export function sizeFuturesPosition(
     grossExposureLimitRate: input.mode === "paper"
       ? PAPER_MAX_GROSS_EXPOSURE_RATE
       : LIVE_MAX_GROSS_EXPOSURE_RATE,
-    marginUsageLimitRate: MAX_MARGIN_USAGE_RATE,
+    marginUsageLimitRate: DEFAULT_MARGIN_USAGE_RATE,
     liquidationBufferMultiple: 2,
   };
   const finite = [

@@ -669,10 +669,10 @@ def fincast_interval_seconds(item: InferenceSeries) -> int:
         if (
             len(deltas) != _FINCAST_CONTEXT_BARS - 1
             or len(set(deltas)) != 1
-            or deltas[0] not in (15, 30, 60)
+            or deltas[0] not in (5, 15, 30, 60)
         ):
             raise ValueError(
-                "FinCast undeclared context bars must be continuous at 15s, 30s, or 60s"
+                "FinCast undeclared context bars must be continuous at 5s, 15s, 30s, or 60s"
             )
         candle_seconds = deltas[0]
         gap_policy = "continuous"
@@ -710,6 +710,7 @@ class FinCastAdapter:
         source_manifest: dict[str, Any],
         runtime: RuntimeDevice,
     ) -> None:
+        self._settings = settings
         root = settings.model_cache_dir
         source = _source_snapshot(root, source_manifest)
         validation, artifact, precision, peak_vram_bytes = _artifact_selection(root, model_manifest)
@@ -727,6 +728,7 @@ class FinCastAdapter:
             )
         self._runtime = runtime
         self._context_bars = settings.fincast_context_bars
+        self._artifact_path = artifact
         loaded_model = _load_model(source, artifact, precision, runtime)
         post_load_free_bytes = nvml_free_bytes(settings.fincast_nvml_device_index)
         if post_load_free_bytes < settings.fincast_min_vram_headroom_bytes:

@@ -1,13 +1,20 @@
 import type { PortfolioRunKind } from "../repositories/run-repository.js";
 import { TECHNICAL_INDICATOR_ENGINE_VERSION } from "../services/technical-analysis-contract.js";
 import type { SimulationPreset } from "../simulation/contracts.js";
-import { RUST_SCANNER_EVIDENCE_VERSION } from "../simulation/technical-indicator-evidence.js";
+import {
+  RUST_MARKET_EVIDENCE_VERSION,
+  RUST_SCANNER_EVIDENCE_VERSION,
+  parseRustMarketEvidenceV2,
+} from "../simulation/technical-indicator-evidence.js";
+import type { RustMarketEvidenceV2 } from "../simulation/technical-indicator-evidence.js";
 import type { BinanceKline } from "./binance-market-data.js";
 
 export const CRYPTO_RUST_TECHNICAL_SCHEMA_VERSION = "crypto-rust-technical/v1" as const;
 export const CRYPTO_RUST_SCALPING_ENGINE_VERSION = "scalping-analysis/1.4.0" as const;
 export const CRYPTO_RUST_SCANNER_EVIDENCE_SCHEMA_VERSION =
   RUST_SCANNER_EVIDENCE_VERSION;
+export const CRYPTO_LIVE_RUST_MARKET_EVIDENCE_SCHEMA_VERSION =
+  "crypto-live-rust-market-evidence/v1" as const;
 export const CRYPTO_RUST_OUTPUT_TAIL_POINTS = 64;
 // Seven UTC days leave at least six complete 24/7 sessions plus the current
 // partial session, which is sufficient for the five-session relative-volume
@@ -212,6 +219,7 @@ export type CryptoRustTechnicalAnalysis = Readonly<{
   rationale: readonly string[];
   calculations: readonly CryptoRustTechnicalCalculation[];
   scannerEvidence: CryptoRustScannerEvidence;
+  marketEvidence: RustMarketEvidenceV2;
   input: Readonly<{
     interval: "1m";
     barCount: number;
@@ -228,7 +236,44 @@ export type CryptoRustTechnicalAnalyzeInput = Readonly<{
   symbol: string;
   bars: readonly BinanceKline[];
   preset: SimulationPreset;
+  orderbook?: Readonly<{
+    observedAt: string;
+    bidPrice: number;
+    bidQuantity: number;
+    askPrice: number;
+    askQuantity: number;
+  }>;
+  tradeStats?: Readonly<{
+    observedAt: string;
+    buyVolume: number;
+    sellVolume: number;
+  }>;
   signal?: AbortSignal;
+}>;
+
+export type CryptoLiveRustMarketEvidence = Readonly<{
+  schemaVersion: typeof CRYPTO_LIVE_RUST_MARKET_EVIDENCE_SCHEMA_VERSION;
+  technicalOriginAt: string;
+  decisionOriginAt: string;
+  microstructureObservedAt: string | null;
+  marketEvidence: RustMarketEvidenceV2;
+}>;
+
+export type CryptoLiveRustMarketEvidenceInput = Readonly<{
+  baseEvidence: RustMarketEvidenceV2;
+  decisionOriginAt: string;
+  bookTicker?: Readonly<{
+    observedAt: string;
+    bidPrice: number;
+    bidQuantity: number;
+    askPrice: number;
+    askQuantity: number;
+  }>;
+  tradeStats?: Readonly<{
+    observedAt: string;
+    buyVolume: number;
+    sellVolume: number;
+  }>;
 }>;
 
 type PreparedBar = Readonly<{
@@ -243,6 +288,250 @@ type PreparedBar = Readonly<{
   complete: true;
   epochMillis: number;
 }>;
+
+const LIVE_MARKET_GATE_NAMES = new Set([
+  "SPREAD",
+  "SPREAD_UNAVAILABLE",
+  "LIQUIDITY",
+  "LIQUIDITY_UNAVAILABLE",
+  "QUOTE_FRESHNESS",
+  "QUOTE_STALE",
+  "QUOTE_FRESHNESS_UNAVAILABLE",
+]);
+
+const LIVE_MARKET_FIELDS = Object.freeze([
+  "spreadBps",
+  "orderbookDepth",
+  "orderbookImbalance",
+  "executionStrength",
+  "liquidityQuality",
+  "exitRisk",
+  "quoteFreshnessMs",
+] as const);
+
+function roundEvidence(value: number, digits: number): number {
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
+}
+
+function clampEvidence(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function canonicalEpoch(value: string, label: string): number {
+  const epoch = Date.parse(value);
+  if (!Number.isFinite(epoch) || new Date(epoch).toISOString() !== value) {
+    throw new Error(`Crypto live Rust ${label} must be a canonical UTC instant.`);
+  }
+  return epoch;
+}
+
+function liveMarketGateProjection(input: {
+  base: RustMarketEvidenceV2;
+  spreadBps: number | null;
+  liquidityQuality: number | null;
+  quoteFreshnessMs: number | null;
+}): Pick<RustMarketEvidenceV2, "passedGates" | "blockedGates"> {
+  const passedGates = input.base.passedGates.filter(
+    (gate) => !LIVE_MARKET_GATE_NAMES.has(gate),
+  );
+  const blockedGates = input.base.blockedGates.filter(
+    (gate) => !LIVE_MARKET_GATE_NAMES.has(gate),
+  );
+  if (input.spreadBps === null) blockedGates.push("SPREAD_UNAVAILABLE");
+  else if (input.spreadBps <= 35) passedGates.push("SPREAD");
+  else blockedGates.push("SPREAD");
+  if (input.liquidityQuality === null) blockedGates.push("LIQUIDITY_UNAVAILABLE");
+  else if (input.liquidityQuality >= 0.25) passedGates.push("LIQUIDITY");
+  else blockedGates.push("LIQUIDITY");
+  if (input.quoteFreshnessMs === null) {
+    blockedGates.push("QUOTE_FRESHNESS_UNAVAILABLE");
+  } else if (input.quoteFreshnessMs <= 60_000) {
+    passedGates.push("QUOTE_FRESHNESS");
+  } else {
+    blockedGates.push("QUOTE_STALE");
+  }
+  return {
+    passedGates: [...new Set(passedGates)],
+    blockedGates: [...new Set(blockedGates)],
+  };
+}
+
+/**
+ * Projects cached finalized-bar Rust indicators onto a live decision origin.
+ *
+ * The technical values remain the Rust worker's immutable, finalized-1m
+ * result. Only top-of-book and aggregate-trade fields are replaced with
+ * snapshots observed no later than the decision origin. The calculations and
+ * gate thresholds intentionally mirror worker/rust/src/scalping.rs.
+ */
+export function composeCryptoLiveRustMarketEvidence(
+  input: CryptoLiveRustMarketEvidenceInput,
+): CryptoLiveRustMarketEvidence {
+  const decisionEpoch = canonicalEpoch(input.decisionOriginAt, "decisionOriginAt");
+  const technicalEpoch = canonicalEpoch(input.baseEvidence.originAt, "technicalOriginAt");
+  const baseObservedEpoch = canonicalEpoch(
+    input.baseEvidence.observedAt,
+    "baseEvidence.observedAt",
+  );
+  if (technicalEpoch > decisionEpoch || baseObservedEpoch > decisionEpoch) {
+    throw new Error("Crypto live Rust base evidence exceeds the decision origin.");
+  }
+
+  let spreadBps = input.baseEvidence.spreadBps;
+  let orderbookDepth = input.baseEvidence.orderbookDepth;
+  let orderbookImbalance = input.baseEvidence.orderbookImbalance;
+  let quoteObservedEpoch = input.baseEvidence.quoteFreshnessMs === null
+    ? undefined
+    : technicalEpoch - input.baseEvidence.quoteFreshnessMs;
+  if (input.bookTicker) {
+    const observedEpoch = canonicalEpoch(input.bookTicker.observedAt, "bookTicker.observedAt");
+    if (observedEpoch > decisionEpoch) {
+      throw new Error("Crypto live Rust book ticker exceeds the decision origin.");
+    }
+    const {
+      bidPrice,
+      bidQuantity,
+      askPrice,
+      askQuantity,
+    } = input.bookTicker;
+    if (
+      !Number.isFinite(bidPrice)
+      || bidPrice <= 0
+      || !Number.isFinite(askPrice)
+      || askPrice < bidPrice
+      || !Number.isFinite(bidQuantity)
+      || bidQuantity < 0
+      || !Number.isFinite(askQuantity)
+      || askQuantity < 0
+    ) {
+      throw new Error("Crypto live Rust book ticker values are invalid.");
+    }
+    const midpoint = (bidPrice + askPrice) / 2;
+    const totalQuantity = bidQuantity + askQuantity;
+    spreadBps = roundEvidence((askPrice - bidPrice) / midpoint * 10_000, 8);
+    orderbookDepth = roundEvidence(totalQuantity * midpoint, 4);
+    orderbookImbalance = totalQuantity > 0
+      ? roundEvidence((bidQuantity - askQuantity) / totalQuantity, 8)
+      : null;
+    quoteObservedEpoch = observedEpoch;
+  }
+  const quoteFreshnessMs = quoteObservedEpoch === undefined
+    ? null
+    : decisionEpoch - quoteObservedEpoch;
+
+  let executionStrength = input.baseEvidence.executionStrength;
+  let tradeObservedEpoch: number | undefined;
+  if (input.tradeStats) {
+    tradeObservedEpoch = canonicalEpoch(input.tradeStats.observedAt, "tradeStats.observedAt");
+    if (tradeObservedEpoch > decisionEpoch) {
+      throw new Error("Crypto live Rust trade stats exceed the decision origin.");
+    }
+    const { buyVolume, sellVolume } = input.tradeStats;
+    if (
+      !Number.isFinite(buyVolume)
+      || buyVolume < 0
+      || !Number.isFinite(sellVolume)
+      || sellVolume < 0
+    ) {
+      throw new Error("Crypto live Rust trade stats values are invalid.");
+    }
+    const totalVolume = buyVolume + sellVolume;
+    executionStrength = totalVolume > 0
+      ? roundEvidence((buyVolume - sellVolume) / totalVolume, 8)
+      : null;
+  }
+
+  const liquidityComponents: number[] = [];
+  if (spreadBps !== null) {
+    liquidityComponents.push(clampEvidence(1 - spreadBps / 50, 0, 1));
+  }
+  if (orderbookDepth !== null) {
+    liquidityComponents.push(clampEvidence(orderbookDepth / 250_000, 0, 1));
+  }
+  if (input.baseEvidence.relativeVolume !== null) {
+    liquidityComponents.push(clampEvidence(input.baseEvidence.relativeVolume, 0, 1));
+  }
+  const liquidityQuality = liquidityComponents.length
+    ? roundEvidence(
+      liquidityComponents.reduce((sum, value) => sum + value, 0)
+        / liquidityComponents.length,
+      8,
+    )
+    : null;
+
+  const exitComponents: number[] = [];
+  if (input.baseEvidence.normalizedAtr !== null) {
+    exitComponents.push(clampEvidence(input.baseEvidence.normalizedAtr / 10, 0, 1));
+  }
+  if (input.baseEvidence.choppiness !== null) {
+    exitComponents.push(clampEvidence(input.baseEvidence.choppiness / 100, 0, 1));
+  }
+  if (spreadBps !== null) {
+    exitComponents.push(clampEvidence(spreadBps / 50, 0, 1));
+  }
+  const exitRisk = exitComponents.length
+    ? roundEvidence(
+      exitComponents.reduce((sum, value) => sum + value, 0) / exitComponents.length,
+      8,
+    )
+    : null;
+  const gates = liveMarketGateProjection({
+    base: input.baseEvidence,
+    spreadBps,
+    liquidityQuality,
+    quoteFreshnessMs,
+  });
+  const unavailableFields = new Set(input.baseEvidence.unavailableFields);
+  const liveValues = {
+    spreadBps,
+    orderbookDepth,
+    orderbookImbalance,
+    executionStrength,
+    liquidityQuality,
+    exitRisk,
+    quoteFreshnessMs,
+  };
+  for (const field of LIVE_MARKET_FIELDS) {
+    if (liveValues[field] === null) unavailableFields.add(field);
+    else unavailableFields.delete(field);
+  }
+  const microstructureObservedEpoch = Math.max(
+    ...(quoteObservedEpoch === undefined ? [] : [quoteObservedEpoch]),
+    ...(tradeObservedEpoch === undefined ? [] : [tradeObservedEpoch]),
+  );
+  const observedEpoch = Math.max(
+    baseObservedEpoch,
+    ...(Number.isFinite(microstructureObservedEpoch)
+      ? [microstructureObservedEpoch]
+      : []),
+  );
+  const marketEvidence: RustMarketEvidenceV2 = {
+    ...input.baseEvidence,
+    schemaVersion: RUST_MARKET_EVIDENCE_VERSION,
+    spreadBps,
+    orderbookDepth,
+    orderbookImbalance,
+    executionStrength,
+    liquidityQuality,
+    exitRisk,
+    quoteFreshnessMs,
+    passedGates: gates.passedGates,
+    blockedGates: gates.blockedGates,
+    unavailableFields: [...unavailableFields],
+    originAt: input.decisionOriginAt,
+    observedAt: new Date(observedEpoch).toISOString(),
+  };
+  return {
+    schemaVersion: CRYPTO_LIVE_RUST_MARKET_EVIDENCE_SCHEMA_VERSION,
+    technicalOriginAt: input.baseEvidence.originAt,
+    decisionOriginAt: input.decisionOriginAt,
+    microstructureObservedAt: Number.isFinite(microstructureObservedEpoch)
+      ? new Date(microstructureObservedEpoch).toISOString()
+      : null,
+    marketEvidence,
+  };
+}
 
 function record(value: unknown, label: string): JsonRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -843,6 +1132,10 @@ function parseResult(
     throw new Error("Crypto Rust data-quality bar count does not match the input.");
   }
   const parsedScannerEvidence = scannerEvidence(instrument.scanner_metrics, originAt);
+  const marketEvidence = parseRustMarketEvidenceV2(instrument.market_evidence);
+  if (!marketEvidence || marketEvidence.originAt !== originAt) {
+    throw new Error("Crypto Rust market evidence v2 is missing or violates the origin boundary.");
+  }
 
   return {
     schemaVersion: CRYPTO_RUST_TECHNICAL_SCHEMA_VERSION,
@@ -894,6 +1187,7 @@ function parseResult(
     rationale: boundedStrings(latest.rationale, "signal.rationale", 100),
     calculations,
     scannerEvidence: parsedScannerEvidence,
+    marketEvidence,
     input: {
       interval: "1m",
       barCount: bars.length,
@@ -914,6 +1208,36 @@ export class CryptoRustTechnicalAnalyzer {
     const symbol = normalizeSymbol(input.symbol);
     const bars = prepareBars(symbol, input.bars);
     const sessions = confirmedUtcSessions(bars);
+    const originAt = bars.at(-1)!.timestamp;
+    const validateCausalSnapshot = (observedAt: string, label: string): string => {
+      const parsed = isoInstant(observedAt, label);
+      if (Date.parse(parsed) > Date.parse(originAt)) {
+        throw new Error(`Crypto Rust ${label} must not be after the decision origin.`);
+      }
+      return parsed;
+    };
+    const orderbook = input.orderbook
+      ? {
+        timestamp: validateCausalSnapshot(
+          input.orderbook.observedAt,
+          "orderbook.observedAt",
+        ),
+        bid_volume: finite(input.orderbook.bidQuantity, "orderbook.bidQuantity"),
+        ask_volume: finite(input.orderbook.askQuantity, "orderbook.askQuantity"),
+        best_bid: finite(input.orderbook.bidPrice, "orderbook.bidPrice"),
+        best_ask: finite(input.orderbook.askPrice, "orderbook.askPrice"),
+      }
+      : undefined;
+    const tradeStats = input.tradeStats
+      ? {
+        timestamp: validateCausalSnapshot(
+          input.tradeStats.observedAt,
+          "tradeStats.observedAt",
+        ),
+        buy_volume: finite(input.tradeStats.buyVolume, "tradeStats.buyVolume"),
+        sell_volume: finite(input.tradeStats.sellVolume, "tradeStats.sellVolume"),
+      }
+      : undefined;
     const result = await this.rust.compute<unknown>(
       "scalping_analysis",
       {
@@ -933,6 +1257,8 @@ export class CryptoRustTechnicalAnalyzer {
             complete_session_dates: sessions.complete,
             session_windows: [],
             session_window_overrides: [],
+            ...(orderbook ? { orderbook } : {}),
+            ...(tradeStats ? { trade_stats: tradeStats } : {}),
           }],
           indicators: CRYPTO_RUST_INDICATORS,
           relative_volume_lookback_sessions: 5,

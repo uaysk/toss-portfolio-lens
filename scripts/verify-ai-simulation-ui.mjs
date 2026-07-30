@@ -89,6 +89,15 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     ? request.selection.symbols
     : ["BTCUSDT", "ETHUSDT"].slice(0, request.selection.symbolCount);
   const modelIdentity = {
+    chronos2: {
+      modelId: "amazon/chronos-2",
+      modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+      sourceRevision: "chronos-forecasting-v2.3.1",
+      loaderVersion: "chronos-forecasting-2.3.1",
+      precision: "fp32",
+      latencyMs: 138,
+      peakVramMb: 5_120,
+    },
     kronos_base: {
       modelId: "NeoQuasar/Kronos-base",
       modelRevision: "kronos-ui-revision",
@@ -292,6 +301,9 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     });
   });
   return {
+    schemaVersion: "ai-paper-simulation/v8",
+    simulationCase: request.simulationCase,
+    modelPlan: request.modelPlan,
     phase,
     startedAt: "2026-07-24T00:20:00.000Z",
     expiresAt: "2026-07-24T02:20:00.000Z",
@@ -394,6 +406,8 @@ function snapshot({
   }
   const pairSymbols = {
     "qqq-tqqq-sqqq": ["QQQ", "TQQQ", "SQQQ"],
+    "semiconductor-soxl-soxs": ["SOXX", "SOXL", "SOXS"],
+    "spy-spxl-spxs": ["SPY", "SPXL", "SPXS"],
     "smh-soxl-soxs": ["SMH", "SOXL", "SOXS"],
   };
   const symbols = request.strategy?.mode === "pair"
@@ -687,6 +701,15 @@ export async function routeSimulationUiApi(page) {
             signedReadSucceeded: true,
             executionGates: { paper: true, testnet: false, live: false },
             workers: {
+              chronos2: {
+                lane: "chronos2",
+                status: "ready",
+                available: true,
+                modelId: "amazon/chronos-2",
+                modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+                precision: "fp32",
+                latencyMs: 138,
+              },
               kronos_base: {
                 lane: "kronos_base",
                 status: "ready",
@@ -707,12 +730,31 @@ export async function routeSimulationUiApi(page) {
           },
           pairStrategy: {
             enabled: true,
-            catalogVersion: "scalping-pair-catalog/v2",
+            catalogVersion: "scalping-pair-catalog/v3",
             pairs: [{
-              pairId: "sndk-snxx-sndq",
-              signalSymbol: "SNDK",
-              bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
-              bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
+              pairId: "qqq-tqqq-sqqq",
+              displaySignalSymbol: "QQQ",
+              modelTargetSymbol: "QQQ",
+              auxiliarySymbols: [],
+              signalSymbol: "QQQ",
+              bull: { executionSymbol: "TQQQ", leverageMultiplier: 3 },
+              bear: { executionSymbol: "SQQQ", leverageMultiplier: -3 },
+            }, {
+              pairId: "semiconductor-soxl-soxs",
+              displaySignalSymbol: "SMH",
+              modelTargetSymbol: "SOXX",
+              auxiliarySymbols: ["SMH", "QQQ"],
+              signalSymbol: "SOXX",
+              bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
+              bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
+            }, {
+              pairId: "spy-spxl-spxs",
+              displaySignalSymbol: "SPY",
+              modelTargetSymbol: "SPY",
+              auxiliarySymbols: [],
+              signalSymbol: "SPY",
+              bull: { executionSymbol: "SPXL", leverageMultiplier: 3 },
+              bear: { executionSymbol: "SPXS", leverageMultiplier: -3 },
             }],
           },
           costProfiles: {
@@ -1105,6 +1147,12 @@ async function verify(browser, baseUrl, viewport, theme) {
   let cryptoResultScreenshot;
   let inlineForecastScreenshot;
   let pairLayoutScreenshot;
+  let selectedCount = 0;
+  let chartCount = 0;
+  let liveForecastCount = 0;
+  let scrollMetrics = {};
+  let zeroSize = [];
+  let overflow = 0;
   try {
     await page.goto(`${baseUrl}/?simulation-ui=${viewport.width}#simulation`, {
       waitUntil: "domcontentloaded",
@@ -1120,7 +1168,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     );
     await page.getByRole("heading", { name: "시뮬레이션", exact: true }).waitFor();
     await page.locator("[data-ai-simulation]").waitFor();
-    await page.getByText("실주문 없음, 투자 지시 아님, 다음 유효 체결만.", { exact: true }).waitFor();
+    await page.getByText("선물 paper 전용 · 실주문 capability false", { exact: true }).waitFor();
     const historyPanel = page.locator("[data-simulation-history]");
     await historyPanel.waitFor();
     await historyPanel.locator(`[data-simulation-history-item="${state.archivedRunId}"]`).waitFor();
@@ -1149,15 +1197,29 @@ async function verify(browser, baseUrl, viewport, theme) {
     ));
     check(actualTheme === theme, `${viewport.width}px 테마가 ${theme}가 아니라 ${actualTheme}입니다.`);
 
-    const assetClassControl = page.getByRole("radiogroup", { name: "시뮬레이션 자산군" });
-    await assetClassControl.getByRole("radio", { name: /암호화폐/ }).click();
-    await page.getByRole("combobox", { name: "암호화폐 종목 선택 방식" }).waitFor();
+    const assetClassControl = page.getByRole("tablist", { name: "시뮬레이션 전략 케이스" });
+    const caseTabs = assetClassControl.getByRole("tab");
+    check(await caseTabs.count() === 3, "시뮬레이션 최상위 전략 케이스가 3개가 아닙니다.");
+    await assetClassControl.getByRole("tab", { name: /BTC·ETH/ }).waitFor();
+    await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ }).waitFor();
+    await assetClassControl.getByRole("tab", { name: /미국 ETF 페어/ }).waitFor();
+    await assetClassControl.getByRole("tab", { name: /BTC·ETH/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ })
+      .waitFor({ state: "attached" });
+    check(
+      await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ })
+        .getAttribute("aria-selected") === "true",
+      "전략 케이스 탭의 ArrowRight 키보드 전환이 동작하지 않습니다.",
+    );
+    await page.keyboard.press("ArrowLeft");
+    await page.getByRole("radiogroup", { name: "BTC ETH 실행 종목" }).waitFor();
     await page.getByRole("combobox", { name: "암호화폐 판단 프리셋" }).waitFor();
     await page.getByRole("slider", { name: "암호화폐 공격 방어 성향" }).waitFor();
-    await page.getByRole("combobox", { name: "암호화폐 scanner 기준" }).waitFor();
-    await page.getByRole("combobox", { name: "암호화폐 선정 계약 수" }).waitFor();
-    await page.locator('[data-crypto-candidate="BTCUSDT"][data-candidate-selected="true"]')
-      .waitFor({ timeout: 10_000 });
+    await page.locator('[data-model-role="primary"][data-model-lane="chronos2"]').waitFor();
+    await page.locator('[data-model-role="veto"][data-model-lane="fincast"]').waitFor();
+    await page.locator('[data-model-role="primary"][data-model-lane="fincast"]').waitFor();
+    await page.locator('[data-model-role="shadow"][data-model-lane="chronos2"]').waitFor();
     const cryptoRiskLabels = [
       "암호화폐 거래당 위험",
       "암호화폐 UTC 일손실 중단선",
@@ -1179,28 +1241,13 @@ async function verify(browser, baseUrl, viewport, theme) {
       name: "암호화폐 최대 레버리지",
       exact: true,
     });
-    await page.getByRole("combobox", { name: "암호화폐 선정 계약 수" }).click();
-    await page.getByRole("option", { name: "2계약 · 독립 비교", exact: true }).click();
-    await page.locator('[data-crypto-candidate="ETHUSDT"][data-candidate-selected="true"]')
-      .waitFor({ timeout: 10_000 });
-    await page.locator('[data-model-lane-toggle="fincast"]').click();
-    await page.locator('[data-model-lane-toggle="fincast"][aria-pressed="true"]').waitFor();
-    const fincastCandleSelect = page.getByRole("combobox", {
-      name: "FinCast 모델 입력 봉 간격",
+    const cryptoMarginUsageLimit = page.getByRole("spinbutton", {
+      name: "암호화폐 증거금 사용률 상한",
+      exact: true,
     });
-    check(await fincastCandleSelect.isDisabled(), "모델 비교 중 FinCast 서브분봉 선택이 열려 있습니다.");
-    await page.locator('[data-model-lane-toggle="kronos_base"]').click();
-    await page.locator('[data-model-lane-toggle="kronos_base"][aria-pressed="false"]').waitFor();
-    check(await fincastCandleSelect.isEnabled(), "FinCast 단독 실행에서 서브분봉 선택이 비활성입니다.");
-    await fincastCandleSelect.click();
-    await page.getByRole("option", { name: "30초봉", exact: true }).click();
-    check(await fincastCandleSelect.textContent() === "30초봉", "FinCast 30초봉 선택이 반영되지 않았습니다.");
-    await page.locator('[data-model-lane-toggle="kronos_base"]').click();
-    await page.locator('[data-model-lane-toggle="kronos_base"][aria-pressed="true"]').waitFor();
-    check(await fincastCandleSelect.isDisabled(), "Kronos 비교 복귀 후 FinCast 서브분봉이 열려 있습니다.");
-    check(await fincastCandleSelect.textContent() === "1분봉", "Kronos 비교 복귀 시 공통 1분봉으로 재설정되지 않았습니다.");
     await cryptoRiskPerTrade.fill("0.4");
     await cryptoMaximumLeverage.fill("12");
+    await cryptoMarginUsageLimit.fill("100");
     check(
       await cryptoRiskPerTrade.inputValue() === "0.4",
       "암호화폐 거래당 위험 변경값이 제어 상태에 반영되지 않았습니다.",
@@ -1208,6 +1255,11 @@ async function verify(browser, baseUrl, viewport, theme) {
     check(
       await cryptoMaximumLeverage.inputValue() === "12",
       "암호화폐 최대 레버리지 변경값이 제어 상태에 반영되지 않았습니다.",
+    );
+    check(
+      await cryptoMarginUsageLimit.getAttribute("max") === "100"
+      && await cryptoMarginUsageLimit.inputValue() === "100",
+      "암호화폐 증거금 사용률 상한을 100%까지 설정할 수 없습니다.",
     );
     await mkdir(screenshotDirectory, { recursive: true });
     cryptoSetupScreenshot = path.join(
@@ -1225,9 +1277,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       return button instanceof HTMLButtonElement && !button.disabled;
     });
     await cryptoStartButton.click();
-    await page.locator("[data-simulation-run]")
-      .getByText("가상 원장을 준비하고 있습니다.", { exact: true })
-      .waitFor({ timeout: 10_000 });
+    await page.locator("[data-simulation-run]").waitFor({ timeout: 10_000 });
     check(state.starts.length === 1, "암호화폐 시작 한 번에 정확히 하나의 run이 생성되지 않았습니다.");
     const cryptoRequest = state.starts[0];
     const cryptoRunId = [...state.active.keys()][0];
@@ -1239,22 +1289,36 @@ async function verify(browser, baseUrl, viewport, theme) {
         quoteAsset: "USDT",
         contractType: "PERPETUAL",
       }),
-      "암호화폐 v7 market union이 요청 body에 보존되지 않았습니다.",
+      "암호화폐 v8 market union이 요청 body에 보존되지 않았습니다.",
     );
+    check(cryptoRequest?.contractVersion === "ai-paper-simulation/v8", "암호화폐 요청이 v8이 아닙니다.");
+    check(cryptoRequest?.simulationCase === "btc_eth", "BTC·ETH simulationCase가 누락됐습니다.");
     check(!("marketCountry" in cryptoRequest), "암호화폐 요청에 legacy marketCountry가 포함됐습니다.");
     check(cryptoRequest?.initialCash === 10_000, "암호화폐 시작 USDT가 요청 body에 보존되지 않았습니다.");
     check(cryptoRequest?.durationMinutes === 120, "암호화폐 shadow 기간이 요청 body에 보존되지 않았습니다.");
     check(
       JSON.stringify(cryptoRequest?.selection) === JSON.stringify({
-        mode: "auto",
-        criterion: "volatility",
-        symbolCount: 2,
+        mode: "manual",
+        symbols: ["BTCUSDT", "ETHUSDT"],
       }),
-      "암호화폐 2계약 자동 선정 설정이 요청 body에 보존되지 않았습니다.",
+      "BTC·ETH 2계약 직접 선택 설정이 요청 body에 보존되지 않았습니다.",
     );
     check(
-      JSON.stringify(cryptoRequest?.modelLanes) === JSON.stringify(["kronos_base", "fincast"]),
-      "암호화폐 독립 모델 lane 선택이 요청 body에 보존되지 않았습니다.",
+      JSON.stringify(cryptoRequest?.modelLanes) === JSON.stringify(["chronos2", "fincast"]),
+      "암호화폐 역할 모델 lane 선택이 요청 body에 보존되지 않았습니다.",
+    );
+    check(
+      cryptoRequest?.modelPlan?.some((entry) => (
+        entry.symbol === "BTCUSDT"
+        && entry.modelLane === "chronos2"
+        && entry.role === "primary"
+      ))
+      && cryptoRequest?.modelPlan?.some((entry) => (
+        entry.symbol === "ETHUSDT"
+        && entry.modelLane === "chronos2"
+        && entry.role === "shadow"
+      )),
+      "BTC·ETH 종목별 primary/shadow modelPlan이 요청 body에 없습니다.",
     );
     check(cryptoRequest?.execution?.mode === "paper", "암호화폐 실행 mode가 paper가 아닙니다.");
     check(
@@ -1263,7 +1327,7 @@ async function verify(browser, baseUrl, viewport, theme) {
         dailyLossLimitRate: 0.03,
         maximumLeverage: 12,
         grossExposureLimitRate: 1.5,
-        marginUsageLimitRate: 0.2,
+        marginUsageLimitRate: 1,
         liquidationBufferMultiple: 2,
       }),
       `암호화폐 hard-envelope 위험 한도가 요청 body와 다릅니다: ${JSON.stringify(cryptoRequest?.riskLimits)}`,
@@ -1283,9 +1347,9 @@ async function verify(browser, baseUrl, viewport, theme) {
     await cryptoRunPanel.locator('[data-futures-position="ETHUSDT"][data-futures-position-side="short"]').waitFor();
     await cryptoRunPanel.getByText("BTCUSDT · 롱 진입", { exact: true }).waitFor();
     await cryptoRunPanel.getByText("ETHUSDT · 숏 진입", { exact: true }).waitFor();
-    await cryptoRunPanel.locator('[data-model-lane="kronos_base"]').waitFor();
+    await cryptoRunPanel.locator('[data-model-lane="chronos2"]').waitFor();
     await cryptoRunPanel.locator('[data-model-lane="fincast"]').waitFor();
-    await cryptoRunPanel.locator('[data-model-lane-provenance="kronos_base"]').waitFor();
+    await cryptoRunPanel.locator('[data-model-lane-provenance="chronos2"]').waitFor();
     await cryptoRunPanel.locator('[data-model-lane-provenance="fincast"]').waitFor();
     await cryptoRunPanel.getByText("Vincent05R/FinCast", { exact: false }).first().waitFor();
     await cryptoRunPanel.locator(
@@ -1348,7 +1412,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       document.querySelector('[data-ai-simulation-chart="BTCUSDT"]')
         ?.getAttribute("data-ai-simulation-chart-expanded") === "false"
     ));
-    for (const lane of ["kronos_base", "fincast"]) {
+    for (const lane of ["chronos2", "fincast"]) {
       await cryptoCharts.first().locator(
         `[data-ai-simulation-model-forecast="${lane}"][data-ai-simulation-model-forecast-origin="exact-final"]`,
       ).waitFor();
@@ -1387,7 +1451,7 @@ async function verify(browser, baseUrl, viewport, theme) {
           endX: end?.x,
         };
       }))
-    ), ["kronos_base", "fincast"]);
+    ), ["chronos2", "fincast"]);
     for (const geometry of cryptoForecastGeometry) {
       check(
         geometry.lineD.trim().length > 0 && geometry.bandD.trim().length > 0,
@@ -1423,7 +1487,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     const cryptoHistoryReport = historyPanel.locator(`[data-simulation-report="${cryptoRunId}"]`);
     await cryptoHistoryReport.waitFor({ timeout: 10_000 });
     await cryptoHistoryReport.locator("[data-futures-ledger]").waitFor();
-    await cryptoHistoryReport.locator('[data-model-lane-provenance="kronos_base"]').waitFor();
+    await cryptoHistoryReport.locator('[data-model-lane-provenance="chronos2"]').waitFor();
     await cryptoHistoryReport.locator('[data-model-lane-provenance="fincast"]').waitFor();
     check(
       await cryptoHistoryReport.locator("[data-simulation-report-charts] [data-ai-simulation-chart]").count() === 2,
@@ -1431,8 +1495,13 @@ async function verify(browser, baseUrl, viewport, theme) {
     );
     await cryptoHistoryReport.getByText("BTCUSDT · 롱 진입", { exact: true }).waitFor();
     await cryptoHistoryReport.getByText("ETHUSDT · 숏 진입", { exact: true }).waitFor();
-    await cryptoHistoryReport.getByText("Kronos-base · FinCast lane·판단 주기", { exact: true }).waitFor();
+    await cryptoHistoryReport.getByText(
+      "Chronos-2 · Primary · FinCast · Main lane·판단 주기",
+      { exact: true },
+    ).waitFor();
 
+    const runLegacySingleStockRegression = false;
+    if (runLegacySingleStockRegression) {
     await assetClassControl.getByRole("radio", { name: /주식/ }).click();
     await page.locator('[data-simulation-asset-class="stock"]').waitFor();
 
@@ -1730,6 +1799,111 @@ async function verify(browser, baseUrl, viewport, theme) {
       state.cancels.length === cancelsBeforeStock + 2,
       "각 주식 테스트 중단이 정확히 한 번씩 cancel API를 호출하지 않았습니다.",
     );
+    }
+
+    const startsBeforeEtf = state.starts.length;
+    const cancelsBeforeEtf = state.cancels.length;
+    await assetClassControl.getByRole("tab", { name: /미국 ETF 페어/ }).click();
+    await page.getByText("실주문 없음, 투자 지시 아님, 다음 유효 체결만.", { exact: true }).waitFor();
+    await page.locator('[data-model-role="primary"]').filter({ hasText: "Chronos-2" }).waitFor();
+    await page.locator('[data-model-role="shadow"]').filter({ hasText: "FinCast" }).waitFor();
+    const etfPairSelect = page.getByRole("combobox", { name: "미국 페어 카탈로그" });
+    await etfPairSelect.waitFor();
+    await etfPairSelect.click();
+    for (const label of [
+      "QQQ → TQQQ / SQQQ",
+      "SMH/반도체 · SOXX → SOXL / SOXS",
+      "SPY → SPXL / SPXS",
+    ]) {
+      await page.getByRole("option", { name: label, exact: true }).waitFor();
+    }
+    await page.getByRole("option", { name: "SPY → SPXL / SPXS", exact: true }).click();
+    const spyMapping = page.locator('[data-etf-pair-mapping="spy-spxl-spxs"]');
+    await spyMapping.waitFor();
+    await spyMapping.getByText(/SPY \/ SPY/).waitFor();
+    await spyMapping.getByText(/SPXL \/ SPXS/).waitFor();
+    const etfStartButton = page.getByRole("button", {
+      name: "AI 시뮬레이션 시작",
+      exact: true,
+    });
+    await etfStartButton.click();
+    await page.locator("[data-simulation-run]")
+      .getByText("시뮬레이션 진행", { exact: true })
+      .waitFor({ timeout: 10_000 });
+    check(state.starts.length === startsBeforeEtf + 1, "ETF 시작이 정확히 한 run을 만들지 않았습니다.");
+    const etfRequest = state.starts.at(-1);
+    check(etfRequest?.contractVersion === "ai-paper-simulation/v8", "ETF 요청이 v8이 아닙니다.");
+    check(etfRequest?.simulationCase === "us_etf_pair", "ETF simulationCase가 누락됐습니다.");
+    check(etfRequest?.strategy?.pairId === "spy-spxl-spxs", "SPY 페어 선택이 payload에 없습니다.");
+    check(
+      JSON.stringify(etfRequest?.modelLanes) === JSON.stringify(["chronos2", "fincast"]),
+      "ETF Chronos-2 primary/FinCast shadow lane이 payload에 없습니다.",
+    );
+    check(
+      etfRequest?.modelPlan?.some((entry) => (
+        entry.modelLane === "chronos2" && entry.role === "primary"
+      ))
+      && etfRequest?.modelPlan?.some((entry) => (
+        entry.modelLane === "fincast" && entry.role === "shadow"
+      )),
+      "ETF 역할 modelPlan이 payload에 없습니다.",
+    );
+    const pairChartGrid = page.locator(
+      '[data-simulation-charts][data-simulation-chart-layout="pair-primary-full-width"]',
+    );
+    await pairChartGrid.waitFor();
+    const pairCharts = pairChartGrid.locator("[data-ai-simulation-chart]");
+    chartCount = await pairCharts.count();
+    selectedCount = await page.locator("[data-simulation-selected] article").count();
+    check(chartCount === 3, "SPY 페어 차트가 3개가 아닙니다.");
+    check(
+      JSON.stringify(await pairCharts.evaluateAll((charts) => charts.map(
+        (chart) => chart.getAttribute("data-ai-simulation-chart"),
+      ))) === JSON.stringify(["SPY", "SPXL", "SPXS"]),
+      "SPY model target과 execution leg 차트 순서가 다릅니다.",
+    );
+    pairLayoutScreenshot = path.join(
+      screenshotDirectory,
+      `${viewport.width}x${viewport.height}-${theme}-pair-layout.png`,
+    );
+    await pairChartGrid.screenshot({ path: pairLayoutScreenshot, animations: "disabled" });
+    const scrollSelectors = [
+      ["trades", "[data-simulation-trades-scroll]"],
+      ["decisions", "[data-simulation-decisions-scroll]"],
+    ];
+    for (const [name, selector] of scrollSelectors) {
+      const area = page.locator(selector);
+      await area.waitFor();
+      scrollMetrics[name] = await area.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        tabIndex: element.tabIndex,
+      }));
+    }
+    zeroSize = await page.locator([
+      "[data-simulation-run]",
+      "[data-simulation-selected]",
+      "[data-simulation-charts]",
+      "[data-simulation-trades]",
+      "[data-simulation-decisions]",
+    ].join(",")).evaluateAll((items) => items.map((item) => ({
+      marker: Array.from(item.attributes)
+        .find((attribute) => attribute.name.startsWith("data-simulation"))?.name,
+      width: item.getBoundingClientRect().width,
+      height: item.getBoundingClientRect().height,
+    })).filter(({ width, height }) => width <= 0 || height <= 0));
+    overflow = await page.evaluate(() => Math.max(
+      0,
+      document.documentElement.scrollWidth - window.innerWidth,
+      document.body.scrollWidth - window.innerWidth,
+    ));
+    check(zeroSize.length === 0, `ETF 화면에 zero-size 결과 요소가 있습니다: ${JSON.stringify(zeroSize)}`);
+    check(overflow === 0, `${viewport.width}px ETF 화면 가로 overflow ${overflow}px`);
+    await page.getByRole("button", { name: "테스트 중단", exact: true }).click();
+    await page.locator("[data-simulation-run]")
+      .getByText("취소됨", { exact: true })
+      .waitFor({ timeout: 10_000 });
+    check(state.cancels.length === cancelsBeforeEtf + 1, "ETF cancel API가 정확히 한 번 호출되지 않았습니다.");
     check(
       Object.values(errors).every((items) => items.length === 0),
       `브라우저 오류: ${JSON.stringify(errors)}`,

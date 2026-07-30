@@ -255,8 +255,12 @@ const cryptoFincastClient = new AiComputeClient(config.cryptoAi.fincast);
 const cryptoKronosClient = config.cryptoAi.kronos
   ? new AiComputeClient(config.cryptoAi.kronos)
   : undefined;
+const cryptoChronos2Client = config.cryptoAi.chronos2
+  ? new AiComputeClient(config.cryptoAi.chronos2)
+  : undefined;
 cryptoFincastClient.start();
 cryptoKronosClient?.start();
+cryptoChronos2Client?.start();
 const cryptoRuntimeSnapshots = new Map<string, unknown>();
 let binanceRulesCache:
   | { loadedAt: number; rules: ReturnType<typeof normalizeBinanceUniverse> }
@@ -291,13 +295,14 @@ const cryptoPaperRuntime = new CryptoPaperRuntime({
   laneClients: {
     fincast: cryptoFincastClient,
     ...(cryptoKronosClient ? { kronos_base: cryptoKronosClient } : {}),
+    ...(cryptoChronos2Client ? { chronos2: cryptoChronos2Client } : {}),
   },
   executionLane: "fincast",
   ...(rustCompute
     ? { technicalAnalyzer: new CryptoRustTechnicalAnalyzer(rustCompute) }
     : {}),
   instrumentRules: resolveBinanceRules,
-  contextBars: 512,
+  contextBars: 1024,
   inferenceDeadlineMs: config.cryptoAi.sequentialDeadlineMs,
   circuitBreaker: config.cryptoAi.circuitBreaker,
   onSnapshot: (runId, snapshot) => {
@@ -326,6 +331,7 @@ const cryptoSimulationService = new CryptoSimulationCoordinator({
   workerState: () => ({
     kronos_base: cryptoWorkerPublicState(cryptoKronosClient?.snapshot()),
     fincast: cryptoWorkerPublicState(cryptoFincastClient.snapshot()),
+    chronos2: cryptoWorkerPublicState(cryptoChronos2Client?.snapshot()),
   }),
 });
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
@@ -385,6 +391,14 @@ if (config.scalping.enabled && scalpingRepository) {
         config.scalping.ai.maximumBatchSize,
       )
     : undefined;
+  const stockChronos2Ai = cryptoChronos2Client
+    ? new ScalpingAiService(
+        cryptoChronos2Client,
+        scalpingRepository,
+        runService,
+        config.scalping.ai.maximumBatchSize,
+      )
+    : undefined;
   scalpingService = new ScalpingService(
     tossScalping,
     kisScalpingRest,
@@ -399,6 +413,7 @@ if (config.scalping.enabled && scalpingRepository) {
     undefined,
     stockFincastAi,
     "fincast",
+    stockChronos2Ai,
   );
   if (config.scalping.recorder.enabled) {
     marketDataRecorder = new MarketDataRecorder(
@@ -697,6 +712,7 @@ const lifecycle = new GracefulLifecycle({
       }),
       shutdownStep("AI client", () => aiComputeClient?.close()),
       shutdownStep("crypto AI clients", () => {
+        cryptoChronos2Client?.close();
         cryptoKronosClient?.close();
         cryptoFincastClient.close();
       }),

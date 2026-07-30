@@ -3,6 +3,7 @@ services:
     environment:
       AI_COMPUTE_URL: ${AI_COMPUTE_URL:?set AI_COMPUTE_URL to the remote FinCast wss URL or an explicitly allowed private-LAN ws URL}
       AI_FINCAST_COMPUTE_URL: ${AI_FINCAST_COMPUTE_URL:-${AI_COMPUTE_URL:?set AI_COMPUTE_URL or AI_FINCAST_COMPUTE_URL to the FinCast remote URL}}
+      AI_CHRONOS2_COMPUTE_URL: ${AI_CHRONOS2_COMPUTE_URL:?set AI_CHRONOS2_COMPUTE_URL to the remote Chronos-2 URL}
       # Kronos-base is an optional legacy lane and must never inherit the
       # generic FinCast endpoint.
       AI_KRONOS_COMPUTE_URL: ${AI_KRONOS_COMPUTE_URL:-}
@@ -10,4 +11,6 @@ services:
   ai-worker:
     profiles: !override ["local-ai-disabled"]
   fincast-worker:
+    profiles: !override ["local-ai-disabled"]
+  chronos2-worker:
     profiles: !override ["local-ai-disabled"]

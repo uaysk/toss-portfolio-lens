@@ -12,6 +12,7 @@ from typing import Any, Iterator, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from .contracts import (
+    CHRONOS_2_MODEL_ID,
     FINCAST_MODEL_ID,
     KRONOS_BASE_MODEL_ID,
     ModelProvenance,
@@ -463,7 +464,13 @@ def _try_load(
     runtime: RuntimeDevice,
 ) -> ModelAdapter:
     models = manifest.get("models")
-    source_key = "kronos_source" if name == "kronos-base" else "fincast_source"
+    source_key = {
+        "kronos-base": "kronos_source",
+        "fincast": "fincast_source",
+        "chronos-2": "chronos2_source",
+    }.get(name)
+    if source_key is None:
+        raise AdapterLoadError("unsupported production model lane")
     source = manifest.get(source_key)
     if not isinstance(models, dict) or not isinstance(source, dict) or name not in models:
         raise AdapterLoadError("model manifest is incomplete")
@@ -500,6 +507,13 @@ def _try_load(
         from .fincast import FinCastAdapter
 
         return FinCastAdapter(settings, model, source, runtime)
+    if name == "chronos-2":
+        from .chronos2 import Chronos2Adapter, _validate_manifest
+
+        if not isinstance(model, dict) or not isinstance(source, dict):
+            raise AdapterLoadError("Chronos-2 manifest is incomplete")
+        _validate_manifest(model, source)
+        return Chronos2Adapter(settings, model, source, runtime)
     raise AdapterLoadError("unsupported production model lane")
 
 
@@ -510,7 +524,15 @@ def _enable_offline_runtime() -> None:
 
 
 def _expected_model_id(name: str) -> str:
-    return KRONOS_BASE_MODEL_ID if name == "kronos-base" else FINCAST_MODEL_ID if name == "fincast" else name
+    return (
+        KRONOS_BASE_MODEL_ID
+        if name == "kronos-base"
+        else FINCAST_MODEL_ID
+        if name == "fincast"
+        else CHRONOS_2_MODEL_ID
+        if name == "chronos-2"
+        else name
+    )
 
 
 def _unavailable_adapter(
@@ -529,7 +551,12 @@ def _unavailable_adapter(
             # manifest itself is malformed. A missing/corrupt snapshot must
             # never erase the identity of the model the role expected.
             model_manifest["model_id"] = expected_model_id
-        source = manifest.get("kronos_source" if name == "kronos-base" else "fincast_source")
+        source_key = {
+            "kronos-base": "kronos_source",
+            "fincast": "fincast_source",
+            "chronos-2": "chronos2_source",
+        }.get(name)
+        source = manifest.get(source_key) if source_key is not None else None
         if isinstance(source, dict):
             candidate_revision = source.get("revision")
             if isinstance(candidate_revision, str) and 0 < len(candidate_revision) <= 256:
@@ -596,6 +623,9 @@ def load_production_model_suite(settings: AISettings) -> ProductionModelSuite:
     if settings.model_lane == "fincast":
         adapter = _load_named_adapter(settings, "fincast", require_cuda=True)
         runs = (ProductionModelBinding("fincast", FINCAST_MODEL_ID, adapter),)
+    elif settings.model_lane == "chronos_2":
+        adapter = _load_named_adapter(settings, "chronos-2", require_cuda=True)
+        runs = (ProductionModelBinding("chronos_2", CHRONOS_2_MODEL_ID, adapter),)
     else:
         adapter = _load_named_adapter(settings, "kronos-base", require_cuda=True)
         runs = (ProductionModelBinding("kronos_base", KRONOS_BASE_MODEL_ID, adapter),)

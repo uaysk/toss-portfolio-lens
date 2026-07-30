@@ -6,6 +6,7 @@ import {
 } from "../simulation/contracts.js";
 
 export const BINANCE_USDM_STORAGE_KEY = "BINANCE_USDM" as const;
+export const BINANCE_USDM_MAX_INITIAL_LEVERAGE = 150;
 export const BINANCE_SCANNER_MAX_AGE_MS = 60_000;
 export const BINANCE_SCANNER_SPREAD_LIMIT_BPS = 10;
 export const BINANCE_SCANNER_LIQUIDITY_POOL_SIZE = 50;
@@ -37,7 +38,8 @@ export const BinanceInstrumentRulesSchema = z.discriminatedUnion(
     }).strict(),
     BinanceInstrumentRulesBaseSchema.extend({
       maintenanceMarginRate: z.number().positive().lt(1),
-      maximumInitialLeverage: z.number().int().positive().max(125),
+      maximumInitialLeverage: z.number().int().positive()
+        .max(BINANCE_USDM_MAX_INITIAL_LEVERAGE),
       maintenanceMarginMaximumNotional: z.number().positive(),
       maintenanceMarginSource: z.literal("binance_user_data_brackets"),
     }).strict(),
@@ -56,6 +58,16 @@ export const BinanceScannerCandidateSchema = z.object({
   realizedVolatility60m: z.number().nonnegative(),
   priceChangePercent24h: z.number().finite(),
   atrPercent14: z.number().nonnegative(),
+  tradeCount: z.number().int().nonnegative().optional(),
+  medianSpreadBps: z.number().nonnegative().optional(),
+  p95SpreadBps: z.number().nonnegative().optional(),
+  orderbookDepthUsd: z.number().nonnegative().optional(),
+  rollingRange: z.number().nonnegative().optional(),
+  bollingerWidthExpansion: z.number().nonnegative().optional(),
+  liquidityQuality: z.number().min(0).max(1).optional(),
+  fundingRate: z.number().finite().nullable().optional(),
+  basisRate: z.number().finite().nullable().optional(),
+  featureAvailability: z.record(z.string(), z.boolean()).optional(),
   volatilityScore: z.number().min(0).max(1),
   score: z.number().min(0).max(1),
   scoreComponents: z.object({

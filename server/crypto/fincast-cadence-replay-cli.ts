@@ -19,6 +19,8 @@ export type FinCastCadenceReplayCliArguments = {
   output: string;
   endExclusive: number;
   deadlineMs: number;
+  rawInputRoot?: string;
+  rawModelSeed?: number;
 };
 
 function usage(): string {
@@ -28,6 +30,7 @@ function usage(): string {
     "--output <absolute JSON path>",
     "--end-exclusive <UTC minute RFC3339>",
     "[--deadline-ms <1..86400000>]",
+    "[--raw-input-root <absolute empty parent> --raw-model-seed <non-negative integer>]",
   ].join(" ");
 }
 
@@ -63,6 +66,8 @@ export function parseFinCastCadenceReplayCliArguments(
   let output: string | undefined;
   let endExclusive: number | undefined;
   let deadlineMs = DEFAULT_DEADLINE_MS;
+  let rawInputRoot: string | undefined;
+  let rawModelSeed: number | undefined;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--symbol") {
@@ -82,6 +87,21 @@ export function parseFinCastCadenceReplayCliArguments(
       }
       deadlineMs = parsed;
       index += 1;
+    } else if (argument === "--raw-input-root") {
+      const value = requiredValue(arguments_, index, argument);
+      if (!isAbsolute(value) || resolve(value) !== value) {
+        throw new Error(`--raw-input-root must be an absolute normalized path. ${usage()}`);
+      }
+      rawInputRoot = value;
+      index += 1;
+    } else if (argument === "--raw-model-seed") {
+      const raw = requiredValue(arguments_, index, argument);
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new Error(`--raw-model-seed must be a non-negative safe integer. ${usage()}`);
+      }
+      rawModelSeed = parsed;
+      index += 1;
     } else {
       throw new Error(`Unknown argument: ${argument ?? ""}. ${usage()}`);
     }
@@ -95,11 +115,19 @@ export function parseFinCastCadenceReplayCliArguments(
   if (endExclusive === undefined) {
     throw new Error(`--end-exclusive is required. ${usage()}`);
   }
+  if ((rawInputRoot === undefined) !== (rawModelSeed === undefined)) {
+    throw new Error(
+      `--raw-input-root and --raw-model-seed must be provided together. ${usage()}`,
+    );
+  }
   return {
     symbol,
     output: resolve(output),
     endExclusive,
     deadlineMs,
+    ...(rawInputRoot === undefined
+      ? {}
+      : { rawInputRoot, rawModelSeed }),
   };
 }
 
@@ -153,6 +181,14 @@ async function run(): Promise<void> {
       rest: new OfficialBinanceUsdmRestMarketData(30_000),
       client,
       deadlineMs: arguments_.deadlineMs,
+      ...(arguments_.rawInputRoot === undefined
+        ? {}
+        : {
+          rawInputArtifacts: {
+            root: arguments_.rawInputRoot,
+            modelSeed: arguments_.rawModelSeed!,
+          },
+        }),
     });
     const result = await replay.run({
       symbol: arguments_.symbol,
@@ -174,6 +210,7 @@ async function run(): Promise<void> {
       originEndExclusiveAt: result.window.originEndExclusiveAt,
       outcome: result.comparison.outcome,
       output: arguments_.output,
+      rawInputRoot: arguments_.rawInputRoot ?? null,
     })}\n`);
   } finally {
     client.close();

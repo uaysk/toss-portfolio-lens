@@ -100,6 +100,16 @@ import {
   scoreRustIndicatorEvidence,
 } from "./technical-indicator-evidence.js";
 import {
+  applyEtfSessionGate,
+  evaluateEtfSessionGate,
+  fitPairReturnMapper,
+  selectEtfPairDirection,
+  type EtfSessionGate,
+  type PairReturnMapping,
+  type PairReturnObservation,
+} from "./pair-return-mapper.js";
+import type { EvidenceCostBreakdown } from "./model-evidence.js";
+import {
   reduceDecisionQueueTick,
   transitionSimulationPhase,
   type SimulationPhase,
@@ -428,9 +438,31 @@ function manuallySelectedSymbols(request: SimulationStartRequest): string[] {
   return request.selection.mode === "manual" ? [...request.selection.symbols] : [];
 }
 
+function simulationModelPlan(
+  request: SimulationStartRequest,
+): SimulationStartRequest["modelPlan"] {
+  if (Array.isArray(request.modelPlan) && request.modelPlan.length > 0) {
+    return request.modelPlan;
+  }
+  return request.modelLanes.map((modelLane) => ({
+    symbol: "*",
+    modelLane,
+    role: "primary" as const,
+    required: true,
+    preferredHorizonsMinutes: [15, 30, 60],
+  }));
+}
+
+function usesUnifiedEtfPolicy(request: SimulationStartRequest): boolean {
+  return request.sourceContractVersion === AI_SIMULATION_CONTRACT_VERSION
+    && request.simulationCase === "us_etf_pair";
+}
+
 function stockModelLane(request: SimulationStartRequest): SimulationModelLane {
-  const lane = request.modelLanes[0];
-  if (!lane || request.modelLanes.length !== 1) {
+  const primary = simulationModelPlan(request)
+    .find((entry) => entry.role === "primary")?.modelLane;
+  const lane = primary ?? request.modelLanes[0];
+  if (!lane || (!usesUnifiedEtfPolicy(request) && request.modelLanes.length !== 1)) {
     throw new Error("주식 시뮬레이션은 정확히 하나의 모델 lane이 필요합니다.");
   }
   return lane;
@@ -538,6 +570,9 @@ type SimulationDecision = {
   rustSignal?: PairRustTechnicalInput;
   sizing?: PairSizingResult;
   pairDecisionId?: string;
+  selectedHorizonMinutes?: number;
+  pairMapping?: PairReturnMapping;
+  etfSessionGate?: EtfSessionGate;
 };
 
 type SimulationTrade = PaperTrade & {
@@ -842,6 +877,14 @@ type ActiveSession = SimulationRuntimeHandles & {
     comparisonSkipped: PairSkippedComparison[];
     provenanceRecords: PairDecisionProvenance[];
     lastSizing?: PairSizingResult;
+    lastPairMapping?: PairReturnMapping;
+    lastEtfSessionGate?: EtfSessionGate;
+    shadowForecasts: Array<{
+      lane: SimulationModelLane;
+      role: "shadow";
+      capturedAt: string;
+      forecast: unknown;
+    }>;
     signalPosition?: {
       averagePrice: number;
       asOf: string;
@@ -883,7 +926,108 @@ function executionSymbols(session: ActiveSession): string[] {
 }
 
 function retainedSymbols(session: ActiveSession): string[] {
-  return Array.from(new Set([...selectedSymbols(session), ...executionSymbols(session)]));
+  return Array.from(new Set([
+    ...selectedSymbols(session),
+    ...executionSymbols(session),
+    ...(session.pair?.catalog.auxiliarySymbols ?? []),
+  ]));
+}
+
+function pairReturnHistory(
+  session: ActiveSession,
+  originAt: string,
+): PairReturnObservation[] {
+  if (!session.pair) return [];
+  const required = [
+    session.pair.catalog.modelTargetSymbol,
+    session.pair.catalog.bull.executionSymbol,
+    session.pair.catalog.bear.executionSymbol,
+  ];
+  const closes = new Map<string, Map<string, number>>();
+  for (const symbol of required) {
+    const chart = session.charts.find((item) => item.symbol === symbol);
+    closes.set(symbol, new Map(
+      (chart?.bars ?? [])
+        .filter((bar) => (
+          bar.status === "final"
+          && Date.parse(bar.timestamp) < Date.parse(originAt)
+          && Number.isFinite(bar.close)
+          && bar.close > 0
+        ))
+        .map((bar) => [bar.timestamp, bar.close]),
+    ));
+  }
+  const timestamps = [...(closes.get(required[0]!)?.keys() ?? [])]
+    .filter((at) => required.every((symbol) => closes.get(symbol)?.has(at)))
+    .sort((left, right) => Date.parse(left) - Date.parse(right));
+  const observations: PairReturnObservation[] = [];
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const previousAt = timestamps[index - 1]!;
+    const observedAt = timestamps[index]!;
+    const returns = required.map((symbol) => (
+      closes.get(symbol)!.get(observedAt)! / closes.get(symbol)!.get(previousAt)! - 1
+    ));
+    const absoluteTarget = Math.abs(returns[0]!);
+    observations.push({
+      observedAt,
+      targetReturn: returns[0]!,
+      bullReturn: returns[1]!,
+      bearReturn: returns[2]!,
+      timeOfDayBucket: new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        hour: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date(observedAt)),
+      volatilityRegime: absoluteTarget >= 0.004
+        ? "high"
+        : absoluteTarget <= 0.001 ? "low" : "normal",
+    });
+  }
+  return observations;
+}
+
+function etfLegCosts(
+  session: ActiveSession,
+  direction: "bull" | "bear",
+): EvidenceCostBreakdown {
+  if (!session.pair) throw new Error("ETF leg costs require a pair session.");
+  const symbol = session.pair.catalog[direction].executionSymbol;
+  return {
+    commissionBps: session.request.costs.commissionBpsPerSide * 2
+      + session.request.costs.taxBpsOnExit,
+    spreadBps: Math.max(
+      session.request.costs.spreadBpsRoundTrip,
+      session.pair.quotes[symbol]?.spreadBps ?? session.pair.catalog.maxSpreadBps,
+    ),
+    slippageBps: session.request.costs.slippageBpsPerSide * 2,
+    fundingBps: 0,
+    safetyMarginBps: 1,
+  };
+}
+
+function newYorkSessionMinutes(value: string): {
+  minutesFromOpen: number | null;
+  minutesToClose: number | null;
+} {
+  if (pairSessionAt(value) !== "regular") {
+    return { minutesFromOpen: null, minutesToClose: null };
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(value));
+  const hour = Number(parts.find((part) => part.type === "hour")?.value);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return { minutesFromOpen: null, minutesToClose: null };
+  }
+  const current = hour * 60 + minute;
+  return {
+    minutesFromOpen: current - (9 * 60 + 30),
+    minutesToClose: 16 * 60 - current,
+  };
 }
 
 function updatePairExecutionQuote(
@@ -1838,8 +1982,8 @@ export class AiTradingSimulationService {
         deterministicChartPatterns: true,
         eventDrivenDecisions: true,
         gpuForecastWorker: "provenance_reported_per_run",
-        stockModelLanes: "kronos_base,fincast",
-        stockModelLaneConcurrency: "single_lane_only",
+        stockModelLanes: "kronos_base,fincast,chronos2",
+        stockModelLaneConcurrency: "role_routed_for_v8_etf",
         nextObservedExecutionOnly: true,
         pairStrategy: true,
         kronosRustEnsemble: true,
@@ -1852,11 +1996,16 @@ export class AiTradingSimulationService {
         directions: ["bull", "bear", "cash"],
         exclusivity: "one_active_direction_per_pair",
         models: {
-          kronos: "NeoQuasar/Kronos-base",
+          primary: "amazon/chronos-2",
+          shadow: "FinCast",
+          legacy: "NeoQuasar/Kronos-base",
         },
         pairs: [...DEFAULT_PAIR_CATALOG.values()].map((pair) => ({
           pairId: pair.pairId,
           signalSymbol: pair.signalSymbol,
+          displaySignalSymbol: pair.displaySignalSymbol,
+          modelTargetSymbol: pair.modelTargetSymbol,
+          auxiliarySymbols: pair.auxiliarySymbols,
           bull: pair.bull,
           bear: pair.bear,
           allowedSessions: pair.allowedSessions,
@@ -1948,6 +2097,9 @@ export class AiTradingSimulationService {
     } : resolvePaperPolicyProfile(input.preset, input.riskTolerance);
     const config = {
       schema_version: AI_SIMULATION_CONTRACT_VERSION,
+      simulation_case: input.simulationCase,
+      normalized_request: input,
+      model_plan: simulationModelPlan(input),
       policy_version: pairCatalog
         ? PAIR_ENSEMBLE_POLICY_VERSION
         : AI_PAPER_POLICY_VERSION,
@@ -1999,6 +2151,7 @@ export class AiTradingSimulationService {
         requested_symbols: pairCatalog
           ? [
               pairCatalog.signalSymbol,
+              ...pairCatalog.auxiliarySymbols,
               pairCatalog.bull.executionSymbol,
               pairCatalog.bear.executionSymbol,
             ]
@@ -2053,6 +2206,7 @@ export class AiTradingSimulationService {
           comparisonObservations: [],
           comparisonSkipped: [],
           provenanceRecords: [],
+          shadowForecasts: [],
         },
       } : {}),
       warnings: [],
@@ -2658,6 +2812,46 @@ export class AiTradingSimulationService {
     session.progressTimer.unref();
   }
 
+  private async capturePairShadowForecast(
+    session: ActiveSession,
+    symbols: string[],
+    maximumInputEndAt: string | undefined,
+  ): Promise<void> {
+    if (!session.pair) return;
+    const shadowLanes = simulationModelPlan(session.request)
+      .filter((entry) => entry.role === "shadow")
+      .map((entry) => entry.modelLane);
+    for (const lane of [...new Set(shadowLanes)]) {
+      try {
+        const output = await this.market.forecast({
+          marketCountry: "US",
+          symbols,
+          interval: "1m",
+        }, {
+          signal: session.decisionAbort.signal,
+          modelLane: lane,
+          ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
+        });
+        session.pair.shadowForecasts.push({
+          lane,
+          role: "shadow",
+          capturedAt: new Date(this.now()).toISOString(),
+          forecast: output.forecast,
+        });
+        if (session.pair.shadowForecasts.length > MAX_REPORT_DECISIONS) {
+          session.pair.shadowForecasts.shift();
+        }
+      } catch (error) {
+        this.warn(
+          session,
+          `shadow ${lane} unavailable: ${
+            error instanceof Error ? error.message : "unknown worker error"
+          }`,
+        );
+      }
+    }
+  }
+
   private async initializePair(session: ActiveSession): Promise<void> {
     if (!session.pair || session.request.marketCountry !== "US") {
       throw new Error("페어 전략은 검증된 미국 catalog 세션에서만 시작할 수 있습니다.");
@@ -2766,6 +2960,8 @@ export class AiTradingSimulationService {
       modelLane: stockModelLane(session.request),
       ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
     });
+    if (signal.aborted || session.phase !== "selecting") return;
+    await this.capturePairShadowForecast(session, signalSymbols, maximumInputEndAt);
     if (signal.aborted || session.phase !== "selecting") return;
     const technical = await this.market.realtimeAnalysis({
       marketCountry: "US",
@@ -3261,14 +3457,81 @@ export class AiTradingSimulationService {
       });
     }
     const rust = pairRustTechnicalInput(technicalValue);
-    const models = normalizePairModelOutputs(forecast, {
-      signalSymbol: session.pair.catalog.signalSymbol,
-      ...(expectedOrigin ? { expectedOrigin } : {}),
-      now: decisionAt,
-      maximumOriginAgeMs: 180_000,
-      requireCuda: true,
-      requiredDeviceName: "Tesla P40",
+    const isUnifiedEtf = usesUnifiedEtfPolicy(session.request);
+    const preferredHorizons = isUnifiedEtf
+      ? simulationModelPlan(session.request).find((entry) => entry.role === "primary")
+        ?.preferredHorizonsMinutes ?? [15, 30, 60]
+      : [5];
+    const normalizedCandidates = preferredHorizons.map((horizonMinutes) => ({
+      horizonMinutes,
+      models: normalizePairModelOutputs(forecast, {
+        signalSymbol: session.pair!.catalog.signalSymbol,
+        ...(expectedOrigin ? { expectedOrigin } : {}),
+        now: decisionAt,
+        horizonMinutes,
+        maximumOriginAgeMs: 180_000,
+        requireCuda: true,
+        requiredDeviceName: "Tesla P40",
+        ...(isUnifiedEtf ? { expectedModelId: "amazon/chronos-2" } : {}),
+      }),
+    }));
+    const originForMapping = expectedOrigin
+      ?? normalizedCandidates[0]?.models.kronos.inputEndAt
+      ?? decisionAt;
+    const mappingHistory = isUnifiedEtf
+      ? pairReturnHistory(session, originForMapping)
+      : [];
+    const timeOfDayBucket = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date(originForMapping));
+    const volatilityRegime = mappingHistory.at(-1)?.volatilityRegime ?? "normal";
+    const mappedCandidates = normalizedCandidates.map((candidate) => {
+      const model = candidate.models.kronos;
+      const mapping = isUnifiedEtf
+        && model.q10Return !== undefined
+        && model.medianReturn !== undefined
+        && model.q90Return !== undefined
+        ? fitPairReturnMapper({
+            originAt: originForMapping,
+            pair: session.pair!.catalog,
+            targetQuantiles: {
+              0.1: model.q10Return,
+              0.5: model.medianReturn,
+              0.9: model.q90Return,
+            },
+            targetExpectedReturn: model.medianReturn,
+            history: mappingHistory,
+            timeOfDayBucket,
+            volatilityRegime,
+            bullCosts: etfLegCosts(session, "bull"),
+            bearCosts: etfLegCosts(session, "bear"),
+          })
+        : undefined;
+      const score = mapping?.status === "ready"
+        ? Math.max(
+            (mapping.bull?.expectedNetReturn ?? 0) * (mapping.pNetBull ?? 0),
+            (mapping.bear?.expectedNetReturn ?? 0) * (mapping.pNetBear ?? 0),
+          )
+        : Number.NEGATIVE_INFINITY;
+      return { ...candidate, mapping, score };
     });
+    mappedCandidates.sort((left, right) => right.score - left.score);
+    let selectedCandidate = mappedCandidates[0]!;
+    const previousHorizon = session.decisions.at(-1)?.selectedHorizonMinutes;
+    const previousCandidate = previousHorizon === undefined
+      ? undefined
+      : mappedCandidates.find((candidate) => candidate.horizonMinutes === previousHorizon);
+    if (
+      previousCandidate
+      && Number.isFinite(previousCandidate.score)
+      && previousCandidate.score >= selectedCandidate.score * 0.9
+    ) {
+      selectedCandidate = previousCandidate;
+    }
+    const models = selectedCandidate.models;
+    const pairMapping = selectedCandidate.mapping;
     const profile = {
       ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE,
       weights: { ...DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE.weights },
@@ -3290,7 +3553,104 @@ export class AiTradingSimulationService {
       ...(session.pair.cooldownUntil ? { cooldownUntil: session.pair.cooldownUntil } : {}),
       profile,
     };
-    const decision = evaluatePairEnsemble(ensembleInput);
+    const legacyDecision = evaluatePairEnsemble(ensembleInput);
+    let etfSessionGate: EtfSessionGate | undefined;
+    let decision = legacyDecision;
+    if (isUnifiedEtf) {
+      const directionSelection = selectEtfPairDirection({
+        mapping: pairMapping,
+        primaryAvailable: models.kronos.status === "available",
+        rustDataQuality: rust.dataQuality === "good"
+          ? "good"
+          : rust.dataQuality === "unavailable" ? "unavailable" : "degraded",
+        rustTechnicalSignal: rust.technicalSignal ?? 0,
+      });
+      const { pNetBull, pNetBear } = directionSelection;
+      let direction: PairDirection = directionSelection.direction;
+      const sessionMinutes = newYorkSessionMinutes(decisionAt);
+      const quoteSymbol = direction === "cash"
+        ? session.pair.catalog.bull.executionSymbol
+        : session.pair.catalog[direction].executionSymbol;
+      const quote = session.pair.quotes[quoteSymbol];
+      etfSessionGate = evaluateEtfSessionGate({
+        originAt: decisionAt,
+        marketCalendarStatus: pairSessionAt(decisionAt) === "regular"
+          ? "regular"
+          : "closed",
+        ...sessionMinutes,
+        quoteObservedAt: quote?.observedAt ?? null,
+        quoteSpreadBps: quote?.spreadBps ?? null,
+        maximumSpreadBps: session.pair.catalog.maxSpreadBps,
+        flattenBeforeClose: true,
+      });
+      const sessionSelection = applyEtfSessionGate({
+        proposedDirection: direction,
+        currentDirection: session.pair.direction,
+        gate: etfSessionGate,
+      });
+      direction = sessionSelection.direction;
+      const executionSymbol = direction === "cash"
+        ? null
+        : session.pair.catalog[direction].executionSymbol;
+      const mappingLeg = direction === "cash" ? undefined : pairMapping?.[direction];
+      const decisionKind: PairEnsembleDecision["decisionKind"] = direction === "cash"
+        ? session.pair.direction === "cash" ? "cash" : "exit"
+        : session.pair.direction === "cash" ? "enter"
+          : session.pair.direction === direction ? "hold" : "switch";
+      const mappingReasons = pairMapping?.status === "ready"
+        ? [
+            "pair_return_mapper_ready",
+            `selected_horizon_${selectedCandidate.horizonMinutes}m`,
+            `pnet_bull_${pNetBull.toFixed(4)}`,
+            `pnet_bear_${pNetBear.toFixed(4)}`,
+          ]
+        : ["pair_return_mapper_warming_up"];
+      decision = {
+        ...legacyDecision,
+        direction,
+        executionSymbol,
+        leverageMultiplier: direction === "cash"
+          ? 0
+          : session.pair.catalog[direction].leverageMultiplier,
+        decisionKind,
+        degraded: models.kronos.status !== "available" || pairMapping?.status !== "ready",
+        exposureScale: direction === "cash" ? 0 : legacyDecision.exposureScale,
+        reasonCodes: uniqueWarnings([
+          ...mappingReasons,
+          ...directionSelection.reasons,
+          ...sessionSelection.reasons,
+        ]),
+        componentScores: {
+          ...legacyDecision.componentScores,
+          kronos: {
+            ...legacyDecision.componentScores.kronos,
+            bull: pNetBull,
+            bear: pNetBear,
+            bullNetExpectedReturn: pairMapping?.bull?.expectedNetReturn ?? 0,
+            bearNetExpectedReturn: pairMapping?.bear?.expectedNetReturn ?? 0,
+            bullProbability: pNetBull,
+            bearProbability: pNetBear,
+            leveragedUncertainty: mappingLeg
+              ? mappingLeg.q90Return - mappingLeg.q10Return
+              : 0,
+            preferredDirection: direction,
+          },
+        },
+        finalScores: {
+          bull: pNetBull,
+          bear: pNetBear,
+          cash: direction === "cash" ? 1 : 0,
+        },
+        scoreMargin: Math.abs(pNetBull - pNetBear),
+        costs: {
+          bullRoundTripRate: (pairMapping?.bull?.totalCostBps ?? 0) / 10_000,
+          bearRoundTripRate: (pairMapping?.bear?.totalCostBps ?? 0) / 10_000,
+          switchCostApplied: decisionKind === "switch",
+        },
+      };
+      session.pair.lastPairMapping = pairMapping;
+      session.pair.lastEtfSessionGate = etfSessionGate;
+    }
     const rollback = {
       runtimeState: session.pair.runtimeState,
       direction: session.pair.direction,
@@ -3446,6 +3806,9 @@ export class AiTradingSimulationService {
       modelOutputs: models,
       rustSignal: rust,
       pairDecisionId: baseAction.pairDecisionId,
+      selectedHorizonMinutes: selectedCandidate.horizonMinutes,
+      ...(pairMapping ? { pairMapping } : {}),
+      ...(etfSessionGate ? { etfSessionGate } : {}),
     };
     session.decisions.push(simulationDecision);
     if (session.decisions.length > MAX_DECISIONS) session.decisions.shift();
@@ -3745,6 +4108,8 @@ export class AiTradingSimulationService {
       modelLane: stockModelLane(session.request),
       ...(maximumInputEndAt ? { maximumInputEndAt } : {}),
     });
+    if (signal.aborted || session.phase !== "running") return;
+    await this.capturePairShadowForecast(session, [signalSymbol], maximumInputEndAt);
     if (signal.aborted || session.phase !== "running") return;
     const technical = await this.market.realtimeAnalysis({
       marketCountry: "US",
@@ -4219,6 +4584,8 @@ export class AiTradingSimulationService {
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       market,
       marketCountry: session.request.marketCountry,
+      simulationCase: session.request.simulationCase,
+      modelPlan: simulationModelPlan(session.request),
       modelLanes: [...session.request.modelLanes],
       executionMode: session.request.execution.mode,
       currency: session.request.marketCountry === "US" ? "USD" : "KRW",
@@ -4330,6 +4697,10 @@ export class AiTradingSimulationService {
       decisions: session.decisions,
       ...(session.pair?.strategyComparison !== undefined
         ? { strategyComparison: session.pair.strategyComparison } : {}),
+      ...(session.pair?.lastPairMapping
+        ? { pairMapping: session.pair.lastPairMapping } : {}),
+      ...(session.pair?.lastEtfSessionGate
+        ? { etfSessionGate: session.pair.lastEtfSessionGate } : {}),
       warnings: uniqueWarnings([
         ...session.warnings,
         ...(valuation.unavailable.length ? [`평가 가격 unavailable: ${valuation.unavailable.join(", ")}`] : []),
@@ -4368,6 +4739,9 @@ export class AiTradingSimulationService {
             : AI_PAPER_POLICY_VERSION,
           selection: session.selection,
           strategy: simulationStrategy(session.request),
+          simulationCase: session.request.simulationCase,
+          normalizedRequest: session.request,
+          modelPlan: simulationModelPlan(session.request),
           modelLanes: [...session.request.modelLanes],
           ...(session.pair ? { pair: session.pair.catalog } : {}),
           metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
@@ -4423,6 +4797,9 @@ export class AiTradingSimulationService {
             ? PAIR_ENSEMBLE_POLICY_VERSION
             : AI_PAPER_POLICY_VERSION,
           contract_version: AI_SIMULATION_CONTRACT_VERSION,
+          simulation_case: session.request.simulationCase,
+          normalized_request: session.request,
+          model_plan: simulationModelPlan(session.request),
           mode: "forward_paper_session",
           real_order_api_used: false,
           order_api_dependency: false,
@@ -4446,6 +4823,9 @@ export class AiTradingSimulationService {
             signal_symbol: session.pair.catalog.signalSymbol,
             execution_symbols: executionSymbols(session),
             active_direction: session.pair.direction,
+            pair_mapping: session.pair.lastPairMapping,
+            etf_session_gate: session.pair.lastEtfSessionGate,
+            shadow_forecasts: session.pair.shadowForecasts,
           } : {}),
           preset: session.request.preset,
           risk_tolerance: session.request.riskTolerance,

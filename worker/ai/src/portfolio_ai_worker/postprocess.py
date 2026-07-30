@@ -247,6 +247,7 @@ def _direct_horizons(series: ForecastSeries, raw: RawPrediction) -> tuple[Horizo
         if provided is None or any(quantile not in provided for quantile in FIXED_QUANTILES):
             return None
         points = [(quantile, provided[quantile]) for quantile in FIXED_QUANTILES]
+        native_points = sorted(provided.items())
         prices = [price for _, price in points]
         if any(not math.isfinite(price) or price <= 0 for price in prices) or any(
             right < left for left, right in zip(prices, prices[1:], strict=False)
@@ -264,6 +265,22 @@ def _direct_horizons(series: ForecastSeries, raw: RawPrediction) -> tuple[Horizo
                     QuantileValue(quantile=quantile, value=price / base - 1) for quantile, price in points
                 ),
                 price_quantiles=tuple(QuantileValue(quantile=quantile, value=price) for quantile, price in points),
+                native_return_quantiles=(
+                    tuple(
+                        QuantileValue(quantile=quantile, value=price / base - 1)
+                        for quantile, price in native_points
+                    )
+                    if len(native_points) > len(FIXED_QUANTILES)
+                    else ()
+                ),
+                native_price_quantiles=(
+                    tuple(
+                        QuantileValue(quantile=quantile, value=price)
+                        for quantile, price in native_points
+                    )
+                    if len(native_points) > len(FIXED_QUANTILES)
+                    else ()
+                ),
                 up_probability=1 - cdf_at_base,
                 down_probability=cdf_at_base,
                 flat_probability=0,

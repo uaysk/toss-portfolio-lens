@@ -10,6 +10,7 @@ import {
 import {
   CryptoModelComparisonReplay,
   CryptoModelReplayError,
+  loadCryptoReplayRawContexts,
   type CryptoReplayLane,
   type CryptoReplayLaneClient,
 } from "./crypto-model-replay.js";
@@ -485,6 +486,94 @@ describe("CryptoModelComparisonReplay", () => {
       sameContext: true,
       outcome: "review_required",
     });
+  });
+
+  it("extracts the same 48-hour origins as close-only 512-bar raw contexts", async () => {
+    const fixture = restWith();
+    const result = await loadCryptoReplayRawContexts({
+      rest: fixture.rest,
+      symbol: "BTCUSDT",
+      durationHours: 48,
+      endExclusive: END_EXCLUSIVE,
+      authoritativeNow: NOW,
+    });
+
+    expect(result).toMatchObject({
+      symbol: "BTCUSDT",
+      durationHours: 48,
+      startAt: "2026-07-23T00:00:00.000Z",
+      endExclusiveAt: "2026-07-25T00:00:00.000Z",
+      contextBars: 512,
+      inputBarCount: CONTEXT_PREFIX_BARS + 48 * 60 + OUTCOME_TAIL_BARS,
+    });
+    expect(result.rows).toHaveLength(48 * 4);
+    expect(result.rows[0]).toMatchObject({
+      instrumentKey: "BINANCE_USDM:BTCUSDT",
+      metadata: {
+        symbol: "BTCUSDT",
+        originOrdinal: 0,
+      },
+    });
+    expect(result.rows[0]!.closes).toHaveLength(512);
+    expect(result.rows[0]!.futureTimestamps).toHaveLength(60);
+    expect(result.rows.at(-1)!.metadata.originOrdinal).toBe(48 * 4 - 1);
+    expect(result.marketBars).toHaveLength(
+      CONTEXT_PREFIX_BARS + 48 * 60 + OUTCOME_TAIL_BARS,
+    );
+    expect(result.marketBars[0]).toMatchObject({
+      symbol: "BTCUSDT",
+      interval: "1m",
+      final: true,
+    });
+  });
+
+  it("collects 8192-bar pre-roll only through the raw context loader", async () => {
+    const rest = {
+      async klines(input: {
+        startTime?: number;
+        endTime?: number;
+        limit?: number;
+      }): Promise<unknown> {
+        const start = input.startTime!;
+        const end = input.endTime!;
+        const count = Math.min(
+          input.limit ?? 1_024,
+          Math.floor((end - start + 1) / MINUTE_MS),
+        );
+        return Array.from({ length: count }, (_unused, index) => {
+          const openTime = start + index * MINUTE_MS;
+          const open = 100 + index * 0.01;
+          const close = open + 0.004;
+          return [
+            openTime,
+            open.toFixed(6),
+            (close + 0.01).toFixed(6),
+            (open - 0.01).toFixed(6),
+            close.toFixed(6),
+            "10",
+            openTime + MINUTE_MS - 1,
+            (open * 10).toFixed(6),
+            12,
+            "0",
+            "0",
+            "0",
+          ];
+        }).reverse();
+      },
+    };
+    const result = await loadCryptoReplayRawContexts({
+      rest,
+      symbol: "BTCUSDT",
+      durationHours: 1,
+      endExclusive: END_EXCLUSIVE,
+      authoritativeNow: NOW,
+      contextBars: 8192,
+    });
+
+    expect(result.contextBars).toBe(8192);
+    expect(result.inputBarCount).toBe(8192 - 1 + 60 + 60);
+    expect(result.rows).toHaveLength(4);
+    expect(result.rows.every((row) => row.closes.length === 8192)).toBe(true);
   });
 
   it("accepts only the explicitly selected experimental Kronos cache loader", async () => {

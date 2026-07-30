@@ -98,14 +98,27 @@ def _canonical_input_digest(bars: Sequence[PriceBar]) -> str:
     payload = [
         {
             "amount": number(bar.amount),
+            "benchmark_return": number(bar.benchmark_return),
+            "btc_realized_volatility": number(bar.btc_realized_volatility),
+            "btc_short_return": number(bar.btc_short_return),
             "close": number(bar.close),
             "complete": bar.complete,
+            "eth_realized_volatility": number(bar.eth_realized_volatility),
+            "eth_short_return": number(bar.eth_short_return),
+            "funding_rate": number(bar.funding_rate),
             "high": number(bar.high),
+            "index_price": number(bar.index_price),
             "low": number(bar.low),
+            "mark_price": number(bar.mark_price),
             "open": number(bar.open),
+            "premium_index": number(bar.premium_index),
+            "relative_strength": number(bar.relative_strength),
+            "taker_buy_amount": number(bar.taker_buy_amount),
+            "taker_buy_volume": number(bar.taker_buy_volume),
             "timestamp": bar.timestamp.astimezone(timezone.utc)
             .isoformat(timespec="microseconds")
             .replace("+00:00", "Z"),
+            "trade_count": bar.trade_count,
             "volume": number(bar.volume),
         }
         for bar in bars

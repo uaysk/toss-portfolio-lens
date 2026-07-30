@@ -6,6 +6,7 @@ export const SCALPING_AI_REALTIME_HORIZONS = [5, 15] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
 export const KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
 export const FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
+export const CHRONOS_2_MODEL_ID = "amazon/chronos-2" as const;
 
 const finite = z.number().finite();
 const positive = finite.positive();
@@ -34,6 +35,19 @@ export const AiPriceBarSchema = z.object({
   close: positive,
   volume: nonnegative.nullable().optional(),
   amount: nonnegative.nullable().optional(),
+  trade_count: z.number().int().nonnegative().nullable().optional(),
+  taker_buy_volume: nonnegative.nullable().optional(),
+  taker_buy_amount: nonnegative.nullable().optional(),
+  mark_price: positive.nullable().optional(),
+  index_price: positive.nullable().optional(),
+  premium_index: finite.nullable().optional(),
+  funding_rate: finite.nullable().optional(),
+  btc_short_return: finite.nullable().optional(),
+  btc_realized_volatility: nonnegative.nullable().optional(),
+  eth_short_return: finite.nullable().optional(),
+  eth_realized_volatility: nonnegative.nullable().optional(),
+  benchmark_return: finite.nullable().optional(),
+  relative_strength: finite.nullable().optional(),
   complete: z.literal(true),
 }).strict().superRefine((bar, context) => {
   if (bar.low > Math.min(bar.open, bar.close) || bar.high < Math.max(bar.open, bar.close) || bar.low > bar.high) {
@@ -49,7 +63,9 @@ export const AiTargetStopSchema = z.object({
 }).strict().refine((item) => item.target_price !== item.stop_price, "target and stop must differ");
 
 export const AiSeriesCadenceSchema = z.object({
-  candle_seconds: z.union([z.literal(15), z.literal(30), z.literal(60)]),
+  candle_seconds: z.union([
+    z.literal(5), z.literal(15), z.literal(30), z.literal(60),
+  ]),
   gap_policy: z.enum(["continuous", "market_session_prevalidated"]),
 }).strict().superRefine((cadence, context) => {
   if (cadence.gap_policy === "market_session_prevalidated" && cadence.candle_seconds !== 60) {
@@ -390,6 +406,7 @@ export const AiModelProvenanceSchema = z.object({
   quantile_monotonicity_policy: z.enum([
     "native",
     "fp32_monotone_rearrangement_v1",
+    "chronos2_fp32_monotone_rearrangement_v1",
     "unavailable",
   ]).optional(),
   fp32_quantile_observations: QuantileRearrangementObservationsSchema.nullable().optional(),
@@ -458,7 +475,31 @@ export const AiModelProvenanceSchema = z.object({
     if (invalidKronosPrecision) {
       context.addIssue({
         code: "custom",
-        message: "Kronos-base requires native float32 provenance",
+        message: "Kronos-family models require native float32 provenance",
+      });
+    }
+  }
+  if (model.model_id === CHRONOS_2_MODEL_ID) {
+    const invalidChronos2Precision = model.dtype !== "float32"
+      || (model.precision_validation !== undefined
+        && model.precision_validation !== (model.loaded ? "not_required" : "unavailable"))
+      || (model.memory_status !== undefined
+        && model.memory_status !== (model.loaded ? "ok" : "unavailable"))
+      || (model.quantile_monotonicity_policy !== undefined
+        && model.quantile_monotonicity_policy !== (
+          model.loaded ? "chronos2_fp32_monotone_rearrangement_v1" : "unavailable"
+        ))
+      || (model.fp32_quantile_observations !== undefined
+        && model.fp32_quantile_observations !== null)
+      || (model.mixed_quantile_observations !== undefined
+        && model.mixed_quantile_observations !== null)
+      || (model.quantile_tail_policy !== undefined
+        && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable"))
+      || (model.precision_failure_reasons?.length ?? 0) > 0;
+    if (invalidChronos2Precision) {
+      context.addIssue({
+        code: "custom",
+        message: "Chronos-2 requires monotone-rearranged native float32 provenance",
       });
     }
   }
@@ -603,6 +644,8 @@ export const AiHorizonForecastSchema = z.object({
   target_timestamp: timestamp,
   return_quantiles: z.array(QuantileValueSchema).length(SCALPING_AI_QUANTILES.length),
   price_quantiles: z.array(QuantileValueSchema).length(SCALPING_AI_QUANTILES.length),
+  native_return_quantiles: z.array(QuantileValueSchema).max(99).optional(),
+  native_price_quantiles: z.array(QuantileValueSchema).max(99).optional(),
   up_probability: finite.min(0).max(1).nullable().optional(),
   down_probability: finite.min(0).max(1).nullable().optional(),
   flat_probability: finite.min(0).max(1).nullable().optional(),
@@ -614,6 +657,51 @@ export const AiHorizonForecastSchema = z.object({
   valid_path_count: z.number().int().nonnegative(),
   invalid_path_count: z.number().int().nonnegative(),
 }).strict().superRefine((value, context) => {
+  if (
+    (value.native_return_quantiles === undefined)
+    !== (value.native_price_quantiles === undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "native return and price quantiles must be present together",
+    });
+  }
+  if (value.native_return_quantiles && value.native_price_quantiles) {
+    if (
+      (value.native_return_quantiles.length > 0 && value.native_return_quantiles.length < 7)
+      || (value.native_price_quantiles.length > 0 && value.native_price_quantiles.length < 7)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "non-empty native quantiles must contain at least seven points",
+      });
+    }
+    for (const [key, quantiles] of [
+      ["native_return_quantiles", value.native_return_quantiles],
+      ["native_price_quantiles", value.native_price_quantiles],
+    ] as const) {
+      for (let index = 1; index < quantiles.length; index += 1) {
+        if (
+          quantiles[index]!.quantile <= quantiles[index - 1]!.quantile
+          || quantiles[index]!.value < quantiles[index - 1]!.value
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: [key, index],
+            message: "native quantiles must be strictly keyed and value-monotone",
+          });
+        }
+      }
+    }
+    if (value.native_return_quantiles.some((item, index) => (
+      item.quantile !== value.native_price_quantiles![index]?.quantile
+    ))) {
+      context.addIssue({
+        code: "custom",
+        message: "native return and price quantile probabilities must align",
+      });
+    }
+  }
   const probabilities = [
     value.up_probability,
     value.down_probability,
@@ -703,8 +791,12 @@ const ModelRunInputOriginSchema = z.object({
 });
 
 const ModelRunSchema = z.object({
-  role: z.enum(["kronos_base", "fincast"]),
-  expected_model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID]),
+  role: z.enum(["kronos_base", "fincast", "chronos_2"]),
+  expected_model_id: z.enum([
+    KRONOS_BASE_MODEL_ID,
+    FINCAST_MODEL_ID,
+    CHRONOS_2_MODEL_ID,
+  ]),
   status: z.enum(["available", "partial", "unavailable"]),
   model: AiModelProvenanceSchema,
   generated_at: timestamp,
@@ -716,7 +808,11 @@ const ModelRunSchema = z.object({
   input_end_aligned: z.literal(true),
   raw_series: z.array(SeriesForecastResultSchema).min(1).max(10_000),
 }).strict().superRefine((run, context) => {
-  const expectedModelId = run.role === "kronos_base" ? KRONOS_BASE_MODEL_ID : FINCAST_MODEL_ID;
+  const expectedModelId = run.role === "kronos_base"
+    ? KRONOS_BASE_MODEL_ID
+    : run.role === "chronos_2"
+      ? CHRONOS_2_MODEL_ID
+      : FINCAST_MODEL_ID;
   if (run.expected_model_id !== expectedModelId || run.model.model_id !== expectedModelId) {
     context.addIssue({
       code: "custom",
@@ -937,11 +1033,15 @@ export const AiResponseSchema = z.object({
   evaluation: EvaluationResultSchema.nullable().optional(),
   error: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((response, context) => {
-  if (response.model.model_id !== KRONOS_BASE_MODEL_ID && response.model.model_id !== FINCAST_MODEL_ID) {
+  if (
+    response.model.model_id !== KRONOS_BASE_MODEL_ID
+    && response.model.model_id !== FINCAST_MODEL_ID
+    && response.model.model_id !== CHRONOS_2_MODEL_ID
+  ) {
     context.addIssue({
       code: "custom",
       path: ["model", "model_id"],
-      message: "AI backend must use a supported pinned Kronos-base or FinCast model",
+      message: "AI backend must use a supported pinned Kronos-base, Chronos-2, or FinCast model",
     });
   }
   if ((response.model.fallback_from ?? null) !== null || (response.model.fallback_reason ?? null) !== null) {
@@ -998,7 +1098,9 @@ export const AiResponseSchema = z.object({
     const independentRun = response.model_runs[0]!;
     const expectedModelId = independentRun.role === "kronos_base"
       ? KRONOS_BASE_MODEL_ID
-      : FINCAST_MODEL_ID;
+      : independentRun.role === "chronos_2"
+        ? CHRONOS_2_MODEL_ID
+        : FINCAST_MODEL_ID;
     if (response.model.model_id !== expectedModelId) {
       context.addIssue({
         code: "custom",

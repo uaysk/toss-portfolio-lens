@@ -28,6 +28,7 @@ const BINANCE_PAGE_LIMIT = 1_024;
 const ORIGIN_STRIDE_BARS = 15;
 const FUTURE_BAR_COUNT = 60;
 const DEFAULT_CONTEXT_BARS = 512;
+const MAXIMUM_RAW_CONTEXT_BARS = 8192;
 const DEFAULT_DEADLINE_MS = 2 * 60 * 60_000;
 const MAXIMUM_DEADLINE_MS = 24 * 60 * 60_000;
 const NUMBER_TOLERANCE = 1e-12;
@@ -118,6 +119,30 @@ export type CryptoModelReplayInput = {
   durationHours?: number;
   endExclusive?: number;
   kronosLoaderProfile?: KronosReplayLoaderProfile;
+};
+
+export type CryptoReplayRawContextRow = {
+  instrumentKey: string;
+  origin: string;
+  futureTimestamps: readonly string[];
+  closes: readonly number[];
+  metadata: {
+    symbol: string;
+    originOrdinal: number;
+    windowStartAt: string;
+    windowEndExclusiveAt: string;
+  };
+};
+
+export type CryptoReplayRawContextResult = {
+  symbol: string;
+  durationHours: number;
+  startAt: string;
+  endExclusiveAt: string;
+  contextBars: number;
+  inputBarCount: number;
+  marketBars: readonly BinanceKline[];
+  rows: CryptoReplayRawContextRow[];
 };
 
 export type CryptoReplayQuantileMetric = {
@@ -678,6 +703,8 @@ function exactDuplicate(left: BinanceKline, right: BinanceKline): boolean {
     && left.volume === right.volume
     && left.quoteVolume === right.quoteVolume
     && left.tradeCount === right.tradeCount
+    && left.takerBuyVolume === right.takerBuyVolume
+    && left.takerBuyQuoteVolume === right.takerBuyQuoteVolume
     && left.final === right.final;
 }
 
@@ -810,6 +837,9 @@ function buildRequest(
     close: bar.close,
     volume: bar.volume,
     amount: bar.quoteVolume,
+    trade_count: bar.tradeCount,
+    taker_buy_volume: bar.takerBuyVolume,
+    taker_buy_amount: bar.takerBuyQuoteVolume,
     complete: true,
   }));
   const firstOriginIndex = alignedFirstOriginIndex(bars, contextBars, window);
@@ -884,6 +914,89 @@ function expectedRecords(request: AiEvaluateRequest): Map<string, ExpectedRecord
     }
   }
   return records;
+}
+
+export async function loadCryptoReplayRawContexts(input: {
+  rest: Pick<BinanceRestMarketData, "klines">;
+  symbol: string;
+  durationHours: number;
+  endExclusive: number;
+  authoritativeNow?: number;
+  contextBars?: number;
+  signal?: AbortSignal;
+}): Promise<CryptoReplayRawContextResult> {
+  const symbol = normalizedSymbol(input.symbol);
+  const durationHours = finiteInteger(
+    input.durationHours,
+    1,
+    MAXIMUM_REPLAY_DURATION_HOURS,
+    "Replay durationHours",
+  );
+  const contextBars = finiteInteger(
+    input.contextBars ?? DEFAULT_CONTEXT_BARS,
+    1,
+    MAXIMUM_RAW_CONTEXT_BARS,
+    "Replay contextBars",
+  );
+  const authoritativeNow = input.authoritativeNow ?? Date.now();
+  const window = replayWindow(
+    authoritativeNow,
+    contextBars,
+    durationHours,
+    input.endExclusive,
+  );
+  const localController = input.signal ? undefined : new AbortController();
+  const signal = input.signal ?? localController!.signal;
+  const bars = await loadCompleteBars(
+    input.rest,
+    symbol,
+    window,
+    contextBars,
+    authoritativeNow,
+    durationHours * 60,
+    signal,
+  );
+  const firstOriginIndex = alignedFirstOriginIndex(bars, contextBars, window);
+  const rows: CryptoReplayRawContextRow[] = [];
+  for (
+    let index = firstOriginIndex;
+    index + FUTURE_BAR_COUNT < bars.length
+      && bars[index]!.openTime < window.endExclusive;
+    index += ORIGIN_STRIDE_BARS
+  ) {
+    const origin = bars[index]!;
+    const context = bars.slice(index - contextBars + 1, index + 1);
+    if (context.length !== contextBars) {
+      throw new CryptoModelReplayError(
+        "data_gap",
+        "A raw replay origin did not retain its complete causal context.",
+      );
+    }
+    rows.push({
+      instrumentKey: `BINANCE_USDM:${symbol}`,
+      origin: new Date(origin.closeTime).toISOString(),
+      futureTimestamps: bars
+        .slice(index + 1, index + FUTURE_BAR_COUNT + 1)
+        .map((bar) => new Date(bar.closeTime).toISOString()),
+      closes: context.map((bar) => bar.close),
+      metadata: {
+        symbol,
+        originOrdinal: rows.length,
+        windowStartAt: new Date(window.evaluationStart).toISOString(),
+        windowEndExclusiveAt: new Date(window.endExclusive).toISOString(),
+      },
+    });
+  }
+  return {
+    symbol,
+    durationHours,
+    startAt: new Date(window.evaluationStart).toISOString(),
+    endExclusiveAt: new Date(window.endExclusive).toISOString(),
+    contextBars,
+    inputBarCount: bars.length,
+    marketBars: bars,
+    rows,
+  };
 }
 
 function roundTripCostRate(costs: CryptoReplayCostAssumptions): number {

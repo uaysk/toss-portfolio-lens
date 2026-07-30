@@ -156,6 +156,8 @@ function staleForecast() {
 
 function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
   return {
+    contractVersion: "ai-paper-simulation/v8",
+    sourceContractVersion: "ai-paper-simulation/v7",
     market: { kind: "stock", country: "KR" },
     marketCountry: "KR",
     initialCash: 100_000,
@@ -174,6 +176,13 @@ function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
       slippageBpsPerSide: 10,
     },
     modelLanes: ["kronos_base"],
+    modelPlan: [{
+      symbol: "*",
+      modelLane: "kronos_base",
+      role: "primary",
+      required: true,
+      preferredHorizonsMinutes: [15, 30, 60],
+    }],
     fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };
@@ -651,8 +660,8 @@ describe("AI trading simulation service", () => {
       orderApiDependency: false,
       mcp: false,
       autonomousPaperTrading: true,
-      stockModelLanes: "kronos_base,fincast",
-      stockModelLaneConcurrency: "single_lane_only",
+      stockModelLanes: "kronos_base,fincast,chronos2",
+      stockModelLaneConcurrency: "role_routed_for_v8_etf",
     });
     expect(status.limitations.join(" ")).toContain("실제 주문 API를 호출하지 않는");
     expect(status.pairStrategy.pairs).toEqual(expect.arrayContaining([
@@ -694,6 +703,13 @@ describe("AI trading simulation service", () => {
     const input: SimulationStartRequest = {
       ...request(1),
       modelLanes: ["fincast"],
+      modelPlan: [{
+        symbol: "*",
+        modelLane: "fincast",
+        role: "primary",
+        required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }],
     };
     const started = await setup.service.start(input, "owner");
     const running = await waitForPhase(setup, started.runId, "running") as unknown as {
@@ -760,29 +776,36 @@ describe("AI trading simulation service", () => {
   it("normalizes a legacy stock request across v7 storage, live reads, history, reports, and artifacts", async () => {
     const setup = harness();
     const legacyInput = Object.fromEntries(
-      Object.entries(request(1)).filter(([key]) => key !== "market"),
+      Object.entries(request(1)).filter(([key]) => ![
+        "contractVersion",
+        "sourceContractVersion",
+        "modelPlan",
+        "market",
+      ].includes(key)),
     );
     const parsed = createSimulationStartRequestSchema({
       maxDurationMinutes: 390,
     }).parse(legacyInput);
     expect(parsed).toMatchObject({
+      contractVersion: "ai-paper-simulation/v8",
+      sourceContractVersion: "ai-paper-simulation/v7",
       market: { kind: "stock", country: "KR" },
       marketCountry: "KR",
     });
 
     const started = await setup.service.start(parsed, "owner");
     expect(started).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       snapshot: {
-        schemaVersion: "ai-paper-simulation/v7",
+        schemaVersion: "ai-paper-simulation/v8",
         market: { kind: "stock", country: "KR" },
         marketCountry: "KR",
       },
     });
     expect(setup.runService.create).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
-        schema_version: "ai-paper-simulation/v7",
+        schema_version: "ai-paper-simulation/v8",
         market: { kind: "stock", country: "KR" },
         market_country: "KR",
       }),
@@ -790,47 +813,47 @@ describe("AI trading simulation service", () => {
 
     await waitForPhase(setup, started.runId, "running");
     expect(await setup.service.get(started.runId, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       run: {
-        schemaVersion: "ai-paper-simulation/v7",
+        schemaVersion: "ai-paper-simulation/v8",
         market: { kind: "stock", country: "KR" },
       },
       snapshot: { market: { kind: "stock", country: "KR" } },
     });
     expect(await setup.service.current("owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       snapshot: { market: { kind: "stock", country: "KR" } },
     });
 
     await setup.service.cancel(started.runId, "owner");
     expect(setup.run()?.summary).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       market_country: "KR",
       snapshot: { market: { kind: "stock", country: "KR" } },
     });
     expect(setup.latestArtifact("simulation-selection")?.content).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
     });
     expect(setup.latestArtifact("simulation-diagnostics")?.content).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       snapshot: { market: { kind: "stock", country: "KR" } },
     });
 
     expect(await setup.service.list({}, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       items: [{
-        schemaVersion: "ai-paper-simulation/v7",
+        schemaVersion: "ai-paper-simulation/v8",
         market: { kind: "stock", country: "KR" },
         marketCountry: "KR",
       }],
     });
     expect(await setup.service.report(started.runId, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       run: { market: { kind: "stock", country: "KR" } },
       report: {
@@ -847,7 +870,7 @@ describe("AI trading simulation service", () => {
     await setup.service.close("test_complete");
   });
 
-  it("persists the normalized stock market at the v7 result root on completion", async () => {
+  it("persists the normalized stock market at the v8 result root on completion", async () => {
     let now = Date.parse(CREATED_AT);
     const artifactGate = deferred();
     const setup = harness({ artifactGate: artifactGate.promise, now: () => now });
@@ -859,10 +882,10 @@ describe("AI trading simulation service", () => {
     await eventually(
       setup.run,
       (run) => run?.status === "completed",
-      "v7 stock result completion",
+      "v8 stock result completion",
     );
     expect(setup.run()?.result).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       market: { kind: "stock", country: "KR" },
       snapshot: { market: { kind: "stock", country: "KR" } },
     });

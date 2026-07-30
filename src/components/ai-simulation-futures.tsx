@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 const MODEL_LABELS: Record<AiSimulationModelComparisonLane["id"], string> = {
   kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
+  chronos2: "Chronos-2 · Primary",
 };
 
 function ratio(value?: number, signed = false): string {

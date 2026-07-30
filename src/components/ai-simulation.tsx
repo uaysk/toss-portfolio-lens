@@ -53,6 +53,7 @@ import {
   type AiSimulationCryptoRequest,
   type AiSimulationMarketCountry,
   type AiSimulationModelLane,
+  type AiSimulationModelPlanEntry,
   type AiSimulationPairCatalogItem,
   type AiSimulationPairId,
   type AiSimulationPreset,
@@ -177,7 +178,9 @@ function selectionModeLabel(request: AiSimulationRequest): string {
 }
 
 function stockModelLaneLabel(lane: AiSimulationModelLane): string {
-  return lane === "fincast" ? "FinCast · Main" : "Kronos-base · Legacy";
+  return lane === "fincast"
+    ? "FinCast"
+    : lane === "chronos2" ? "Chronos-2" : "Kronos-base · Legacy";
 }
 
 export function aiSimulationRequestWithStrategy(
@@ -201,8 +204,9 @@ export function aiSimulationRequestWithStrategy(
       pairId: strategy.pairId,
       allowDegradedMode: false,
     },
-    // The retained pair strategy is the only legacy-only stock path.
-    modelLanes: ["kronos_base"],
+    modelLanes: current.simulationCase === "us_etf_pair"
+      ? ["chronos2", "fincast"]
+      : ["kronos_base"],
     costs: usingDefaultCosts ? defaultAiSimulationCosts("US") : current.costs,
   };
 }
@@ -246,6 +250,257 @@ function formatScore(value?: number): string {
   return Number.isFinite(value) ? (value as number).toFixed(3) : "unavailable";
 }
 
+function unknownRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function unknownNumber(source: Record<string, unknown>, key: string): number | undefined {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function unknownStringArray(source: Record<string, unknown>, key: string): string[] {
+  const value = source[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+export function UnifiedPolicyEvidencePanel({ snapshot }: { snapshot: AiSimulationSnapshot }) {
+  const evidence = (snapshot.modelEvidence ?? [])
+    .map(unknownRecord)
+    .slice(-6)
+    .reverse();
+  const latestDecision = unknownRecord(snapshot.unifiedPolicyDecisions?.at(-1));
+  const circuitBreaker = unknownRecord(latestDecision.circuitBreaker);
+  const mapping = unknownRecord(snapshot.pairMapping);
+  const bull = unknownRecord(mapping.bull);
+  const bear = unknownRecord(mapping.bear);
+  const sessionGate = unknownRecord(snapshot.etfSessionGate);
+  const scanner = unknownRecord(snapshot.highVolatilityScanner);
+  const scannerCandidates = Array.isArray(scanner.candidates)
+    ? scanner.candidates.map(unknownRecord)
+    : [];
+  if (
+    !snapshot.simulationCase
+    && evidence.length === 0
+    && Object.keys(mapping).length === 0
+    && Object.keys(scanner).length === 0
+  ) return null;
+  return (
+    <Card className="bg-card p-5 sm:p-6" data-unified-policy-evidence>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">UNIFIED POLICY · V8</p>
+          <h3 className="mt-1 text-base font-black">{snapshot.simulationCase ?? "legacy history"}</h3>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {(snapshot.modelPlan ?? []).map((entry) => (
+            <span
+              key={`${entry.symbol}-${entry.modelLane}-${entry.role}`}
+              className="rounded-full bg-secondary px-2.5 py-1 text-[9px] font-black"
+              data-result-model-role={entry.role}
+            >
+              {entry.symbol} · {entry.modelLane} · {entry.role}
+            </span>
+          ))}
+        </div>
+      </div>
+      {evidence.length ? (
+        <div className="mt-4 grid gap-2 lg:grid-cols-2">
+          {evidence.map((item, index) => (
+            <article
+              key={`${String(item.symbol)}-${String(item.modelLane)}-${String(item.horizonMinutes)}-${index}`}
+              className="rounded-2xl bg-secondary p-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-black">
+                  {String(item.symbol ?? "unavailable")} · {String(item.modelLane ?? "unavailable")}
+                </p>
+                <span className="rounded-full bg-card px-2 py-1 text-[8px] font-black">
+                  {String(item.role ?? "unavailable")} · {String(item.horizonMinutes ?? "?")}m
+                </span>
+              </div>
+              <p className="mt-2 text-[9px] leading-4 text-muted-foreground">
+                {String(item.modelId ?? "model unavailable")} @ {String(item.modelRevision ?? "revision unavailable")}
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] sm:grid-cols-4">
+                <span>gross {formatRatio(unknownNumber(item, "expectedReturn"), true)}</span>
+                <span>net {formatRatio(unknownNumber(item, "expectedNetReturn"), true)}</span>
+                <span>pNet L {formatRatio(unknownNumber(item, "pNetLong"))}</span>
+                <span>pNet S {formatRatio(unknownNumber(item, "pNetShort"))}</span>
+                {(["q01Return", "q05Return", "q10Return", "q50Return", "q90Return", "q95Return", "q99Return"] as const)
+                  .map((key) => (
+                    <span key={key}>
+                      {key.replace("Return", "")} {formatRatio(unknownNumber(item, key), true)}
+                    </span>
+                  ))}
+                <span>interval {formatRatio(unknownNumber(item, "intervalWidth"))}</span>
+                <span>ES {formatRatio(unknownNumber(item, "expectedShortfall"))}</span>
+                <span>latency {unknownNumber(item, "latencyMs")?.toFixed(0) ?? "unavailable"}ms</span>
+                <span>input {String(item.inputOrigin ?? "unavailable")}</span>
+                <span>cal {String(item.calibrationStatus ?? "unavailable")} · age {String(item.calibrationAge ?? "?")}</span>
+              </div>
+              {(() => {
+                const quality = unknownRecord(item.dataQuality);
+                const unavailable = unknownStringArray(quality, "unavailableFeatures");
+                const warnings = unknownStringArray(quality, "warnings");
+                return (
+                  <p className="mt-3 text-[9px] leading-4 text-muted-foreground">
+                    quality {String(quality.status ?? "unavailable")}
+                    {" · "}profile {String(item.featureProfile ?? "unavailable")}
+                    {" · "}missing {formatRatio(unknownNumber(quality, "missingRate"))}
+                    {" · "}unavailable {unavailable.length ? unavailable.join(", ") : "none"}
+                    {warnings.length ? ` · warnings ${warnings.join(", ")}` : ""}
+                  </p>
+                );
+              })()}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-4 rounded-2xl bg-secondary p-4 text-xs text-muted-foreground">
+          모델 evidence unavailable · fail-closed cash
+        </p>
+      )}
+      {Object.keys(latestDecision).length ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>최종 판단</strong><br />
+            {String(latestDecision.direction ?? "cash")} · {String(latestDecision.executionAction ?? "none")}
+            {" · "}horizon {String(latestDecision.selectedHorizonMinutes ?? "unavailable")}m
+            <br />
+            gross {formatRatio(unknownNumber(latestDecision, "expectedGrossReturn"), true)}
+            {" · "}net {formatRatio(unknownNumber(latestDecision, "expectedNetReturn"), true)}
+            <br />
+            pNet L {formatRatio(unknownNumber(latestDecision, "pNetLong"))}
+            {" · "}S {formatRatio(unknownNumber(latestDecision, "pNetShort"))}
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>Veto</strong><br />
+            {String(unknownRecord(latestDecision.veto).vetoed ?? false)}
+            {" · "}{unknownStringArray(unknownRecord(latestDecision.veto), "reasons").join(", ") || "없음"}
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>Circuit breaker</strong><br />
+            {String(circuitBreaker.active ?? false)}
+            {" · "}{unknownStringArray(circuitBreaker, "triggers").join(", ") || "해제"}
+            <br />
+            release {unknownStringArray(circuitBreaker, "releaseConditions").join(", ") || "none"}
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>Rust policy gate</strong><br />
+            regime {String(latestDecision.rustRegime ?? "unavailable")}
+            <br />
+            pass {unknownStringArray(latestDecision, "passedIndicatorGates").join(", ") || "none"}
+            <br />
+            block {unknownStringArray(latestDecision, "blockedIndicatorGates").join(", ") || "none"}
+          </p>
+          {(() => {
+            const cost = unknownRecord(latestDecision.costBreakdown);
+            return (
+              <p className="rounded-xl bg-secondary p-3 text-[9px] sm:col-span-2 lg:col-span-4">
+                <strong>비용 breakdown</strong><br />
+                commission {String(cost.commissionBps ?? "unavailable")}bps
+                {" · "}spread {String(cost.spreadBps ?? "unavailable")}bps
+                {" · "}slippage {String(cost.slippageBps ?? "unavailable")}bps
+                {" · "}funding {String(cost.fundingBps ?? "unavailable")}bps
+                {" · "}safety {String(cost.safetyMarginBps ?? "unavailable")}bps
+                {" · "}long total {String(cost.totalLongBps ?? "unavailable")}bps
+                {" · "}short total {String(cost.totalShortBps ?? "unavailable")}bps
+              </p>
+            );
+          })()}
+        </div>
+      ) : null}
+      {Object.keys(mapping).length ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-3" data-result-pair-mapping>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>PairReturnMapper</strong><br />
+            {String(mapping.modelTargetSymbol ?? "target unavailable")}
+            {" · "}{String(mapping.status ?? "unavailable")} · samples {String(mapping.sampleCount ?? 0)}
+            <br />
+            residual 학습 시점 {formatTimestamp(String(mapping.latestTrainingObservationAt ?? ""))}
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>Bull {String(bull.symbol ?? "")}</strong><br />
+            α {formatRatio(unknownNumber(bull, "alpha"), true)}
+            {" · "}β {String(bull.effectiveBeta ?? "unavailable")}
+            {" · "}residual q10/q90 {formatRatio(unknownNumber(bull, "residualQ10"), true)}
+            /{formatRatio(unknownNumber(bull, "residualQ90"), true)}
+            <br />
+            net {formatRatio(unknownNumber(bull, "expectedNetReturn"), true)}
+            {" · "}pNet {formatRatio(unknownNumber(mapping, "pNetBull"))}
+            {" · "}cost {String(bull.totalCostBps ?? "unavailable")}bps
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px]">
+            <strong>Bear {String(bear.symbol ?? "")}</strong><br />
+            α {formatRatio(unknownNumber(bear, "alpha"), true)}
+            {" · "}β {String(bear.effectiveBeta ?? "unavailable")}
+            {" · "}residual q10/q90 {formatRatio(unknownNumber(bear, "residualQ10"), true)}
+            /{formatRatio(unknownNumber(bear, "residualQ90"), true)}
+            <br />
+            net {formatRatio(unknownNumber(bear, "expectedNetReturn"), true)}
+            {" · "}pNet {formatRatio(unknownNumber(mapping, "pNetBear"))}
+            {" · "}cost {String(bear.totalCostBps ?? "unavailable")}bps
+          </p>
+          <p className="rounded-xl bg-secondary p-3 text-[9px] sm:col-span-3">
+            <strong>정규장 · OR15 · VWAP gate</strong><br />
+            entry {String(sessionGate.canEnter ?? "unavailable")}
+            {" · "}hold {String(sessionGate.canHold ?? "unavailable")}
+            {" · "}force exit {String(sessionGate.forceExit ?? "unavailable")}
+            {" · "}{unknownStringArray(sessionGate, "reasons").join(", ") || "통과"}
+          </p>
+        </div>
+      ) : null}
+      {Object.keys(scanner).length ? (
+        <div className="mt-3 rounded-2xl bg-secondary p-4" data-result-high-vol-scanner>
+          <p className="text-xs font-black">
+            Scanner · 전체 {String(scanner.totalCandidateCount ?? 0)}
+            {" · "}적격 {String(scanner.eligibleCandidateCount ?? 0)}
+            {" · "}선정 {Array.isArray(scanner.selectedSymbols)
+              ? scanner.selectedSymbols.join(", ")
+              : "unavailable"}
+          </p>
+          <p className="mt-1 text-[9px] text-muted-foreground">
+            scan {formatTimestamp(String(scanner.scannedAt ?? ""))}
+            {" · "}freshness {unknownNumber(scanner, "dataFreshnessMs")?.toFixed(0) ?? "unavailable"}ms
+          </p>
+          <ul className="mt-2 space-y-1 text-[9px] text-muted-foreground">
+            {scannerCandidates.slice(0, 8).map((candidate) => (
+              <li key={String(candidate.symbol)}>
+                {(() => {
+                  const metrics = unknownRecord(candidate.metrics);
+                  const availability = unknownRecord(candidate.featureAvailability);
+                  return (
+                    <>
+                      {String(candidate.symbol)} · score {String(candidate.score ?? "unavailable")}
+                      {" · "}freshness {unknownNumber(candidate, "freshnessMs")?.toFixed(0) ?? "unavailable"}ms
+                      {" · "}RV {formatRatio(unknownNumber(metrics, "realizedVolatility"))}
+                      {" · "}NATR {formatRatio(unknownNumber(metrics, "normalizedAtr"))}
+                      {" · "}RVOL {formatScore(unknownNumber(metrics, "relativeVolume"))}
+                      {" · "}amount {String(unknownNumber(metrics, "tradingAmountUsd") ?? "unavailable")}
+                      {" · "}spread {availability.spread === false
+                        ? "unavailable"
+                        : `${String(unknownNumber(metrics, "medianSpreadBps") ?? "unavailable")}bps`}
+                      {" · "}depth {availability.orderbookDepth === false
+                        ? "unavailable"
+                        : String(unknownNumber(metrics, "depthUsd") ?? "unavailable")}
+                      {" · "}{unknownStringArray(candidate, "exclusionReasons").join(", ") || "eligible"}
+                    </>
+                  );
+                })()}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function phaseLabel(value: string): string {
   return PHASE_LABELS[value] ?? value;
 }
@@ -275,13 +530,22 @@ export function AiSimulationStrategySettings({
   onModeChange: (mode: "single" | "pair") => void;
   onPairIdChange: (pairId: AiSimulationPairId) => void;
 }) {
+  const etfOnly = request.simulationCase === "us_etf_pair";
+  const selectedPairId = request.strategy.mode === "pair"
+    ? request.strategy.pairId
+    : undefined;
+  const selectedPair = selectedPairId
+    ? catalog.find((item) => item.id === selectedPairId)
+    : undefined;
   return (
     <div className="rounded-2xl bg-secondary p-4" data-simulation-strategy-settings>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="text-xs font-black">전략 실행 방식</p>
           <p className="mt-1 text-[9px] leading-4 text-muted-foreground">
-            페어 비교는 Kronos-base, Rust 기술 지표와 두 신호를 결합한 최종 전략에 같은 미국 시장 원천·비용·체결 정책을 적용합니다.
+            {etfOnly
+              ? "Chronos-2가 기초 ETF를 예측하고 Rust 세션·유동성 gate와 causal PairReturnMapper가 실제 bull/bear ETF의 비용 후 분포를 판단합니다."
+              : "Kronos-base와 Rust 기술 지표를 같은 확정봉 origin에 맞추는 legacy 페어 비교입니다."}
           </p>
         </div>
         <div
@@ -297,10 +561,10 @@ export function AiSimulationStrategySettings({
               "rounded-lg px-3 py-2 text-[10px] font-black transition-colors",
               request.strategy.mode === "single" ? "bg-primary text-primary-foreground" : "text-muted-foreground",
             )}
-            disabled={disabled}
+            disabled={disabled || etfOnly}
             onClick={() => onModeChange("single")}
           >
-            단일
+            단일 · legacy
           </button>
           <button
             type="button"
@@ -314,7 +578,7 @@ export function AiSimulationStrategySettings({
             aria-disabled={disabled || !pairEnabled}
             onClick={() => onModeChange("pair")}
           >
-            페어 비교
+            ETF 페어
           </button>
         </div>
       </div>
@@ -340,8 +604,28 @@ export function AiSimulationStrategySettings({
               </SelectContent>
             </Select>
           </label>
+          {selectedPair ? (
+            <div className="mt-3 grid gap-2 sm:grid-cols-3" data-etf-pair-mapping={selectedPair.id}>
+              <p className="rounded-xl bg-card p-3 text-[9px]">
+                <strong>표시 / 모델 target</strong><br />
+                {selectedPair.displaySignalSymbol ?? selectedPair.symbols[0] ?? "unavailable"}
+                {" / "}
+                {selectedPair.modelTargetSymbol ?? selectedPair.symbols[0] ?? "unavailable"}
+              </p>
+              <p className="rounded-xl bg-card p-3 text-[9px]">
+                <strong>보조 covariate</strong><br />
+                {selectedPair.auxiliarySymbols?.join(", ") || "없음"}
+              </p>
+              <p className="rounded-xl bg-card p-3 text-[9px]">
+                <strong>실제 execution</strong><br />
+                {selectedPair.symbols.slice(-2).join(" / ") || "unavailable"}
+              </p>
+            </div>
+          ) : null}
           <p className="mt-3 rounded-xl bg-card p-3 text-[9px] leading-4 text-muted-foreground">
-            페어 비교를 선택하면 시장은 미국으로 고정됩니다. Kronos-base가 unavailable 또는 degraded이거나 Rust 입력이 유효하지 않으면 거래하지 않고 cash로 닫습니다.
+            {etfOnly
+              ? "Model target과 execution leg는 분리됩니다. SOXX 반도체 target에는 SMH·QQQ가 보조 입력으로만 들어가며, rolling alpha/beta·시간대·regime·tracking residual은 origin 이전 자료로만 학습합니다."
+              : "시장은 미국으로 고정됩니다. Kronos-base, Rust 기술 지표 또는 실행 호가가 unavailable이면 거래하지 않고 cash로 닫습니다."}
           </p>
         </div>
       ) : null}
@@ -657,6 +941,7 @@ export function TradesAndDecisions({ snapshot }: { snapshot: AiSimulationSnapsho
 }
 
 export function simulationDecisionCadenceLabel(trigger?: string): string {
+  if (trigger === "high_vol_live_5s") return "고변동성 실시간 5초";
   if (trigger === "final_fincast_15s_aggtrade_bar") return "FinCast 새 확정 15초봉 즉시";
   if (trigger === "final_fincast_30s_aggtrade_bar") return "FinCast 새 확정 30초봉 즉시";
   return trigger === "finalized_one_minute_bar" || trigger === "final_binance_1m_kline"
@@ -858,6 +1143,7 @@ function RunPanel({
           ))}
         </div>
       ) : null}
+      <UnifiedPolicyEvidencePanel snapshot={snapshot} />
       <TradesAndDecisions snapshot={snapshot} />
       {snapshot.warnings.length ? (
         <Card className="bg-secondary p-5" role="status">
@@ -871,11 +1157,99 @@ function RunPanel({
   );
 }
 
+const BTC_ETH_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
+  { symbol: "BTCUSDT", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [30, 60, 15] },
+  { symbol: "BTCUSDT", modelLane: "fincast", role: "veto", required: true, preferredHorizonsMinutes: [30, 60, 15] },
+  { symbol: "ETHUSDT", modelLane: "fincast", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
+  { symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow", required: false, preferredHorizonsMinutes: [15, 30, 60] },
+];
+
+const HIGH_VOL_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
+  { symbol: "*", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
+  { symbol: "*", modelLane: "fincast", role: "veto", required: true, preferredHorizonsMinutes: [15, 30, 60] },
+];
+
+const ETF_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
+  { symbol: "*", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
+  { symbol: "*", modelLane: "fincast", role: "shadow", required: false, preferredHorizonsMinutes: [15, 30, 60] },
+];
+
+export function cryptoRequestForCase(
+  simulationCase: "btc_eth" | "high_vol_crypto",
+  current: AiSimulationCryptoRequest = DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+): AiSimulationCryptoRequest {
+  if (simulationCase === "btc_eth") {
+    return {
+      ...current,
+      contractVersion: "ai-paper-simulation/v8",
+      simulationCase,
+      selection: current.simulationCase === "btc_eth" && current.selection.mode === "manual"
+        ? current.selection
+        : { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
+      modelLanes: ["chronos2", "fincast"],
+      modelPlan: BTC_ETH_MODEL_PLAN,
+      scanner: undefined,
+      fincastCandleSeconds: 60,
+    };
+  }
+  return {
+    ...current,
+    contractVersion: "ai-paper-simulation/v8",
+    simulationCase,
+    selection: current.simulationCase === "high_vol_crypto" && current.selection.mode === "auto"
+      ? current.selection
+      : { mode: "auto", criterion: "volatility", symbolCount: 1 },
+    modelLanes: ["chronos2", "fincast"],
+    modelPlan: HIGH_VOL_MODEL_PLAN,
+    scanner: current.scanner ?? {
+      symbolCount: 1,
+      minimumListingDays: 90,
+      minimumTradingAmountUsd: 25_000_000,
+      maximumSpreadBps: 12,
+      depthRangeBps: 10,
+      minimumDepthUsd: 250_000,
+      maximumMissingRate: 0.02,
+      rescanIntervalMinutes: 30,
+      riskAppetite: "balanced",
+    },
+    fincastCandleSeconds: 60,
+  };
+}
+
+export function etfRequest(
+  current: AiSimulationRequest = DEFAULT_AI_SIMULATION_REQUEST,
+): AiSimulationRequest {
+  const currentPair = current.strategy.mode === "pair"
+    && ["qqq-tqqq-sqqq", "semiconductor-soxl-soxs", "spy-spxl-spxs"].includes(
+      current.strategy.pairId,
+    )
+    ? current.strategy.pairId
+    : "qqq-tqqq-sqqq";
+  return {
+    ...current,
+    contractVersion: "ai-paper-simulation/v8",
+    simulationCase: "us_etf_pair",
+    marketCountry: "US",
+    initialCash: current.marketCountry === "KR"
+      && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash
+      ? 100_000
+      : current.initialCash,
+    selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
+    strategy: { mode: "pair", pairId: currentPair, allowDegradedMode: false },
+    modelLanes: ["chronos2", "fincast"],
+    modelPlan: ETF_MODEL_PLAN,
+    fincastCandleSeconds: 60,
+    costs: usesDefaultAiSimulationCosts(current.costs, current.marketCountry)
+      ? defaultAiSimulationCosts("US")
+      : current.costs,
+  };
+}
+
 export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
-  const [assetClass, setAssetClass] = useState<AiSimulationAssetClass>("stock");
-  const [request, setRequest] = useState<AiSimulationRequest>(DEFAULT_AI_SIMULATION_REQUEST);
+  const [assetClass, setAssetClass] = useState<AiSimulationAssetClass>("btc_eth");
+  const [request, setRequest] = useState<AiSimulationRequest>(() => etfRequest());
   const [cryptoRequest, setCryptoRequest] = useState<AiSimulationCryptoRequest>(
-    DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+    () => cryptoRequestForCase("btc_eth"),
   );
   const [status, setStatus] = useState<AiSimulationStatus>();
   const [statusLoading, setStatusLoading] = useState(true);
@@ -895,7 +1269,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const pollingGeneration = useRef(0);
 
   const issues = useMemo(
-    () => assetClass === "crypto_futures"
+    () => assetClass !== "us_etf_pair"
       ? validateAiSimulationCryptoRequest(cryptoRequest, {
           minimumInitialCash: AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
           maximumInitialCash: AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
@@ -908,6 +1282,11 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   const runActive = Boolean(run && ACTIVE_RUN_STATUSES.has(run.status));
   const pairEnabled = aiSimulationPairStrategyEnabled(status);
   const pairCatalog = useMemo(() => aiSimulationPairCatalog(status), [status]);
+  const primaryEtfPairCatalog = useMemo(() => pairCatalog.filter(({ id }) => (
+    id === "qqq-tqqq-sqqq"
+    || id === "semiconductor-soxl-soxs"
+    || id === "spy-spxl-spxs"
+  )), [pairCatalog]);
   const loadCryptoCandidates = useCallback(async (signal?: AbortSignal) => {
     setCandidateLoading(true);
     setCandidateError("");
@@ -938,7 +1317,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   }, [cryptoRequest.selection, onUnauthorized]);
 
   useEffect(() => {
-    if (assetClass !== "crypto_futures" || runActive) return;
+    if (assetClass === "us_etf_pair" || runActive) return;
     const controller = new AbortController();
     void loadCryptoCandidates(controller.signal);
     return () => controller.abort();
@@ -1025,9 +1404,16 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             && !controller.signal.aborted) {
             const restored = normalizeAiSimulationRun(currentPayload);
             setRun(restored);
-            if (restored.snapshot?.market?.kind === "crypto_futures") {
-              setAssetClass("crypto_futures");
-            }
+            const restoredCase = restored.snapshot?.simulationCase
+              ?? (restored.snapshot?.market?.kind === "crypto_futures"
+                ? restored.snapshot.selection?.mode === "manual"
+                  && restored.snapshot.selection.symbols.every(
+                    (symbol) => symbol === "BTCUSDT" || symbol === "ETHUSDT",
+                  )
+                  ? "btc_eth"
+                  : "high_vol_crypto"
+                : "us_etf_pair");
+            setAssetClass(restoredCase);
           } else if (!currentResponse.ok) {
             throw new Error(aiSimulationErrorMessage(currentPayload, "최근 시뮬레이션을 복원하지 못했습니다."));
           }
@@ -1082,7 +1468,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   }, [run?.runId, runActive, cancelling, onUnauthorized]);
 
   const startSimulation = useCallback(async () => {
-    const validation = assetClass === "crypto_futures"
+    const validation = assetClass !== "us_etf_pair"
       ? validateAiSimulationCryptoRequest(cryptoRequest, {
           minimumInitialCash: AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
           maximumInitialCash: AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
@@ -1100,7 +1486,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       const response = await fetch("/api/portfolio/simulation/runs", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(assetClass === "crypto_futures" ? cryptoRequest : request),
+        body: JSON.stringify(assetClass !== "us_etf_pair" ? cryptoRequest : request),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -1209,6 +1595,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   };
 
   const changeStrategyMode = (mode: "single" | "pair") => {
+    if (assetClass === "us_etf_pair" && mode !== "pair") return;
     if (mode === "pair" && !pairEnabled) return;
     setInstrumentQuery("");
     setInstrumentResults([]);
@@ -1217,18 +1604,24 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     setRequest((current) => {
       if (mode === "single") return aiSimulationRequestWithStrategy(current, { mode });
       const currentPairId = current.strategy.mode === "pair" ? current.strategy.pairId : undefined;
-      const pairId = pairCatalog.some((item) => item.id === currentPairId)
+      const pairId = primaryEtfPairCatalog.some((item) => item.id === currentPairId)
         ? currentPairId!
-        : pairCatalog.some((item) => item.id === "sndk-snxx-sndq")
-          ? "sndk-snxx-sndq"
-          : pairCatalog[0]?.id ?? "soxx-soxl-soxs";
+        : primaryEtfPairCatalog[0]?.id ?? "qqq-tqqq-sqqq";
       return aiSimulationRequestWithStrategy(current, { mode, pairId });
     });
   };
 
   const changeAssetClass = (next: AiSimulationAssetClass) => {
-    if (runActive || next === assetClass) return;
-    setAssetClass(next);
+    const canonical = next === "stock"
+      ? "us_etf_pair"
+      : next === "crypto_futures" ? "high_vol_crypto" : next;
+    if (runActive || canonical === assetClass) return;
+    setAssetClass(canonical);
+    if (canonical === "us_etf_pair") {
+      setRequest((current) => etfRequest(current));
+    } else {
+      setCryptoRequest((current) => cryptoRequestForCase(canonical, current));
+    }
     setError("");
     setRun(undefined);
   };
@@ -1255,26 +1648,26 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               PAPER TRADING ONLY
             </div>
             <h2 className="mt-6 max-w-3xl text-[clamp(2rem,5vw,4.7rem)] font-black leading-[0.95] tracking-[-0.07em]">
-              {assetClass === "crypto_futures"
+              {assetClass !== "us_etf_pair"
                 ? <>선물 방향을 읽고,<br />격리 원장으로 검증합니다.</>
                 : <>AI가 고르고,<br />가상 원장으로 검증합니다.</>}
             </h2>
             <p className="mt-5 max-w-2xl text-sm leading-6 text-primary-foreground/60">
-              {assetClass === "crypto_futures"
+              {assetClass !== "us_etf_pair"
                 ? "Binance USDⓈ-M USDT 무기한 계약 중 유동성 조건을 통과한 1~2개 계약을 자동 또는 직접 고르고, 확정봉과 다음 유효 체결만으로 롱·숏 paper 결과를 검증합니다. 읽기 전용 키와 공개 시세 외에는 외부로 주문을 전송하지 않습니다."
                 : "보유 주식 0주·현금 100%에서 시작해 자동 선정 또는 직접 고른 1~2개 종목의 수익률을 검증합니다. 새 확정 1분봉마다 선택한 AI 모델의 예측, Rust 기술 지표와 차트 패턴을 즉시 다시 판단하며 자금과 주문은 외부로 전송하지 않습니다."}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "자동·직접 1~2계약" : "AI 또는 직접 선택"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BrainCircuit className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">종목 선정</p><p className="mt-1 text-sm font-black">{assetClass === "btc_eth" ? "BTC · ETH · 둘 다" : assetClass === "high_vol_crypto" ? "PIT scanner 1~2계약" : "QQQ · 반도체 · SPY"}</p></div>
             <div className="rounded-2xl bg-primary-foreground/10 p-4"><Clock className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">판단</p><p className="mt-1 text-sm font-black">확정봉 이벤트 즉시</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "USDT · isolated" : "현금 100% · 0주"}</p></div>
-            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">분석</p><p className="mt-1 text-sm font-black">{assetClass === "crypto_futures" ? "FinCast Main · Kronos Legacy" : request.strategy.mode === "pair" ? "Kronos-base Legacy · Rust · 패턴" : "FinCast Main · Rust · 패턴"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><Wallet className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">시작 상태</p><p className="mt-1 text-sm font-black">{assetClass !== "us_etf_pair" ? "USDT · isolated" : "USD · 현금 · 정규장"}</p></div>
+            <div className="rounded-2xl bg-primary-foreground/10 p-4"><BarChart3 className="size-4" /><p className="mt-4 text-[10px] font-black text-primary-foreground/50">모델 역할</p><p className="mt-1 text-sm font-black">{assetClass === "btc_eth" ? "BTC C2→FinCast veto · ETH FinCast→C2 shadow" : assetClass === "high_vol_crypto" ? "Chronos-2 primary · FinCast veto" : "Chronos-2 primary · FinCast shadow · Rust"}</p></div>
           </div>
         </div>
       </Card>
 
-      {assetClass === "stock" ? (
+      {assetClass === "us_etf_pair" ? (
         <SimulationDisclosure />
       ) : (
         <Card className="bg-secondary p-4 text-[10px] leading-5 text-muted-foreground" data-crypto-simulation-disclosure>
@@ -1287,7 +1680,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       )}
       <RuntimeStatus status={status} loading={statusLoading} />
 
-      {assetClass === "crypto_futures" ? (
+      {assetClass !== "us_etf_pair" ? (
         <AiSimulationCryptoSetup
           request={cryptoRequest}
           status={status?.cryptoFutures}
@@ -1312,7 +1705,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
         />
       ) : null}
 
-      <Card className={cn("bg-card p-5 sm:p-7", assetClass !== "stock" && "hidden")} aria-hidden={assetClass !== "stock"}>
+      <Card className={cn("bg-card p-5 sm:p-7", assetClass !== "us_etf_pair" && "hidden")} aria-hidden={assetClass !== "us_etf_pair"}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">SIMULATION SETUP</p>
@@ -1341,27 +1734,17 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               </Select>
             </label>
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
-              <span className="mb-2 block text-[10px] font-black text-muted-foreground">예측 모델</span>
-              <Select
-                value={request.modelLanes[0]}
-                onValueChange={(value) => setRequest((current) => ({
-                  ...current,
-                  modelLanes: [value as AiSimulationModelLane],
-                }))}
-                disabled={runActive || request.strategy.mode === "pair"}
-              >
-                <SelectTrigger aria-label="주식 시뮬레이션 예측 모델" className="w-full min-w-0 bg-card">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="fincast">FinCast · Main</SelectItem>
-                  <SelectItem value="kronos_base">Kronos-base · Legacy</SelectItem>
-                </SelectContent>
-              </Select>
+              <span className="mb-2 block text-[10px] font-black text-muted-foreground">모델 역할</span>
+              <div className="flex flex-wrap gap-1.5" aria-label="ETF 모델 역할">
+                <span className="rounded-full bg-card px-2 py-1 text-[9px] font-black" data-model-role="primary">
+                  Chronos-2 · primary
+                </span>
+                <span className="rounded-full bg-card px-2 py-1 text-[9px] font-black" data-model-role="shadow">
+                  FinCast · shadow
+                </span>
+              </div>
               <span className="mt-2 block text-[9px] leading-4 text-muted-foreground">
-                {request.strategy.mode === "pair"
-                  ? "페어는 레거시 Kronos-base worker + Rust 결합으로 고정됩니다."
-                  : "선택한 한 모델만 실행하며 다른 모델로 대체하지 않습니다."}
+                Shadow 출력은 방향이나 주문 판단에 합산하지 않습니다. Chronos-2 또는 Rust·세션 데이터가 unavailable이면 cash입니다.
               </span>
             </label>
             {request.strategy.mode === "single" ? (
@@ -1405,7 +1788,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
 
           <AiSimulationStrategySettings
             request={request}
-            catalog={pairCatalog}
+            catalog={primaryEtfPairCatalog}
             pairEnabled={pairEnabled}
             pairMessage={statusLoading
               ? "페어 전략 capability를 확인하고 있습니다."

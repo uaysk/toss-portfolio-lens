@@ -26,14 +26,17 @@ import {
   canonicalCryptoModelInputDigest,
   CRYPTO_LOCAL_CHART_PROJECTION_BARS,
   cryptoChartProjection,
+  cryptoModelContextForLane,
   cryptoModelForecastIsFresh,
   CryptoPaperRuntime,
   CryptoPaperRuntimeError,
   cryptoRuntimeClientOrderId,
   cryptoRuntimeEntityId,
   groupPortfolioRuntimeArtifacts,
+  HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS,
   monotonicCryptoRiskClock,
   PortfolioDailyLossGate,
+  rebaseCryptoReturnQuantiles,
   type CryptoAiLaneClient,
   type CryptoPaperRuntimeSnapshot,
   type CryptoPublicStreams,
@@ -130,6 +133,8 @@ function simulationRequest(
   lanes: SimulationStartRequest["modelLanes"] = ["kronos_base"],
 ): SimulationStartRequest {
   return {
+    contractVersion: "ai-paper-simulation/v8",
+    sourceContractVersion: "ai-paper-simulation/v7",
     market: {
       kind: "crypto_futures",
       venue: "BINANCE_USDM",
@@ -150,6 +155,13 @@ function simulationRequest(
       slippageBpsPerSide: 1,
     },
     modelLanes: lanes,
+    modelPlan: lanes.map((modelLane) => ({
+      symbol: "*",
+      modelLane,
+      role: "primary",
+      required: true,
+      preferredHorizonsMinutes: [15, 30, 60],
+    })),
     fincastCandleSeconds: 60,
     execution: { mode: "paper" },
   };
@@ -674,6 +686,51 @@ function rustTechnicalAnalysis(
         relativeVolume: 1.25,
       },
     },
+    marketEvidence: {
+      schemaVersion: "rust-market-evidence/v2",
+      trendScore: 0.8,
+      momentumScore: 0.7,
+      breakoutScore: 0.6,
+      choppiness: 35,
+      normalizedAtr: 0.012,
+      realizedVolatility: 0.01,
+      dayRangeRatio: 0.02,
+      bollingerWidthExpansion: 1.1,
+      relativeVolume: 1.25,
+      tradingAmount: 5_000_000,
+      spreadBps: null,
+      orderbookDepth: null,
+      orderbookImbalance: null,
+      executionStrength: null,
+      liquidityQuality: null,
+      exitRisk: 0.1,
+      sessionVwap: null,
+      openingRange5: null,
+      openingRange15: null,
+      openingRange30: null,
+      timeOfDayRelativeVolume: null,
+      benchmarkRelativeStrength: null,
+      quoteFreshnessMs: null,
+      regime: "trend",
+      passedGates: ["trend"],
+      blockedGates: [],
+      unavailableFields: [
+        "spreadBps",
+        "orderbookDepth",
+        "orderbookImbalance",
+        "executionStrength",
+        "liquidityQuality",
+        "sessionVwap",
+        "openingRange5",
+        "openingRange15",
+        "openingRange30",
+        "timeOfDayRelativeVolume",
+        "benchmarkRelativeStrength",
+        "quoteFreshnessMs",
+      ],
+      originAt,
+      observedAt: originAt,
+    },
     input: {
       interval: "1m",
       barCount: bars.length,
@@ -770,6 +827,51 @@ describe("CryptoPaperRuntime", () => {
     expect(projection.patterns.every((pattern) => (
       pattern.detectedAt >= firstTimestamp && pattern.detectedAt <= lastTimestamp
     ))).toBe(true);
+  });
+
+  it("preserves a forming one-minute candle for the live chart projection", () => {
+    const source = finalizedKlineHistory(32);
+    source[source.length - 1] = {
+      ...source.at(-1)!,
+      close: 101.25,
+      final: false,
+    };
+
+    const projection = cryptoChartProjection(source);
+
+    expect(projection.bars.at(-1)).toMatchObject({
+      close: 101.25,
+      status: "forming",
+    });
+    expect(projection.bars.slice(0, -1).every((bar) => bar.status === "final"))
+      .toBe(true);
+  });
+
+  it("uses 1024 Chronos-2 bars and a 512-bar FinCast context from the same causal origin", () => {
+    const bars = finalizedKlineHistory(1_024);
+    const chronos2 = cryptoModelContextForLane("chronos2", bars);
+    const fincast = cryptoModelContextForLane("fincast", bars);
+
+    expect(chronos2).toHaveLength(1_024);
+    expect(fincast).toHaveLength(512);
+    expect(chronos2.at(-1)?.closeTime).toBe(fincast.at(-1)?.closeTime);
+    expect(fincast[0]?.openTime).toBe(chronos2[512]?.openTime);
+  });
+
+  it("rebases model returns to the causal live decision price without changing quantile order", () => {
+    const rebased = rebaseCryptoReturnQuantiles([
+      { quantile: 0.1, returnRate: -0.01 },
+      { quantile: 0.5, returnRate: 0.01 },
+      { quantile: 0.9, returnRate: 0.03 },
+    ], 100, 102);
+
+    expect(rebased.map((item) => item.returnRate)).toEqual([
+      100 * 0.99 / 102 - 1,
+      100 * 1.01 / 102 - 1,
+      100 * 1.03 / 102 - 1,
+    ]);
+    expect(rebased[0]!.returnRate).toBeLessThan(rebased[1]!.returnRate);
+    expect(rebased[1]!.returnRate).toBeLessThan(rebased[2]!.returnRate);
   });
 
   it("serializes same-lane worker calls even when portfolio symbols request concurrently", async () => {
@@ -875,7 +977,7 @@ describe("CryptoPaperRuntime", () => {
         amount: null,
         complete: true,
       },
-    ])).toBe("5c040b70809bc0c525e6f438de98b4fe66341dc7a55953e2b688b95d136ec5d0");
+    ])).toBe("8671be00a0ba96f14ca05146e4cbe0c929ec5cc3fd308b20d4e140b0b2036971");
   });
 
   it("never rewinds the daily-risk clock for a late prior-day event after UTC rollover", () => {
@@ -1330,6 +1432,12 @@ describe("CryptoPaperRuntime", () => {
     expect(cryptoModelForecastIsFresh({
       inputEndAt,
       targetTimestamps: targets,
+      latestFinalCandleCloseTime: START + 60_000,
+      maximumInputLagMs: 60_000,
+    })).toBe(true);
+    expect(cryptoModelForecastIsFresh({
+      inputEndAt,
+      targetTimestamps: targets,
       latestFinalCandleCloseTime: START + 60 * 60_000,
     })).toBe(false);
     expect(cryptoModelForecastIsFresh({
@@ -1542,6 +1650,61 @@ describe("CryptoPaperRuntime", () => {
       precisionFailureReasons: [],
       peakVramBytes: 4_000 * 1024 * 1024,
       peakVramMeasurement: "cuda_allocated_or_reserved",
+    });
+  });
+
+  it("treats FinCast's empty native quantile list as unavailable and preserves fixed quantiles", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      transform: (raw) => {
+        const output = structuredClone(raw);
+        const horizon = output.series[0]!.horizons[0] as UnknownRecord;
+        horizon.native_return_quantiles = [];
+        return output;
+      },
+    });
+    const comparisonLane = (
+      artifact(result, "simulation-comparison").lanes as UnknownRecord[]
+    )[0]!;
+    const provenanceLane = (
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]!;
+
+    expect(comparisonLane).toMatchObject({
+      id: "fincast",
+      status: "completed",
+      provenance: {
+        quantileTailPolicy: "tail_clamped_q10_q90",
+      },
+    });
+    expect(provenanceLane).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      errors: [],
+    });
+  });
+
+  it("rejects malformed non-empty FinCast native quantiles with a bounded error code", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "fincast",
+      transform: (raw) => {
+        const output = structuredClone(raw);
+        const horizon = output.series[0]!.horizons[0] as UnknownRecord;
+        horizon.native_return_quantiles = [{
+          quantile: 0.5,
+          value: 0,
+        }];
+        return output;
+      },
+    });
+    const provenanceLane = (
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]!;
+
+    expect(provenanceLane).toMatchObject({
+      attempts: 1,
+      successes: 0,
+      errors: ["model_native_quantiles_invalid"],
     });
   });
 
@@ -1919,6 +2082,153 @@ describe("CryptoPaperRuntime", () => {
     expect(result.terminalFailure?.code).toBe(
       "CRYPTO_TERMINAL_SETTLEMENT_INCOMPLETE",
     );
+  });
+
+  it("refreshes high-volatility forecasts every five seconds from finalized one-minute input", async () => {
+    const clock = new ScheduledClock();
+    const observed: AiForecastRequest[] = [];
+    const snapshots: CryptoPaperRuntimeSnapshot[] = [];
+    const analyze = vi.fn(async (input: {
+      bars: readonly BinanceKline[];
+    }) => rustTechnicalAnalysis(input.bars));
+    const client: CryptoAiLaneClient = {
+      request: vi.fn(async (request: AiForecastRequest) => {
+        observed.push(structuredClone(request));
+        return responseWithDisplayPath(response(
+          "fincast",
+          request,
+          clock.now(),
+          flatReturns,
+        ));
+      }),
+    };
+    const formingEvents = Array.from({ length: 59 }, (_, index) => {
+      const at = START + (index + 1) * 1_000;
+      const price = 100 + (index + 1) / 1_000;
+      return {
+        at,
+        event: {
+          kind: "kline",
+          source: "binance_ws",
+          symbol: "BTCUSDT",
+          interval: "1m",
+          openTime: START,
+          closeTime: START + 59_999,
+          open: 100,
+          high: price + 0.1,
+          low: 99.9,
+          close: price,
+          volume: 20 + index,
+          quoteVolume: 2_000 + index,
+          tradeCount: 20 + index,
+          final: false,
+          receivedAt: at,
+        } satisfies BinanceMarketEvent,
+      };
+    });
+    const riskEvents = Array.from({ length: 15 }, (_, index) => (
+      riskPrelude(START + 100 + index * 4_000, 100 + index / 100)
+    )).flat();
+    const runtime = new CryptoPaperRuntime({
+      rest: rest(),
+      streams: new ScheduledStreams(clock, [
+        { at: START + 50, event: finalKline(START + 50, true) },
+        ...riskEvents,
+        ...formingEvents,
+      ]),
+      laneClients: { fincast: client },
+      technicalAnalyzer: { analyze },
+      instrumentRules: rules,
+      clock,
+      contextBars: 64,
+      onSnapshot: (_runId, snapshot) => {
+        snapshots.push(snapshot);
+      },
+    });
+
+    const result = await runtime.run({
+      request: {
+        ...simulationRequest(["fincast"]),
+        sourceContractVersion: "ai-paper-simulation/v8",
+        simulationCase: "high_vol_crypto",
+      },
+      snapshot: scannerSnapshot,
+      selected: candidate,
+      context: context().value,
+    });
+
+    expect(HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS).toBe(5_000);
+    expect(observed.length).toBeGreaterThanOrEqual(10);
+    expect(analyze).toHaveBeenCalledTimes(1);
+    expect(new Set(observed.map((item) => item.request_id)).size).toBe(observed.length);
+    expect(new Set(observed.map((item) => item.series[0]!.input_end_at)).size).toBe(1);
+    expect(observed.every((item) => (
+      item.series[0]!.bars.length === 64
+      && item.series[0]!.bars.every((bar) => bar.complete)
+    ))).toBe(true);
+
+    const forecastOrigins = [...new Set(snapshots.flatMap((snapshot) => (
+      (snapshot.modelForecasts as Array<{
+        status: string;
+        origin?: string;
+        inputOrigin?: string;
+        projectionPolicy?: string;
+      }>).flatMap((forecast) => (
+        forecast.status === "available" && forecast.origin
+          ? [Date.parse(forecast.origin)]
+          : []
+      ))
+    )))].sort((left, right) => left - right);
+    expect(forecastOrigins.length).toBe(observed.length);
+    expect(forecastOrigins.slice(1).every((origin, index) => (
+      origin - forecastOrigins[index]! === HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS
+    ))).toBe(true);
+
+    const liveChartCloses = [...new Set(snapshots.flatMap((snapshot) => {
+      const chart = (snapshot.charts as Array<{
+        bars: Array<{ status: string; close: number }>;
+      }>)[0];
+      return chart?.bars.at(-1)?.status === "forming"
+        ? [chart.bars.at(-1)!.close]
+        : [];
+    }))];
+    expect(liveChartCloses.length).toBeGreaterThan(10);
+
+    const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
+    expect(terminal.decisionCadence).toMatchObject({
+      trigger: "high_vol_live_5s",
+      modelCandleSeconds: 60,
+      inferenceIntervalSeconds: 5,
+      triggeredEvents: observed.length,
+    });
+    expect(terminal.capabilities).toMatchObject({
+      chartCandleSeconds: 60,
+      inferenceIntervalSeconds: 5,
+      realOrder: false,
+    });
+    expect(terminal.rustMarketEvidence).toHaveLength(observed.length);
+    expect(terminal.rustMarketEvidence.every((item) => (
+      item.schemaVersion === "crypto-live-rust-market-evidence/v1"
+      && item.marketEvidence.originAt === item.decisionOriginAt
+      && Date.parse(item.marketEvidence.observedAt) <= Date.parse(item.decisionOriginAt)
+      && item.marketEvidence.quoteFreshnessMs !== null
+      && item.marketEvidence.quoteFreshnessMs <= 60_000
+      && item.marketEvidence.passedGates.includes("SPREAD")
+      && item.marketEvidence.passedGates.includes("LIQUIDITY")
+      && item.marketEvidence.passedGates.includes("QUOTE_FRESHNESS")
+      && !item.marketEvidence.blockedGates.some((gate) => (
+        gate === "SPREAD_UNAVAILABLE"
+        || gate === "LIQUIDITY_UNAVAILABLE"
+        || gate === "QUOTE_FRESHNESS_UNAVAILABLE"
+        || gate === "QUOTE_STALE"
+      ))
+    ))).toBe(true);
+    expect(terminal.modelEvidence.every((item) => !item.dataQuality.stale)).toBe(true);
+    expect((terminal.modelForecasts as Array<UnknownRecord>)[0]).toMatchObject({
+      status: "available",
+      projectionPolicy: "live_price_rebase/v1",
+      inputOrigin: new Date(START - 1).toISOString(),
+    });
   });
 
   it("paginates 10,080 causal one-minute bars for Rust without widening neural context", async () => {
@@ -3569,7 +3879,7 @@ describe("CryptoPaperRuntime", () => {
     ]));
   });
 
-  it("coalesces high-frequency market ingress and drops non-final klines without queue growth", async () => {
+  it("coalesces high-frequency ingress while preserving the latest forming kline", async () => {
     const clock = new ScheduledClock();
     const close = vi.fn().mockResolvedValue(undefined);
     const streams: CryptoPublicStreams = {
@@ -3606,13 +3916,14 @@ describe("CryptoPaperRuntime", () => {
     const diagnostics = artifact(result, "simulation-diagnostics");
     expect(diagnostics.marketEventQueue).toMatchObject({
       maximumAllowedDepth: 256,
-      droppedNonFinalKlines: 1_000,
       coalescedMarkPrices: 999,
       overflowCount: 0,
     });
+    expect((diagnostics.marketEventQueue as UnknownRecord).droppedNonFinalKlines)
+      .toBeGreaterThanOrEqual(998);
     expect((diagnostics.marketEventQueue as UnknownRecord).coalescedBookTickers)
       .toBeGreaterThanOrEqual(998);
-    expect((diagnostics.marketEventQueue as UnknownRecord).maximumDepth).toBeLessThanOrEqual(3);
+    expect((diagnostics.marketEventQueue as UnknownRecord).maximumDepth).toBeLessThanOrEqual(4);
   });
 
   it("bounds cancellation polling, progress writes, and equity artifacts on a busy stream", async () => {

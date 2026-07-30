@@ -1,0 +1,18 @@
+{
+  "schema_version": "chronos2-qualification-tools/v1",
+  "node_target": "node22",
+  "artifacts": [
+    {
+      "source": "scripts/prepare-chronos2-comparison-input.ts",
+      "name": "prepare-chronos2-comparison-input.mjs",
+      "size_bytes": 1796417,
+      "sha256": "c323b2b28f8bfd1204637a75b4096b10de5b091e6872be10453362a1fdd2ae00"
+    },
+    {
+      "source": "scripts/compare-fincast-p40-policy-regression.ts",
+      "name": "compare-fincast-policy.mjs",
+      "size_bytes": 717340,
+      "sha256": "285737ec194145d9e4bff67d6f5ab8d577c0d9358a53cc08fa6dc1b5713f2758"
+    }
+  ]
+}

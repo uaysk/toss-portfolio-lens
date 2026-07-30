@@ -132,6 +132,10 @@ describe("Binance USDⓈ-M public market data", () => {
       tuple(NOW - 60_000, NOW + 1),
     ], NOW);
     expect(bars.map((bar) => bar.final)).toEqual([true, false]);
+    expect(bars[0]).toMatchObject({
+      takerBuyVolume: 5,
+      takerBuyQuoteVolume: 500,
+    });
 
     const forming = normalizeBinanceWebsocketEvent({
       e: "kline",
@@ -147,6 +151,8 @@ describe("Binance USDⓈ-M public market data", () => {
         v: "10",
         q: "1000",
         n: 10,
+        V: "4.5",
+        Q: "455",
         x: false,
       },
     }, NOW)!;
@@ -154,6 +160,10 @@ describe("Binance USDⓈ-M public market data", () => {
     if (forming.kind !== "kline") {
       throw new Error("Expected a normalized kline event.");
     }
+    expect(forming).toMatchObject({
+      takerBuyVolume: 4.5,
+      takerBuyQuoteVolume: 455,
+    });
     expect(isModelDecisionEvent({ ...forming, final: true })).toBe(true);
   });
 

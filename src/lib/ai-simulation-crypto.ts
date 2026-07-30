@@ -1,4 +1,4 @@
-export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast"] as const;
+export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast", "chronos2"] as const;
 export const AI_SIMULATION_MAIN_MODEL_LANE = "fincast" as const;
 export const AI_SIMULATION_LEGACY_MODEL_LANE = "kronos_base" as const;
 export const AI_SIMULATION_FINCAST_CANDLE_SECONDS = [60, 30, 15] as const;
@@ -11,6 +11,26 @@ export type AiSimulationFinCastCandleSeconds =
   (typeof AI_SIMULATION_FINCAST_CANDLE_SECONDS)[number];
 export type AiSimulationExecutionMode = (typeof AI_SIMULATION_EXECUTION_MODES)[number];
 export type AiSimulationCriterion = "trading_amount" | "volume" | "volatility";
+export type AiSimulationCase = "btc_eth" | "high_vol_crypto" | "us_etf_pair";
+export type AiSimulationModelRole = "primary" | "veto" | "shadow";
+export type AiSimulationModelPlanEntry = {
+  symbol: string;
+  modelLane: AiSimulationModelLane;
+  role: AiSimulationModelRole;
+  required: boolean;
+  preferredHorizonsMinutes: Array<5 | 15 | 30 | 60>;
+};
+export type AiSimulationHighVolatilityScannerSettings = {
+  symbolCount: 1 | 2;
+  minimumListingDays: number;
+  minimumTradingAmountUsd: number;
+  maximumSpreadBps: number;
+  depthRangeBps: number;
+  minimumDepthUsd: number;
+  maximumMissingRate: number;
+  rescanIntervalMinutes: number;
+  riskAppetite: "conservative" | "balanced" | "aggressive";
+};
 
 export type AiSimulationMarket =
   | { kind: "stock"; country: "KR" | "US" }
@@ -51,6 +71,8 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS: Readonly<
 });
 
 export type AiSimulationCryptoRequest = {
+  contractVersion?: "ai-paper-simulation/v8";
+  simulationCase?: Extract<AiSimulationCase, "btc_eth" | "high_vol_crypto">;
   market: Extract<AiSimulationMarket, { kind: "crypto_futures" }>;
   initialCash: number;
   durationMinutes: number;
@@ -74,7 +96,12 @@ export type AiSimulationCryptoRequest = {
     slippageBpsPerSide: number;
   };
   riskLimits: AiSimulationCryptoRiskLimits;
-  modelLanes: [AiSimulationModelLane] | [AiSimulationModelLane, AiSimulationModelLane];
+  scanner?: AiSimulationHighVolatilityScannerSettings;
+  modelLanes:
+    | [AiSimulationModelLane]
+    | [AiSimulationModelLane, AiSimulationModelLane]
+    | [AiSimulationModelLane, AiSimulationModelLane, AiSimulationModelLane];
+  modelPlan?: AiSimulationModelPlanEntry[];
   fincastCandleSeconds: AiSimulationFinCastCandleSeconds;
   execution: { mode: "paper" };
 };
@@ -491,22 +518,29 @@ export function normalizeAiSimulationCandidates(
 }
 
 function normalizeWorker(value: unknown, fallbackLane?: AiSimulationModelLane): AiSimulationWorkerStatus | undefined {
+  if (value === undefined || value === null) return undefined;
   const worker = record(value);
   const lane = modelLane(first(worker, "lane", "id", "role", "modelLane", "model_lane")) ?? fallbackLane;
   if (!lane) return undefined;
   const status = text(first(worker, "status", "state", "health")) ?? "unavailable";
+  const modelId = text(first(worker, "modelId", "model_id", "model"));
+  const modelRevision = text(first(worker, "modelRevision", "model_revision", "revision"));
+  const device = text(first(worker, "device", "deviceName", "device_name"));
+  const latencyMs = number(first(worker, "latencyMs", "latency_ms"));
+  const peakVramMb = number(first(worker, "peakVramMb", "peak_vram_mb", "vramMb", "vram_mb"));
+  const reason = text(first(worker, "reason", "message", "error"));
   return {
     lane,
     status,
     available: bool(first(worker, "available", "ready", "healthy"))
       ?? ["available", "ready", "healthy", "running", "connected"].includes(status.toLowerCase()),
-    modelId: text(first(worker, "modelId", "model_id", "model")),
-    modelRevision: text(first(worker, "modelRevision", "model_revision", "revision")),
     precision: precision(first(worker, "precision", "dtype")),
-    device: text(first(worker, "device", "deviceName", "device_name")),
-    latencyMs: number(first(worker, "latencyMs", "latency_ms")),
-    peakVramMb: number(first(worker, "peakVramMb", "peak_vram_mb", "vramMb", "vram_mb")),
-    reason: text(first(worker, "reason", "message", "error")),
+    ...(modelId === undefined ? {} : { modelId }),
+    ...(modelRevision === undefined ? {} : { modelRevision }),
+    ...(device === undefined ? {} : { device }),
+    ...(latencyMs === undefined ? {} : { latencyMs }),
+    ...(peakVramMb === undefined ? {} : { peakVramMb }),
+    ...(reason === undefined ? {} : { reason }),
   };
 }
 
@@ -809,7 +843,7 @@ export function validateAiSimulationCryptoRequest(
     }
   }
   if (!AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])
-    || request.modelLanes.length > 2
+    || request.modelLanes.length > 3
     || new Set(request.modelLanes).size !== request.modelLanes.length) {
     issues.push("모델 lane을 하나 이상 중복 없이 선택해 주세요.");
   }
@@ -836,6 +870,21 @@ export function validateAiSimulationCryptoRequest(
   if (request.strategy.mode !== "single") {
     issues.push("암호화폐 선물 전략 실행 방식이 올바르지 않습니다.");
   }
+  if (request.simulationCase === "btc_eth" && (
+    request.selection.mode !== "manual"
+    || request.selection.symbols.length < 1
+    || request.selection.symbols.some(
+      (symbol) => symbol !== "BTCUSDT" && symbol !== "ETHUSDT",
+    )
+  )) {
+    issues.push("BTC·ETH 케이스는 BTCUSDT/ETHUSDT 중 하나 이상을 선택해야 합니다.");
+  }
+  if (request.simulationCase === "high_vol_crypto" && (
+    request.selection.mode !== "auto"
+    || request.scanner === undefined
+  )) {
+    issues.push("고변동성 케이스는 point-in-time 자동 scanner 설정이 필요합니다.");
+  }
   const riskLimitRules: Array<[
     keyof AiSimulationCryptoRiskLimits,
     number,
@@ -846,7 +895,7 @@ export function validateAiSimulationCryptoRequest(
     ["dailyLossLimitRate", 0.005, 0.03, "UTC 일손실 중단선"],
     ["maximumLeverage", 1, 15, "최대 레버리지"],
     ["grossExposureLimitRate", 0.1, 1.5, "gross exposure 상한"],
-    ["marginUsageLimitRate", 0.05, 0.2, "증거금 사용률 상한"],
+    ["marginUsageLimitRate", 0.05, 1, "증거금 사용률 상한"],
     ["liquidationBufferMultiple", 2, 5, "청산 buffer 배수"],
   ];
   for (const [key, minimum, maximum, label] of riskLimitRules) {

@@ -21,6 +21,7 @@ FORECAST_HORIZONS_BY_STEPS = {
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 FINCAST_MODEL_ID = "Vincent05R/FinCast"
+CHRONOS_2_MODEL_ID = "amazon/chronos-2"
 FINCAST_QUALIFICATION_CONTEXT_COUNT = 128
 FINCAST_QUALIFICATION_CANDLE_SECONDS = (15, 30, 60)
 FINCAST_QUALIFICATION_NATIVE_HORIZON_STEPS = (240, 120, 60)
@@ -69,6 +70,19 @@ class PriceBar(StrictModel):
     close: float = Field(gt=0)
     volume: float | None = Field(default=None, ge=0)
     amount: float | None = Field(default=None, ge=0)
+    trade_count: int | None = Field(default=None, ge=0)
+    taker_buy_volume: float | None = Field(default=None, ge=0)
+    taker_buy_amount: float | None = Field(default=None, ge=0)
+    mark_price: float | None = Field(default=None, gt=0)
+    index_price: float | None = Field(default=None, gt=0)
+    premium_index: float | None = None
+    funding_rate: float | None = None
+    btc_short_return: float | None = None
+    btc_realized_volatility: float | None = None
+    eth_short_return: float | None = None
+    eth_realized_volatility: float | None = None
+    benchmark_return: float | None = None
+    relative_strength: float | None = None
     complete: Literal[True]
 
     @field_validator("timestamp")
@@ -76,7 +90,26 @@ class PriceBar(StrictModel):
     def validate_timestamp(cls, value: datetime) -> datetime:
         return _aware(value, "bar timestamp")
 
-    @field_validator("open", "high", "low", "close", "volume", "amount")
+    @field_validator(
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "taker_buy_volume",
+        "taker_buy_amount",
+        "mark_price",
+        "index_price",
+        "premium_index",
+        "funding_rate",
+        "btc_short_return",
+        "btc_realized_volatility",
+        "eth_short_return",
+        "eth_realized_volatility",
+        "benchmark_return",
+        "relative_strength",
+    )
     @classmethod
     def finite_number(cls, value: float | None) -> float | None:
         if value is not None and not math.isfinite(value):
@@ -103,7 +136,7 @@ class TargetStopSpec(StrictModel):
 
 
 class SeriesCadence(StrictModel):
-    candle_seconds: Literal[15, 30, 60]
+    candle_seconds: Literal[5, 15, 30, 60]
     gap_policy: Literal["continuous", "market_session_prevalidated"]
 
     @model_validator(mode="after")
@@ -443,6 +476,7 @@ class ModelProvenance(StrictModel):
     quantile_monotonicity_policy: Literal[
         "native",
         "fp32_monotone_rearrangement_v1",
+        "chronos2_fp32_monotone_rearrangement_v1",
         "unavailable",
     ] = "native"
     fp32_quantile_observations: QuantileRearrangementObservations | None = None
@@ -559,6 +593,8 @@ class HorizonForecast(StrictModel):
     target_timestamp: datetime
     return_quantiles: tuple[QuantileValue, ...]
     price_quantiles: tuple[QuantileValue, ...]
+    native_return_quantiles: tuple[QuantileValue, ...] = ()
+    native_price_quantiles: tuple[QuantileValue, ...] = ()
     up_probability: float | None = Field(default=None, ge=0, le=1)
     down_probability: float | None = Field(default=None, ge=0, le=1)
     flat_probability: float | None = Field(default=None, ge=0, le=1)
@@ -586,6 +622,26 @@ class HorizonForecast(StrictModel):
             assert all(value is not None for value in probabilities)
             if not math.isclose(sum(probabilities), 1, rel_tol=0, abs_tol=1e-9):
                 raise ValueError("direction probabilities must sum to one")
+        if bool(self.native_return_quantiles) != bool(self.native_price_quantiles):
+            raise ValueError("native return and price quantiles must be present together")
+        if self.native_return_quantiles:
+            return_probabilities = tuple(item.quantile for item in self.native_return_quantiles)
+            price_probabilities = tuple(item.quantile for item in self.native_price_quantiles)
+            if return_probabilities != price_probabilities:
+                raise ValueError("native return and price quantile probabilities must align")
+            if len(return_probabilities) < len(FIXED_QUANTILES):
+                raise ValueError("native quantiles cannot contain fewer points than fixed quantiles")
+            _strictly_increasing(return_probabilities, "native quantiles")
+            return_values = tuple(item.value for item in self.native_return_quantiles)
+            price_values = tuple(item.value for item in self.native_price_quantiles)
+            if any(
+                right < left
+                for left, right in zip(return_values, return_values[1:], strict=False)
+            ) or any(
+                right < left
+                for left, right in zip(price_values, price_values[1:], strict=False)
+            ):
+                raise ValueError("native quantile values must be monotone")
         return self
 
 
@@ -648,8 +704,12 @@ class ModelRunInputOrigin(StrictModel):
 
 
 class ModelRun(StrictModel):
-    role: Literal["kronos_base", "fincast"]
-    expected_model_id: Literal["NeoQuasar/Kronos-base", "Vincent05R/FinCast"]
+    role: Literal["kronos_base", "fincast", "chronos_2"]
+    expected_model_id: Literal[
+        "NeoQuasar/Kronos-base",
+        "Vincent05R/FinCast",
+        "amazon/chronos-2",
+    ]
     status: Literal["available", "partial", "unavailable"]
     model: ModelProvenance
     generated_at: datetime
@@ -671,6 +731,7 @@ class ModelRun(StrictModel):
         expected_by_role = {
             "kronos_base": KRONOS_BASE_MODEL_ID,
             "fincast": FINCAST_MODEL_ID,
+            "chronos_2": CHRONOS_2_MODEL_ID,
         }
         if self.expected_model_id != expected_by_role[self.role]:
             raise ValueError("model run role and expected model ID do not match")

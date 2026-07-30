@@ -123,6 +123,45 @@ describe("scalping AI WebSocket transport contract", () => {
     expect(() => AiServerTransportEnvelopeSchema.parse(pressure)).toThrow(/must fail closed/);
   });
 
+  it("Chronos-2 native FP32 상태 provenance를 검증한다", () => {
+    const chronos2 = {
+      transport_version: SCALPING_AI_TRANSPORT_VERSION,
+      type: "status_response",
+      request_id: "status-chronos2",
+      status: {
+        status: "available",
+        model: {
+          loaded: true,
+          device: "cuda",
+          model_id: "amazon/chronos-2",
+          model_revision: "254b5357164a84326913b0695216f690752ac55d",
+          precision: "float32",
+          precision_validation: "not_required",
+          memory_status: "ok",
+          quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+          quantile_tail_policy: "native",
+        },
+        active_requests: 0,
+        queued_requests: 0,
+        generated_at: "2026-07-21T00:00:01.000Z",
+      },
+    };
+    expect(AiServerTransportEnvelopeSchema.parse(chronos2)).toMatchObject({
+      status: {
+        model: {
+          model_id: "amazon/chronos-2",
+          quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+        },
+      },
+    });
+
+    const wrongPolicy = structuredClone(chronos2);
+    wrongPolicy.status.model.quantile_monotonicity_policy = "native";
+    expect(() => AiServerTransportEnvelopeSchema.parse(wrongPolicy)).toThrow(
+      /requires native FP32 and monotone quantile provenance/,
+    );
+  });
+
   it("검증되지 않은 mixed FP16 worker 상태와 알 수 없는 모델을 거부한다", () => {
     const status = {
       transport_version: SCALPING_AI_TRANSPORT_VERSION,

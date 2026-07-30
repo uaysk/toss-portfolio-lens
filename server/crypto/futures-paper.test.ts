@@ -250,6 +250,32 @@ describe("futures paper execution and risk", () => {
     expect(sizing.liquidationBufferRate).toBeGreaterThanOrEqual(
       (sizing.protectiveStopDistance / 100) * 3,
     );
+    expect(sizeFuturesPosition({
+      ...({
+        mode: "paper" as const,
+        side: "long" as const,
+        equity: 10_000,
+        currentGrossExposure: 0,
+        currentMargin: 0,
+        price: 100,
+        atr14: 1,
+        adverseQuantileDistance: 2,
+        spreadBps: 4,
+        slippageBpsPerSide: 1,
+        requestedLeverage: 15,
+        rules,
+      }),
+      limits: {
+        riskPerTradeRate: 0.005,
+        maximumLeverage: 15,
+        grossExposureLimitRate: 1.5,
+        marginUsageLimitRate: 1,
+        liquidationBufferMultiple: 2,
+      },
+    })).toMatchObject({
+      accepted: true,
+      marginLimit: 10_000,
+    });
 
     const day = Date.parse("2026-07-25T00:00:00.000Z");
     const initial = updateDailyLossGate(undefined, 10_000, day, 0.02);
@@ -305,7 +331,7 @@ describe("futures paper execution and risk", () => {
         riskPerTradeRate: 0.005,
         maximumLeverage: 15,
         grossExposureLimitRate: 1.5,
-        marginUsageLimitRate: 0.21,
+        marginUsageLimitRate: 1.01,
         liquidationBufferMultiple: 2,
       },
       {

@@ -7,6 +7,28 @@ import {
   type SimulationStartRequest,
 } from "../simulation/contracts.js";
 import {
+  normalizeModelEvidence,
+  type EvidenceCostBreakdown,
+  type ModelEvidence,
+} from "../simulation/model-evidence.js";
+import {
+  applyConformalScale,
+  fitRollingConformalCalibration,
+  type ConformalResidual,
+} from "../simulation/rolling-conformal-calibration.js";
+import {
+  CIRCUIT_BREAKER_POLICY_VERSION,
+  decideUnifiedSimulationPolicy,
+  DYNAMIC_HORIZON_POLICY_VERSION,
+  MODEL_ROUTER_POLICY_VERSION,
+  POSITION_SIZING_POLICY_VERSION,
+  UNIFIED_STRATEGY_POLICY_VERSION,
+  VETO_POLICY_VERSION,
+  type UnifiedPolicyDecision,
+  type UnifiedPolicyState,
+} from "../simulation/unified-policy-engine.js";
+import {
+  CHRONOS_2_MODEL_ID,
   FINCAST_QUALIFICATION_QUANTILE_ROWS,
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
@@ -70,18 +92,23 @@ import {
 import {
   scoreRustIndicatorEvidence,
   type RustIndicatorEvidence,
+  type RustMarketEvidenceV2,
 } from "../simulation/technical-indicator-evidence.js";
-import type {
-  CryptoRustScannerEvidence,
-  CryptoRustTechnicalAnalysis,
-  CryptoRustTechnicalAnalyzer,
+import {
+  composeCryptoLiveRustMarketEvidence,
+  CRYPTO_RUST_MAX_INPUT_BARS,
+  type CryptoLiveRustMarketEvidence,
+  type CryptoRustScannerEvidence,
+  type CryptoRustTechnicalAnalysis,
+  type CryptoRustTechnicalAnalyzer,
 } from "./crypto-rust-technical.js";
-import { CRYPTO_RUST_MAX_INPUT_BARS } from "./crypto-rust-technical.js";
 
 const MINUTE_MS = 60_000;
 const MAXIMUM_RESTORED_BARS = 1_024;
 export const CRYPTO_LOCAL_CHART_PROJECTION_BARS = 240;
+export const HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS = 5_000;
 const DEFAULT_CONTEXT_BARS = 512;
+const CHRONOS2_CONTEXT_BARS = 1024;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_INFERENCE_DEADLINE_MS = 240_000;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
@@ -95,6 +122,7 @@ const CANCELLATION_POLL_INTERVAL_MS = 1_000;
 const PROGRESS_UPDATE_INTERVAL_MS = 5_000;
 const EQUITY_SAMPLE_INTERVAL_MS = 5_000;
 const MAX_EQUITY_SAMPLES_PER_LANE = 5_000;
+const MAX_RUNTIME_FORECAST_OBSERVATIONS_PER_LANE = 12_000;
 const MAX_MARKET_EVENT_QUEUE_DEPTH = 256;
 const MAX_FINAL_KLINE_RISK_EVIDENCE_BUCKETS = 3;
 const MAX_FINAL_KLINE_FUNDING_EVIDENCE = 4;
@@ -129,6 +157,7 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_lane_identity_mismatch",
   "model_memory_status_invalid",
   "model_mode_mismatch",
+  "model_native_quantiles_invalid",
   "model_path_count_invalid",
   "model_peak_vram_invalid",
   "model_price_quantiles_invalid",
@@ -163,7 +192,10 @@ type UnknownRecord = Record<string, unknown>;
 type ModelPrecision = "fp16" | "fp32";
 type ModelPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
 type ModelMemoryStatus = "ok";
-type ModelQuantileMonotonicityPolicy = "native" | "fp32_monotone_rearrangement_v1";
+type ModelQuantileMonotonicityPolicy =
+  | "native"
+  | "fp32_monotone_rearrangement_v1"
+  | "chronos2_fp32_monotone_rearrangement_v1";
 type ModelQuantileTailPolicy = "native" | "tail_clamped_q10_q90";
 type ModelPeakVramMeasurement = "cuda_allocated_or_reserved";
 type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
@@ -179,7 +211,7 @@ type ModelQuantileObservations = {
   postprocessedMonotonic: boolean;
 };
 type PinnedModelRuntimeProvenance = {
-  modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
+  modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID | typeof CHRONOS_2_MODEL_ID;
   modelRevision: string;
   sourceRevision: string;
   loaderVersion: string;
@@ -203,6 +235,15 @@ const PINNED_MODEL_RUNTIME_PROVENANCE = {
     modelRevision: "2d7d90b159db8961d27c2cf165d51195902ef92b",
     sourceRevision: "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
     loaderVersion: "fincast-source-488b19d",
+    license: "Apache-2.0",
+    tokenizerId: null,
+    tokenizerRevision: null,
+  },
+  chronos2: {
+    modelId: CHRONOS_2_MODEL_ID,
+    modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+    sourceRevision: "v2.3.1",
+    loaderVersion: "chronos-forecasting-2.3.1-compact_causal_v1",
     license: "Apache-2.0",
     tokenizerId: null,
     tokenizerRevision: null,
@@ -320,6 +361,15 @@ type NormalizedLaneForecast = {
   generatedAtIso: string;
   inputEndAt: string;
   quantiles: ReturnQuantile[];
+  horizonDistributions: Array<{
+    horizonMinutes: 5 | 15 | 30 | 60;
+    quantiles: ReturnQuantile[];
+    nativeQuantiles: ReturnQuantile[];
+    upProbability?: number;
+    downProbability?: number;
+    flatProbability?: number;
+    intervalWidth?: number;
+  }>;
   displayPoints: RuntimeModelForecastPoint[];
   upProbability?: number;
   downProbability?: number;
@@ -358,9 +408,16 @@ type NormalizedLaneForecast = {
 };
 
 type RuntimeForecastObservation = NormalizedLaneForecast & {
+  horizonMinutes: 5 | 15 | 30 | 60;
+  displayOriginAt: string;
+  inputOriginPrice: number;
   originPrice: number;
+  priceObservedAt: string;
+  projectionPolicy: "native_input_origin" | "live_price_rebase/v1";
   targetAt: number;
   evaluated: boolean;
+  actualReturn?: number;
+  resolvedAt?: string;
 };
 
 type RuntimeDecision = {
@@ -568,6 +625,9 @@ type RuntimeInferenceCompletion = {
   streamEpoch: number;
   bar: BinanceKline;
   bars: BinanceKline[];
+  decisionAt: number;
+  decisionPrice: number;
+  priceObservedAt: number;
   requestDigest: string;
   outcomes: Map<SimulationModelLane, RuntimeLaneInferenceOutcome>;
   riskGenerations: Map<SimulationModelLane, number>;
@@ -576,6 +636,7 @@ type RuntimeInferenceCompletion = {
   currentVolatility: number;
   technicalBars: BinanceKline[];
   rustTechnical?: CryptoRustTechnicalAnalysis;
+  rustLiveMarketEvidence?: CryptoLiveRustMarketEvidence;
   rustTechnicalError?: string;
 };
 
@@ -1045,6 +1106,8 @@ export function aggregatePortfolioLaneMetrics(
 
 export type CryptoPaperRuntimeSnapshot = {
   schemaVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
+  simulationCase?: SimulationStartRequest["simulationCase"];
+  modelPlan: SimulationStartRequest["modelPlan"];
   runId: string;
   phase: "running" | "completed" | "failed";
   startedAt: string;
@@ -1097,6 +1160,9 @@ export type CryptoPaperRuntimeSnapshot = {
   charts: unknown[];
   trades: unknown[];
   decisions: RuntimeDecision[];
+  unifiedPolicyDecisions: UnifiedPolicyDecision[];
+  modelEvidence: ModelEvidence[];
+  rustMarketEvidence: CryptoLiveRustMarketEvidence[];
   modelForecasts: unknown[];
   kronosForecasts: unknown[];
   warnings: string[];
@@ -1109,8 +1175,10 @@ export type CryptoPaperRuntimeSnapshot = {
   decisionCadence: {
     trigger: "final_binance_1m_kline"
       | "final_fincast_30s_aggtrade_bar"
-      | "final_fincast_15s_aggtrade_bar";
+      | "final_fincast_15s_aggtrade_bar"
+      | "high_vol_live_5s";
     modelCandleSeconds: 15 | 30 | 60;
+    inferenceIntervalSeconds: 5 | 15 | 30 | 60;
     triggeredEvents: number;
     coalescedFinalKlines: number;
     lastTriggeredAt?: string;
@@ -1216,7 +1284,9 @@ export function cryptoRuntimeEntityId(
   input: CryptoRuntimeIdentifierInput,
 ): string {
   assertCryptoRuntimeIdentifierInput(input);
-  const lane = input.lane === "kronos_base" ? "k" : "f";
+  const lane = input.lane === "kronos_base"
+    ? "k"
+    : input.lane === "chronos2" ? "c2" : "f";
   return [
     kind,
     cryptoRuntimeScope(input.runId, input.symbol),
@@ -1264,14 +1334,17 @@ export function cryptoModelForecastIsFresh(input: {
   inputEndAt: string;
   targetTimestamps: readonly string[];
   latestFinalCandleCloseTime?: number;
+  maximumInputLagMs?: number;
 }): boolean {
   const inputEndAt = Date.parse(input.inputEndAt);
   const latestFinalCandleCloseTime = input.latestFinalCandleCloseTime;
+  const maximumInputLagMs = Math.max(0, input.maximumInputLagMs ?? 0);
   if (
     !Number.isFinite(inputEndAt)
     || latestFinalCandleCloseTime === undefined
     || !Number.isSafeInteger(latestFinalCandleCloseTime)
-    || inputEndAt !== latestFinalCandleCloseTime
+    || inputEndAt > latestFinalCandleCloseTime
+    || latestFinalCandleCloseTime - inputEndAt > maximumInputLagMs
   ) return false;
   return input.targetTimestamps.some((candidate) => {
     const target = Date.parse(candidate);
@@ -1324,12 +1397,25 @@ export function canonicalCryptoModelInputDigest(
   );
   const payload = bars.map((bar) => ({
     amount: number(bar.amount),
+    benchmark_return: number(bar.benchmark_return),
+    btc_realized_volatility: number(bar.btc_realized_volatility),
+    btc_short_return: number(bar.btc_short_return),
     close: number(bar.close),
     complete: bar.complete,
+    eth_realized_volatility: number(bar.eth_realized_volatility),
+    eth_short_return: number(bar.eth_short_return),
+    funding_rate: number(bar.funding_rate),
     high: number(bar.high),
+    index_price: number(bar.index_price),
     low: number(bar.low),
+    mark_price: number(bar.mark_price),
     open: number(bar.open),
+    premium_index: number(bar.premium_index),
+    relative_strength: number(bar.relative_strength),
+    taker_buy_amount: number(bar.taker_buy_amount),
+    taker_buy_volume: number(bar.taker_buy_volume),
     timestamp: pythonUtcMicrosecondTimestamp(bar.timestamp),
+    trade_count: bar.trade_count ?? null,
     volume: number(bar.volume),
   }));
   return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
@@ -1393,11 +1479,8 @@ type QueuedMarketEvent =
       ingressSequence: number;
     };
   };
-type CoalescedMarketEventKind = "book_ticker" | "mark_price";
-type CoalescedMarketEvent = Extract<
-  BinanceMarketEvent,
-  { kind: CoalescedMarketEventKind }
->;
+type CoalescedMarketEventKind = "book_ticker" | "mark_price" | "forming_kline";
+type CoalescedMarketEvent = BinanceMarketEvent;
 type MarketEventQueueToken =
   | { kind: "direct_event"; event: QueuedMarketEvent; queueSequence: number }
   | {
@@ -1457,8 +1540,39 @@ class AsyncMarketEventQueue {
     },
   ): boolean {
     if (event.kind === "kline" && !event.final) {
-      this.droppedNonFinalKlines += 1;
-      return true;
+      const queueSequence = ++this.queueSequence;
+      const segment = this.coalescingSegment;
+      const coalescedKey = this.coalescedKey("forming_kline", segment);
+      const existing = this.coalesced.get(coalescedKey);
+      if (existing && event.receivedAt < eventAt(existing)) {
+        this.droppedNonFinalKlines += 1;
+        return true;
+      }
+      this.coalesced.set(coalescedKey, event);
+      if (existing) {
+        this.droppedNonFinalKlines += 1;
+        const tokenIndex = this.events.findIndex((queued) => (
+          queued.kind === "coalesced_event"
+          && queued.eventKind === "forming_kline"
+          && queued.segment === segment
+        ));
+        if (tokenIndex >= 0) {
+          this.events[tokenIndex] = {
+            kind: "coalesced_event",
+            eventKind: "forming_kline",
+            segment,
+            queueSequence,
+          };
+          this.sortByIngress();
+        }
+        return true;
+      }
+      return this.enqueue({
+        kind: "coalesced_event",
+        eventKind: "forming_kline",
+        segment,
+        queueSequence,
+      });
     }
     if (event.kind === "mark_price"
       && metadata?.markRiskBarrierKey
@@ -1480,7 +1594,7 @@ class AsyncMarketEventQueue {
       const existing = existingEvent !== undefined;
       // Exchange event time orders distinct observations. Exact ties follow
       // callback/queue order because the local receivedAt clock may roll back.
-      if (existingEvent && event.eventTime < existingEvent.eventTime) {
+      if (existingEvent && event.eventTime < eventAt(existingEvent)) {
         if (event.kind === "book_ticker") this.coalescedBookTickers += 1;
         else this.coalescedMarkPrices += 1;
         return true;
@@ -2015,6 +2129,103 @@ function normalizeLaneForecast(
   const horizons = Array.isArray(series.horizons)
     ? series.horizons.map(record).filter((item): item is UnknownRecord => item !== undefined)
     : [];
+  const distributionHorizons = request.forecast_profile === "full"
+    ? request.horizons_minutes
+    : request.horizons_minutes.filter((horizonMinutes) => horizons.some((item) => finite(
+        first(item, "horizon_minutes", "horizonMinutes"),
+      ) === horizonMinutes));
+  if (distributionHorizons.length === 0) {
+    throw new Error("model_return_quantiles_incomplete");
+  }
+  const horizonDistributions = distributionHorizons.map((horizonMinutes) => {
+    const source = horizons.find((item) => finite(
+      first(item, "horizon_minutes", "horizonMinutes"),
+    ) === horizonMinutes);
+    if (!source) throw new Error("model_return_quantiles_incomplete");
+    const fixedRaw = first(source, "return_quantiles", "returnQuantiles");
+    if (!Array.isArray(fixedRaw) || fixedRaw.length !== SCALPING_AI_QUANTILES.length) {
+      throw new Error("model_return_quantiles_incomplete");
+    }
+    const normalizedFixed = fixedRaw.map((item, index): ReturnQuantile => {
+      const entry = record(item);
+      const quantile = finite(first(entry, "quantile", "q"));
+      const returnRate = finite(first(entry, "value", "return_rate", "returnRate"));
+      if (quantile !== SCALPING_AI_QUANTILES[index] || returnRate === undefined) {
+        throw new Error("model_return_quantiles_invalid");
+      }
+      return { quantile, returnRate };
+    });
+    const nativeRaw = first(
+      source,
+      "native_return_quantiles",
+      "nativeReturnQuantiles",
+    );
+    const normalizedNative = nativeRaw === undefined
+      || (Array.isArray(nativeRaw) && nativeRaw.length === 0)
+      ? normalizedFixed
+      : Array.isArray(nativeRaw)
+        ? nativeRaw.map((item): ReturnQuantile => {
+          const entry = record(item);
+          const quantile = finite(first(entry, "quantile", "q"));
+          const returnRate = finite(first(entry, "value", "return_rate", "returnRate"));
+          if (
+            quantile === undefined
+            || quantile <= 0
+            || quantile >= 1
+            || returnRate === undefined
+          ) throw new Error("model_native_quantiles_invalid");
+          return { quantile, returnRate };
+        })
+        : [];
+    if (
+      normalizedNative.length < normalizedFixed.length
+      || normalizedNative.some((item, index) => (
+        index > 0
+        && (
+          item.quantile <= normalizedNative[index - 1]!.quantile
+          || item.returnRate < normalizedNative[index - 1]!.returnRate
+        )
+      ))
+      || (lane === "chronos2" && (
+        normalizedNative[0]?.quantile !== 0.01
+        || normalizedNative.at(-1)?.quantile !== 0.99
+      ))
+    ) throw new Error("model_native_quantiles_invalid");
+    const readProbability = (snake: string, camel: string): number | undefined => {
+      const value = first(source, snake, camel);
+      if (value === undefined || value === null) return undefined;
+      const parsed = normalizedProbability(value);
+      if (parsed === undefined) throw new Error("model_direction_probabilities_invalid");
+      return parsed;
+    };
+    const rawWidth = first(
+      source,
+      "uncertainty_interval_width",
+      "uncertaintyIntervalWidth",
+    );
+    const intervalWidth = rawWidth === undefined || rawWidth === null
+      ? undefined
+      : finite(rawWidth);
+    if (rawWidth !== undefined && rawWidth !== null
+      && (intervalWidth === undefined || intervalWidth < 0)) {
+      throw new Error("model_distribution_method_invalid");
+    }
+    return {
+      horizonMinutes,
+      quantiles: normalizedFixed,
+      nativeQuantiles: normalizedNative,
+      ...(readProbability("up_probability", "upProbability") === undefined
+        ? {}
+        : { upProbability: readProbability("up_probability", "upProbability") }),
+      ...(readProbability("down_probability", "downProbability") === undefined
+        ? {}
+        : { downProbability: readProbability("down_probability", "downProbability") }),
+      ...(readProbability("flat_probability", "flatProbability") === undefined
+        ? {}
+        : { flatProbability: readProbability("flat_probability", "flatProbability") }),
+      ...(intervalWidth === undefined ? {} : { intervalWidth }),
+    };
+  });
   const displayPoints = normalizeDisplayForecastPoints(
     horizons,
     inputEndAt,
@@ -2145,10 +2356,16 @@ function normalizeLaneForecast(
   if (modelRuns.length !== 1) throw new Error("model_lane_count_mismatch");
   const laneRun = record(modelRuns[0]);
   const role = text(first(laneRun, "role", "lane"))?.toLowerCase().replaceAll("-", "_");
-  if (role !== lane && !(lane === "kronos_base" && role === "kronos")) {
+  if (
+    role !== lane
+    && !(lane === "kronos_base" && role === "kronos")
+    && !(lane === "chronos2" && role === "chronos_2")
+  ) {
     throw new Error("model_lane_identity_mismatch");
   }
-  const expectedContext = expectedSeries.bars.slice(-DEFAULT_CONTEXT_BARS);
+  const expectedContext = expectedSeries.bars.slice(
+    -(lane === "chronos2" ? CHRONOS2_CONTEXT_BARS : DEFAULT_CONTEXT_BARS),
+  );
   const expectedContextStartAt = expectedContext[0]?.timestamp;
   const rawInputOrigins = first(laneRun, "input_origins", "inputOrigins");
   const inputOrigins = Array.isArray(rawInputOrigins) ? rawInputOrigins.map(record) : [];
@@ -2269,7 +2486,11 @@ function normalizeLaneForecast(
     ? "native"
     : exactEnum(
       rawQuantileMonotonicityPolicy,
-      ["native", "fp32_monotone_rearrangement_v1"] as const,
+      [
+        "native",
+        "fp32_monotone_rearrangement_v1",
+        "chronos2_fp32_monotone_rearrangement_v1",
+      ] as const,
     );
   const quantileTailPolicy = rawQuantileTailPolicy === undefined && lane === "kronos_base"
     ? "native"
@@ -2318,11 +2539,14 @@ function normalizeLaneForecast(
     ? legacyPeakVramMb
     : peakVramBytes / (1024 * 1024);
 
-  if (lane === "kronos_base") {
+  if (lane === "kronos_base" || lane === "chronos2") {
+    const expectedMonotonicity = lane === "chronos2"
+      ? "chronos2_fp32_monotone_rearrangement_v1"
+      : "native";
     if (precision !== "fp32"
       || precisionValidation !== "not_required"
       || memoryStatus !== "ok"
-      || quantileMonotonicityPolicy !== "native"
+      || quantileMonotonicityPolicy !== expectedMonotonicity
       || (fp32QuantileObservations !== undefined && fp32QuantileObservations !== null)
       || (mixedQuantileObservations !== undefined && mixedQuantileObservations !== null)
       || quantileTailPolicy !== "native"
@@ -2374,6 +2598,7 @@ function normalizeLaneForecast(
     generatedAtIso: iso(generatedAt),
     inputEndAt,
     quantiles,
+    horizonDistributions,
     displayPoints,
     ...(upProbability === undefined ? {} : { upProbability }),
     ...(downProbability === undefined ? {} : { downProbability }),
@@ -2554,7 +2779,7 @@ export function cryptoChartProjection(
       low: bar.low,
       close: bar.close,
       volume: bar.volume,
-      status: "final",
+      status: bar.final ? "final" : "forming",
       indicatorValues,
     };
   });
@@ -2762,9 +2987,12 @@ function hasContinuousFinalContext(
   return true;
 }
 
-function futureTimestamps(inputEndAt: number): AiForecastRequest["series"][number]["future_timestamps"] {
+function futureTimestamps(
+  inputEndAt: number,
+  steps: 15 | 60,
+): AiForecastRequest["series"][number]["future_timestamps"] {
   const values = Array.from(
-    { length: SCALPING_AI_REALTIME_HORIZONS.at(-1)! },
+    { length: steps },
     (_, index) => iso(inputEndAt + (index + 1) * MINUTE_MS),
   );
   return values as AiForecastRequest["series"][number]["future_timestamps"];
@@ -2775,6 +3003,8 @@ function aiRequest(
   symbol: string,
   bars: readonly BinanceKline[],
   targetStop: AiForecastRequest["series"][number]["target_stop"] = null,
+  fullHorizon = false,
+  requestDiscriminator?: number,
 ): AiForecastRequest {
   const safeRunId = runId.replaceAll(/[^A-Za-z0-9._:-]/g, "-").slice(0, 48) || "run";
   const final = bars.at(-1);
@@ -2782,17 +3012,24 @@ function aiRequest(
   const inputEndAt = final.closeTime;
   return {
     schema_version: SCALPING_AI_SCHEMA_VERSION,
-    request_id: `crypto:${safeRunId}:${inputEndAt}`,
+    request_id: [
+      "crypto",
+      safeRunId,
+      inputEndAt,
+      ...(requestDiscriminator === undefined ? [] : [requestDiscriminator]),
+    ].join(":").slice(0, 128),
     mode: "forecast",
-    forecast_profile: "realtime_5_15",
-    horizons_minutes: [...SCALPING_AI_REALTIME_HORIZONS],
+    forecast_profile: fullHorizon ? "full" : "realtime_5_15",
+    horizons_minutes: fullHorizon
+      ? [...SCALPING_AI_HORIZONS]
+      : [...SCALPING_AI_REALTIME_HORIZONS],
     quantiles: [...SCALPING_AI_QUANTILES],
     seed: 0,
     series: [{
       instrument_key: symbol,
       timezone: "UTC",
       input_end_at: iso(inputEndAt),
-      future_timestamps: futureTimestamps(inputEndAt),
+      future_timestamps: futureTimestamps(inputEndAt, fullHorizon ? 60 : 15),
       bars: bars.map((bar) => ({
         timestamp: iso(bar.closeTime),
         open: bar.open,
@@ -2801,10 +3038,102 @@ function aiRequest(
         close: bar.close,
         volume: bar.volume,
         amount: bar.quoteVolume,
+        trade_count: bar.tradeCount,
+        taker_buy_volume: bar.takerBuyVolume ?? null,
+        taker_buy_amount: bar.takerBuyQuoteVolume ?? null,
         complete: true as const,
       })),
       target_stop: targetStop,
     }],
+  };
+}
+
+export function cryptoModelContextForLane(
+  lane: SimulationModelLane,
+  bars: readonly BinanceKline[],
+): BinanceKline[] {
+  return bars.slice(
+    -(lane === "chronos2" ? CHRONOS2_CONTEXT_BARS : DEFAULT_CONTEXT_BARS),
+  );
+}
+
+export function rebaseCryptoReturnQuantiles(
+  quantiles: readonly ReturnQuantile[],
+  inputOriginPrice: number,
+  decisionPrice: number,
+): ReturnQuantile[] {
+  if (!Number.isFinite(inputOriginPrice) || inputOriginPrice <= 0
+    || !Number.isFinite(decisionPrice) || decisionPrice <= 0) {
+    throw new Error("crypto_live_rebase_price_invalid");
+  }
+  return quantiles.map((item) => ({
+    quantile: item.quantile,
+    returnRate: inputOriginPrice * (1 + item.returnRate) / decisionPrice - 1,
+  }));
+}
+
+function rebaseLaneForecastToLivePrice(
+  forecast: NormalizedLaneForecast,
+  inputOriginPrice: number,
+  decisionPrice: number,
+  realizedVolatilityRate: number,
+  spreadBps: number,
+): NormalizedLaneForecast {
+  const horizonDistributions = forecast.horizonDistributions.map((distribution) => {
+    const quantiles = rebaseCryptoReturnQuantiles(
+      distribution.quantiles,
+      inputOriginPrice,
+      decisionPrice,
+    );
+    const nativeQuantiles = rebaseCryptoReturnQuantiles(
+      distribution.nativeQuantiles,
+      inputOriginPrice,
+      decisionPrice,
+    );
+    const signal = signalFromQuantileCdf({
+      quantiles,
+      roundTripCostRate: 0,
+      realizedVolatilityRate,
+      spreadBps,
+      mode: "paper",
+    });
+    return {
+      ...distribution,
+      quantiles,
+      nativeQuantiles,
+      upProbability: signal.probabilityAboveCost,
+      downProbability: signal.probabilityBelowNegativeCost,
+      flatProbability: Math.max(
+        0,
+        1 - signal.probabilityAboveCost - signal.probabilityBelowNegativeCost,
+      ),
+      intervalWidth: quantiles.at(-1)!.returnRate - quantiles[0]!.returnRate,
+    };
+  });
+  const primary = horizonDistributions.find(
+    (distribution) => distribution.horizonMinutes === SCALPING_AI_HORIZONS[0],
+  ) ?? horizonDistributions[0]!;
+  const relativeScale = inputOriginPrice / decisionPrice;
+  return {
+    ...forecast,
+    quantiles: primary.quantiles,
+    horizonDistributions,
+    displayPoints: forecast.displayPoints.map((point) => ({
+      ...point,
+      upProbability: horizonDistributions.find(
+        (distribution) => distribution.horizonMinutes === point.horizonMinutes,
+      )?.upProbability,
+    })),
+    upProbability: primary.upProbability,
+    downProbability: primary.downProbability,
+    flatProbability: primary.flatProbability,
+    probabilityMethod: "derived_quantile_cdf",
+    ...(forecast.expectedVolatility === undefined
+      ? {}
+      : { expectedVolatility: forecast.expectedVolatility * relativeScale }),
+    ...(forecast.uncertaintyIntervalWidth === undefined
+      ? {}
+      : { uncertaintyIntervalWidth: forecast.uncertaintyIntervalWidth * relativeScale }),
   };
 }
 
@@ -2826,6 +3155,150 @@ function cryptoTargetStop(
   // The current Rust assistance contract is long-position-oriented. A short
   // first-passage target must not be fabricated from its exit label.
   return null;
+}
+
+function modelPlanForLane(
+  request: SimulationStartRequest,
+  symbol: string,
+  lane: SimulationModelLane,
+): SimulationStartRequest["modelPlan"][number] | undefined {
+  return normalizedModelPlan(request).find((plan) => (
+    plan.modelLane === lane
+    && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol.toUpperCase())
+  ));
+}
+
+/**
+ * Runtime inputs created through the v8 schema always have a model plan.
+ * Keep this defensive projection for persisted/direct v7 fixtures that
+ * predate the field and are replayed without passing through the router.
+ */
+function normalizedModelPlan(
+  request: SimulationStartRequest,
+): SimulationStartRequest["modelPlan"] {
+  if (Array.isArray(request.modelPlan) && request.modelPlan.length > 0) {
+    return request.modelPlan;
+  }
+  return request.modelLanes.map((modelLane) => ({
+    symbol: "*",
+    modelLane,
+    role: "primary" as const,
+    required: true,
+    preferredHorizonsMinutes: [15, 30, 60],
+  }));
+}
+
+function runtimeCalibrationResiduals(
+  state: LaneState,
+  symbol: string,
+  horizonMinutes: number,
+): ConformalResidual[] {
+  return state.forecasts.flatMap((forecast) => {
+    const q10 = forecast.quantiles.find((item) => item.quantile === 0.1)?.returnRate;
+    const q90 = forecast.quantiles.find((item) => item.quantile === 0.9)?.returnRate;
+    if (
+      forecast.horizonMinutes !== horizonMinutes
+      || forecast.actualReturn === undefined
+      || forecast.resolvedAt === undefined
+      || q10 === undefined
+      || q90 === undefined
+    ) return [];
+    return [{
+      modelLane: state.lane,
+      symbol,
+      horizonMinutes,
+      originAt: forecast.displayOriginAt,
+      resolvedAt: forecast.resolvedAt,
+      predictedQ10: q10,
+      predictedQ90: q90,
+      actualReturn: forecast.actualReturn,
+    }];
+  });
+}
+
+function commonModelEvidence(
+  input: {
+    request: SimulationStartRequest;
+    symbol: string;
+    originAt: string;
+    outcomes: ReadonlyMap<SimulationModelLane, RuntimeLaneInferenceOutcome>;
+    states: ReadonlyMap<SimulationModelLane, LaneState>;
+    rustTechnical?: CryptoRustTechnicalAnalysis;
+    rustMarketEvidence?: RustMarketEvidenceV2;
+    costs: EvidenceCostBreakdown;
+  },
+): ModelEvidence[] {
+  const output: ModelEvidence[] = [];
+  for (const [lane, outcome] of input.outcomes) {
+    const forecast = outcome.forecast;
+    const state = input.states.get(lane);
+    const plan = modelPlanForLane(input.request, input.symbol, lane);
+    if (!forecast || !state || !plan) continue;
+    for (const distribution of forecast.horizonDistributions) {
+      const calibration = fitRollingConformalCalibration(
+        runtimeCalibrationResiduals(state, input.symbol, distribution.horizonMinutes),
+        {
+          modelLane: lane,
+          symbol: input.symbol,
+          horizonMinutes: distribution.horizonMinutes,
+          originAt: input.originAt,
+        },
+        {
+          minimumSamples: 30,
+          maximumSamples: 500,
+          maximumAgeMinutes: 24 * 60,
+          coverage: 0.8,
+        },
+      );
+      const nativeQuantiles = Object.fromEntries(
+        distribution.nativeQuantiles.map((item) => [item.quantile, item.returnRate]),
+      );
+      const calibrated = applyConformalScale(nativeQuantiles, calibration);
+      const unavailableFeatures = [
+        ...(input.rustMarketEvidence?.unavailableFields ?? []),
+        "open_interest",
+        "long_short_ratio",
+        "liquidation_volume",
+      ];
+      output.push(normalizeModelEvidence({
+        modelLane: lane,
+        modelId: forecast.modelId,
+        modelRevision: forecast.modelRevision,
+        role: plan.role,
+        symbol: input.symbol,
+        originAt: input.originAt,
+        horizonMinutes: distribution.horizonMinutes,
+        quantiles: calibrated,
+        calibrationId: calibration.calibrationId,
+        calibrationStatus: calibration.status,
+        calibrationAge: calibration.ageMinutes,
+        featureProfile: lane === "chronos2"
+          ? "compact_causal_v1"
+          : lane === "fincast" ? "fincast-native/v1" : "kronos-base-legacy/v1",
+        dataQuality: {
+          status: input.rustTechnical?.quality.status === "available"
+            ? "ok"
+            : input.rustTechnical ? "degraded" : "unavailable",
+          finalizedOnly: true,
+          stale: (input.rustMarketEvidence?.quoteFreshnessMs ?? Number.POSITIVE_INFINITY)
+            > 120_000,
+          missingRate: input.rustTechnical
+            ? input.rustTechnical.quality.sameSessionGapCount
+              / Math.max(1, input.rustTechnical.quality.finalBarCount)
+            : 1,
+          unavailableFeatures: [...new Set(unavailableFeatures)],
+          warnings: [
+            ...(input.rustTechnical?.quality.reasons ?? ["rust_technical_unavailable"]),
+          ],
+        },
+        generatedAt: forecast.generatedAtIso,
+        latencyMs: outcome.observedLatency ?? forecast.latencyMs ?? 0,
+        inputOrigin: "live",
+        costs: input.costs,
+      }));
+    }
+  }
+  return output;
 }
 
 function costRate(
@@ -3400,6 +3873,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const selectedLanes = [...request.modelLanes];
     const modelCandleSeconds = request.fincastCandleSeconds ?? 60;
     const subminuteFinCast = modelCandleSeconds < 60;
+    const highFrequencyHighVol = (
+      request.simulationCase === "high_vol_crypto"
+      && !subminuteFinCast
+    );
     if (
       subminuteFinCast
       && (
@@ -3415,13 +3892,24 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       );
     }
     const modelIntervalMs = modelCandleSeconds * 1_000;
-    const decisionTrigger = modelCandleSeconds === 15
+    const inferenceIntervalMs = highFrequencyHighVol
+      ? HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS
+      : modelIntervalMs;
+    const decisionTrigger = highFrequencyHighVol
+      ? "high_vol_live_5s" as const
+      : modelCandleSeconds === 15
       ? "final_fincast_15s_aggtrade_bar" as const
       : modelCandleSeconds === 30
         ? "final_fincast_30s_aggtrade_bar" as const
         : "final_binance_1m_kline" as const;
     const policyProfile = cryptoFuturesPolicyProfile(request);
-    const preferredExecutionLane = this.options.executionLane ?? "fincast";
+    const modelPlan = normalizedModelPlan(request);
+    const preferredExecutionLane = request.sourceContractVersion === "ai-paper-simulation/v8"
+      ? modelPlan.find((plan) => (
+        plan.role === "primary"
+        && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol)
+      ))?.modelLane ?? this.options.executionLane ?? "fincast"
+      : this.options.executionLane ?? "fincast";
     const executionLane = selectedLanes.includes(preferredExecutionLane)
       ? preferredExecutionLane
       : selectedLanes[0]!;
@@ -3455,6 +3943,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const latestModelBar = (): BinanceKline | undefined => modelContext().at(-1);
     const warnings: string[] = [];
     const decisions: RuntimeDecision[] = [];
+    const unifiedPolicyDecisions: UnifiedPolicyDecision[] = [];
+    const routedModelEvidence: ModelEvidence[] = [];
+    const liveRustMarketEvidence: CryptoLiveRustMarketEvidence[] = [];
     const states = new Map<SimulationModelLane, LaneState>();
     let terminalSettlement: TerminalSettlementEvidence | undefined;
     let currentSpreadBps = selected.spreadBps;
@@ -3478,12 +3969,21 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let lastCancellationPollAt = Number.NEGATIVE_INFINITY;
     let lastInferredOpenTime = Number.NEGATIVE_INFINITY;
     let lastProcessedFinalOpenTime = Number.NEGATIVE_INFINITY;
+    let nextHighFrequencyInferenceAt = Number.POSITIVE_INFINITY;
     let lastBookTickerObservedAt: number | undefined;
     let lastMarkPriceObservedAt: number | undefined;
     let lastBookTickerEventTime: number | undefined;
     let lastMarkPriceEventTime: number | undefined;
     let lastIngressBookTickerEventTime: number | undefined;
     let lastIngressMarkPriceEventTime: number | undefined;
+    let latestBookTicker: Extract<
+      BinanceMarketEvent,
+      { kind: "book_ticker" }
+    > | undefined;
+    const recentAggregateTrades: Array<Extract<
+      BinanceMarketEvent,
+      { kind: "agg_trade" }
+    >> = [];
     let lastIngressSequence = 0;
     let coalescedFinalKlines = 0;
     let coalescedInferenceBar: BinanceKline | undefined;
@@ -3493,6 +3993,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     let activeInferenceController: AbortController | undefined;
     let acceptInferenceCompletions = true;
     let liveWindowStarted = false;
+    let liveDecisionStartAt = Number.POSITIVE_INFINITY;
     let terminalBoundaryQueued = false;
     let streamEpoch = 0;
     let inferenceSequence = 0;
@@ -3842,6 +4343,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       lastMarkPriceEventTime = undefined;
       lastIngressBookTickerEventTime = undefined;
       lastIngressMarkPriceEventTime = undefined;
+      latestBookTicker = undefined;
+      recentAggregateTrades.length = 0;
       finalKlineRiskEvidence.clear();
       markEvidenceEvictedThroughEventTime = undefined;
       blockPendingOpens("stream_reconnecting");
@@ -3868,6 +4371,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         inputEndAt: forecast.inputEndAt,
         targetTimestamps: forecast.displayPoints.map((point) => point.targetTimestamp),
         latestFinalCandleCloseTime: latestModelBar()?.closeTime,
+        maximumInputLagMs: highFrequencyHighVol ? MINUTE_MS : 0,
       })
     );
 
@@ -3883,8 +4387,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           signalSymbol: symbol,
           status: "unavailable" as const,
           ...(latest ? {
-            origin: latest.inputEndAt,
+            origin: latest.displayOriginAt,
+            inputOrigin: latest.inputEndAt,
             originPrice: latest.originPrice,
+            priceObservedAt: latest.priceObservedAt,
+            projectionPolicy: latest.projectionPolicy,
             generatedAt: latest.generatedAtIso,
             modelId: latest.modelId,
             modelRevision: latest.modelRevision,
@@ -3901,8 +4408,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         lane,
         signalSymbol: symbol,
         status: "available" as const,
-        origin: latest.inputEndAt,
+        origin: latest.displayOriginAt,
+        inputOrigin: latest.inputEndAt,
         originPrice: latest.originPrice,
+        priceObservedAt: latest.priceObservedAt,
+        projectionPolicy: latest.projectionPolicy,
         generatedAt: latest.generatedAtIso,
         modelId: latest.modelId,
         modelRevision: latest.modelRevision,
@@ -3981,7 +4491,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         ? 1
         : Math.max(0, Math.min(0.999, (at - startedAt) / Math.max(1, expiresAt - startedAt)));
       const dailyLossRatio = executionDailyGate.drawdownRate;
-      const bars = decisionStore.list(symbol).slice(-240);
+      const bars = decisionStore.list(symbol, false).slice(-240);
       const chart = cryptoChartProjection(bars);
       const forecasts = modelForecasts();
       return {
@@ -3996,6 +4506,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           quoteAsset: "USDT",
           contractType: "PERPETUAL",
         },
+        ...(request.simulationCase ? { simulationCase: request.simulationCase } : {}),
+        modelPlan: structuredClone(modelPlan),
         currency: "USDT",
         initialCash: request.initialCash,
         cash: ledger.walletBalance,
@@ -4072,10 +4584,13 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           bars: chart.bars,
           indicators: chart.indicators,
           patterns: chart.patterns,
-          updatedAt: bars.length ? iso(bars.at(-1)!.closeTime) : undefined,
+          updatedAt: bars.length ? iso(at) : undefined,
         }],
         trades: tradeRows(executionLane, ledger),
         decisions: decisions.filter((decision) => decision.lane === executionLane).slice(-300),
+        unifiedPolicyDecisions: unifiedPolicyDecisions.slice(-300),
+        modelEvidence: routedModelEvidence.slice(-600),
+        rustMarketEvidence: liveRustMarketEvidence.slice(-300),
         modelForecasts: forecasts,
         kronosForecasts: forecasts.filter((forecast) => forecast.lane === "kronos_base"),
         warnings: unique(warnings),
@@ -4089,6 +4604,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           maximumPaperLeverage: riskLimits.maximumLeverage,
           executionLane,
           modelCandleSeconds,
+          inferenceIntervalSeconds: inferenceIntervalMs / 1_000,
           chartCandleSeconds: 60,
         },
         modelLanes: selectedLanes,
@@ -4101,6 +4617,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         decisionCadence: {
           trigger: decisionTrigger,
           modelCandleSeconds,
+          inferenceIntervalSeconds: inferenceIntervalMs / 1_000 as 5 | 15 | 30 | 60,
           triggeredEvents,
           coalescedFinalKlines,
           ...(lastTriggeredAt ? { lastTriggeredAt } : {}),
@@ -4939,6 +5456,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           );
           state.predictionMetrics.nominalCoverage.push(high.quantile - low.quantile);
           forecast.evaluated = true;
+          forecast.actualReturn = actual;
+          forecast.resolvedAt = iso(bar.closeTime);
         }
       }
     };
@@ -4947,15 +5466,46 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       bar: BinanceKline,
       id: number,
       inferenceStreamEpoch: number,
+      trigger: {
+        decisionAt: number;
+        decisionPrice: number;
+        priceObservedAt: number;
+      },
     ): Promise<RuntimeInferenceCompletion> => {
       const bars = modelContext();
       if (!bars.length || bars.at(-1)!.openTime !== bar.openTime) {
         throw new Error("inference_origin_not_latest_final_bar");
       }
-      if (bar.openTime <= lastInferredOpenTime) {
+      if (!highFrequencyHighVol && bar.openTime <= lastInferredOpenTime) {
         throw new Error("inference_origin_already_processed");
       }
-      lastInferredOpenTime = bar.openTime;
+      if (!highFrequencyHighVol) lastInferredOpenTime = bar.openTime;
+      const liveDecisionOriginAt = iso(trigger.decisionAt);
+      const causalLiveBookTicker = latestBookTicker
+        && latestBookTicker.eventTime <= trigger.decisionAt
+        ? {
+          observedAt: iso(latestBookTicker.eventTime),
+          bidPrice: latestBookTicker.bidPrice,
+          bidQuantity: latestBookTicker.bidQuantity,
+          askPrice: latestBookTicker.askPrice,
+          askQuantity: latestBookTicker.askQuantity,
+        }
+        : undefined;
+      const causalLiveTrades = recentAggregateTrades.filter((trade) => (
+        trade.executedAt <= trigger.decisionAt
+        && trade.executedAt > trigger.decisionAt - MINUTE_MS
+      ));
+      const causalLiveTradeStats = causalLiveTrades.length
+        ? {
+          observedAt: iso(Math.max(...causalLiveTrades.map((trade) => trade.executedAt))),
+          buyVolume: causalLiveTrades
+            .filter((trade) => !trade.buyerWasMaker)
+            .reduce((sum, trade) => sum + trade.quantity, 0),
+          sellVolume: causalLiveTrades
+            .filter((trade) => trade.buyerWasMaker)
+            .reduce((sum, trade) => sum + trade.quantity, 0),
+        }
+        : undefined;
       const decisionSpreadBps = currentSpreadBps;
       const currentAtr = Math.max(
         atr14(bars),
@@ -4986,12 +5536,13 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       deadlineTimer.unref();
       inferenceInFlight = true;
       triggeredEvents += 1;
-      lastTriggeredAt = iso(bar.closeTime);
+      lastTriggeredAt = iso(trigger.decisionAt);
       try {
         const technicalBars = decisionStore.list(symbol)
           .filter((candidate) => candidate.final && candidate.closeTime <= bar.closeTime)
           .slice(-CRYPTO_RUST_MAX_INPUT_BARS);
         let rustTechnical: CryptoRustTechnicalAnalysis | undefined;
+        let rustLiveMarketEvidence: CryptoLiveRustMarketEvidence | undefined;
         let rustTechnicalError: string | undefined;
         if (this.options.technicalAnalyzer) {
           const technicalOriginCloseTime = technicalBars.at(-1)?.closeTime;
@@ -5011,6 +5562,41 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                   symbol,
                   bars: technicalBars,
                   preset: request.preset,
+                  ...(latestBookTicker
+                    && latestBookTicker.eventTime <= bar.closeTime
+                    && bar.closeTime - latestBookTicker.eventTime <= 60_000
+                    ? {
+                      orderbook: {
+                        observedAt: iso(latestBookTicker.eventTime),
+                        bidPrice: latestBookTicker.bidPrice,
+                        bidQuantity: latestBookTicker.bidQuantity,
+                        askPrice: latestBookTicker.askPrice,
+                        askQuantity: latestBookTicker.askQuantity,
+                      },
+                    }
+                    : {}),
+                  ...(() => {
+                    const causalTrades = recentAggregateTrades.filter((trade) => (
+                      trade.executedAt <= bar.closeTime
+                      && trade.executedAt > bar.closeTime - 60_000
+                    ));
+                    if (!causalTrades.length) return {};
+                    const buyVolume = causalTrades
+                      .filter((trade) => !trade.buyerWasMaker)
+                      .reduce((sum, trade) => sum + trade.quantity, 0);
+                    const sellVolume = causalTrades
+                      .filter((trade) => trade.buyerWasMaker)
+                      .reduce((sum, trade) => sum + trade.quantity, 0);
+                    return {
+                      tradeStats: {
+                        observedAt: iso(Math.max(
+                          ...causalTrades.map((trade) => trade.executedAt),
+                        )),
+                        buyVolume,
+                        sellVolume,
+                      },
+                    };
+                  })(),
                   signal: inferenceController.signal,
                 }),
                 inferenceController.signal,
@@ -5032,13 +5618,33 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             rustTechnicalError = "rust_technical_analysis_failed";
           }
         }
-        const canonicalRequest = aiRequest(
-          context.runId,
-          symbol,
-          bars,
-          cryptoTargetStop(rustTechnical),
-        );
-        const requestDigest = digest(canonicalRequest);
+        if (highFrequencyHighVol && rustTechnical) {
+          try {
+            rustLiveMarketEvidence = composeCryptoLiveRustMarketEvidence({
+              baseEvidence: rustTechnical.marketEvidence,
+              decisionOriginAt: liveDecisionOriginAt,
+              ...(causalLiveBookTicker ? { bookTicker: causalLiveBookTicker } : {}),
+              ...(causalLiveTradeStats ? { tradeStats: causalLiveTradeStats } : {}),
+            });
+          } catch {
+            rustTechnicalError = "rust_live_market_evidence_failed";
+          }
+        }
+        const targetStop = cryptoTargetStop(rustTechnical);
+        const laneRequests = new Map(selectedLanes.map((lane) => {
+          const laneBars = cryptoModelContextForLane(lane, bars);
+          return [lane, aiRequest(
+            context.runId,
+            symbol,
+            laneBars,
+            targetStop,
+            request.simulationCase !== undefined,
+            highFrequencyHighVol ? trigger.decisionAt : undefined,
+          )] as const;
+        }));
+        const requestDigest = digest(Object.fromEntries(
+          selectedLanes.map((lane) => [lane, laneRequests.get(lane)!]),
+        ));
         for (const lane of selectedLanes) {
           const state = states.get(lane)!;
           const attemptAt = this.clock.now();
@@ -5075,13 +5681,26 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               this.requestLane(
                 lane,
                 client,
-                structuredClone(canonicalRequest),
+                structuredClone(laneRequests.get(lane)!),
                 inferenceController.signal,
               ),
               inferenceController.signal,
             );
             await cancellationCheckpoint();
-            const forecast = normalizeLaneForecast(lane, raw, canonicalRequest);
+            const normalizedForecast = normalizeLaneForecast(
+              lane,
+              raw,
+              laneRequests.get(lane)!,
+            );
+            const forecast = highFrequencyHighVol
+              ? rebaseLaneForecastToLivePrice(
+                normalizedForecast,
+                bar.close,
+                trigger.decisionPrice,
+                currentVolatility,
+                decisionSpreadBps,
+              )
+              : normalizedForecast;
             const observedLatency = Math.max(0, this.clock.now() - before);
             outcomes.set(lane, {
               attemptAt,
@@ -5109,6 +5728,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           streamEpoch: inferenceStreamEpoch,
           bar,
           bars,
+          decisionAt: trigger.decisionAt,
+          decisionPrice: trigger.decisionPrice,
+          priceObservedAt: trigger.priceObservedAt,
           requestDigest,
           outcomes,
           riskGenerations,
@@ -5117,6 +5739,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           currentVolatility,
           technicalBars,
           ...(rustTechnical ? { rustTechnical } : {}),
+          ...(rustLiveMarketEvidence ? { rustLiveMarketEvidence } : {}),
           ...(rustTechnicalError ? { rustTechnicalError } : {}),
         };
       } finally {
@@ -5135,6 +5758,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     ): void => {
       const {
         bar,
+        decisionAt,
+        decisionPrice,
+        priceObservedAt,
         requestDigest,
         outcomes,
         riskGenerations,
@@ -5143,15 +5769,17 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         currentVolatility,
         technicalBars,
         rustTechnical,
+        rustLiveMarketEvidence,
         rustTechnicalError,
       } = completion;
       const commonDecisionAt = Math.max(
-        bar.closeTime,
+        decisionAt,
         this.clock.now(),
         ...Array.from(outcomes.values()).flatMap((item) => (
           item.forecast ? [item.forecast.generatedAt] : []
         )),
       );
+      const decisionOriginAt = iso(decisionAt);
       const decisionIngressWatermark = lastIngressSequence;
       const epochInvalid = completion.streamEpoch !== streamEpoch;
       const lifecycleBlockReason = forcedBlockReason
@@ -5165,7 +5793,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             id: decisionId(lane, commonDecisionAt),
             lane,
             symbol,
-            originAt: iso(bar.closeTime),
+            originAt: decisionOriginAt,
             decisionAt: iso(commonDecisionAt),
             fillEligibleAfter: iso(commonDecisionAt),
             action: "none",
@@ -5222,14 +5850,35 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           );
           state.peakVramMeasurement = forecast.peakVramMeasurement;
           state.peakVramMb = maximumDefined(state.peakVramMb, forecast.peakVramMb);
-          const observation: RuntimeForecastObservation = {
-            ...forecast,
-            originPrice: bar.close,
-            targetAt: bar.closeTime + SCALPING_AI_HORIZONS[0] * MINUTE_MS,
-            evaluated: false,
-          };
-          state.forecasts.push(observation);
-          newlyAddedForecasts.push(observation);
+          for (const distribution of forecast.horizonDistributions) {
+            const targetAt = forecast.displayPoints.find(
+              (point) => point.horizonMinutes === distribution.horizonMinutes,
+            )?.targetTimestamp;
+            const observation: RuntimeForecastObservation = {
+              ...forecast,
+              quantiles: distribution.quantiles,
+              horizonMinutes: distribution.horizonMinutes,
+              displayOriginAt: decisionOriginAt,
+              inputOriginPrice: bar.close,
+              originPrice: decisionPrice,
+              priceObservedAt: iso(priceObservedAt),
+              projectionPolicy: highFrequencyHighVol
+                ? "live_price_rebase/v1"
+                : "native_input_origin",
+              targetAt: targetAt === undefined
+                ? bar.closeTime + distribution.horizonMinutes * MINUTE_MS
+                : Date.parse(targetAt),
+              evaluated: false,
+            };
+            state.forecasts.push(observation);
+            newlyAddedForecasts.push(observation);
+          }
+          if (state.forecasts.length > MAX_RUNTIME_FORECAST_OBSERVATIONS_PER_LANE) {
+            state.forecasts.splice(
+              0,
+              state.forecasts.length - MAX_RUNTIME_FORECAST_OBSERVATIONS_PER_LANE,
+            );
+          }
         } else {
           const reason = outcome.error ?? "worker_unavailable";
           state.errors.push(reason);
@@ -5253,12 +5902,131 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
 
       const observedCostRate = costRate(request, decisionSpreadBps);
+      const policyRustEvidence = highFrequencyHighVol
+        ? rustLiveMarketEvidence?.marketEvidence
+        : rustTechnical?.marketEvidence;
+      if (rustLiveMarketEvidence) {
+        liveRustMarketEvidence.push(rustLiveMarketEvidence);
+        if (liveRustMarketEvidence.length > 300) {
+          liveRustMarketEvidence.splice(0, liveRustMarketEvidence.length - 300);
+        }
+      }
       const technical = cryptoTechnicalObservation(
         technicalBars,
         request.preset,
         rustTechnical,
         rustTechnicalError,
       );
+      const evidenceCosts: EvidenceCostBreakdown = {
+        commissionBps: request.costs.commissionBpsPerSide * 2,
+        spreadBps: decisionSpreadBps,
+        slippageBps: request.costs.slippageBpsPerSide * 2,
+        fundingBps: 0,
+        safetyMarginBps: 1,
+      };
+      const routedEvidence = commonModelEvidence({
+        request,
+        symbol,
+        originAt: decisionOriginAt,
+        outcomes,
+        states,
+        ...(rustTechnical ? { rustTechnical } : {}),
+        ...(policyRustEvidence ? { rustMarketEvidence: policyRustEvidence } : {}),
+        costs: evidenceCosts,
+      });
+      routedModelEvidence.push(...routedEvidence);
+      if (routedModelEvidence.length > 2_000) {
+        routedModelEvidence.splice(0, routedModelEvidence.length - 2_000);
+      }
+      const primaryPlan = modelPlan.find((plan) => (
+        plan.role === "primary"
+        && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol)
+      ));
+      const primaryState = primaryPlan ? states.get(primaryPlan.modelLane) : undefined;
+      let unifiedDecision: UnifiedPolicyDecision | undefined;
+      if (
+        request.sourceContractVersion === "ai-paper-simulation/v8"
+        && request.simulationCase
+        && primaryPlan
+        && primaryState
+      ) {
+        const ledger = primaryState.ledger.snapshot();
+        const position = ledger.positions.find((item) => item.symbol === symbol);
+        const lastUnified = unifiedPolicyDecisions.at(-1);
+        const lastExit = [...ledger.fills].reverse().find((fill) => fill.action === "reduce");
+        const consecutiveLosses = [...ledger.fills]
+          .reverse()
+          .filter((fill) => fill.action === "reduce")
+          .findIndex((fill) => fill.realizedPnl >= 0);
+        const policyState: UnifiedPolicyState = {
+          currentDirection: position?.side ?? "cash",
+          ...(position ? { positionOpenedAt: iso(position.openedAt) } : {}),
+          ...(lastExit ? {
+            lastExitAt: iso(lastExit.executedAt),
+            lastDirection: lastExit.side,
+          } : {}),
+          ...(lastUnified?.selectedHorizonMinutes === null
+            || lastUnified?.selectedHorizonMinutes === undefined
+            ? {}
+            : {
+              lastHorizonMinutes: lastUnified.selectedHorizonMinutes,
+              ...(lastUnified.horizonScore === null
+                ? {}
+                : { lastHorizonScore: lastUnified.horizonScore }),
+            }),
+          tradeTimestamps: ledger.fills.map((fill) => iso(fill.executedAt)),
+          dailyTurnoverRate: ledger.fills.reduce(
+            (sum, fill) => sum + fill.notional,
+            0,
+          ) / Math.max(ledger.equity, 1),
+        };
+        const previousBar = technicalBars.at(-2);
+        unifiedDecision = decideUnifiedSimulationPolicy({
+          simulationCase: request.simulationCase,
+          symbol,
+          originAt: decisionOriginAt,
+          modelPlan,
+          modelEvidence: routedEvidence,
+          ...(policyRustEvidence ? { rustEvidence: policyRustEvidence } : {}),
+          costs: evidenceCosts,
+          state: policyState,
+          sizing: {
+            equity: ledger.equity,
+            volatilityTargetRate: 0.01,
+            lossBudgetRate: riskLimits.riskPerTradeRate,
+            bookParticipationRate: 0.01,
+            symbolExposureCapRate: 0.5,
+            grossExposureCapRate: riskLimits.grossExposureLimitRate,
+            marginUsageCapRate: riskLimits.marginUsageLimitRate,
+            maximumLeverage: riskLimits.maximumLeverage,
+          },
+          circuit: {
+            dailyLossRate: currentDailyGate(primaryState).drawdownRate,
+            consecutiveLosses: consecutiveLosses < 0
+              ? ledger.fills.filter((fill) => (
+                fill.action === "reduce" && fill.realizedPnl < 0
+              )).length
+              : consecutiveLosses,
+            referenceSpreadBps: selected.spreadBps,
+            ...(policyRustEvidence?.orderbookDepth === null
+              || policyRustEvidence?.orderbookDepth === undefined
+              ? {}
+              : { referenceDepth: policyRustEvidence.orderbookDepth }),
+            ...(policyRustEvidence?.realizedVolatility === null
+              || policyRustEvidence?.realizedVolatility === undefined
+              ? {}
+              : {
+                realizedVolatilityBaseline:
+                  policyRustEvidence.realizedVolatility,
+              }),
+            ...(previousBar
+              ? { priceGapRate: Math.abs(bar.open / previousBar.close - 1) }
+              : {}),
+            missingData: !klineDataHealthy || policyRustEvidence === undefined,
+          },
+        });
+        unifiedPolicyDecisions.push(unifiedDecision);
+      }
       for (const lane of selectedLanes) {
         const state = states.get(lane)!;
         const outcome = outcomes.get(lane);
@@ -5267,7 +6035,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             id: decisionId(lane, commonDecisionAt),
             lane,
             symbol,
-            originAt: iso(bar.closeTime),
+            originAt: decisionOriginAt,
             decisionAt: iso(commonDecisionAt),
             fillEligibleAfter: iso(commonDecisionAt),
             action: "none",
@@ -5277,18 +6045,59 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           });
           continue;
         }
-        const signal: QuantileDirectionSignal = signalFromQuantileCdf({
-          quantiles: outcome.forecast.quantiles,
+        const role = modelPlanForLane(request, symbol, lane)?.role ?? "primary";
+        if (role !== "primary") {
+          decisions.push({
+            id: decisionId(lane, commonDecisionAt),
+            lane,
+            symbol,
+            originAt: decisionOriginAt,
+            generatedAt: outcome.forecast.generatedAtIso,
+            decisionAt: iso(commonDecisionAt),
+            fillEligibleAfter: iso(commonDecisionAt),
+            action: "none",
+            status: "skipped",
+            reason: role === "shadow" ? "shadow_observation_only" : "veto_observation_only",
+            requestDigest,
+          });
+          continue;
+        }
+        const selectedDistribution = unifiedDecision?.selectedHorizonMinutes === null
+          || unifiedDecision?.selectedHorizonMinutes === undefined
+          ? outcome.forecast.horizonDistributions[0]!
+          : outcome.forecast.horizonDistributions.find(
+            (distribution) => (
+              distribution.horizonMinutes === unifiedDecision!.selectedHorizonMinutes
+            ),
+          ) ?? outcome.forecast.horizonDistributions[0]!;
+        const routedQuantiles = selectedDistribution.quantiles;
+        const legacySignal = signalFromQuantileCdf({
+          quantiles: routedQuantiles,
           roundTripCostRate: observedCostRate,
           realizedVolatilityRate: currentVolatility,
           spreadBps: decisionSpreadBps,
           mode: "paper",
         });
+        const signal: QuantileDirectionSignal = unifiedDecision
+          ? {
+            direction: unifiedDecision.direction === "long"
+              || unifiedDecision.direction === "short"
+              ? unifiedDecision.direction
+              : "flat",
+            probabilityAboveCost: unifiedDecision.pNetLong ?? 0,
+            probabilityBelowNegativeCost: unifiedDecision.pNetShort ?? 0,
+            confidence: Math.max(
+              unifiedDecision.pNetLong ?? 0,
+              unifiedDecision.pNetShort ?? 0,
+            ),
+            leverageTier: legacySignal.leverageTier,
+          }
+          : legacySignal;
         const fusion = fuseForecastWithTechnical({
           lane,
           modelDirection: signal.direction,
           modelConfidence: signal.confidence,
-          modelOriginAt: iso(bar.closeTime),
+          modelOriginAt: decisionOriginAt,
           modelGeneratedAt: outcome.forecast.generatedAtIso,
           ...(this.options.technicalAnalyzer ? {
             technical: {
@@ -5322,7 +6131,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           id: decisionId(lane, commonDecisionAt),
           lane,
           symbol,
-          originAt: iso(bar.closeTime),
+          originAt: decisionOriginAt,
           generatedAt: outcome.forecast.generatedAtIso,
           decisionAt: iso(commonDecisionAt),
           fillEligibleAfter: iso(commonDecisionAt),
@@ -5358,6 +6167,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             ...technical.components,
             ...fusion.components,
             ...modelEvidence.components,
+            ...(unifiedDecision?.selectedHorizonMinutes === null
+              || unifiedDecision?.selectedHorizonMinutes === undefined
+              ? {}
+              : {
+                unifiedHorizonMinutes: unifiedDecision.selectedHorizonMinutes,
+                unifiedHorizonScore: unifiedDecision.horizonScore ?? 0,
+                unifiedPositionRate: unifiedDecision.positionSizing.selectedRate,
+              }),
           },
           status: "held",
           reason: "flat_signal",
@@ -5389,6 +6206,22 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         const ledger = state.ledger.snapshot();
         const position = ledger.positions.find((item) => item.symbol === symbol);
+        if (unifiedDecision?.direction === "cash") {
+          baseDecision.status = position ? "pending" : "blocked";
+          baseDecision.reason = unifiedDecision.reasons[0] ?? "unified_policy_no_trade";
+          if (position) {
+            baseDecision.action = "reduce";
+            state.pending = {
+              action: "reduce",
+              decision: baseDecision,
+              decisionAt: commonDecisionAt,
+              eligibleAfterIngressSequence: decisionIngressWatermark,
+              reason: "signal",
+            };
+          }
+          decisions.push(baseDecision);
+          continue;
+        }
         if (signal.direction === "flat") {
           baseDecision.action = "hold";
           decisions.push(baseDecision);
@@ -5448,15 +6281,21 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           continue;
         }
         const adverseQuantileDistance = signal.direction === "long"
-          ? Math.max(0, -outcome.forecast.quantiles[1]!.returnRate) * bar.close
-          : Math.max(0, outcome.forecast.quantiles.at(-2)!.returnRate) * bar.close;
+          ? Math.max(
+            0,
+            -(routedQuantiles.find((item) => item.quantile === 0.1)?.returnRate ?? 0),
+          ) * decisionPrice
+          : Math.max(
+            0,
+            routedQuantiles.find((item) => item.quantile === 0.9)?.returnRate ?? 0,
+          ) * decisionPrice;
         const sizing = sizeFuturesPosition({
           mode: "paper",
           side: signal.direction,
           equity: ledger.equity,
           currentGrossExposure: ledger.grossExposure,
           currentMargin: ledger.totalIsolatedMargin,
-          price: bar.close,
+          price: decisionPrice,
           atr14: currentAtr,
           adverseQuantileDistance,
           spreadBps: decisionSpreadBps,
@@ -5469,8 +6308,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           limits: riskLimits,
           rules,
         });
+        const unifiedQuantityCap = unifiedDecision
+          ? unifiedDecision.positionSizing.selectedNotional / decisionPrice
+          : Number.POSITIVE_INFINITY;
         const policyQuantity = floorToStep(
-          sizing.quantity
+          Math.min(sizing.quantity, unifiedQuantityCap)
             * policyProfile.targetAllocationRate
             * fusion.exposureScale
             * modelEvidence.exposureScale,
@@ -5482,11 +6324,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         baseDecision.fillEligibleAfter = iso(entryDecisionAt);
         baseDecision.leverage = sizing.leverage;
         baseDecision.quantity = policyQuantity;
-        baseDecision.notional = policyQuantity * bar.close;
+        baseDecision.notional = policyQuantity * decisionPrice;
         baseDecision.protectiveStopPrice = sizing.protectiveStopPrice;
         if (!sizing.accepted
           || policyQuantity < rules.minQuantity
-          || policyQuantity * bar.close < rules.minNotional) {
+          || policyQuantity * decisionPrice < rules.minNotional) {
           baseDecision.status = "blocked";
           baseDecision.reason = `risk_${sizing.reason ?? "policy_allocation_below_minimum"}`;
           decisions.push(baseDecision);
@@ -5514,20 +6356,30 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     const recordBlockedFinalDecision = (
       bar: BinanceKline,
       reason: string,
+      triggerAt = bar.closeTime,
     ): void => {
       const bars = modelContext()
         .filter((candidateBar) => candidateBar.openTime <= bar.openTime)
         .slice(-this.contextBars);
-      const requestDigest = bars.length ? digest(aiRequest(context.runId, symbol, bars)) : "";
-      const at = Math.max(bar.closeTime, this.clock.now());
+      const requestDigest = bars.length
+        ? digest(aiRequest(
+          context.runId,
+          symbol,
+          bars,
+          null,
+          request.simulationCase !== undefined,
+          highFrequencyHighVol ? triggerAt : undefined,
+        ))
+        : "";
+      const at = Math.max(triggerAt, this.clock.now());
       triggeredEvents += 1;
-      lastTriggeredAt = iso(bar.closeTime);
+      lastTriggeredAt = iso(triggerAt);
       for (const lane of selectedLanes) {
         decisions.push({
           id: decisionId(lane, at),
           lane,
           symbol,
-          originAt: iso(bar.closeTime),
+          originAt: iso(triggerAt),
           decisionAt: iso(at),
           fillEligibleAfter: iso(at),
           action: "none",
@@ -5538,8 +6390,23 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
     };
 
-    const launchInference = (bar: BinanceKline): void => {
+    const launchInference = (
+      bar: BinanceKline,
+      trigger: {
+        decisionAt: number;
+        decisionPrice: number;
+        priceObservedAt: number;
+      } = {
+        decisionAt: bar.closeTime,
+        decisionPrice: bar.close,
+        priceObservedAt: bar.closeTime,
+      },
+    ): void => {
       if (inferenceTask) {
+        if (highFrequencyHighVol) {
+          coalescedFinalKlines += 1;
+          return;
+        }
         if (!coalescedInferenceBar || bar.openTime > coalescedInferenceBar.openTime) {
           if (coalescedInferenceBar) coalescedFinalKlines += 1;
           coalescedInferenceBar = bar;
@@ -5550,7 +6417,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       }
       const id = ++inferenceSequence;
       const inferenceStreamEpoch = streamEpoch;
-      inferenceTask = performInference(bar, id, inferenceStreamEpoch)
+      inferenceTask = performInference(bar, id, inferenceStreamEpoch, trigger)
         .then((completion) => {
           readyInferenceCompletion = completion;
         })
@@ -5568,6 +6435,34 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             queue.fail(error);
           }
         });
+    };
+    const maybeLaunchHighFrequencyInference = (): void => {
+      if (!highFrequencyHighVol || !liveWindowStarted || terminalSettlement) return;
+      const at = this.clock.now();
+      if (at < nextHighFrequencyInferenceAt || at >= expiresAt) return;
+      const elapsedIntervals = Math.floor(
+        (at - nextHighFrequencyInferenceAt) / HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS,
+      );
+      if (elapsedIntervals > 0) coalescedFinalKlines += elapsedIntervals;
+      nextHighFrequencyInferenceAt += (
+        elapsedIntervals + 1
+      ) * HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS;
+      const bar = latestModelBar();
+      if (!bar) return;
+      if (inferenceTask) {
+        coalescedFinalKlines += 1;
+        return;
+      }
+      const reason = decisionLifecycleBlockReason(at);
+      if (reason) {
+        recordBlockedFinalDecision(bar, reason, at);
+        return;
+      }
+      launchInference(bar, {
+        decisionAt: at,
+        decisionPrice: currentMarkPrice,
+        priceObservedAt: currentMarkPriceObservedAt,
+      });
     };
     const yieldToImmediateInferenceCompletion = async (): Promise<void> => {
       if (!inferenceTask) return;
@@ -6006,14 +6901,20 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         state.maximumDrawdown = 0;
         state.lastEquitySampleAt = startedAt;
       }
-      const liveDecisionStartAt = startedAt;
+      liveDecisionStartAt = startedAt;
       liveWindowStarted = true;
+      if (highFrequencyHighVol) {
+        nextHighFrequencyInferenceAt = (
+          Math.floor(startedAt / HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS) + 1
+        ) * HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS;
+      }
       await updateProgress(true);
       await publishSnapshot("running", true, liveDecisionStartAt);
 
       while (!terminalSettlement) {
         await cancellationCheckpoint();
         await yieldToImmediateInferenceCompletion();
+        maybeLaunchHighFrequencyInference();
         if (this.clock.now() >= expiresAt && !terminalBoundaryQueued) {
           if (!queueTerminalBoundary("expiry_timeout", lastIngressSequence)) {
             const error = new Error("market_event_queue_overflow");
@@ -6207,6 +7108,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           riskEventAccepted = lastBookTickerEventTime === undefined
             || event.eventTime >= lastBookTickerEventTime;
           if (riskEventAccepted) {
+            latestBookTicker = event;
             lastBookTickerEventTime = event.eventTime;
             lastBookTickerObservedAt = event.receivedAt;
             const midpoint = (event.bidPrice + event.askPrice) / 2;
@@ -6214,6 +7116,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               ? (event.askPrice - event.bidPrice) / midpoint * 10_000
               : currentSpreadBps;
           }
+        }
+        if (event.kind === "agg_trade") {
+          recentAggregateTrades.push(event);
+          const cutoff = event.executedAt - 2 * MINUTE_MS;
+          while (
+            recentAggregateTrades[0]
+            && recentAggregateTrades[0].executedAt < cutoff
+          ) recentAggregateTrades.shift();
         }
         if (event.kind === "mark_price") {
           riskEventAccepted = lastMarkPriceEventTime === undefined
@@ -6300,12 +7210,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           if (event.receivedAt >= liveDecisionStartAt
             && event.openTime > lastProcessedFinalOpenTime) {
             lastProcessedFinalOpenTime = event.openTime;
-            const reason = decisionLifecycleBlockReason();
-            if (reason) {
-              discardCoalescedInference();
-              recordBlockedFinalDecision(event, reason);
+            if (!highFrequencyHighVol) {
+              const reason = decisionLifecycleBlockReason();
+              if (reason) {
+                discardCoalescedInference();
+                recordBlockedFinalDecision(event, reason);
+              }
+              else launchInference(event);
             }
-            else launchInference(event);
           }
         }
         recordEquity(this.clock.now());
@@ -6639,6 +7551,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
               symbol,
               decisions,
+              unifiedPolicyDecisions,
+              modelEvidence: routedModelEvidence,
+              rustMarketEvidence: liveRustMarketEvidence,
               settlementComplete: settlement.settlementComplete,
               terminalSettlement: structuredClone(settlement),
             },
@@ -6687,6 +7602,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             content: {
               schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
               market: request.market,
+              simulationCase: request.simulationCase,
+              normalizedRequest: request,
+              modelPlan,
               scannerSnapshotId: input.snapshot.scannerSnapshotId,
               executionLane,
               modelLanes: provenance,
@@ -6694,6 +7612,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               terminalSettlement: structuredClone(settlement),
               maintenanceMargin: maintenanceMarginEvidence,
               runtime: CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS,
+              policyVersions: {
+                unified: UNIFIED_STRATEGY_POLICY_VERSION,
+                router: MODEL_ROUTER_POLICY_VERSION,
+                veto: VETO_POLICY_VERSION,
+                horizon: DYNAMIC_HORIZON_POLICY_VERSION,
+                sizing: POSITION_SIZING_POLICY_VERSION,
+                circuitBreaker: CIRCUIT_BREAKER_POLICY_VERSION,
+              },
             },
             rowCount: provenance.length,
           },
@@ -6850,6 +7776,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       startedAt,
       expiresAt,
       market: firstSnapshot.market,
+      ...(request.simulationCase ? { simulationCase: request.simulationCase } : {}),
+      modelPlan: structuredClone(normalizedModelPlan(request)),
       currency: "USDT",
       initialCash,
       cash,
@@ -6899,6 +7827,13 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       charts: snapshots.flatMap((snapshot) => snapshot.charts),
       trades: snapshots.flatMap((snapshot) => snapshot.trades),
       decisions: snapshots.flatMap((snapshot) => snapshot.decisions).slice(-600),
+      unifiedPolicyDecisions: snapshots.flatMap(
+        (snapshot) => snapshot.unifiedPolicyDecisions,
+      ).slice(-600),
+      modelEvidence: snapshots.flatMap((snapshot) => snapshot.modelEvidence).slice(-1_200),
+      rustMarketEvidence: snapshots.flatMap(
+        (snapshot) => snapshot.rustMarketEvidence,
+      ).slice(-600),
       modelForecasts,
       kronosForecasts: modelForecasts.flatMap((value) => (
         first(record(value), "lane") === "kronos_base" ? [value] : []
@@ -6936,6 +7871,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       decisionCadence: {
         trigger: firstSnapshot.decisionCadence.trigger,
         modelCandleSeconds: firstSnapshot.decisionCadence.modelCandleSeconds,
+        inferenceIntervalSeconds:
+          firstSnapshot.decisionCadence.inferenceIntervalSeconds,
         triggeredEvents: snapshots.reduce(
           (sum, snapshot) => sum + snapshot.decisionCadence.triggeredEvents,
           0,

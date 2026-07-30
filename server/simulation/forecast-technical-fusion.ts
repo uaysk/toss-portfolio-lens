@@ -1,4 +1,5 @@
 import type { RustIndicatorEvidence } from "./technical-indicator-evidence.js";
+import type { SimulationModelLane } from "./contracts.js";
 
 export const FORECAST_TECHNICAL_FUSION_VERSION =
   "forecast-technical-fusion/v1" as const;
@@ -49,7 +50,7 @@ function technicalDirection(score: number): FusionDirection {
  * reduce exposure only.
  */
 export function fuseForecastWithTechnical(input: {
-  lane: "kronos_base" | "fincast";
+  lane: SimulationModelLane;
   modelDirection: FusionDirection;
   modelConfidence: number;
   modelOriginAt: string;

@@ -5,13 +5,17 @@ import {
   AiSimulationStrategySettings,
   SimulationDisclosure,
   TradesAndDecisions,
+  UnifiedPolicyEvidencePanel,
   aiSimulationRequestWithStrategy,
   aiSimulationChartLayout,
+  cryptoRequestForCase,
+  etfRequest,
   simulationDecisionCadenceLabel,
 } from "./ai-simulation";
 import { AiSimulationComparisonPanel } from "./ai-simulation-comparison-panel";
 import {
   AI_SIMULATION_PAIR_CATALOG,
+  DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   DEFAULT_AI_SIMULATION_REQUEST,
   type AiSimulationSnapshot,
   type AiSimulationStrategyComparison,
@@ -33,6 +37,8 @@ describe("AiSimulation", () => {
       .toBe("FinCast 새 확정 30초봉 즉시");
     expect(simulationDecisionCadenceLabel("final_fincast_15s_aggtrade_bar"))
       .toBe("FinCast 새 확정 15초봉 즉시");
+    expect(simulationDecisionCadenceLabel("high_vol_live_5s"))
+      .toBe("고변동성 실시간 5초");
   });
 
   it.each([
@@ -80,27 +86,181 @@ describe("AiSimulation", () => {
     expect(layout.charts).toHaveLength(1);
   });
 
-  it("renders cash-only setup, selection mode, preset, and risk controls", () => {
+  it("renders the three strategy cases and the BTC·ETH paper setup", () => {
     const markup = renderToStaticMarkup(<AiSimulation onUnauthorized={() => undefined} />);
     expect(markup).toContain('data-ai-simulation="true"');
-    expect(markup).toContain('aria-label="시작 예수금"');
-    expect(markup).toContain('aria-label="테스트 기간"');
-    expect(markup).toContain('aria-label="시뮬레이션 종목 선택 방식"');
-    expect(markup).toContain('aria-label="시뮬레이션 전략 실행 방식"');
-    expect(markup).toContain("페어 비교");
-    expect(markup).toContain("페어 전략 capability를 확인하고 있습니다.");
-    expect(markup).toContain('aria-label="AI 선정 종목 수"');
-    expect(markup).toContain('aria-label="공격 방어 성향"');
-    expect(markup).toContain("FinCast · Main");
-    expect(markup).toContain("FinCast Main · Rust · 패턴");
-    expect(markup).toContain("최대 공격 · 최대 배분");
-    expect(markup).toContain("현금 100% · 0주");
+    expect(markup).toContain('role="tablist"');
+    expect(markup).toContain('data-simulation-asset-class-option="btc_eth"');
+    expect(markup).toContain('data-simulation-asset-class-option="high_vol_crypto"');
+    expect(markup).toContain('data-simulation-asset-class-option="us_etf_pair"');
+    expect(markup).toContain("BTC·ETH");
+    expect(markup).toContain("고변동성 암호화폐");
+    expect(markup).toContain("미국 ETF 페어");
+    expect(markup).toContain('aria-label="암호화폐 시작 자산"');
+    expect(markup).toContain('aria-label="암호화폐 테스트 기간"');
+    expect(markup).toContain("BTC C2→FinCast veto");
+    expect(markup).toContain("ETH FinCast→C2 shadow");
     expect(markup).toContain("확정봉 이벤트 즉시");
     expect(markup).toContain("AI 시뮬레이션 시작");
-    expect(markup).toContain("시작 버튼을 눌러야만 후보 스캔과 AI 판단이 시작됩니다.");
     expect(markup).toContain('data-simulation-empty="true"');
     expect(markup).toContain("시뮬레이션 기록·결과 보고서");
     expect(markup).toContain('data-simulation-history="true"');
+  });
+
+  it("builds explicit v8 payloads for every top-level strategy case", () => {
+    expect(cryptoRequestForCase("btc_eth", DEFAULT_AI_SIMULATION_CRYPTO_REQUEST))
+      .toMatchObject({
+        contractVersion: "ai-paper-simulation/v8",
+        simulationCase: "btc_eth",
+        selection: { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
+        modelLanes: ["chronos2", "fincast"],
+        modelPlan: [
+          { symbol: "BTCUSDT", modelLane: "chronos2", role: "primary", required: true },
+          { symbol: "BTCUSDT", modelLane: "fincast", role: "veto", required: true },
+          { symbol: "ETHUSDT", modelLane: "fincast", role: "primary", required: true },
+          { symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow", required: false },
+        ],
+      });
+    expect(cryptoRequestForCase("high_vol_crypto", DEFAULT_AI_SIMULATION_CRYPTO_REQUEST))
+      .toMatchObject({
+        contractVersion: "ai-paper-simulation/v8",
+        simulationCase: "high_vol_crypto",
+        selection: { mode: "auto", symbolCount: 1 },
+        scanner: {
+          minimumTradingAmountUsd: 25_000_000,
+          maximumSpreadBps: 12,
+          rescanIntervalMinutes: 30,
+        },
+      });
+    expect(etfRequest({
+      ...DEFAULT_AI_SIMULATION_REQUEST,
+      strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
+    })).toMatchObject({
+      contractVersion: "ai-paper-simulation/v8",
+      simulationCase: "us_etf_pair",
+      marketCountry: "US",
+      strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
+      modelPlan: [
+        { symbol: "*", modelLane: "chronos2", role: "primary", required: true },
+        { symbol: "*", modelLane: "fincast", role: "shadow", required: false },
+      ],
+    });
+  });
+
+  it("renders fail-closed evidence, tails, policy gates, costs, mapping, and scanner facts", () => {
+    const snapshot: AiSimulationSnapshot = {
+      phase: "running",
+      simulationCase: "high_vol_crypto",
+      modelPlan: [{
+        symbol: "*",
+        modelLane: "chronos2",
+        role: "primary",
+        required: true,
+        preferredHorizonsMinutes: [15, 30],
+      }],
+      currency: "USDT",
+      initialCash: 10_000,
+      cash: 10_000,
+      equity: 10_000,
+      progress: 0.5,
+      selected: [],
+      positions: [],
+      charts: [],
+      trades: [],
+      decisions: [],
+      kronosForecasts: [],
+      warnings: [],
+      capabilities: {},
+      modelEvidence: [{
+        symbol: "SOLUSDT",
+        modelLane: "chronos2",
+        role: "primary",
+        modelId: "amazon/chronos-2",
+        modelRevision: "pinned",
+        horizonMinutes: 30,
+        q01Return: -0.04,
+        q05Return: -0.025,
+        q10Return: -0.02,
+        q50Return: 0.004,
+        q90Return: 0.03,
+        q95Return: 0.04,
+        q99Return: 0.07,
+        expectedReturn: 0.004,
+        expectedNetReturn: 0.002,
+        pNetLong: 0.63,
+        pNetShort: 0.22,
+        intervalWidth: 0.05,
+        expectedShortfall: 0.028,
+        calibrationStatus: "ready",
+        calibrationAge: 12,
+        featureProfile: "compact_causal_v1",
+        latencyMs: 150,
+        inputOrigin: "historical",
+        dataQuality: {
+          status: "degraded",
+          missingRate: 0.01,
+          unavailableFeatures: ["open_interest"],
+          warnings: ["liquidation_unavailable"],
+        },
+      }],
+      unifiedPolicyDecisions: [{
+        direction: "cash",
+        executionAction: "none",
+        selectedHorizonMinutes: 30,
+        expectedGrossReturn: 0.004,
+        expectedNetReturn: 0.002,
+        pNetLong: 0.63,
+        pNetShort: 0.22,
+        rustRegime: "trending",
+        passedIndicatorGates: ["ADX"],
+        blockedIndicatorGates: ["SPREAD"],
+        veto: { vetoed: true, reasons: ["TAIL_LOSS_LIMIT"] },
+        circuitBreaker: {
+          active: true,
+          triggers: ["DATA_STALE"],
+          releaseConditions: ["CLEAR_DATA_STALE"],
+        },
+        costBreakdown: {
+          commissionBps: 4,
+          spreadBps: 3,
+          slippageBps: 2,
+          fundingBps: 1,
+          safetyMarginBps: 2,
+          totalLongBps: 12,
+          totalShortBps: 10,
+        },
+      }],
+      highVolatilityScanner: {
+        scannedAt: "2026-07-28T00:00:00.000Z",
+        totalCandidateCount: 2,
+        eligibleCandidateCount: 1,
+        selectedSymbols: ["SOLUSDT"],
+        dataFreshnessMs: 1_000,
+        candidates: [{
+          symbol: "SOLUSDT",
+          score: 0.82,
+          freshnessMs: 1_000,
+          exclusionReasons: [],
+          metrics: {
+            realizedVolatility: 0.04,
+            normalizedAtr: 0.03,
+            relativeVolume: 1.8,
+            tradingAmountUsd: 40_000_000,
+            medianSpreadBps: 2,
+            depthUsd: 600_000,
+          },
+        }],
+      },
+    };
+    const markup = renderToStaticMarkup(<UnifiedPolicyEvidencePanel snapshot={snapshot} />);
+    expect(markup).toContain("q01");
+    expect(markup).toContain("q99");
+    expect(markup).toContain("open_interest");
+    expect(markup).toContain("TAIL_LOSS_LIMIT");
+    expect(markup).toContain("DATA_STALE");
+    expect(markup).toContain("CLEAR_DATA_STALE");
+    expect(markup).toContain("commission 4bps");
+    expect(markup).toContain("RVOL 1.800");
   });
 
   it("keeps the complete decision history inside a bounded scroll region", () => {

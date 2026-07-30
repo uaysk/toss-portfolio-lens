@@ -19,6 +19,10 @@ import {
   type AiSimulationFuturesPosition,
   type AiSimulationFuturesRisk,
   type AiSimulationMarket,
+  type AiSimulationCase,
+  type AiSimulationHighVolatilityScannerSettings,
+  type AiSimulationModelPlanEntry,
+  type AiSimulationModelRole,
   type AiSimulationModelComparison,
   type AiSimulationModelLane,
 } from "./ai-simulation-crypto";
@@ -53,6 +57,10 @@ export type {
   AiSimulationFuturesPosition,
   AiSimulationFuturesRisk,
   AiSimulationMarket,
+  AiSimulationCase,
+  AiSimulationHighVolatilityScannerSettings,
+  AiSimulationModelPlanEntry,
+  AiSimulationModelRole,
   AiSimulationModelComparison,
   AiSimulationModelComparisonLane,
   AiSimulationModelLaneProvenance,
@@ -66,6 +74,8 @@ export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"]
 export const AI_SIMULATION_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
 export const AI_SIMULATION_SELECTION_MODES = ["auto", "manual"] as const;
 export const AI_SIMULATION_PAIR_IDS = [
+  "semiconductor-soxl-soxs",
+  "spy-spxl-spxs",
   "soxx-soxl-soxs",
   "smh-soxl-soxs",
   "sndk-snxx-sndq",
@@ -87,9 +97,36 @@ export type AiSimulationPairCatalogItem = {
   id: AiSimulationPairId;
   label: string;
   symbols: string[];
+  displaySignalSymbol?: string;
+  modelTargetSymbol?: string;
+  auxiliarySymbols?: string[];
 };
 
 export const AI_SIMULATION_PAIR_CATALOG: readonly AiSimulationPairCatalogItem[] = [
+  {
+    id: "qqq-tqqq-sqqq",
+    label: "QQQ → TQQQ / SQQQ",
+    symbols: ["QQQ", "TQQQ", "SQQQ"],
+    displaySignalSymbol: "QQQ",
+    modelTargetSymbol: "QQQ",
+    auxiliarySymbols: [],
+  },
+  {
+    id: "semiconductor-soxl-soxs",
+    label: "SMH/반도체 · SOXX → SOXL / SOXS",
+    symbols: ["SOXX", "SMH", "QQQ", "SOXL", "SOXS"],
+    displaySignalSymbol: "SMH",
+    modelTargetSymbol: "SOXX",
+    auxiliarySymbols: ["SMH", "QQQ"],
+  },
+  {
+    id: "spy-spxl-spxs",
+    label: "SPY → SPXL / SPXS",
+    symbols: ["SPY", "SPXL", "SPXS"],
+    displaySignalSymbol: "SPY",
+    modelTargetSymbol: "SPY",
+    auxiliarySymbols: [],
+  },
   {
     id: "sndk-snxx-sndq",
     label: "샌디스크 SNDK · SNXX (+2x) · SNDQ (-2x)",
@@ -99,7 +136,6 @@ export const AI_SIMULATION_PAIR_CATALOG: readonly AiSimulationPairCatalogItem[] 
   { id: "smh-soxl-soxs", label: "SMH · SOXL · SOXS", symbols: ["SMH", "SOXL", "SOXS"] },
   { id: "tsla-tsll-tsls", label: "TSLA · TSLL · TSLS", symbols: ["TSLA", "TSLL", "TSLS"] },
   { id: "tsla-tsll-tslq", label: "TSLA · TSLL · TSLQ", symbols: ["TSLA", "TSLL", "TSLQ"] },
-  { id: "qqq-tqqq-sqqq", label: "QQQ · TQQQ · SQQQ", symbols: ["QQQ", "TQQQ", "SQQQ"] },
 ] as const;
 
 export type AiSimulationStrategyRequest =
@@ -192,6 +228,8 @@ export function usesDefaultAiSimulationCosts(
 }
 
 export type AiSimulationRequest = {
+  contractVersion?: "ai-paper-simulation/v8";
+  simulationCase?: AiSimulationCase;
   marketCountry: AiSimulationMarketCountry;
   initialCash: number;
   durationMinutes: number;
@@ -200,7 +238,11 @@ export type AiSimulationRequest = {
   selection: AiSimulationSelectionRequest;
   strategy: AiSimulationStrategyRequest;
   costs: AiSimulationCosts;
-  modelLanes: [AiSimulationModelLane];
+  modelLanes:
+    | [AiSimulationModelLane]
+    | [AiSimulationModelLane, AiSimulationModelLane]
+    | [AiSimulationModelLane, AiSimulationModelLane, AiSimulationModelLane];
+  modelPlan?: AiSimulationModelPlanEntry[];
   fincastCandleSeconds: 60;
   execution: { mode: "paper" };
 };
@@ -390,6 +432,8 @@ export type AiSimulationSnapshot = {
   expiresAt?: string;
   market?: AiSimulationMarket;
   marketCountry?: AiSimulationMarketCountry;
+  simulationCase?: AiSimulationCase;
+  modelPlan?: AiSimulationModelPlanEntry[];
   currency: AiSimulationCurrency;
   initialCash: number;
   cash: number;
@@ -403,6 +447,7 @@ export type AiSimulationSnapshot = {
   policyProfile?: AiSimulationPolicyProfile;
   decisionCadence?: {
     trigger?: string;
+    inferenceIntervalSeconds?: number;
     triggeredEvents?: number;
     coalescedEvents?: number;
     duplicateEvents?: number;
@@ -426,6 +471,11 @@ export type AiSimulationSnapshot = {
   modelLanes?: AiSimulationModelLane[];
   executionMode?: AiSimulationExecutionMode;
   modelComparison?: AiSimulationModelComparison;
+  modelEvidence?: unknown[];
+  unifiedPolicyDecisions?: unknown[];
+  pairMapping?: unknown;
+  etfSessionGate?: unknown;
+  highVolatilityScanner?: unknown;
 };
 
 export type AiSimulationRunResponse = {
@@ -609,6 +659,49 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function simulationCaseValue(value: unknown): AiSimulationCase | undefined {
+  const candidate = textValue(value);
+  return candidate === "btc_eth"
+    || candidate === "high_vol_crypto"
+    || candidate === "us_etf_pair"
+    ? candidate
+    : undefined;
+}
+
+function normalizeModelPlan(value: unknown): AiSimulationModelPlanEntry[] {
+  return mapValid(value, (entry): AiSimulationModelPlanEntry | undefined => {
+    const source = asRecord(entry);
+    const symbol = textValue(source.symbol)?.toUpperCase();
+    const modelLane = textValue(first(source, "modelLane", "model_lane"));
+    const role = textValue(source.role);
+    const required = booleanValue(source.required);
+    const rawHorizons = first(
+      source,
+      "preferredHorizonsMinutes",
+      "preferred_horizons_minutes",
+    );
+    const horizons = (Array.isArray(rawHorizons) ? rawHorizons : [])
+      .map(finiteNumber)
+      .filter((item): item is 5 | 15 | 30 | 60 => (
+        item === 5 || item === 15 || item === 30 || item === 60
+      ));
+    if (
+      !symbol
+      || !AI_SIMULATION_MODEL_LANES.includes(modelLane as AiSimulationModelLane)
+      || !["primary", "veto", "shadow"].includes(role ?? "")
+      || required === undefined
+      || horizons.length === 0
+    ) return undefined;
+    return {
+      symbol,
+      modelLane: modelLane as AiSimulationModelLane,
+      role: role as AiSimulationModelRole,
+      required,
+      preferredHorizonsMinutes: horizons,
+    };
+  });
+}
+
 function nonNegativeInteger(value: unknown): number | undefined {
   const number = finiteNumber(value);
   return number !== undefined && Number.isInteger(number) && number >= 0 ? number : undefined;
@@ -699,6 +792,9 @@ function normalizePairCatalogItem(value: unknown): AiSimulationPairCatalogItem |
   const symbols = [
     ...stringList(first(item, "symbols", "instruments", "legs")),
     textValue(first(item, "signalSymbol", "signal_symbol")),
+    textValue(first(item, "displaySignalSymbol", "display_signal_symbol")),
+    textValue(first(item, "modelTargetSymbol", "model_target_symbol")),
+    ...stringList(first(item, "auxiliarySymbols", "auxiliary_symbols")),
     textValue(first(bull, "executionSymbol", "execution_symbol", "symbol")),
     textValue(first(bear, "executionSymbol", "execution_symbol", "symbol")),
   ].filter((symbol): symbol is string => Boolean(symbol))
@@ -708,6 +804,23 @@ function normalizePairCatalogItem(value: unknown): AiSimulationPairCatalogItem |
     id,
     label: textValue(first(item, "label", "name", "title")) ?? fallback.label,
     symbols: symbols.length ? symbols : fallback.symbols,
+    displaySignalSymbol: textValue(first(
+      item,
+      "displaySignalSymbol",
+      "display_signal_symbol",
+    )) ?? fallback.displaySignalSymbol,
+    modelTargetSymbol: textValue(first(
+      item,
+      "modelTargetSymbol",
+      "model_target_symbol",
+      "signalSymbol",
+      "signal_symbol",
+    )) ?? fallback.modelTargetSymbol,
+    auxiliarySymbols: stringList(first(
+      item,
+      "auxiliarySymbols",
+      "auxiliary_symbols",
+    )),
   };
 }
 
@@ -1472,6 +1585,11 @@ function normalizedCadence(value: unknown): AiSimulationSnapshot["decisionCadenc
   if (!Object.keys(cadence).length) return undefined;
   return {
     trigger: textValue(cadence.trigger),
+    inferenceIntervalSeconds: finiteNumber(first(
+      cadence,
+      "inferenceIntervalSeconds",
+      "inference_interval_seconds",
+    )),
     triggeredEvents: finiteNumber(first(cadence, "triggeredEvents", "triggered_events")),
     coalescedEvents: finiteNumber(first(cadence, "coalescedEvents", "coalesced_events")),
     duplicateEvents: finiteNumber(first(cadence, "duplicateEvents", "duplicate_events")),
@@ -1535,6 +1653,25 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     "modelComparison",
     "model_comparison",
   ) ?? first(outer, "modelComparison", "model_comparison"));
+  const explicitSimulationCase = simulationCaseValue(first(
+    source,
+    "simulationCase",
+    "simulation_case",
+  ));
+  const simulationCase = explicitSimulationCase
+    ?? (market?.kind === "crypto_futures"
+      ? rawSelection?.mode === "manual"
+        && rawSelection.symbols.every(
+          (symbol) => symbol === "BTCUSDT" || symbol === "ETHUSDT",
+        )
+        ? "btc_eth"
+        : "high_vol_crypto"
+      : market?.kind === "stock"
+        && market.country === "US"
+        && strategy?.mode === "pair"
+        ? "us_etf_pair"
+        : undefined);
+  const modelPlan = normalizeModelPlan(first(source, "modelPlan", "model_plan"));
   const legacyKronosForecasts = selectLatestKronosForecasts(source.decisions);
   const modelForecasts = mergeLatestModelForecasts(
     normalizeAiSimulationModelForecasts(first(
@@ -1554,6 +1691,8 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     expiresAt: textValue(first(source, "expiresAt", "expires_at")),
     market,
     marketCountry: market?.kind === "stock" ? market.country : undefined,
+    ...(simulationCase ? { simulationCase } : {}),
+    ...(modelPlan.length ? { modelPlan } : {}),
     currency: market?.kind === "crypto_futures" || currency === "USDT"
       ? "USDT"
       : currency === "USD"
@@ -1607,6 +1746,23 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     modelLanes,
     ...(executionMode ? { executionMode } : {}),
     ...(modelComparison ? { modelComparison } : {}),
+    modelEvidence: Array.isArray(first(source, "modelEvidence", "model_evidence"))
+      ? first(source, "modelEvidence", "model_evidence") as unknown[]
+      : [],
+    unifiedPolicyDecisions: Array.isArray(first(
+      source,
+      "unifiedPolicyDecisions",
+      "unified_policy_decisions",
+    ))
+      ? first(source, "unifiedPolicyDecisions", "unified_policy_decisions") as unknown[]
+      : [],
+    pairMapping: first(source, "pairMapping", "pair_mapping"),
+    etfSessionGate: first(source, "etfSessionGate", "etf_session_gate"),
+    highVolatilityScanner: first(
+      source,
+      "highVolatilityScanner",
+      "high_volatility_scanner",
+    ),
   };
 }
 
@@ -2318,9 +2474,14 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
 export function aiSimulationErrorMessage(payload: unknown, fallback: string): string {
   const root = asRecord(payload);
   const error = asRecord(root.error);
-  return textValue(first(error, "message", "detail", "reason"))
+  const message = textValue(first(error, "message", "detail", "reason"))
     ?? textValue(first(root, "message", "reason"))
     ?? fallback;
+  const issues = Array.isArray(error.issues) ? error.issues : [];
+  const issue = issues
+    .map((value) => textValue(first(asRecord(value), "message", "detail", "reason")))
+    .find((value): value is string => Boolean(value));
+  return issue && issue !== message ? `${message} · ${issue}` : message;
 }
 
 export function validateAiSimulationRequest(
@@ -2343,12 +2504,30 @@ export function validateAiSimulationRequest(
     issues.push("전략 실행 방식이 올바르지 않습니다.");
   }
   if (!AI_SIMULATION_PRESETS.includes(request.preset)) issues.push("AI 전략 프리셋이 올바르지 않습니다.");
-  if (request.modelLanes.length !== 1
-    || !AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])) {
-    issues.push("주식 시뮬레이션 모델은 Kronos-base 또는 FinCast 중 하나여야 합니다.");
-  }
-  if (strategyMode === "pair" && request.modelLanes[0] !== "kronos_base") {
-    issues.push("페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.");
+  if (request.simulationCase === "us_etf_pair") {
+    if (
+      request.marketCountry !== "US"
+      || strategyMode !== "pair"
+      || request.modelLanes.join(",") !== "chronos2,fincast"
+    ) {
+      issues.push("미국 ETF 페어는 Chronos-2 primary·FinCast shadow 역할 정책을 사용해야 합니다.");
+    }
+    const pairId = pairIdValue(first(strategy, "pairId", "pair_id"));
+    if (
+      pairId !== "qqq-tqqq-sqqq"
+      && pairId !== "semiconductor-soxl-soxs"
+      && pairId !== "spy-spxl-spxs"
+    ) {
+      issues.push("새 ETF 메뉴는 QQQ·반도체·SPY 페어 중 하나를 선택해야 합니다.");
+    }
+  } else {
+    if (request.modelLanes.length !== 1
+      || !AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])) {
+      issues.push("주식 시뮬레이션 모델은 Kronos-base 또는 FinCast 중 하나여야 합니다.");
+    }
+    if (strategyMode === "pair" && request.modelLanes[0] !== "kronos_base") {
+      issues.push("페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.");
+    }
   }
   if (request.fincastCandleSeconds !== 60) {
     issues.push("주식 FinCast 입력 주기는 1분봉만 지원합니다.");

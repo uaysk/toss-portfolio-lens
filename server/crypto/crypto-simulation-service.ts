@@ -18,6 +18,7 @@ import type {
 import type { SimulationHistoryListInput } from "../simulation/simulation-service.js";
 import { BinanceUsdmScanner } from "./binance-scanner.js";
 import type { BinanceScannerCandidate, BinanceScannerSnapshot } from "./contracts.js";
+import type { HighVolatilityScannerSnapshot } from "../simulation/high-volatility-scanner.js";
 import type { FuturesExecution } from "./execution.js";
 import type {
   BinanceMaintenanceMarginProviderStatus,
@@ -68,8 +69,8 @@ export type CryptoSimulationCoordinatorOptions = {
     symbol: string,
     requiredMaximumNotional: number,
   ) => Promise<void>;
-  workers?: Partial<Record<"kronos_base" | "fincast", CryptoWorkerPublicState>>;
-  workerState?: () => Partial<Record<"kronos_base" | "fincast", CryptoWorkerPublicState>>;
+  workers?: Partial<Record<"kronos_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
+  workerState?: () => Partial<Record<"kronos_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
   runtimeSnapshots?: Map<string, unknown>;
   maximumActiveSessions?: number;
 };
@@ -225,6 +226,8 @@ export class CryptoSimulationCoordinator {
           ?? { status: "unavailable", precision: "unknown" },
         fincast: workers.fincast
           ?? { status: "unavailable", precision: "unknown" },
+        chronos2: workers.chronos2
+          ?? { status: "unavailable", precision: "unknown" },
       },
       activeSessions: this.active.size,
     };
@@ -270,15 +273,30 @@ export class CryptoSimulationCoordinator {
       const criterion: ScannerCriterion = input.selection.mode === "auto"
         ? input.selection.criterion
         : "volatility";
-      const { snapshot } = await this.options.scanner
-        .selectionSnapshot(criterion);
+      let highVolatility: HighVolatilityScannerSnapshot | undefined;
+      let selectedByHighVolatility: BinanceScannerCandidate[] | undefined;
+      let snapshot: BinanceScannerSnapshot;
+      if (
+        input.sourceContractVersion === AI_SIMULATION_CONTRACT_VERSION
+        && input.simulationCase === "high_vol_crypto"
+      ) {
+        const scannerResult = await this.options.scanner
+          .highVolatilitySelectionSnapshot(input.scanner!);
+        snapshot = scannerResult.snapshot;
+        highVolatility = scannerResult.highVolatility;
+        selectedByHighVolatility = scannerResult.selected;
+      } else {
+        ({ snapshot } = await this.options.scanner.selectionSnapshot(criterion));
+      }
       if (this.closed) {
         throw new Error("Crypto simulation coordinator is closed.");
       }
       const eligible = snapshot.candidates.filter(
         (candidate) => candidate.dataQuality.status === "available",
       );
-      const selected = input.selection.mode === "manual"
+      const selected: BinanceScannerCandidate[] = selectedByHighVolatility
+        ? selectedByHighVolatility
+        : input.selection.mode === "manual"
         ? input.selection.symbols.flatMap((symbol) => {
           const candidate = eligible.find((item) => item.symbol === symbol);
           return candidate ? [candidate] : [];
@@ -310,6 +328,7 @@ export class CryptoSimulationCoordinator {
         market: input.market,
         scannerSnapshotId: snapshot.scannerSnapshotId,
         scannerGeneratedAt: snapshot.generatedAt,
+        ...(highVolatility ? { highVolatilityScanner: highVolatility } : {}),
         selectedSymbols: selected.map((candidate) => candidate.symbol),
         sessionNonce,
         realOrder: false,
@@ -387,6 +406,7 @@ export class CryptoSimulationCoordinator {
         request: input,
         snapshot,
         selected,
+        ...(highVolatility ? { highVolatilityScanner: highVolatility } : {}),
         criterion,
         dataRevision,
         controller,
@@ -423,7 +443,10 @@ export class CryptoSimulationCoordinator {
           scannerSnapshotId: snapshot.scannerSnapshotId,
           selectedSymbols: selected.map((candidate) => candidate.symbol),
           selected,
+          ...(highVolatility ? { highVolatilityScanner: highVolatility } : {}),
           modelLanes: input.modelLanes,
+          simulationCase: input.simulationCase,
+          modelPlan: input.modelPlan,
           fincastCandleSeconds: input.fincastCandleSeconds,
           executionMode: "paper",
           execution: { mode: "paper", realOrder: false },
@@ -440,6 +463,7 @@ export class CryptoSimulationCoordinator {
     request: SimulationStartRequest;
     snapshot: BinanceScannerSnapshot;
     selected: readonly BinanceScannerCandidate[];
+    highVolatilityScanner?: HighVolatilityScannerSnapshot;
     criterion: ScannerCriterion;
     dataRevision: string;
     controller: AbortController;
@@ -483,6 +507,9 @@ export class CryptoSimulationCoordinator {
         generatedAt: input.snapshot.generatedAt,
         criterion: input.criterion,
         selected: input.selected,
+        ...(input.highVolatilityScanner
+          ? { highVolatilityScanner: input.highVolatilityScanner }
+          : {}),
         rankedCandidates: input.snapshot.candidates,
         evidence: input.snapshot.evidence,
         realOrder: false,

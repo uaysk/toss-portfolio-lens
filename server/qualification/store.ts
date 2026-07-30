@@ -10,6 +10,7 @@ import {
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAXIMUM_STATE_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_EVENTS_BYTES = 8 * 1024 * 1024;
+const MAXIMUM_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 export class QualificationRunNotFoundError extends Error {
   constructor() {
@@ -20,6 +21,19 @@ export class QualificationRunNotFoundError extends Error {
 
 function safeRunId(value: string): string {
   if (!RUN_ID.test(value)) throw new QualificationRunNotFoundError();
+  return value;
+}
+
+function safeArtifactPath(value: string): string {
+  if (
+    !value
+    || value.length > 240
+    || value.startsWith("/")
+    || value.includes("\\")
+    || value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new QualificationRunNotFoundError();
+  }
   return value;
 }
 
@@ -103,6 +117,37 @@ export class QualificationRunStore {
       if (event.sequence > afterSequence) events.push(event);
     }
     return events.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  async artifact(
+    runId: string,
+    relativePath: string,
+  ): Promise<{ payload: Buffer; path: string }> {
+    const { directory } = await this.runDirectory(runId);
+    const normalized = safeArtifactPath(relativePath);
+    const artifactPath = path.join(directory, normalized);
+    let stats;
+    try {
+      stats = await lstat(artifactPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new QualificationRunNotFoundError();
+      }
+      throw error;
+    }
+    if (
+      !stats.isFile()
+      || stats.isSymbolicLink()
+      || stats.size < 1
+      || stats.size > MAXIMUM_ARTIFACT_BYTES
+      || path.relative(directory, artifactPath).startsWith("..")
+    ) {
+      throw new QualificationRunNotFoundError();
+    }
+    return {
+      payload: await readFile(artifactPath),
+      path: normalized,
+    };
   }
 
   private async runDirectory(

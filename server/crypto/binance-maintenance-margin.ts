@@ -5,6 +5,7 @@ import {
 } from "@binance/derivatives-trading-usds-futures";
 import type { BinanceServerCredentials } from "./binance-credentials.js";
 import {
+  BINANCE_USDM_MAX_INITIAL_LEVERAGE,
   BinanceInstrumentRulesSchema,
   type BinanceInstrumentRules,
 } from "./contracts.js";
@@ -165,6 +166,7 @@ export function normalizeBinanceMaintenanceMarginSchedule(
     const maintMarginRatio = finite(value.maintMarginRatio);
     const cum = finite(value.cum);
     if (bracket === undefined || initialLeverage === undefined
+      || initialLeverage > BINANCE_USDM_MAX_INITIAL_LEVERAGE
       || notionalFloor === undefined || notionalFloor < 0
       || notionalCap === undefined || notionalCap <= notionalFloor
       || maintMarginRatio === undefined || maintMarginRatio <= 0 || maintMarginRatio >= 1

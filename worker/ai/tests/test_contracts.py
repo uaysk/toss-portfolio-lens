@@ -115,6 +115,11 @@ def test_stock_fincast_cadence_round_trips_as_explicit_prevalidated_policy() -> 
         )
 
 
+def test_five_second_continuous_cadence_is_supported() -> None:
+    cadence = SeriesCadence(candle_seconds=5, gap_policy="continuous")
+    assert cadence.candle_seconds == 5
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

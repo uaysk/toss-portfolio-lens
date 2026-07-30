@@ -862,8 +862,11 @@ mod tests {
             .pointer("/payload/scalping_analysis/instruments/0")
             .cloned()
             .unwrap();
-        second["key"] = json!("KRW:000660");
-        second["symbol"] = json!("000660");
+        second["key"] = json!("USDT:BTCUSDT");
+        second["symbol"] = json!("BTCUSDT");
+        second["market"] = json!("CRYPTO");
+        second["currency"] = json!("USDT");
+        second["instrument_type"] = json!("crypto");
         request
             .pointer_mut("/payload/scalping_analysis/instruments")
             .and_then(Value::as_array_mut)

@@ -991,7 +991,7 @@ describe("SimulationServiceMultiplexer crypto/stock routing", () => {
       page: { limit: number; returned: number };
     };
     expect(listed).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v7",
+      schemaVersion: "ai-paper-simulation/v8",
       nextCursor: "stock-cursor",
       page: { limit: 20, returned: 2 },
     });

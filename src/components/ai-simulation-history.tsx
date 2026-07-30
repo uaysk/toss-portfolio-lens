@@ -80,6 +80,7 @@ const ACTION_LABELS: Record<string, string> = {
 const MODEL_LANE_LABELS: Record<AiSimulationModelLane, string> = {
   kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
+  chronos2: "Chronos-2 · Primary",
 };
 
 function modelLaneFromIdentity(
@@ -89,6 +90,7 @@ function modelLaneFromIdentity(
   const identity = [component, modelId].filter(Boolean).join(" ").toLowerCase()
     .replaceAll("-", "_");
   if (identity.includes("fincast")) return "fincast";
+  if (identity.includes("chronos2") || identity.includes("chronos_2")) return "chronos2";
   if (identity.includes("kronos_base") || identity.includes("kronos")) return "kronos_base";
   return undefined;
 }

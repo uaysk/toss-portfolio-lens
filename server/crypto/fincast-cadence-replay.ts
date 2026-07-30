@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { join } from "node:path";
 import {
   AiCostAssumptionsSchema,
   AiForecastRequestSchema,
@@ -20,6 +21,10 @@ import {
   loadFinCastCadenceMarketData,
   type FinCastCadenceMarketData,
 } from "./fincast-cadence-market-data.js";
+import {
+  writeFinCastRawInputArtifact,
+  type FinCastRawInputArtifact,
+} from "./fincast-raw-artifact.js";
 
 const MINUTE_MS = 60_000;
 const ORIGIN_HOURS = 4 as const;
@@ -111,6 +116,12 @@ export type FinCastCadenceResult = {
   wallLatencyMs: number;
   metrics: FinCastCadenceHorizonMetrics[];
   records: FinCastCadenceReplayRecord[];
+  rawInputArtifact?: {
+    manifestPath: string;
+    manifestSha256: string;
+    contextsSha256: string;
+    originsSha256: string;
+  };
 };
 
 export type FinCastCadenceComparisonResult = {
@@ -187,6 +198,10 @@ export type FinCastCadenceReplayOptions = {
     delayMs: number,
     signal?: AbortSignal,
   ) => Promise<void>;
+  rawInputArtifacts?: {
+    root: string;
+    modelSeed: number;
+  };
 };
 
 export type FinCastCadenceReplayInput = {
@@ -708,14 +723,52 @@ export class FinCastCadenceComparisonReplay {
         let modelLatencyMs = 0;
         let requestCount = 0;
         const wallStartedAt = this.monotonicNow();
+        const cadenceContexts = origins.map((origin) => contextForOrigin({
+          cadence,
+          bars: cadenceBars,
+          origin,
+        }));
+        let rawInputArtifact: FinCastRawInputArtifact | undefined;
+        if (this.options.rawInputArtifacts) {
+          rawInputArtifact = await writeFinCastRawInputArtifact({
+            directory: join(
+              this.options.rawInputArtifacts.root,
+              String(cadence),
+            ),
+            cadenceSeconds: cadence,
+            modelSeed: this.options.rawInputArtifacts.modelSeed,
+            rows: origins.map((origin, index) => ({
+              instrumentKey: `${symbol}:${cadence}s:${origin.ordinal}`,
+              origin: origin.originAt,
+              futureTimestamps: origin.futureBars.map(
+                (bar) => new Date(bar.closeTime).toISOString(),
+              ),
+              closes: cadenceContexts[index]!.map((bar) => bar.close),
+              metadata: {
+                venue: "BINANCE_USDM",
+                symbol,
+                cadence_seconds: cadence,
+                ordinal: origin.ordinal,
+              },
+            })),
+            metadata: {
+              source: "FinCastCadenceComparisonReplay",
+              execution_mode: "historical_replay",
+              venue: "BINANCE_USDM",
+              symbol,
+              origin_digest: originDigest,
+              canonical_minute_digest: digest(canonicalBars),
+              aggregate_trade_digest: micro.aggregateTradeDigest,
+            },
+          });
+        }
 
         for (let offset = 0; offset < origins.length; offset += FORECAST_BATCH_SIZE) {
           const batchOrigins = origins.slice(offset, offset + FORECAST_BATCH_SIZE);
-          const contexts = batchOrigins.map((origin) => contextForOrigin({
-            cadence,
-            bars: cadenceBars,
-            origin,
-          }));
+          const contexts = cadenceContexts.slice(
+            offset,
+            offset + FORECAST_BATCH_SIZE,
+          );
           const series = batchOrigins.map((origin, index) => {
             const context = contexts[index]!;
             const converted = aiBars(context);
@@ -817,6 +870,16 @@ export class FinCastCadenceComparisonReplay {
           wallLatencyMs: Math.max(0, this.monotonicNow() - wallStartedAt),
           metrics: metrics(records),
           records,
+          ...(rawInputArtifact
+            ? {
+              rawInputArtifact: {
+                manifestPath: rawInputArtifact.manifestPath,
+                manifestSha256: rawInputArtifact.manifestSha256,
+                contextsSha256: rawInputArtifact.manifest.files.contexts.sha256,
+                originsSha256: rawInputArtifact.manifest.files.origins.sha256,
+              },
+            }
+            : {}),
         });
       }
       if (modelDigests.size !== 1) {

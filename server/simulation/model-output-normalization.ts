@@ -97,6 +97,7 @@ export type PairModelNormalizationOptions = {
   maximumOriginAgeMs?: number;
   requireCuda?: boolean;
   requiredDeviceName?: string;
+  expectedModelId?: string;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -467,7 +468,10 @@ function normalizeRun(
   options: Required<Pick<
     PairModelNormalizationOptions,
     "signalSymbol" | "horizonMinutes" | "maximumOriginAgeMs" | "requireCuda"
-  >> & Pick<PairModelNormalizationOptions, "expectedOrigin" | "now" | "requiredDeviceName">,
+  >> & Pick<
+    PairModelNormalizationOptions,
+    "expectedOrigin" | "now" | "requiredDeviceName" | "expectedModelId"
+  >,
 ): NormalizedPairModelOutput {
   const rawOutput = cloneRaw(run.raw);
   const provenance = parseProvenance(run);
@@ -563,7 +567,7 @@ function normalizeRun(
   }
   if (!provenance.loaded) reasonCodes.push("model_not_loaded");
   const modelId = provenance.modelId?.toLowerCase();
-  const expectedId = "neoquasar/kronos-base";
+  const expectedId = (options.expectedModelId ?? "neoquasar/kronos-base").toLowerCase();
   if (modelId !== expectedId) reasonCodes.push("unexpected_model_id");
   const expectedModelId = provenance.expectedModelId?.toLowerCase();
   const runFallbackReason = text(first(run.wrapper, "fallback_reason", "fallbackReason"), 1_000);
@@ -718,10 +722,14 @@ export function normalizePairModelOutputs(
     : undefined;
   const now = optionsInput.now ? timestamp(optionsInput.now) : undefined;
   const requiredDeviceName = optionsInput.requiredDeviceName?.trim();
+  const expectedModelId = optionsInput.expectedModelId?.trim();
   if (optionsInput.expectedOrigin && !expectedOrigin) throw new Error("expectedOrigin is invalid.");
   if (optionsInput.now && !now) throw new Error("now is invalid.");
   if (optionsInput.requiredDeviceName && (!requiredDeviceName || requiredDeviceName.length > 256)) {
     throw new Error("requiredDeviceName is invalid.");
+  }
+  if (optionsInput.expectedModelId && (!expectedModelId || expectedModelId.length > 256)) {
+    throw new Error("expectedModelId is invalid.");
   }
   const options = {
     signalSymbol,
@@ -731,6 +739,7 @@ export function normalizePairModelOutputs(
     ...(expectedOrigin ? { expectedOrigin } : {}),
     ...(now ? { now } : {}),
     ...(requiredDeviceName ? { requiredDeviceName } : {}),
+    ...(expectedModelId ? { expectedModelId } : {}),
   };
   const runs = extractedRuns(input);
   const byComponent = (component: PairModelComponent) => runs.filter((run) => (

@@ -57,12 +57,13 @@ docker compose \
 
 ## GPU worker release
 
-Kronos와 FinCast는 서로 다른 저장소, digest, token과 프로세스를 유지한다. 모델 cache와 safetensors는
+Kronos-base, FinCast, Chronos-2는 서로 다른 저장소, digest, token과 프로세스를 유지한다. 모델 cache와 safetensors는
 이미지에 포함하지 않으며 GPU 호스트의 검증된 read-only cache를 계속 mount한다.
 
 Kronos 배포에는 `compose.harbor-kronos.yaml`, FinCast 배포에는
-`compose.harbor-fincast.yaml`을 기존 GPU/remote overlay 뒤에 추가한다. 각각
-`AI_WORKER_IMAGE`와 `AI_FINCAST_WORKER_IMAGE`를 Harbor digest로 설정하고 명시적으로 `pull`한 뒤
+`compose.harbor-fincast.yaml`, Chronos-2 배포에는 `compose.harbor-chronos2.yaml`을 기존 GPU/각 lane의
+remote overlay 뒤에 추가한다. 각각 `AI_WORKER_IMAGE`, `AI_FINCAST_WORKER_IMAGE`,
+`AI_CHRONOS2_WORKER_IMAGE`를 Harbor digest로 설정하고 명시적으로 `pull`한 뒤
 `up -d --no-build --pull never`를 사용한다. registry 여유 공간과 GPU worker preflight를 확인하기 전에는
 대형 worker 이미지를 publish하거나 기존 worker를 교체하지 않는다.
 
@@ -87,6 +88,12 @@ docker compose \
 FinCast는 메인 worker이므로 위 파일 목록 대신 `compose.ai-remote-fincast.yaml`과
 `compose.harbor-fincast.yaml`을 순서대로 추가해 프로필 없이 `fincast-worker`를 pull·기동한다.
 Kronos-base를 복구할 때만 `--profile legacy-kronos`를 사용한다.
+
+Chronos-2는 `compose.ai-remote-chronos2.yaml`과 `compose.harbor-chronos2.yaml`을 추가하고
+`--profile chronos2`로 `chronos2-worker`만 pull·기동한다. 운영 web에는 별도의
+`AI_CHRONOS2_COMPUTE_URL`과 `AI_CHRONOS2_AUTH_SECRET_SOURCE`를 설정한다. 이 token은 FinCast와
+Kronos-base token을 재사용하지 않으며, 모델 cache가 없거나 revision/hash가 다르면 worker가
+자동 다운로드나 다른 모델 fallback 없이 unavailable로 닫혀야 한다.
 
 ## Local cache retention and bounded cleanup
 

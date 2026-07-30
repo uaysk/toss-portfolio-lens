@@ -91,7 +91,7 @@ function buildRequest(
 
 async function main(): Promise<void> {
   const seriesCount = boundedInteger("AI_VERIFY_SERIES_COUNT", 2, 1, 50);
-  const contextBars = boundedInteger("AI_VERIFY_CONTEXT_BARS", 512, 64, 512);
+  const contextBars = boundedInteger("AI_VERIFY_CONTEXT_BARS", 512, 64, 20_000);
   const timezoneValue = process.env.AI_VERIFY_TIMEZONE?.trim() || "Asia/Seoul";
   if (timezoneValue !== "Asia/Seoul" && timezoneValue !== "America/New_York") {
     throw new Error("AI_VERIFY_TIMEZONE must be Asia/Seoul or America/New_York.");

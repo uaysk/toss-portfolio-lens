@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   AiRequestSchema,
   AiResponseSchema,
+  CHRONOS_2_MODEL_ID,
   FINCAST_MODEL_ID,
   KRONOS_BASE_MODEL_ID,
 } from "./ai-contract.js";
@@ -51,7 +52,7 @@ export const AiWorkerStatusSchema = z.object({
   model: z.object({
     loaded: z.boolean(),
     device: z.enum(["cuda", "cpu", "unavailable"]),
-    model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID]),
+    model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID, CHRONOS_2_MODEL_ID]),
     model_revision: z.string().min(1).max(256),
     precision: z.enum(["float32", "mixed_float16"]).optional(),
     precision_validation: z.enum(["not_required", "passed", "fallback_fp32", "unavailable"]).optional(),
@@ -59,6 +60,7 @@ export const AiWorkerStatusSchema = z.object({
     quantile_monotonicity_policy: z.enum([
       "native",
       "fp32_monotone_rearrangement_v1",
+      "chronos2_fp32_monotone_rearrangement_v1",
       "unavailable",
     ]).optional(),
     quantile_tail_policy: z.enum(["native", "tail_clamped_q10_q90", "unavailable"]).optional(),
@@ -113,6 +115,32 @@ export const AiWorkerStatusSchema = z.object({
         code: "custom",
         path: ["model"],
         message: "Kronos-base worker requires native float32 status provenance",
+      });
+    }
+  }
+  if (worker.model.model_id === CHRONOS_2_MODEL_ID) {
+    const fieldsPresent = worker.model.precision !== undefined
+      && worker.model.precision_validation !== undefined
+      && worker.model.memory_status !== undefined
+      && worker.model.quantile_monotonicity_policy !== undefined
+      && worker.model.quantile_tail_policy !== undefined;
+    const validLoaded = worker.model.loaded
+      && worker.model.precision === "float32"
+      && worker.model.precision_validation === "not_required"
+      && worker.model.memory_status === "ok"
+      && worker.model.quantile_monotonicity_policy === "chronos2_fp32_monotone_rearrangement_v1"
+      && worker.model.quantile_tail_policy === "native";
+    const validUnavailable = !worker.model.loaded
+      && worker.model.precision === "float32"
+      && worker.model.precision_validation === "unavailable"
+      && worker.model.memory_status === "unavailable"
+      && worker.model.quantile_monotonicity_policy === "unavailable"
+      && worker.model.quantile_tail_policy === "unavailable";
+    if (!fieldsPresent || (!validLoaded && !validUnavailable)) {
+      context.addIssue({
+        code: "custom",
+        path: ["model"],
+        message: "Chronos-2 worker status requires native FP32 and monotone quantile provenance",
       });
     }
   }

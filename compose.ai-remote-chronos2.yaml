@@ -1,0 +1,20 @@
+services:
+  chronos2-worker:
+    environment:
+      AI_WEBSOCKET_HOST: 0.0.0.0
+      AI_WEBSOCKET_PORT: "8767"
+      AI_WEBSOCKET_GENERATE_AUTH_TOKEN: "false"
+    ports:
+      - name: chronos2-ai-websocket
+        target: 8767
+        published: "${AI_CHRONOS2_REMOTE_PORT:-18767}"
+        host_ip: ${AI_CHRONOS2_REMOTE_BIND_ADDRESS:-${AI_REMOTE_BIND_ADDRESS:?set AI_REMOTE_BIND_ADDRESS to the GPU server private LAN address}}
+        protocol: tcp
+    volumes:
+      - ${AI_CHRONOS2_MODEL_CACHE_SOURCE:?set AI_CHRONOS2_MODEL_CACHE_SOURCE to an absolute offline Chronos-2 cache directory}:/models:ro
+      - ${AI_CHRONOS2_AUTH_SECRET_SOURCE:?set AI_CHRONOS2_AUTH_SECRET_SOURCE to an absolute Chronos-2 token directory}:/app/chronos2-auth:ro
+      - ${AI_CHRONOS2_TLS_SECRET_SOURCE:-ai_tls}:/run/ai-tls:ro
+
+networks:
+  ai_internal:
+    internal: false

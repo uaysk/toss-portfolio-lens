@@ -169,6 +169,7 @@ export type AiPaperModelProvenance = {
   quantileMonotonicityPolicy?:
     | "native"
     | "fp32_monotone_rearrangement_v1"
+    | "chronos2_fp32_monotone_rearrangement_v1"
     | "unavailable";
   fp32QuantileObservations?: QuantileRearrangementObservations | null;
   mixedQuantileObservations?: QuantileRearrangementObservations | null;

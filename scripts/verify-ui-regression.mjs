@@ -260,14 +260,19 @@ async function prepareScalping(page) {
 async function prepareSimulation(page) {
   await waitForVisible(page.locator("[data-ai-simulation]"), "simulation workspace");
   await waitForVisible(
-    page.getByText("실주문 없음, 투자 지시 아님, 다음 유효 체결만.", { exact: true }),
+    page.locator("[data-crypto-simulation-disclosure]"),
     "simulation disclosure",
   );
-  const start = page.getByRole("button", { name: "AI 시뮬레이션 시작", exact: true });
+  const caseTabs = page.getByRole("tablist", { name: "시뮬레이션 전략 케이스" });
+  await waitForVisible(caseTabs, "simulation case tabs");
+  check(
+    await caseTabs.getByRole("tab").count() === 3,
+    "simulation case tab이 BTC·ETH, 고변동성 암호화폐, 미국 ETF 페어 3개가 아닙니다.",
+  );
+  const start = page.locator("[data-crypto-simulation-start]");
   await waitForVisible(start, "simulation start");
   await page.waitForFunction(() => {
-    const button = Array.from(document.querySelectorAll("button"))
-      .find((element) => element.textContent?.includes("AI 시뮬레이션 시작"));
+    const button = document.querySelector("[data-crypto-simulation-start]");
     return button instanceof HTMLButtonElement && !button.disabled;
   });
   await start.click();

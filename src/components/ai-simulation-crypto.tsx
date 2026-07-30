@@ -26,21 +26,23 @@ import type {
   AiSimulationCandidateSnapshot,
   AiSimulationCryptoRequest,
   AiSimulationCryptoStatus,
+  AiSimulationCase,
   AiSimulationCriterion,
   AiSimulationModelLane,
 } from "@/lib/ai-simulation";
 import { formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-export type AiSimulationAssetClass = "stock" | "crypto_futures";
+export type AiSimulationAssetClass = AiSimulationCase | "stock" | "crypto_futures";
 
 const ASSET_OPTIONS: Array<{
   value: AiSimulationAssetClass;
   label: string;
   detail: string;
 }> = [
-  { value: "stock", label: "주식", detail: "KR · US" },
-  { value: "crypto_futures", label: "암호화폐", detail: "BINANCE USDⓈ-M" },
+  { value: "btc_eth", label: "BTC·ETH", detail: "종목별 역할 routing" },
+  { value: "high_vol_crypto", label: "고변동성 암호화폐", detail: "Point-in-time scanner" },
+  { value: "us_etf_pair", label: "미국 ETF 페어", detail: "QQQ · 반도체 · SPY" },
 ];
 
 const CRITERION_LABELS: Record<AiSimulationCriterion, string> = {
@@ -52,6 +54,7 @@ const CRITERION_LABELS: Record<AiSimulationCriterion, string> = {
 const MODEL_LABELS: Record<AiSimulationModelLane, string> = {
   kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
+  chronos2: "Chronos-2 · Primary",
 };
 
 const CRYPTO_PRESET_DETAILS: Record<
@@ -141,9 +144,9 @@ export function AiSimulationAssetClassControl({
 
   return (
     <div
-      className="grid grid-cols-2 rounded-2xl bg-secondary p-1"
-      role="radiogroup"
-      aria-label="시뮬레이션 자산군"
+      className="grid grid-cols-1 gap-1 rounded-2xl bg-secondary p-1 sm:grid-cols-3"
+      role="tablist"
+      aria-label="시뮬레이션 전략 케이스"
       data-simulation-asset-class={value}
     >
       {ASSET_OPTIONS.map((option, index) => {
@@ -152,8 +155,8 @@ export function AiSimulationAssetClassControl({
           <button
             key={option.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            role="tab"
+            aria-selected={selected}
             tabIndex={selected ? 0 : -1}
             disabled={disabled}
             data-simulation-asset-class-option={option.value}
@@ -417,10 +420,20 @@ export function toggleCryptoModelLane(
   const toggled = current.includes(lane)
     ? current.filter((item) => item !== lane)
     : [...current, lane];
-  const canonical = (["kronos_base", "fincast"] as const)
+  const canonical = (["chronos2", "fincast", "kronos_base"] as const)
     .filter((item) => toggled.includes(item));
-  if (canonical.length === 2) return ["kronos_base", "fincast"];
-  return canonical[0] === "fincast" ? ["fincast"] : ["kronos_base"];
+  if (canonical.length === 3) return ["chronos2", "fincast", "kronos_base"];
+  if (
+    canonical.length === 2
+    && canonical.includes("kronos_base")
+    && canonical.includes("fincast")
+  ) {
+    return ["kronos_base", "fincast"];
+  }
+  if (canonical.length === 2) return [canonical[0], canonical[1]];
+  return canonical[0] === "fincast"
+    ? ["fincast"]
+    : canonical[0] === "chronos2" ? ["chronos2"] : ["kronos_base"];
 }
 
 export function AiSimulationCryptoSetup({
@@ -464,13 +477,21 @@ export function AiSimulationCryptoSetup({
   };
 }) {
   const paperGateOpen = status?.executionGates.paper === true;
-  const selectedWorkersAvailable = request.modelLanes.every(
+  const requiredLanes = request.modelPlan?.filter(({ required }) => required)
+    .map(({ modelLane }) => modelLane) ?? request.modelLanes;
+  const selectedWorkersAvailable = requiredLanes.every(
     (lane) => status?.workers[lane]?.available === true,
   );
   const eligibleCandidates = candidateSnapshot?.candidates.filter(
     ({ eligible }) => eligible,
   ) ?? [];
-  const selectionReady = request.selection.mode === "auto"
+  const selectionReady = request.simulationCase === "btc_eth"
+    ? request.selection.mode === "manual"
+      && request.selection.symbols.length >= 1
+      && request.selection.symbols.every(
+        (symbol) => symbol === "BTCUSDT" || symbol === "ETHUSDT",
+      )
+    : request.selection.mode === "auto"
     ? eligibleCandidates.length >= request.selection.symbolCount
     : request.selection.symbols.length >= 1
       && request.selection.symbols.length <= 2
@@ -500,6 +521,11 @@ export function AiSimulationCryptoSetup({
   };
   const toggleManualSymbol = (symbol: string) => {
     if (request.selection.mode !== "manual") return;
+    if (
+      request.simulationCase === "btc_eth"
+      && symbol !== "BTCUSDT"
+      && symbol !== "ETHUSDT"
+    ) return;
     const selected = request.selection.symbols.includes(symbol);
     const symbols = selected
       ? request.selection.symbols.filter((item) => item !== symbol)
@@ -517,7 +543,11 @@ export function AiSimulationCryptoSetup({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">CRYPTO FUTURES · PAPER</p>
-          <h2 className="mt-1 text-xl font-black">USDT 무기한 선물 shadow 설정</h2>
+          <h2 className="mt-1 text-xl font-black">
+            {request.simulationCase === "btc_eth"
+              ? "BTC·ETH 역할 기반 paper 설정"
+              : "고변동성 point-in-time scanner 설정"}
+          </h2>
           <p className="mt-2 max-w-2xl text-xs leading-5 text-muted-foreground">
             isolated 단방향 원장으로 롱·숏을 모의 체결합니다. 실주문과 testnet 주문은 이 배포에서 전송하지 않습니다.
           </p>
@@ -541,7 +571,8 @@ export function AiSimulationCryptoSetup({
             <p className="rounded-xl bg-card p-3 text-[9px] leading-4"><Database className="mb-2 size-3.5" /><strong>signed read</strong><br /><span className="text-muted-foreground">{status?.signedReadSucceeded ? "성공" : "미확인"}</span></p>
           </div>
         </section>
-        <section className="grid gap-3 sm:grid-cols-2" aria-label="모델 worker 상태">
+        <section className="grid gap-3 sm:grid-cols-3" aria-label="모델 worker 상태">
+          <WorkerCard lane="chronos2" status={status?.workers.chronos2} />
           <WorkerCard lane="fincast" status={status?.workers.fincast} />
           <WorkerCard lane="kronos_base" status={status?.workers.kronos_base} />
         </section>
@@ -554,25 +585,46 @@ export function AiSimulationCryptoSetup({
             Binance USDⓈ-M · USDT 무기한
           </p>
         </div>
-        <label className="rounded-2xl bg-secondary p-3">
+        <div className="rounded-2xl bg-secondary p-3">
           <span className="mb-2 block text-[10px] font-black text-muted-foreground">종목 선택 방식</span>
-          <Select
-            value={request.selection.mode}
-            disabled={disabled}
-            onValueChange={(value) => onRequestChange({
-              ...request,
-              selection: value === "manual"
-                ? { mode: "manual", symbols: [] }
-                : { mode: "auto", criterion: "volatility", symbolCount: 1 },
-            })}
-          >
-            <SelectTrigger className="w-full bg-card" aria-label="암호화폐 종목 선택 방식"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">거래 지표로 자동 선정</SelectItem>
-              <SelectItem value="manual">Scanner에서 직접 선택</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
+          {request.simulationCase === "btc_eth" ? (
+            <div className="grid grid-cols-3 gap-1" role="radiogroup" aria-label="BTC ETH 실행 종목">
+              {([
+                { label: "BTC", symbols: ["BTCUSDT"] },
+                { label: "ETH", symbols: ["ETHUSDT"] },
+                { label: "둘 다", symbols: ["BTCUSDT", "ETHUSDT"] },
+              ] as const).map((option) => {
+                const selected = request.selection.mode === "manual"
+                  && option.symbols.length === request.selection.symbols.length
+                  && option.symbols.every((symbol) => request.selection.mode === "manual"
+                    && request.selection.symbols.includes(symbol));
+                return (
+                  <button
+                    key={option.label}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={disabled}
+                    onClick={() => onRequestChange({
+                      ...request,
+                      selection: { mode: "manual", symbols: [...option.symbols] },
+                    })}
+                    className={cn(
+                      "rounded-xl px-2 py-2 text-[9px] font-black",
+                      selected ? "bg-card" : "text-muted-foreground",
+                    )}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-xl bg-card px-3 py-2.5 text-xs font-black">
+              Point-in-time hard gate → 적격 순위
+            </p>
+          )}
+        </div>
         <label className="rounded-2xl bg-secondary p-3">
           <span className="mb-2 block text-[10px] font-black text-muted-foreground">판단 프리셋</span>
           <Select
@@ -596,57 +648,26 @@ export function AiSimulationCryptoSetup({
           </Select>
         </label>
         <fieldset className="rounded-2xl bg-secondary p-3">
-          <legend className="px-1 text-[10px] font-black text-muted-foreground">독립 모델 lane</legend>
-          <div className="mt-1 flex min-h-10 items-center gap-2">
-            {(["fincast", "kronos_base"] as const).map((lane) => {
-              const selected = request.modelLanes.includes(lane);
-              const workerAvailable = status?.workers[lane]?.available ?? false;
-              return (
-                <button
-                  key={lane}
-                  type="button"
-                  aria-pressed={selected}
-                  disabled={disabled || (!selected && !workerAvailable)}
-                  onClick={() => toggleLane(lane)}
-                  data-model-lane-toggle={lane}
-                  className={cn(
-                    "flex-1 rounded-xl px-2 py-2 text-[9px] font-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
-                    selected ? "bg-card text-foreground" : "text-muted-foreground",
-                  )}
-                >
-                  {selected ? <Check className="mr-1 inline size-3" /> : null}{MODEL_LABELS[lane]}
-                </button>
-              );
-            })}
+          <legend className="px-1 text-[10px] font-black text-muted-foreground">모델 역할</legend>
+          <div className="mt-1 flex min-h-10 flex-wrap items-center gap-1.5">
+            {(request.modelPlan ?? []).map((entry) => (
+              <span
+                key={`${entry.symbol}-${entry.modelLane}-${entry.role}`}
+                className="rounded-full bg-card px-2 py-1 text-[8px] font-black"
+                data-model-role={entry.role}
+                data-model-lane={entry.modelLane}
+              >
+                {entry.symbol} · {MODEL_LABELS[entry.modelLane]} · {entry.role}
+              </span>
+            ))}
           </div>
         </fieldset>
-        <label className="rounded-2xl bg-secondary p-3">
-          <span className="mb-2 block text-[10px] font-black text-muted-foreground">
-            FinCast 모델 봉
-          </span>
-          <Select
-            value={String(request.fincastCandleSeconds)}
-            disabled={disabled || request.modelLanes.length !== 1 || request.modelLanes[0] !== "fincast"}
-            onValueChange={(value) => onRequestChange({
-              ...request,
-              fincastCandleSeconds: Number(value) as AiSimulationCryptoRequest["fincastCandleSeconds"],
-            })}
-          >
-            <SelectTrigger className="w-full bg-card" aria-label="FinCast 모델 입력 봉 간격">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {AI_SIMULATION_FINCAST_CANDLE_SECONDS.map((seconds) => (
-                <SelectItem key={seconds} value={String(seconds)}>
-                  {seconds === 60 ? "1분봉" : `${seconds}초봉`}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="mt-2 text-[8px] leading-4 text-muted-foreground">
-            15초·30초는 FinCast 단독 실행만 지원하며 화면 차트는 1분봉으로 유지됩니다.
+        <div className="rounded-2xl bg-secondary p-3">
+          <span className="mb-2 block text-[10px] font-black text-muted-foreground">Horizon 정책</span>
+          <p className="rounded-xl bg-card px-3 py-2.5 text-[9px] font-black leading-4">
+            5m 위험관리 · 15/30/60m dynamic 선택 · hysteresis
           </p>
-        </label>
+        </div>
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
@@ -731,6 +752,12 @@ export function AiSimulationCryptoSetup({
                     : "volatility",
                   symbolCount: Number(value) as 1 | 2,
                 },
+                ...(request.scanner ? {
+                  scanner: {
+                    ...request.scanner,
+                    symbolCount: Number(value) as 1 | 2,
+                  },
+                } : {}),
               })}
             >
               <SelectTrigger className="w-full bg-card" aria-label="암호화폐 선정 계약 수"><SelectValue /></SelectTrigger>
@@ -778,6 +805,80 @@ export function AiSimulationCryptoSetup({
         </label>
       </div>
 
+      {request.simulationCase === "high_vol_crypto" && request.scanner ? (
+        <section className="mt-3 rounded-2xl bg-secondary p-4" data-high-vol-scanner-settings>
+          <p className="text-xs font-black">Hard gate 설정</p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <label className="rounded-xl bg-card p-3">
+              <span className="mb-2 block text-[9px] font-black text-muted-foreground">최소 거래대금 · USD</span>
+              <Input
+                aria-label="고변동성 최소 거래대금"
+                type="number"
+                min={100_000}
+                step={1_000_000}
+                value={request.scanner.minimumTradingAmountUsd}
+                disabled={disabled}
+                onChange={(event) => onRequestChange({
+                  ...request,
+                  scanner: { ...request.scanner!, minimumTradingAmountUsd: Number(event.target.value) },
+                })}
+              />
+            </label>
+            <label className="rounded-xl bg-card p-3">
+              <span className="mb-2 block text-[9px] font-black text-muted-foreground">최대 spread · bps</span>
+              <Input
+                aria-label="고변동성 최대 스프레드"
+                type="number"
+                min={0.1}
+                step={0.5}
+                value={request.scanner.maximumSpreadBps}
+                disabled={disabled}
+                onChange={(event) => onRequestChange({
+                  ...request,
+                  scanner: { ...request.scanner!, maximumSpreadBps: Number(event.target.value) },
+                })}
+              />
+            </label>
+            <label className="rounded-xl bg-card p-3">
+              <span className="mb-2 block text-[9px] font-black text-muted-foreground">재스캔 · 분</span>
+              <Input
+                aria-label="고변동성 재스캔 주기"
+                type="number"
+                min={5}
+                step={5}
+                value={request.scanner.rescanIntervalMinutes}
+                disabled={disabled}
+                onChange={(event) => onRequestChange({
+                  ...request,
+                  scanner: { ...request.scanner!, rescanIntervalMinutes: Number(event.target.value) },
+                })}
+              />
+            </label>
+            <label className="rounded-xl bg-card p-3">
+              <span className="mb-2 block text-[9px] font-black text-muted-foreground">위험 성향</span>
+              <Select
+                value={request.scanner.riskAppetite}
+                disabled={disabled}
+                onValueChange={(value) => onRequestChange({
+                  ...request,
+                  scanner: {
+                    ...request.scanner!,
+                    riskAppetite: value as NonNullable<AiSimulationCryptoRequest["scanner"]>["riskAppetite"],
+                  },
+                })}
+              >
+                <SelectTrigger aria-label="고변동성 scanner 위험 성향"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="conservative">방어</SelectItem>
+                  <SelectItem value="balanced">균형</SelectItem>
+                  <SelectItem value="aggressive">공격</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+          </div>
+        </section>
+      ) : null}
+
       <div className="mt-3 flex flex-col gap-3 rounded-2xl bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
           <Waves className="mt-0.5 size-4 shrink-0" />
@@ -790,7 +891,7 @@ export function AiSimulationCryptoSetup({
         </Button>
       </div>
 
-      <div className="mt-3">
+      {request.simulationCase === "high_vol_crypto" ? <div className="mt-3">
         <CandidateTable
           snapshot={candidateSnapshot}
           loading={candidateLoading}
@@ -799,7 +900,22 @@ export function AiSimulationCryptoSetup({
           disabled={disabled}
           onToggleSymbol={toggleManualSymbol}
         />
-      </div>
+      </div> : (
+        <section className="mt-3 grid gap-3 sm:grid-cols-2" data-btc-eth-model-policy>
+          <article className="rounded-2xl bg-secondary p-4">
+            <p className="text-xs font-black">BTCUSDT</p>
+            <p className="mt-2 text-[9px] leading-4 text-muted-foreground">
+              Chronos-2 primary · FinCast 강한 veto · 선호 30/60m · 5m은 청산·reversal 감지
+            </p>
+          </article>
+          <article className="rounded-2xl bg-secondary p-4">
+            <p className="text-xs font-black">ETHUSDT</p>
+            <p className="mt-2 text-[9px] leading-4 text-muted-foreground">
+              FinCast primary · Chronos-2 shadow · 선호 15/30m · 5m 신규 진입은 큰 비용 후 edge만 허용
+            </p>
+          </article>
+        </section>
+      )}
 
       <details className="mt-3 rounded-2xl bg-secondary p-4">
         <summary className="cursor-pointer text-xs font-black">비용 가정 · bps</summary>
@@ -846,7 +962,7 @@ export function AiSimulationCryptoSetup({
             ["dailyLossLimitRate", "UTC 일손실 중단선", 0.5, 3, 0.5, 100, "%"],
             ["maximumLeverage", "최대 레버리지", 1, 15, 1, 1, "×"],
             ["grossExposureLimitRate", "Gross exposure 상한", 10, 150, 5, 100, "%"],
-            ["marginUsageLimitRate", "증거금 사용률 상한", 5, 20, 5, 100, "%"],
+            ["marginUsageLimitRate", "증거금 사용률 상한", 5, 100, 5, 100, "%"],
             ["liquidationBufferMultiple", "청산 buffer / 손절", 2, 5, 0.25, 1, "×"],
           ] as const).map(([key, label, minimum, maximum, step, displayScale, unit]) => (
             <label key={key} className="rounded-xl bg-card p-3">
@@ -937,9 +1053,14 @@ export function AiSimulationCryptoSetup({
           {runtimeGateMessage}
         </p>
       ) : null}
-      {!status?.executionGates.live ? (
-        <p className="mt-3 flex items-center gap-2 rounded-2xl bg-destructive/5 p-3 text-[9px] text-muted-foreground">
-          <AlertTriangle className="size-3.5 shrink-0 text-destructive" /> realOrder capability false · 읽기 전용 키로 주문을 전송하지 않습니다.
+      {status && !status.executionGates.live ? (
+        <p
+          className="mt-3 flex items-center gap-2 rounded-2xl bg-secondary p-3 text-[9px] text-muted-foreground"
+          role="status"
+          data-paper-safety-notice
+        >
+          <ShieldCheck className="size-3.5 shrink-0 text-primary" />
+          Paper 전용 안전 모드 · 실주문 API는 연결되지 않으며 모든 체결은 가상 원장에만 기록됩니다.
         </p>
       ) : null}
     </Card>

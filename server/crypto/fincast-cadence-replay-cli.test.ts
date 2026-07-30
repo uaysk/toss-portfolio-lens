@@ -45,6 +45,22 @@ describe("FinCast cadence replay CLI", () => {
       "--symbol", "EULUSDT",
       "--output", "/tmp/fincast-cadence.json",
     ])).toThrow("required");
+    expect(parseFinCastCadenceReplayCliArguments([
+      "--symbol", "EULUSDT",
+      "--output", "/tmp/fincast-cadence.json",
+      "--end-exclusive", "2026-07-26T11:00:00Z",
+      "--raw-input-root", "/tmp/fincast-raw-inputs",
+      "--raw-model-seed", "41",
+    ])).toMatchObject({
+      rawInputRoot: "/tmp/fincast-raw-inputs",
+      rawModelSeed: 41,
+    });
+    expect(() => parseFinCastCadenceReplayCliArguments([
+      "--symbol", "EULUSDT",
+      "--output", "/tmp/fincast-cadence.json",
+      "--end-exclusive", "2026-07-26T11:00:00Z",
+      "--raw-input-root", "/tmp/fincast-raw-inputs",
+    ])).toThrow("provided together");
   });
 
   it("publishes a mode-0600 artifact atomically and never overwrites evidence", async () => {

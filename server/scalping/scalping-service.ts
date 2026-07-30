@@ -625,7 +625,7 @@ type ScalpingComputationOptions = {
   maximumInputEndAt?: string;
 };
 
-export type ScalpingForecastModelLane = "kronos_base" | "fincast";
+export type ScalpingForecastModelLane = "kronos_base" | "fincast" | "chronos2";
 
 type ScalpingForecastOptions = ScalpingComputationOptions & {
   /**
@@ -781,6 +781,7 @@ export class ScalpingService {
     candidateUniverse?: CandidateUniverseSelector,
     private readonly fincastAi?: AiService,
     private readonly defaultModelLane: ScalpingForecastModelLane = "kronos_base",
+    private readonly chronos2Ai?: AiService,
   ) {
     if (!Number.isInteger(config.maximumSubscriptions)
       || config.maximumSubscriptions < config.maximumTopCount * 3) {
@@ -1132,7 +1133,11 @@ export class ScalpingService {
     throwIfAborted(options.signal);
     const request = this.forecastRequestSchema.parse(input);
     const modelLane = options.modelLane ?? this.defaultModelLane;
-    const forecastAi = modelLane === "fincast" ? this.fincastAi : this.ai;
+    const forecastAi = modelLane === "fincast"
+      ? this.fincastAi
+      : modelLane === "chronos2"
+        ? this.chronos2Ai
+        : this.ai;
     if (!forecastAi || !this.rust) {
       return {
         forecast: {
@@ -1140,7 +1145,9 @@ export class ScalpingService {
           code: !forecastAi
             ? modelLane === "fincast"
               ? "fincast_worker_unavailable"
-              : "ai_worker_unavailable"
+              : modelLane === "chronos2"
+                ? "chronos2_worker_unavailable"
+                : "ai_worker_unavailable"
             : "rust_worker_unavailable",
         },
         predictions: [],
@@ -1148,7 +1155,9 @@ export class ScalpingService {
     }
     const contextBarCount = modelLane === "fincast"
       ? FINCAST_CONTEXT_BARS
-      : this.config.forecastMaximumBars;
+      : modelLane === "chronos2"
+        ? 1024
+        : this.config.forecastMaximumBars;
     const forecastHistoryLimit = this.forecastHistoryBarLimit(
       request.marketCountry,
       contextBarCount,
@@ -1156,7 +1165,7 @@ export class ScalpingService {
     let barsBySymbol = await this.loadBars(request.symbols, 1, request.marketCountry, {
       maximumBars: forecastHistoryLimit,
       skipAutomaticRefresh: true,
-      allowBeyondWorkspaceLimit: modelLane === "fincast",
+      allowBeyondWorkspaceLimit: modelLane === "fincast" || modelLane === "chronos2",
     });
     throwIfAborted(options.signal);
     const refreshCutoff = this.now();
@@ -1444,16 +1453,27 @@ export class ScalpingService {
   ) {
     const request = this.evaluationRequestSchema.parse(input);
     const modelLane = options.modelLane ?? this.defaultModelLane;
-    const evaluationAi = modelLane === "fincast" ? this.fincastAi : this.ai;
+    const evaluationAi = modelLane === "fincast"
+      ? this.fincastAi
+      : modelLane === "chronos2"
+        ? this.chronos2Ai
+        : this.ai;
     if (!evaluationAi || !this.rust) {
       throw new Error(!evaluationAi
-        ? `${modelLane === "fincast" ? "FinCast" : "AI"} worker is unavailable.`
+        ? `${
+          modelLane === "fincast"
+            ? "FinCast"
+            : modelLane === "chronos2" ? "Chronos-2" : "AI"
+        } worker is unavailable.`
         : "Rust worker is unavailable.");
     }
-    const evaluationHistoryLimit = modelLane === "fincast"
+    const evaluationHistoryLimit = modelLane === "fincast" || modelLane === "chronos2"
       ? Math.max(
-          this.forecastHistoryBarLimit(request.marketCountry, FINCAST_CONTEXT_BARS),
-          FINCAST_CONTEXT_BARS
+          this.forecastHistoryBarLimit(
+            request.marketCountry,
+            modelLane === "chronos2" ? 1024 : FINCAST_CONTEXT_BARS,
+          ),
+          (modelLane === "chronos2" ? 1024 : FINCAST_CONTEXT_BARS)
             + 60
             + Math.max(0, this.config.evaluationMaximumOrigins - 1)
               * this.config.evaluationOriginStrideBars,

@@ -15,8 +15,8 @@ describe("AI paper simulation contracts", () => {
     contractType: "PERPETUAL" as const,
   };
 
-  it("publishes the normalized stock and crypto contract as v7", () => {
-    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v7");
+  it("publishes v8 while retaining v7 as an accepted source contract", () => {
+    expect(AI_SIMULATION_CONTRACT_VERSION).toBe("ai-paper-simulation/v8");
   });
 
   it("applies market, strategy, risk, scanner, and cost defaults", () => {
@@ -25,6 +25,8 @@ describe("AI paper simulation contracts", () => {
       durationMinutes: 60,
       selection: { mode: "auto", symbolCount: 1 },
     })).toEqual({
+      contractVersion: "ai-paper-simulation/v8",
+      sourceContractVersion: "ai-paper-simulation/v7",
       marketCountry: "KR",
       market: { kind: "stock", country: "KR" },
       initialCash: 1_000_000,
@@ -38,6 +40,13 @@ describe("AI paper simulation contracts", () => {
       riskTolerance: 50,
       costs: DEFAULT_SIMULATION_COSTS,
       modelLanes: ["fincast"],
+      modelPlan: [{
+        symbol: "*",
+        modelLane: "fincast",
+        role: "primary",
+        required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }],
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
     });
@@ -67,6 +76,127 @@ describe("AI paper simulation contracts", () => {
       },
       modelLanes: ["fincast"],
     })).toThrow("페어 전략은 현재 Kronos-base");
+  });
+
+  it("infers v7 cases and applies explicit v8 role plans without changing legacy lanes", () => {
+    const legacyBtc = schema.parse({
+      contractVersion: "ai-paper-simulation/v7",
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      modelLanes: ["fincast"],
+    });
+    expect(legacyBtc).toMatchObject({
+      contractVersion: "ai-paper-simulation/v8",
+      sourceContractVersion: "ai-paper-simulation/v7",
+      simulationCase: "btc_eth",
+      modelLanes: ["fincast"],
+      modelPlan: [{
+        modelLane: "fincast",
+        role: "primary",
+        required: true,
+      }],
+    });
+
+    const btcEth = schema.parse({
+      contractVersion: "ai-paper-simulation/v8",
+      simulationCase: "btc_eth",
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
+      modelLanes: ["chronos2", "fincast"],
+      modelPlan: [
+        {
+          symbol: "BTCUSDT",
+          modelLane: "chronos2",
+          role: "primary",
+          required: true,
+          preferredHorizonsMinutes: [30, 60, 15],
+        },
+        {
+          symbol: "BTCUSDT",
+          modelLane: "fincast",
+          role: "veto",
+          required: true,
+          preferredHorizonsMinutes: [30, 60, 15],
+        },
+        {
+          symbol: "ETHUSDT",
+          modelLane: "fincast",
+          role: "primary",
+          required: true,
+          preferredHorizonsMinutes: [15, 30, 60],
+        },
+        {
+          symbol: "ETHUSDT",
+          modelLane: "chronos2",
+          role: "shadow",
+          required: false,
+          preferredHorizonsMinutes: [15, 30, 60],
+        },
+      ],
+    });
+    expect(btcEth.sourceContractVersion).toBe("ai-paper-simulation/v8");
+    expect(btcEth.modelLanes).toEqual(["chronos2", "fincast"]);
+    expect(btcEth.modelPlan).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        symbol: "BTCUSDT",
+        modelLane: "chronos2",
+        role: "primary",
+      }),
+      expect.objectContaining({
+        symbol: "BTCUSDT",
+        modelLane: "fincast",
+        role: "veto",
+      }),
+      expect.objectContaining({
+        symbol: "ETHUSDT",
+        modelLane: "fincast",
+        role: "primary",
+      }),
+      expect.objectContaining({
+        symbol: "ETHUSDT",
+        modelLane: "chronos2",
+        role: "shadow",
+        required: false,
+      }),
+    ]));
+
+    expect(() => schema.parse({
+      contractVersion: "ai-paper-simulation/v8",
+      simulationCase: "btc_eth",
+      market: cryptoMarket,
+      initialCash: 10_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["BTCUSDT"] },
+      modelPlan: [{
+        symbol: "BTCUSDT",
+        modelLane: "chronos2",
+        role: "shadow",
+        required: false,
+        preferredHorizonsMinutes: [30, 60, 15],
+      }],
+    })).toThrow("고정 모델 역할 정책과 일치하지 않습니다");
+
+    const etf = schema.parse({
+      contractVersion: "ai-paper-simulation/v8",
+      simulationCase: "us_etf_pair",
+      market: { kind: "stock", country: "US" },
+      initialCash: 100_000,
+      durationMinutes: 60,
+      selection: { mode: "manual", symbols: ["SPY"] },
+      strategy: { mode: "pair", pairId: "spy-spxl-spxs" },
+    });
+    expect(etf.modelPlan.map(({ modelLane, role, required }) => ({
+      modelLane,
+      role,
+      required,
+    }))).toEqual([
+      { modelLane: "chronos2", role: "primary", required: true },
+      { modelLane: "fincast", role: "shadow", required: false },
+    ]);
   });
 
   it("normalizes Binance USDT perpetual requests and keeps legacy stock state off the wire", () => {
@@ -194,7 +324,7 @@ describe("AI paper simulation contracts", () => {
         dailyLossLimitRate: 0.03,
         maximumLeverage: 15,
         grossExposureLimitRate: 1.5,
-        marginUsageLimitRate: 0.2,
+        marginUsageLimitRate: 1,
         liquidationBufferMultiple: 5,
       },
     }).riskLimits).toEqual({
@@ -202,7 +332,7 @@ describe("AI paper simulation contracts", () => {
       dailyLossLimitRate: 0.03,
       maximumLeverage: 15,
       grossExposureLimitRate: 1.5,
-      marginUsageLimitRate: 0.2,
+      marginUsageLimitRate: 1,
       liquidationBufferMultiple: 5,
     });
 
@@ -217,7 +347,7 @@ describe("AI paper simulation contracts", () => {
       { grossExposureLimitRate: 0.09 },
       { grossExposureLimitRate: 1.51 },
       { marginUsageLimitRate: 0.04 },
-      { marginUsageLimitRate: 0.201 },
+      { marginUsageLimitRate: 1.001 },
       { liquidationBufferMultiple: 1.99 },
       { liquidationBufferMultiple: 5.01 },
       { hiddenLimit: 1 },

@@ -226,11 +226,28 @@ def test_default_settings_are_fixed_to_single_model_and_p40(monkeypatch) -> None
     assert configured.kronos_kv_cache_enabled is False
 
 
-def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> None:
+def test_chronos2_cuda_graph_backend_is_explicit_and_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODEL_LANE", "chronos_2")
+    monkeypatch.setenv("AI_CHRONOS2_INFERENCE_BACKEND", "cuda_graph")
+
+    configured = AISettings.from_env()
+
+    assert configured.chronos2_inference_backend == "cuda_graph"
+    monkeypatch.setenv("AI_CHRONOS2_INFERENCE_BACKEND", "silent_fallback")
+    with pytest.raises(
+        ValueError,
+        match="AI_CHRONOS2_INFERENCE_BACKEND",
+    ):
+        AISettings.from_env()
+
+
+def test_manifest_pins_only_reviewed_model_and_source_revisions() -> None:
     manifest = json.loads(_manifest_path().read_text(encoding="utf-8"))
 
     assert manifest["schema_version"] == "scalping-ai-model-manifest/v2"
-    assert set(manifest["models"]) == {"kronos-base", "fincast"}
+    assert set(manifest["models"]) == {"kronos-base", "fincast", "chronos-2"}
     assert manifest["models"]["kronos-base"] == {
         "model_id": "NeoQuasar/Kronos-base",
         "revision": MODEL_REVISION,
@@ -249,10 +266,7 @@ def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> No
     assert manifest["fincast_source"]["license"] == "Apache-2.0"
     assert len(manifest["fincast_source"]["required_file_sha256"]) == 6
     assert manifest["fincast_paper"]["revision"] == "2508.19609v1"
-    assert (
-        manifest["fincast_paper"]["sha256"]
-        == "c8dc23c7e0013d85732af1dee2785263b42c7384fc1a9a0f73bfdbb0d5061244"
-    )
+    assert manifest["fincast_paper"]["sha256"] == "c8dc23c7e0013d85732af1dee2785263b42c7384fc1a9a0f73bfdbb0d5061244"
     assert manifest["models"]["fincast"]["revision"] == "2d7d90b159db8961d27c2cf165d51195902ef92b"
     assert (
         manifest["models"]["fincast"]["checkpoint_sha256"]
@@ -262,6 +276,48 @@ def test_manifest_pins_only_reviewed_kronos_base_and_tokenizer_revisions() -> No
         manifest["models"]["fincast"]["validation_contexts_sha256"]
         == "3ee014f25181c595949580acec1ad83908819e3f283b378f449ab679bef75f6f"
     )
+    assert manifest["chronos2_source"] == {
+        "repository": "https://github.com/amazon-science/chronos-forecasting",
+        "package": "chronos-forecasting",
+        "version": "2.3.1",
+        "revision": "v2.3.1",
+        "license": "Apache-2.0",
+    }
+    assert manifest["models"]["chronos-2"] == {
+        "model_id": "amazon/chronos-2",
+        "revision": "254b5357164a84326913b0695216f690752ac55d",
+        "checkpoint_file": "model.safetensors",
+        "checkpoint_sha256": "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42",
+        "native_quantiles": [
+            0.01,
+            0.05,
+            0.1,
+            0.15,
+            0.2,
+            0.25,
+            0.3,
+            0.35,
+            0.4,
+            0.45,
+            0.5,
+            0.55,
+            0.6,
+            0.65,
+            0.7,
+            0.75,
+            0.8,
+            0.85,
+            0.9,
+            0.95,
+            0.99,
+        ],
+        "context_length": 8192,
+        "input_patch_size": 16,
+        "output_patch_size": 16,
+        "max_output_patches": 64,
+        "license": "Apache-2.0",
+        "loader_version": "chronos-forecasting-2.3.1",
+    }
 
 
 @pytest.mark.parametrize(
@@ -314,9 +370,7 @@ def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(
     monkeypatch.setattr(
         adapters,
         "install_kronos_kv_cache",
-        lambda module, model, *, source_revision: installed.append(
-            (module, model, source_revision)
-        ),
+        lambda module, model, *, source_revision: installed.append((module, model, source_revision)),
     )
     runtime = adapters.RuntimeDevice(
         "cuda",
@@ -347,9 +401,7 @@ def test_kronos_base_loader_is_local_only_and_uses_pinned_paths(
         (str(tokenizer_path), {"local_files_only": True}),
     ]
     assert installed == (
-        [(fake_module, instance._predictor.kwargs["model"], SOURCE_REVISION)]
-        if expected_install_count
-        else []
+        [(fake_module, instance._predictor.kwargs["model"], SOURCE_REVISION)] if expected_install_count else []
     )
 
 

@@ -219,7 +219,7 @@ describe("ai simulation v7 crypto contract", () => {
         dailyLossLimitRate: 0.035,
         maximumLeverage: 15,
         grossExposureLimitRate: 1.55,
-        marginUsageLimitRate: 0.25,
+        marginUsageLimitRate: 1.01,
         liquidationBufferMultiple: 1.75,
       },
     });
@@ -227,8 +227,19 @@ describe("ai simulation v7 crypto contract", () => {
       "거래당 위험 값은 0.001~0.005 범위여야 합니다.",
       "UTC 일손실 중단선 값은 0.005~0.03 범위여야 합니다.",
       "gross exposure 상한 값은 0.1~1.5 범위여야 합니다.",
-      "증거금 사용률 상한 값은 0.05~0.2 범위여야 합니다.",
+      "증거금 사용률 상한 값은 0.05~1 범위여야 합니다.",
       "청산 buffer 배수 값은 2~5 범위여야 합니다.",
     ]));
+  });
+
+  it("accepts a 100% paper margin usage ceiling while keeping the default at 20%", () => {
+    expect(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST.riskLimits.marginUsageLimitRate).toBe(0.2);
+    expect(validateAiSimulationCryptoRequest({
+      ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
+      riskLimits: {
+        ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST.riskLimits,
+        marginUsageLimitRate: 1,
+      },
+    })).toEqual([]);
   });
 });

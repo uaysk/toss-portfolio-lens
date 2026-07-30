@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "/home/uaysk/.local/share/uv/tools/graphifyy/bin/python",
+      "args": [
+        "-m",
+        "graphify.serve",
+        "/home/uaysk/toss-portfolio-lens/graphify-out/graph.json"
+      ]
+    },
+    "graphify-hybrid": {
+      "command": "/home/uaysk/toss-portfolio-lens/scripts/graphify-hybrid/run-mcp.sh",
+      "args": []
+    }
+  }
+}

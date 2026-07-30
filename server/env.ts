@@ -140,6 +140,7 @@ export type CryptoAiLaneConfig = {
 export type CryptoAiConfig = {
   fincast: CryptoAiLaneConfig;
   kronos?: CryptoAiLaneConfig;
+  chronos2?: CryptoAiLaneConfig;
   sequentialDeadlineMs: number;
   circuitBreaker: {
     failureThreshold: number;
@@ -677,10 +678,33 @@ export function readCryptoAiConfig(): CryptoAiConfig {
       },
     })
     : undefined;
+  const chronos2Url = optional("AI_CHRONOS2_COMPUTE_URL");
+  const chronos2 = chronos2Url
+    ? readLane({
+      url: { name: "AI_CHRONOS2_COMPUTE_URL", value: chronos2Url },
+      token: {
+        name: "AI_CHRONOS2_COMPUTE_AUTH_TOKEN_FILE",
+        value: optional("AI_CHRONOS2_COMPUTE_AUTH_TOKEN_FILE")
+          || "/run/chronos2-auth/token",
+      },
+      maximumInFlight: {
+        name: "AI_CHRONOS2_COMPUTE_MAX_IN_FLIGHT",
+        value: optional("AI_CHRONOS2_COMPUTE_MAX_IN_FLIGHT") || "1",
+      },
+    })
+    : undefined;
   if (kronos && kronos.authTokenFile === fincast.authTokenFile) {
     throw new Error(
       "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE은 FinCast와 분리된 token 절대 경로여야 합니다.",
     );
+  }
+  const tokenFiles = [
+    fincast.authTokenFile,
+    kronos?.authTokenFile,
+    chronos2?.authTokenFile,
+  ].filter((value): value is string => value !== undefined);
+  if (new Set(tokenFiles).size !== tokenFiles.length) {
+    throw new Error("FinCast, Kronos-base, Chronos-2는 서로 다른 token 파일을 사용해야 합니다.");
   }
   const guardedFincast = kronos
     ? { ...fincast, authTokenMustDifferFromFile: kronos.authTokenFile }
@@ -692,6 +716,12 @@ export function readCryptoAiConfig(): CryptoAiConfig {
   return {
     fincast: guardedFincast,
     ...(guardedKronos ? { kronos: guardedKronos } : {}),
+    ...(chronos2 ? {
+      chronos2: {
+        ...chronos2,
+        authTokenMustDifferFromFile: fincast.authTokenFile,
+      },
+    } : {}),
     sequentialDeadlineMs: readBoundedInteger(
       "AI_CRYPTO_SEQUENTIAL_DEADLINE_MS",
       240_000,

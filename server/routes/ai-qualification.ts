@@ -55,7 +55,7 @@ function sendError(response: Response, error: unknown): void {
   response.status(500).json({
     error: {
       code: "qualification-state-invalid",
-      message: "AI 검증 진행 상태를 읽을 수 없습니다.",
+      message: "AI 검증 상태와 대시보드 계약이 맞지 않습니다. 대시보드 서버 로그를 확인해 주세요.",
     },
   });
 }
@@ -95,6 +95,20 @@ export function createAiQualificationRouter(
         state,
         events: await store.events(state.runId),
       });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  router.get("/api/ai-qualification/runs/:runId/artifact", async (request, response) => {
+    try {
+      const requestedPath = typeof request.query.path === "string"
+        ? request.query.path
+        : "";
+      const artifact = await store.artifact(request.params.runId ?? "", requestedPath);
+      setNoStore(response);
+      response.type(path.extname(artifact.path) || "application/octet-stream");
+      response.send(artifact.payload);
     } catch (error) {
       sendError(response, error);
     }

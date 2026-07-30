@@ -21,6 +21,11 @@ import {
   type BinanceScannerCandidate,
   type BinanceScannerSnapshot,
 } from "./contracts.js";
+import {
+  scanHighVolatilityUniverse,
+  type HighVolatilityScannerSnapshot,
+} from "../simulation/high-volatility-scanner.js";
+import type { HighVolatilityScannerSettings } from "../simulation/contracts.js";
 
 type CandidateInputs = {
   rules: BinanceInstrumentRules;
@@ -31,6 +36,13 @@ type CandidateInputs = {
   realizedVolatility60m: number;
   atrPercent14: number;
   relativeVolume: number;
+  tradeCount: number;
+  rollingRange: number;
+  bollingerWidthExpansion: number;
+  orderbookDepthUsd: number;
+  fundingRate: number | null;
+  basisRate: number | null;
+  featureAvailability: Record<string, boolean>;
   missingFields: string[];
   qualityReasons: string[];
 };
@@ -81,6 +93,84 @@ function relativeVolume(bars: readonly BinanceKline[]): number {
   const baseline = window.slice(0, -1);
   const average = baseline.reduce((sum, item) => sum + item.volume, 0) / baseline.length;
   return average > 0 ? latest / average : 0;
+}
+
+function rollingRange(bars: readonly BinanceKline[]): number {
+  const window = bars.slice(-60);
+  const close = window.at(-1)?.close ?? 0;
+  if (window.length < 2 || close <= 0) return 0;
+  const high = Math.max(...window.map((bar) => bar.high));
+  const low = Math.min(...window.map((bar) => bar.low));
+  return Math.max(0, (high - low) / close);
+}
+
+function bollingerWidthExpansion(bars: readonly BinanceKline[]): number {
+  const closes = bars.slice(-40).map((bar) => bar.close);
+  if (closes.length < 40) return 0;
+  const width = (values: readonly number[]): number => {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    if (mean <= 0) return 0;
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0)
+      / values.length;
+    return 4 * Math.sqrt(Math.max(0, variance)) / mean;
+  };
+  const previous = width(closes.slice(0, 20));
+  const current = width(closes.slice(20));
+  return previous > 0 ? Math.max(0, current / previous) : 0;
+}
+
+function depthUsdWithinBps(
+  payload: unknown,
+  midpoint: number,
+  rangeBps = 10,
+): number | undefined {
+  if (!payload || typeof payload !== "object" || midpoint <= 0) return undefined;
+  const source = payload as { bids?: unknown; asks?: unknown };
+  const levels = [
+    ...(Array.isArray(source.bids) ? source.bids.map((row) => ({ row, side: "bid" as const })) : []),
+    ...(Array.isArray(source.asks) ? source.asks.map((row) => ({ row, side: "ask" as const })) : []),
+  ];
+  let depth = 0;
+  let valid = 0;
+  for (const { row, side } of levels) {
+    if (!Array.isArray(row) || row.length < 2) continue;
+    const price = Number(row[0]);
+    const quantity = Number(row[1]);
+    if (!Number.isFinite(price) || !Number.isFinite(quantity) || price <= 0 || quantity < 0) continue;
+    const distanceBps = Math.abs(price / midpoint - 1) * 10_000;
+    if (
+      distanceBps <= rangeBps
+      && ((side === "bid" && price <= midpoint) || (side === "ask" && price >= midpoint))
+    ) {
+      depth += price * quantity;
+      valid += 1;
+    }
+  }
+  return valid ? depth : undefined;
+}
+
+function currentReferenceBySymbol(payload: unknown): Map<string, {
+  fundingRate: number | null;
+  basisRate: number | null;
+}> {
+  const values = Array.isArray(payload) ? payload : [payload];
+  const output = new Map<string, { fundingRate: number | null; basisRate: number | null }>();
+  for (const value of values) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as Record<string, unknown>;
+    const symbol = typeof item.symbol === "string" ? item.symbol.toUpperCase() : "";
+    const mark = Number(item.markPrice);
+    const index = Number(item.indexPrice);
+    const funding = Number(item.lastFundingRate ?? item.fundingRate);
+    if (!symbol) continue;
+    output.set(symbol, {
+      fundingRate: Number.isFinite(funding) ? funding : null,
+      basisRate: Number.isFinite(mark) && Number.isFinite(index) && index > 0
+        ? mark / index - 1
+        : null,
+    });
+  }
+  return output;
 }
 
 function analyzeKlines(
@@ -231,14 +321,86 @@ export class BinanceUsdmScanner {
     return { snapshot, selected };
   }
 
+  async highVolatilitySelectionSnapshot(
+    settings: HighVolatilityScannerSettings,
+  ): Promise<{
+    snapshot: BinanceScannerSnapshot;
+    highVolatility: HighVolatilityScannerSnapshot;
+    selected: BinanceScannerCandidate[];
+  }> {
+    const snapshot = await this.candidates("volatility", true);
+    const rulesPayload = await this.rest.exchangeInformation();
+    const observedAt = Date.parse(snapshot.generatedAt);
+    const rulesBySymbol = new Map(
+      normalizeBinanceUniverse(rulesPayload, observedAt)
+        .map((rules) => [rules.symbol, rules]),
+    );
+    const highVolatility = scanHighVolatilityUniverse(
+      snapshot.candidates.map((candidate) => {
+        const rules = rulesBySymbol.get(candidate.symbol);
+        return {
+          symbol: candidate.symbol,
+          observedAt: candidate.dataQuality.observedAt,
+          listingAt: new Date(rules?.onboardDate ?? observedAt).toISOString(),
+          quoteAsset: rules?.quoteAsset ?? "USDT",
+          contractType: rules?.contractType ?? "PERPETUAL",
+          missingRate: candidate.dataQuality.finalBars > 0
+            ? candidate.dataQuality.missingFields.length / candidate.dataQuality.finalBars
+            : 1,
+          tradingAmountUsd: candidate.quoteVolume,
+          tradeCount: candidate.tradeCount ?? 0,
+          medianSpreadBps: candidate.medianSpreadBps ?? candidate.spreadBps,
+          p95SpreadBps: candidate.p95SpreadBps ?? candidate.spreadBps,
+          depthUsd: candidate.orderbookDepthUsd ?? 0,
+          staleQuote: observedAt - Date.parse(candidate.dataQuality.observedAt) > 60_000,
+          abnormalGap: candidate.dataQuality.reasons.some((reason) => /gap/i.test(reason)),
+          halted: false,
+          fundingRate: candidate.fundingRate ?? null,
+          basisRate: candidate.basisRate ?? null,
+          realizedVolatility: candidate.realizedVolatility60m,
+          normalizedAtr: candidate.atrPercent14,
+          rollingRange: candidate.rollingRange ?? 0,
+          bollingerWidthExpansion: candidate.bollingerWidthExpansion ?? 0,
+          relativeVolume: candidate.relativeVolume,
+          liquidityQuality: candidate.liquidityQuality ?? 0,
+          featureAvailability: {
+            finalizedOhlcv: candidate.dataQuality.finalBars >= 61,
+            tradeCount: candidate.featureAvailability?.tradeCount ?? false,
+            spread: true,
+            spreadHistory: candidate.featureAvailability?.spreadHistory ?? false,
+            orderbookDepth: candidate.featureAvailability?.orderbookDepth ?? false,
+            funding: candidate.featureAvailability?.funding ?? false,
+            basis: candidate.featureAvailability?.basis ?? false,
+            openInterest: false,
+            longShortRatio: false,
+            liquidationVolume: false,
+          },
+        };
+      }),
+      snapshot.generatedAt,
+      settings,
+    );
+    const selected = highVolatility.selectedSymbols.flatMap((symbol) => {
+      const candidate = snapshot.candidates.find((item) => item.symbol === symbol);
+      return candidate ? [candidate] : [];
+    });
+    if (selected.length !== settings.symbolCount) {
+      throw new Error(
+        `High-volatility scanner selected ${selected.length}/${settings.symbolCount} eligible symbols.`,
+      );
+    }
+    return { snapshot, highVolatility, selected };
+  }
+
   private async scan(
     criterion: ScannerCriterion,
     requestedAt: number,
   ): Promise<BinanceScannerSnapshot> {
-    const [exchangeInformation, tickerPayload, bookPayload] = await Promise.all([
+    const [exchangeInformation, tickerPayload, bookPayload, referencePayload] = await Promise.all([
       this.rest.exchangeInformation(),
       this.rest.tickers24h(),
       this.rest.bookTickers(),
+      this.rest.markPrices?.().catch(() => undefined),
     ]);
     const observedAt = this.now();
     const universe = normalizeBinanceUniverse(exchangeInformation, observedAt);
@@ -252,6 +414,7 @@ export class BinanceUsdmScanner {
       normalizeBookTickers(bookPayload, observedAt).map((item) => [item.symbol, item]),
     );
     const rulesBySymbol = new Map(universe.map((item) => [item.symbol, item]));
+    const references = currentReferenceBySymbol(referencePayload);
     const qualifiedSymbols = liquidityPool
       .map((item) => item.symbol)
       .filter((symbol) => {
@@ -262,14 +425,24 @@ export class BinanceUsdmScanner {
       qualifiedSymbols,
       this.klineConcurrency,
       async (symbol): Promise<CandidateInputs> => {
-        const payload = await this.rest.klines({
-          symbol,
-          limit: 1_024,
-        });
+        const [payload, depthPayload] = await Promise.all([
+          this.rest.klines({
+            symbol,
+            limit: 1_024,
+          }),
+          this.rest.orderBook?.({ symbol, limit: 100 }).catch(() => undefined),
+        ]);
         const quality = analyzeKlines(symbol, payload, observedAt);
         const bars = quality.bars;
         const ticker = tickerBySymbol.get(symbol)!;
         const book = bookBySymbol.get(symbol)!;
+        const midpoint = (book.bidPrice + book.askPrice) / 2;
+        const fullDepth = depthUsdWithinBps(depthPayload, midpoint);
+        const topOfBookDepth = (
+          book.bidPrice * book.bidQuantity
+          + book.askPrice * book.askQuantity
+        );
+        const reference = references.get(symbol);
         return {
           rules: rulesBySymbol.get(symbol)!,
           ticker,
@@ -279,6 +452,19 @@ export class BinanceUsdmScanner {
           realizedVolatility60m: quality.realizedReady ? realizedVolatility(bars) : 0,
           atrPercent14: quality.atrReady ? atrPercent(bars) : 0,
           relativeVolume: relativeVolume(bars),
+          tradeCount: bars.slice(-60).reduce((sum, bar) => sum + bar.tradeCount, 0),
+          rollingRange: rollingRange(bars),
+          bollingerWidthExpansion: bollingerWidthExpansion(bars),
+          orderbookDepthUsd: fullDepth ?? topOfBookDepth,
+          fundingRate: reference?.fundingRate ?? null,
+          basisRate: reference?.basisRate ?? null,
+          featureAvailability: {
+            tradeCount: bars.some((bar) => bar.tradeCount > 0),
+            spreadHistory: false,
+            orderbookDepth: fullDepth !== undefined,
+            funding: reference?.fundingRate !== null && reference?.fundingRate !== undefined,
+            basis: reference?.basisRate !== null && reference?.basisRate !== undefined,
+          },
           missingFields: quality.missingFields,
           qualityReasons: quality.reasons,
         };
@@ -324,6 +510,20 @@ export class BinanceUsdmScanner {
         realizedVolatility60m: item.realizedVolatility60m,
         priceChangePercent24h: item.ticker.priceChangePercent,
         atrPercent14: item.atrPercent14,
+        tradeCount: item.tradeCount,
+        medianSpreadBps: item.spreadBps,
+        p95SpreadBps: item.spreadBps,
+        orderbookDepthUsd: item.orderbookDepthUsd,
+        rollingRange: item.rollingRange,
+        bollingerWidthExpansion: item.bollingerWidthExpansion,
+        liquidityQuality: Math.max(0, Math.min(1,
+          0.45 * components.tradingAmount
+          + 0.25 * (1 - Math.min(1, item.spreadBps / BINANCE_SCANNER_SPREAD_LIMIT_BPS))
+          + 0.3 * Math.min(1, item.orderbookDepthUsd / 1_000_000),
+        )),
+        fundingRate: item.fundingRate,
+        basisRate: item.basisRate,
+        featureAvailability: item.featureAvailability,
         volatilityScore,
         score,
         scoreComponents: components,
