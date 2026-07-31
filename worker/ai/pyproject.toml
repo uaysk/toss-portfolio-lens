@@ -21,7 +21,7 @@ gpu-core = [
 ]
 model = [
   "einops==0.8.1",
-  "huggingface-hub==0.33.1",
+  "huggingface-hub==1.5.0",
   "numpy==2.2.6",
   "pandas==2.2.3",
   "safetensors==0.6.2",
@@ -43,6 +43,7 @@ chronos2 = [
   "pandas==2.2.3",
   "safetensors==0.6.2",
   "torch==2.6.0",
+  "transformers==5.5.0",
 ]
 dev = [
   "pytest==8.4.2",
