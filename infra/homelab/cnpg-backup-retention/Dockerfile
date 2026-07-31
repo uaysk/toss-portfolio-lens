@@ -1,4 +1,4 @@
-FROM golang:1.25.7-alpine3.23@sha256:724e212d86d79b45b7ace725b44ff3b6c2684bfd3131c43d5d60441de151d98e AS build
+FROM golang:1.26.5-alpine3.23@sha256:73f9732658b30852522ee5ebe698daa27e1829add9a70ff4f4a828409f8d0a99 AS build
 
 WORKDIR /src
 COPY go.mod main.go main_test.go ./
