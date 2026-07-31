@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteDatabase } from "../../database.js";
+import { PGliteDatabase } from "../../../test-support/pglite-database.js";
 import { PresetRepository } from "../../repositories/preset-repository.js";
 import { PresetService } from "../../services/preset-service.js";
 import { ServiceError } from "../../services/service-envelope.js";
@@ -7,7 +7,7 @@ import { toolSchemas } from "../schemas.js";
 import { createToolHandlers, type McpToolDependencies } from "./handlers.js";
 
 describe("preset-backed execution", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -15,7 +15,7 @@ describe("preset-backed execution", () => {
   });
 
   async function presets(): Promise<PresetService> {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const service = new PresetService(new PresetRepository(database));
     await service.initialize();
     return service;

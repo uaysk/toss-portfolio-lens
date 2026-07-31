@@ -699,7 +699,7 @@ fn policy_screening_metrics(
         "sampleCount": observations,
         "startDate": dates.first(),
         "endDate": dates.last(),
-        "return": nullable(cumulative),
+        "totalReturn": nullable(cumulative),
         "cagr": nullable(cagr),
         "volatility": volatility,
         "maxDrawdown": nullable(max_drawdown),

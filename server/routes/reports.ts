@@ -7,7 +7,7 @@ import {
   type PortfolioAnalysisService,
 } from "../analysis.js";
 import type { BacktestRunRequest } from "../backtest.js";
-import { BacktestValidationError } from "../backtest-engine.js";
+import { BacktestValidationError } from "../contracts/backtest.js";
 import { isHistoryDate } from "../history.js";
 import { ReportGenerationError } from "../report-ai.js";
 import { isReportId, type StoredReport } from "../reports.js";

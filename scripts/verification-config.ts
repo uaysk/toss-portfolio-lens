@@ -2,11 +2,10 @@ import type { AppConfig } from "../server/env.js";
 
 export const verificationConfigDefaults = {
   readOnlyApiToken: "integration-read-only-token",
-  readOnlyApiTokenSource: "READ_ONLY_API_TOKEN",
   trustProxy: [],
   gracefulShutdownTimeoutMs: 30_000,
   compute: {
-    executionMode: "inline",
+    executionMode: "rust_socket",
     resultPollMs: 250,
     resultDeadlineMs: 300_000,
     rustSocketPath: "/tmp/toss-portfolio-lens-compute.sock",
@@ -36,7 +35,7 @@ export const verificationConfigDefaults = {
     minimumTopCount: 5,
     maximumTopCount: 50,
     ai: {
-      url: "ws://127.0.0.1:8765/ws/scalping-ai/v1",
+      url: "ws://127.0.0.1:8765/ws/scalping-ai/v2",
       authTokenFile: "/tmp/toss-portfolio-lens-ai-token",
       timeoutMs: 120_000,
       connectTimeoutMs: 10_000,
@@ -57,7 +56,7 @@ export const verificationConfigDefaults = {
   },
   cryptoAi: {
     fincast: {
-      url: "ws://127.0.0.1:18766/ws/scalping-ai/v1",
+      url: "ws://127.0.0.1:18766/ws/scalping-ai/v2",
       authTokenFile: "/tmp/toss-portfolio-lens-fincast-token",
       timeoutMs: 120_000,
       connectTimeoutMs: 10_000,
@@ -67,9 +66,9 @@ export const verificationConfigDefaults = {
       maximumRequestBytes: 64 * 1024 * 1024,
       maximumResponseBytes: 128 * 1024 * 1024,
     },
-    kronos: {
-      url: "ws://127.0.0.1:18765/ws/scalping-ai/v1",
-      authTokenFile: "/tmp/toss-portfolio-lens-kronos-token",
+    chronos2: {
+      url: "ws://127.0.0.1:18767/ws/scalping-ai/v2",
+      authTokenFile: "/tmp/toss-portfolio-lens-chronos2-token",
       timeoutMs: 120_000,
       connectTimeoutMs: 10_000,
       reconnectBaseMs: 250,
@@ -77,6 +76,7 @@ export const verificationConfigDefaults = {
       maximumInFlight: 1,
       maximumRequestBytes: 64 * 1024 * 1024,
       maximumResponseBytes: 128 * 1024 * 1024,
+      authTokenMustDifferFromFile: "/tmp/toss-portfolio-lens-fincast-token",
     },
     sequentialDeadlineMs: 240_000,
     circuitBreaker: {

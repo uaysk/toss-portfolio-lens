@@ -1,11 +1,13 @@
 node_modules
-worker/python/.venv
 worker/ai/.venv
 worker/ai/.ruff_cache
 worker/ai/.mypy_cache
 worker/ai/models
 worker/ai/model-cache
 .cache/huggingface
+.cache/tsbuildinfo
+.cache/types
+.cache/performance
 ai-model-cache
 worker/rust/target
 __pycache__/

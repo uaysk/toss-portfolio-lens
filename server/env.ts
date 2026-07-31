@@ -1,7 +1,20 @@
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { isAbsolute } from "node:path";
-import type { MySqlConnectionConfig, PostgresConnectionConfig } from "./database.js";
+import {
+  readAiComputeUrl,
+  readAiTlsCa,
+  readCryptoAiConfig as readCryptoAiConfiguration,
+  type CryptoAiConfig,
+} from "./config/crypto-ai.js";
+import {
+  readComputeConfig,
+  readPostgresConfig,
+  type ComputeConfig,
+} from "./config/storage-compute.js";
+import type {
+  TossApiAuthConfig as TossApiAuthenticationConfig,
+} from "./contracts/toss-api.js";
+import type { PostgresConnectionConfig } from "./database.js";
 import type { KisExchangeRateConfig } from "./kis-exchange-rate.js";
 import type { IntradayBarAggregatorConfig } from "./scalping/intraday-bar-aggregator.js";
 import type { KisRestClientConfig } from "./scalping/kis-rest-client.js";
@@ -14,6 +27,17 @@ import {
 } from "./scalping/market-session.js";
 import type { UsExchange } from "./scalping/contracts.js";
 import type { TossProviderConfig } from "./scalping/toss-provider.js";
+
+export {
+  readCryptoAiConfig,
+  type CryptoAiConfig,
+  type CryptoAiLaneConfig,
+} from "./config/crypto-ai.js";
+export type {
+  ComputeConfig,
+  ComputeExecutionMode,
+} from "./config/storage-compute.js";
+export type { TossApiAuthConfig } from "./contracts/toss-api.js";
 
 export type OpenAiConfig = {
   endpoint: string;
@@ -45,35 +69,6 @@ export type S3ReportStorageConfig = {
 export type ReportStorageConfig = S3ReportStorageConfig | {
   kind: "local";
   directory: string;
-};
-
-export type TossApiAuthConfig =
-  | {
-    tossApiAuthMode: "oauth_client_credentials";
-    clientId: string;
-    clientSecret: string;
-    tossApiBearerToken?: undefined;
-  }
-  | {
-    tossApiAuthMode: "static_bearer";
-    clientId?: string;
-    clientSecret?: string;
-    tossApiBearerToken: string;
-  };
-
-export type DatabaseProvider = "sqlite" | "mysql" | "postgresql";
-export type ComputeExecutionMode = "inline" | "rust_socket" | "external";
-export type ReadOnlyApiTokenSource = "READ_ONLY_API_TOKEN" | "DASHBOARD_PASSWORD";
-
-export type ComputeConfig = {
-  executionMode: ComputeExecutionMode;
-  resultPollMs: number;
-  resultDeadlineMs: number;
-  rustSocketPath: string;
-  rustSocketPoolSize: number;
-  rustSocketTimeoutMs: number;
-  rustComputeMaxQueued: number;
-  rustComputeQueueTimeoutMs: number;
 };
 
 export type McpAuthMode = "oauth" | "none";
@@ -123,31 +118,6 @@ export type ScalpingAiConfig = {
   maximumRequestBytes: number;
   maximumResponseBytes: number;
   tlsCa?: string;
-};
-
-export type CryptoAiLaneConfig = {
-  url: string;
-  authTokenFile: string;
-  authTokenMustDifferFromFile?: string;
-  timeoutMs: number;
-  connectTimeoutMs: number;
-  reconnectBaseMs: number;
-  reconnectMaxMs: number;
-  maximumInFlight: 1;
-  maximumRequestBytes: number;
-  maximumResponseBytes: number;
-  tlsCa?: string;
-};
-
-export type CryptoAiConfig = {
-  fincast: CryptoAiLaneConfig;
-  kronos?: CryptoAiLaneConfig;
-  chronos2?: CryptoAiLaneConfig;
-  sequentialDeadlineMs: number;
-  circuitBreaker: {
-    failureThreshold: number;
-    cooldownMs: number;
-  };
 };
 
 export type CryptoSimulationConfig = {
@@ -205,20 +175,16 @@ export type ScalpingConfig = {
   recoveryBarLimit: number;
 };
 
-export type AppConfig = TossApiAuthConfig & {
+export type AppConfig = TossApiAuthenticationConfig & {
   dashboardPassword: string;
   readOnlyApiToken: string;
-  readOnlyApiTokenSource: ReadOnlyApiTokenSource;
   sessionSecret: string;
   host: string;
   port: number;
   trustProxy: string[];
   gracefulShutdownTimeoutMs: number;
   tossApiBaseUrl: string;
-  dbProvider: DatabaseProvider;
-  databasePath: string;
-  postgres?: PostgresConnectionConfig;
-  mysql?: MySqlConnectionConfig;
+  postgres: PostgresConnectionConfig;
   candleCacheLatestTtlMs: number;
   snapshotRefreshHours: number;
   nodeEnv: string;
@@ -248,159 +214,6 @@ function readBoolean(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
-function readMySqlConfig(requiredForProvider = false): MySqlConnectionConfig | undefined {
-  const mysqlUrl = optional("MYSQL_URL");
-  const individualNames = ["MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"];
-  const hasIndividualValue = individualNames.some((name) => process.env[name] !== undefined);
-  if (!mysqlUrl && !hasIndividualValue) {
-    if (requiredForProvider) throw new Error("DB_PROVIDER=mysql이면 유효한 MySQL 연결 설정이 필요합니다.");
-    return undefined;
-  }
-
-  try {
-    let host: string | undefined;
-    let portText: string | undefined;
-    let user: string | undefined;
-    let password: string | undefined;
-    let database: string | undefined;
-    if (mysqlUrl) {
-      const parsed = new URL(mysqlUrl);
-      if (parsed.protocol !== "mysql:") throw new Error("MYSQL_URL은 mysql:// 형식이어야 합니다.");
-      host = parsed.hostname;
-      portText = parsed.port || "3306";
-      user = decodeURIComponent(parsed.username);
-      password = decodeURIComponent(parsed.password);
-      database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-    } else {
-      host = optional("MYSQL_HOST");
-      portText = optional("MYSQL_PORT") || "3306";
-      user = optional("MYSQL_USER");
-      password = process.env.MYSQL_PASSWORD;
-      database = optional("MYSQL_DATABASE");
-    }
-
-    if (!host || !user || password === undefined || !database) {
-      throw new Error("MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE가 모두 필요합니다.");
-    }
-    if (!/^[A-Za-z0-9_$-]{1,64}$/.test(database)) {
-      throw new Error("MYSQL_DATABASE 이름은 영문, 숫자, _, $, -만 사용할 수 있습니다.");
-    }
-    const port = Number.parseInt(portText || "3306", 10);
-    if (!Number.isFinite(port) || port < 1 || port > 65535) throw new Error("MYSQL_PORT가 올바르지 않습니다.");
-    const connectTimeoutMs = Number.parseInt(optional("MYSQL_CONNECT_TIMEOUT_MS") || "3000", 10);
-    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs < 500 || connectTimeoutMs > 30_000) {
-      throw new Error("MYSQL_CONNECT_TIMEOUT_MS는 500~30000 범위여야 합니다.");
-    }
-    const useSsl = readBoolean("MYSQL_SSL", false);
-    const caPath = optional("MYSQL_SSL_CA_PATH");
-    if (caPath && !useSsl) throw new Error("MYSQL_SSL_CA_PATH를 사용하려면 MYSQL_SSL=true가 필요합니다.");
-    const ca = caPath ? readFileSync(caPath, "utf8") : undefined;
-    if (caPath && !ca?.trim()) throw new Error("MYSQL_SSL_CA_PATH의 인증서가 비어 있습니다.");
-    return {
-      host,
-      port,
-      user,
-      password,
-      database,
-      connectTimeoutMs,
-      ...(useSsl ? {
-        ssl: {
-          rejectUnauthorized: readBoolean("MYSQL_SSL_REJECT_UNAUTHORIZED", true),
-          ...(ca ? { ca } : {}),
-        },
-      } : {}),
-    };
-  } catch (error) {
-    if (requiredForProvider) throw error;
-    console.warn("[storage] MySQL 설정을 사용할 수 없어 SQLite를 사용합니다:", error instanceof Error ? error.message : error);
-    return undefined;
-  }
-}
-
-function readPostgresConfig(requiredForProvider = false): PostgresConnectionConfig | undefined {
-  const postgresUrl = optional("POSTGRES_URL") || optional("DATABASE_URL");
-  const individualNames = [
-    "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DATABASE",
-  ];
-  const hasIndividualValue = individualNames.some((name) => process.env[name] !== undefined);
-  if (!postgresUrl && !hasIndividualValue) {
-    if (requiredForProvider) throw new Error("DB_PROVIDER=postgresql이면 유효한 PostgreSQL 연결 설정이 필요합니다.");
-    return undefined;
-  }
-
-  try {
-    let host: string | undefined;
-    let portText: string | undefined;
-    let user: string | undefined;
-    let password: string | undefined;
-    let database: string | undefined;
-    if (postgresUrl) {
-      const parsed = new URL(postgresUrl);
-      if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
-        throw new Error("POSTGRES_URL/DATABASE_URL은 postgresql:// 형식이어야 합니다.");
-      }
-      host = parsed.hostname;
-      portText = parsed.port || "5432";
-      user = decodeURIComponent(parsed.username);
-      password = decodeURIComponent(parsed.password);
-      database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-    } else {
-      host = optional("POSTGRES_HOST");
-      portText = optional("POSTGRES_PORT") || "5432";
-      user = optional("POSTGRES_USER");
-      password = process.env.POSTGRES_PASSWORD;
-      database = optional("POSTGRES_DATABASE");
-    }
-
-    if (!host || !user || password === undefined || !database) {
-      throw new Error("POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE가 모두 필요합니다.");
-    }
-    if (!/^[A-Za-z0-9_-]{1,63}$/.test(database)) {
-      throw new Error("POSTGRES_DATABASE 이름은 영문, 숫자, _, -만 사용할 수 있습니다.");
-    }
-    const port = Number.parseInt(portText || "5432", 10);
-    if (!Number.isFinite(port) || port < 1 || port > 65535) throw new Error("POSTGRES_PORT가 올바르지 않습니다.");
-    const connectTimeoutMs = Number.parseInt(optional("POSTGRES_CONNECT_TIMEOUT_MS") || "3000", 10);
-    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs < 500 || connectTimeoutMs > 30_000) {
-      throw new Error("POSTGRES_CONNECT_TIMEOUT_MS는 500~30000 범위여야 합니다.");
-    }
-    const useSsl = readBoolean("POSTGRES_SSL", false);
-    const caPath = optional("POSTGRES_SSL_CA_PATH");
-    if (caPath && !useSsl) throw new Error("POSTGRES_SSL_CA_PATH를 사용하려면 POSTGRES_SSL=true가 필요합니다.");
-    const ca = caPath ? readFileSync(caPath, "utf8") : undefined;
-    if (caPath && !ca?.trim()) throw new Error("POSTGRES_SSL_CA_PATH의 인증서가 비어 있습니다.");
-    return {
-      host,
-      port,
-      user,
-      password,
-      database,
-      connectTimeoutMs,
-      ...(useSsl ? {
-        ssl: {
-          rejectUnauthorized: readBoolean("POSTGRES_SSL_REJECT_UNAUTHORIZED", true),
-          ...(ca ? { ca } : {}),
-        },
-      } : {}),
-    };
-  } catch (error) {
-    if (requiredForProvider) throw error;
-    console.warn(
-      "[storage] PostgreSQL 설정을 사용할 수 없어 다른 저장소를 확인합니다:",
-      error instanceof Error ? error.message : error,
-    );
-    return undefined;
-  }
-}
-
-function readDatabaseProvider(): DatabaseProvider {
-  const provider = optional("DB_PROVIDER")?.toLowerCase() || "sqlite";
-  if (provider !== "sqlite" && provider !== "mysql" && provider !== "postgresql") {
-    throw new Error("DB_PROVIDER는 sqlite, mysql, postgresql 중 하나여야 합니다.");
-  }
-  return provider;
-}
-
 function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) {
@@ -409,7 +222,7 @@ function required(name: string): string {
   return value;
 }
 
-function readTossApiAuth(): TossApiAuthConfig {
+function readTossApiAuth(): TossApiAuthenticationConfig {
   const mode = optional("TOSS_API_AUTH_MODE")?.toLowerCase() || "oauth_client_credentials";
   if (mode === "static_bearer") {
     const clientId = optional("CLIENT_ID");
@@ -495,78 +308,6 @@ function isLoopbackHost(host: string): boolean {
   return ["127.0.0.1", "::1", "[::1]", "localhost"].includes(host.toLowerCase());
 }
 
-function isPrivateIpLiteral(host: string): boolean {
-  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (isIP(normalized) === 4) {
-    const octets = normalized.split(".").map(Number);
-    return octets[0] === 10
-      || (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31)
-      || (octets[0] === 192 && octets[1] === 168);
-  }
-  return isIP(normalized) === 6 && (normalized.startsWith("fc") || normalized.startsWith("fd"));
-}
-
-function readAiComputeUrl(
-  value: string,
-  name: string,
-  allowInsecurePrivate: boolean,
-): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error(`${name}은 유효한 WebSocket URL이어야 합니다.`);
-  }
-  if (!["ws:", "wss:"].includes(parsed.protocol)
-    || parsed.pathname !== "/ws/scalping-ai/v1"
-    || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error(`${name}은 /ws/scalping-ai/v1 경로의 ws:// 또는 wss:// URL이어야 합니다.`);
-  }
-  if (parsed.protocol === "ws:") {
-    const localCompose = ["ai-worker", "fincast-worker"].includes(parsed.hostname.toLowerCase());
-    const local = localCompose || isLoopbackHost(parsed.hostname);
-    const explicitlyAllowedPrivate = allowInsecurePrivate && isPrivateIpLiteral(parsed.hostname);
-    if (!local && !explicitlyAllowedPrivate) {
-      throw new Error(
-        `원격 ${name}은 wss://를 사용해야 하며, private IP의 ws://는 `
-        + "AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS=true일 때만 허용됩니다.",
-      );
-    }
-  }
-  return parsed.toString();
-}
-
-type SelectedEnvironmentValue = {
-  name: string;
-  value: string;
-};
-
-function selectEnvironmentValue(
-  primaryName: string,
-  fallbackName: string,
-  defaultValue: string,
-): SelectedEnvironmentValue {
-  const primary = optional(primaryName);
-  if (primary) return { name: primaryName, value: primary };
-  const fallback = optional(fallbackName);
-  if (fallback) return { name: fallbackName, value: fallback };
-  return { name: primaryName, value: defaultValue };
-}
-
-function readAbsolutePath(selection: SelectedEnvironmentValue): string {
-  if (!isAbsolute(selection.value)) {
-    throw new Error(`${selection.name}은 절대 경로여야 합니다.`);
-  }
-  return selection.value;
-}
-
-function readSerializedLaneLimit(selection: SelectedEnvironmentValue): 1 {
-  if (selection.value !== "1") {
-    throw new Error(`${selection.name}은 GPU lane 직렬화를 위해 1이어야 합니다.`);
-  }
-  return 1;
-}
-
 function readSecretFile(name: string, fallbackPath: string): string {
   const filePath = optional(name) || fallbackPath;
   let value: string;
@@ -577,174 +318,6 @@ function readSecretFile(name: string, fallbackPath: string): string {
   }
   if (!value) throw new Error(`${name} 파일이 비어 있습니다.`);
   return value;
-}
-
-function readAiTlsCa(): string | undefined {
-  const path = optional("AI_COMPUTE_TLS_CA_FILE");
-  if (!path) return undefined;
-  let value: string;
-  try {
-    value = readFileSync(path, "utf8");
-  } catch {
-    throw new Error("AI_COMPUTE_TLS_CA_FILE을 읽을 수 없습니다.");
-  }
-  if (!value.trim()) throw new Error("AI_COMPUTE_TLS_CA_FILE이 비어 있습니다.");
-  if (Buffer.byteLength(value, "utf8") > 1024 * 1024) throw new Error("AI_COMPUTE_TLS_CA_FILE은 1MiB 이하여야 합니다.");
-  return value;
-}
-
-export function readCryptoAiConfig(): CryptoAiConfig {
-  const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
-  const tlsCa = readAiTlsCa();
-  const timeoutMs = readBoundedInteger("AI_COMPUTE_TIMEOUT_MS", 120_000, 1_000, 3_600_000);
-  const connectTimeoutMs = readBoundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000);
-  const reconnectBaseMs = readBoundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 250, 1, 60_000);
-  const reconnectMaxMs = readBoundedInteger(
-    "AI_COMPUTE_RECONNECT_MAX_MS",
-    10_000,
-    reconnectBaseMs,
-    600_000,
-  );
-  const maximumRequestBytes = readBoundedInteger(
-    "AI_MAX_REQUEST_BYTES",
-    64 * 1024 * 1024,
-    1_024,
-    512 * 1024 * 1024,
-  );
-  const maximumResponseBytes = readBoundedInteger(
-    "AI_MAX_RESPONSE_BYTES",
-    128 * 1024 * 1024,
-    1_024,
-    512 * 1024 * 1024,
-  );
-  const common = {
-    timeoutMs,
-    connectTimeoutMs,
-    reconnectBaseMs,
-    reconnectMaxMs,
-    maximumRequestBytes,
-    maximumResponseBytes,
-    ...(tlsCa ? { tlsCa } : {}),
-  };
-
-  const readLane = ({
-    url,
-    token,
-    maximumInFlight,
-  }: {
-    url: SelectedEnvironmentValue;
-    token: SelectedEnvironmentValue;
-    maximumInFlight: SelectedEnvironmentValue;
-  }): CryptoAiLaneConfig => {
-    const normalizedUrl = readAiComputeUrl(url.value, url.name, allowInsecurePrivateWs);
-    if (tlsCa && new URL(normalizedUrl).protocol !== "wss:") {
-      throw new Error(`AI_COMPUTE_TLS_CA_FILE은 wss:// ${url.name}에서만 사용할 수 있습니다.`);
-    }
-    return {
-      url: normalizedUrl,
-      authTokenFile: readAbsolutePath(token),
-      maximumInFlight: readSerializedLaneLimit(maximumInFlight),
-      ...common,
-    };
-  };
-
-  const fincast = readLane({
-    url: selectEnvironmentValue(
-      "AI_FINCAST_COMPUTE_URL",
-      "AI_COMPUTE_URL",
-      "ws://fincast-worker:8766/ws/scalping-ai/v1",
-    ),
-    token: selectEnvironmentValue(
-      "AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE",
-      "AI_COMPUTE_AUTH_TOKEN_FILE",
-      "/run/fincast-auth/token",
-    ),
-    maximumInFlight: selectEnvironmentValue(
-      "AI_FINCAST_COMPUTE_MAX_IN_FLIGHT",
-      "AI_COMPUTE_MAX_IN_FLIGHT",
-      "1",
-    ),
-  });
-
-  const kronosUrl = optional("AI_KRONOS_COMPUTE_URL");
-  const kronos = kronosUrl
-    ? readLane({
-      url: { name: "AI_KRONOS_COMPUTE_URL", value: kronosUrl },
-      token: {
-        name: "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE",
-        value: optional("AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE") || "/run/ai-auth/token",
-      },
-      maximumInFlight: {
-        name: "AI_KRONOS_COMPUTE_MAX_IN_FLIGHT",
-        value: optional("AI_KRONOS_COMPUTE_MAX_IN_FLIGHT") || "1",
-      },
-    })
-    : undefined;
-  const chronos2Url = optional("AI_CHRONOS2_COMPUTE_URL");
-  const chronos2 = chronos2Url
-    ? readLane({
-      url: { name: "AI_CHRONOS2_COMPUTE_URL", value: chronos2Url },
-      token: {
-        name: "AI_CHRONOS2_COMPUTE_AUTH_TOKEN_FILE",
-        value: optional("AI_CHRONOS2_COMPUTE_AUTH_TOKEN_FILE")
-          || "/run/chronos2-auth/token",
-      },
-      maximumInFlight: {
-        name: "AI_CHRONOS2_COMPUTE_MAX_IN_FLIGHT",
-        value: optional("AI_CHRONOS2_COMPUTE_MAX_IN_FLIGHT") || "1",
-      },
-    })
-    : undefined;
-  if (kronos && kronos.authTokenFile === fincast.authTokenFile) {
-    throw new Error(
-      "AI_KRONOS_COMPUTE_AUTH_TOKEN_FILE은 FinCast와 분리된 token 절대 경로여야 합니다.",
-    );
-  }
-  const tokenFiles = [
-    fincast.authTokenFile,
-    kronos?.authTokenFile,
-    chronos2?.authTokenFile,
-  ].filter((value): value is string => value !== undefined);
-  if (new Set(tokenFiles).size !== tokenFiles.length) {
-    throw new Error("FinCast, Kronos-base, Chronos-2는 서로 다른 token 파일을 사용해야 합니다.");
-  }
-  const guardedFincast = kronos
-    ? { ...fincast, authTokenMustDifferFromFile: kronos.authTokenFile }
-    : fincast;
-  const guardedKronos = kronos
-    ? { ...kronos, authTokenMustDifferFromFile: fincast.authTokenFile }
-    : undefined;
-
-  return {
-    fincast: guardedFincast,
-    ...(guardedKronos ? { kronos: guardedKronos } : {}),
-    ...(chronos2 ? {
-      chronos2: {
-        ...chronos2,
-        authTokenMustDifferFromFile: fincast.authTokenFile,
-      },
-    } : {}),
-    sequentialDeadlineMs: readBoundedInteger(
-      "AI_CRYPTO_SEQUENTIAL_DEADLINE_MS",
-      240_000,
-      1_000,
-      7_200_000,
-    ),
-    circuitBreaker: {
-      failureThreshold: readBoundedInteger(
-        "AI_CRYPTO_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-        3,
-        1,
-        100,
-      ),
-      cooldownMs: readBoundedInteger(
-        "AI_CRYPTO_CIRCUIT_BREAKER_COOLDOWN_MS",
-        60_000,
-        1_000,
-        3_600_000,
-      ),
-    },
-  };
 }
 
 function readMcpConfig({
@@ -868,35 +441,6 @@ function readOpenAiConfig(): OpenAiConfig | undefined {
   };
 }
 
-function readComputeConfig(dbProvider: DatabaseProvider): ComputeConfig {
-  const mode = optional("EXECUTION_MODE")?.toLowerCase() || "rust_socket";
-  if (mode !== "inline" && mode !== "rust_socket" && mode !== "external") {
-    throw new Error("EXECUTION_MODE는 inline, rust_socket 또는 external이어야 합니다.");
-  }
-  if (mode === "external" && dbProvider !== "postgresql") {
-    throw new Error("EXECUTION_MODE=external은 DB_PROVIDER=postgresql에서만 사용할 수 있습니다.");
-  }
-  return {
-    executionMode: mode,
-    resultPollMs: optional("RUST_WORKER_RESULT_POLL_MS")
-      ? readBoundedInteger("RUST_WORKER_RESULT_POLL_MS", 250, 25, 10_000)
-      : readBoundedInteger("PYTHON_WORKER_RESULT_POLL_MS", 250, 25, 10_000),
-    resultDeadlineMs: optional("RUST_WORKER_RESULT_DEADLINE_MS")
-      ? readBoundedInteger("RUST_WORKER_RESULT_DEADLINE_MS", 300_000, 1_000, 3_600_000)
-      : readBoundedInteger("PYTHON_WORKER_RESULT_DEADLINE_MS", 300_000, 1_000, 3_600_000),
-    rustSocketPath: optional("RUST_COMPUTE_SOCKET") || "/tmp/toss-portfolio-lens-compute.sock",
-    rustSocketPoolSize: readBoundedInteger("RUST_COMPUTE_POOL_SIZE", 2, 1, 32),
-    rustSocketTimeoutMs: readBoundedInteger("RUST_COMPUTE_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
-    rustComputeMaxQueued: readBoundedInteger("RUST_COMPUTE_MAX_QUEUED", 32, 1, 10_000),
-    rustComputeQueueTimeoutMs: readBoundedInteger(
-      "RUST_COMPUTE_QUEUE_TIMEOUT_MS",
-      30_000,
-      100,
-      3_600_000,
-    ),
-  };
-}
-
 function readReportAiConfig(): Pick<AppConfig, "openAi" | "bedrock"> {
   const provider = optional("REPORT_AI_PROVIDER")?.toLowerCase();
   if (provider && provider !== "openai" && provider !== "bedrock") {
@@ -975,26 +519,72 @@ function readScalpingConfig(): ScalpingConfig {
   const recorderEnabled = readBoolean("SCALPING_RECORDER_ENABLED", false);
   const minimumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MIN", 5, 1, 50);
   let maximumTopCount = readBoundedInteger("SCALPING_TOP_COUNT_MAX", 50, minimumTopCount, 50);
-  const allowInsecurePrivateWs = readBoolean("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS", false);
+  const allowInsecurePrivateWs = readBoolean(
+    "AI_FINCAST_COMPUTE_ALLOW_INSECURE_PRIVATE_WS",
+    false,
+  );
   const aiUrl = readAiComputeUrl(
-    optional("AI_COMPUTE_URL") || "ws://fincast-worker:8766/ws/scalping-ai/v1",
-    "AI_COMPUTE_URL",
+    optional("AI_FINCAST_COMPUTE_URL") || "ws://fincast-worker:8766/ws/scalping-ai/v2",
+    "AI_FINCAST_COMPUTE_URL",
     allowInsecurePrivateWs,
   );
-  const authTokenFile = optional("AI_COMPUTE_AUTH_TOKEN_FILE") || "/run/fincast-auth/token";
-  if (!authTokenFile.startsWith("/")) throw new Error("AI_COMPUTE_AUTH_TOKEN_FILE은 절대 경로여야 합니다.");
-  const reconnectBaseMs = readBoundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 250, 1, 60_000);
+  const authTokenFile = optional("AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE")
+    || "/run/fincast-auth/token";
+  if (!authTokenFile.startsWith("/")) {
+    throw new Error("AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE은 절대 경로여야 합니다.");
+  }
+  const reconnectBaseMs = readBoundedInteger(
+    "AI_FINCAST_COMPUTE_RECONNECT_BASE_MS",
+    250,
+    1,
+    60_000,
+  );
   const aiBase: ScalpingAiConfig = {
     url: aiUrl,
     authTokenFile,
-    timeoutMs: readBoundedInteger("AI_COMPUTE_TIMEOUT_MS", 120_000, 1_000, 3_600_000),
-    connectTimeoutMs: readBoundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000),
+    timeoutMs: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_TIMEOUT_MS",
+      120_000,
+      1_000,
+      3_600_000,
+    ),
+    connectTimeoutMs: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_CONNECT_TIMEOUT_MS",
+      10_000,
+      1_000,
+      60_000,
+    ),
     reconnectBaseMs,
-    reconnectMaxMs: readBoundedInteger("AI_COMPUTE_RECONNECT_MAX_MS", 10_000, reconnectBaseMs, 600_000),
-    maximumInFlight: readBoundedInteger("AI_COMPUTE_MAX_IN_FLIGHT", 4, 1, 1_000),
-    maximumBatchSize: readBoundedInteger("AI_COMPUTE_MAX_BATCH_SIZE", maximumTopCount, 1, 50),
-    maximumRequestBytes: readBoundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
-    maximumResponseBytes: readBoundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+    reconnectMaxMs: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_RECONNECT_MAX_MS",
+      10_000,
+      reconnectBaseMs,
+      600_000,
+    ),
+    maximumInFlight: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_MAX_IN_FLIGHT",
+      1,
+      1,
+      1,
+    ),
+    maximumBatchSize: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_MAX_BATCH_SIZE",
+      maximumTopCount,
+      1,
+      50,
+    ),
+    maximumRequestBytes: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_MAX_REQUEST_BYTES",
+      64 * 1024 * 1024,
+      1_024,
+      512 * 1024 * 1024,
+    ),
+    maximumResponseBytes: readBoundedInteger(
+      "AI_FINCAST_COMPUTE_MAX_RESPONSE_BYTES",
+      128 * 1024 * 1024,
+      1_024,
+      512 * 1024 * 1024,
+    ),
   };
   const simulation: AiTradingSimulationConfig = {
     maximumDurationMinutes: readBoundedInteger(
@@ -1047,9 +637,11 @@ function readScalpingConfig(): ScalpingConfig {
   if (websocketEnvironment !== "demo" && websocketEnvironment !== "real") {
     throw new Error("KI_SCALPING_WS_ENV는 demo 또는 real이어야 합니다.");
   }
-  const tlsCa = readAiTlsCa();
+  const tlsCa = readAiTlsCa("AI_FINCAST");
   if (tlsCa && new URL(aiUrl).protocol !== "wss:") {
-    throw new Error("AI_COMPUTE_TLS_CA_FILE은 wss:// AI_COMPUTE_URL에서만 사용할 수 있습니다.");
+    throw new Error(
+      "AI_FINCAST_COMPUTE_TLS_CA_FILE은 wss:// AI_FINCAST_COMPUTE_URL에서만 사용할 수 있습니다.",
+    );
   }
   const ai: ScalpingAiConfig = {
     ...aiBase,
@@ -1161,7 +753,9 @@ function readScalpingConfig(): ScalpingConfig {
     };
   }
   if (ai.maximumBatchSize < maximumTopCount) {
-    throw new Error("AI_COMPUTE_MAX_BATCH_SIZE는 실제 적용되는 최대 표시 종목 수 이상이어야 합니다.");
+    throw new Error(
+      "AI_FINCAST_COMPUTE_MAX_BATCH_SIZE는 실제 적용되는 최대 표시 종목 수 이상이어야 합니다.",
+    );
   }
 
   const minimumTradingAmount = providerLimit("SCALPING_MINIMUM_TRADING_AMOUNT", Number.MAX_SAFE_INTEGER);
@@ -1416,14 +1010,13 @@ export function loadScalpingConfig(): ScalpingConfig {
 
 export function loadConfig(): AppConfig {
   const dashboardPassword = required("DASHBOARD_PASSWORD");
-  const configuredReadOnlyApiToken = optional("READ_ONLY_API_TOKEN");
-  if (configuredReadOnlyApiToken && /\s/.test(configuredReadOnlyApiToken)) {
+  const readOnlyApiToken = required("READ_ONLY_API_TOKEN");
+  if (/\s/.test(readOnlyApiToken)) {
     throw new Error("READ_ONLY_API_TOKEN에는 공백을 사용할 수 없습니다.");
   }
-  const readOnlyApiToken = configuredReadOnlyApiToken ?? dashboardPassword;
-  const readOnlyApiTokenSource: ReadOnlyApiTokenSource = configuredReadOnlyApiToken
-    ? "READ_ONLY_API_TOKEN"
-    : "DASHBOARD_PASSWORD";
+  if (readOnlyApiToken === dashboardPassword) {
+    throw new Error("READ_ONLY_API_TOKEN은 DASHBOARD_PASSWORD와 달라야 합니다.");
+  }
   const sessionSecret = required("SESSION_SECRET");
   const tossApiAuth = readTossApiAuth();
 
@@ -1439,14 +1032,11 @@ export function loadConfig(): AppConfig {
     ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
     : `http://localhost:${port}`;
   const reportAi = readReportAiConfig();
-  const dbProvider = readDatabaseProvider();
-  const postgres = dbProvider === "postgresql" ? readPostgresConfig(true) : undefined;
-  const mysql = dbProvider === "mysql" ? readMySqlConfig(true) : undefined;
+  const postgres = readPostgresConfig();
   return {
     ...tossApiAuth,
     dashboardPassword,
     readOnlyApiToken,
-    readOnlyApiTokenSource,
     sessionSecret,
     host,
     port,
@@ -1461,21 +1051,18 @@ export function loadConfig(): AppConfig {
       optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
       "TOSS_API_BASE_URL",
     ),
-    dbProvider,
-    databasePath: process.env.DATABASE_PATH?.trim() || "./data/portfolio-history.sqlite",
     postgres,
-    mysql,
     candleCacheLatestTtlMs: readBoundedInteger("CANDLE_CACHE_LATEST_TTL_MS", 300_000, 10_000, 86_400_000),
     snapshotRefreshHours: readSnapshotRefreshHours(),
     nodeEnv,
     publicAppUrl,
     ...reportAi,
     reportStorage: readReportStorage(),
-    compute: readComputeConfig(dbProvider),
+    compute: readComputeConfig(),
     mcp: readMcpConfig({ host, nodeEnv, publicAppUrl }),
     kisExchangeRate: readKisExchangeRateConfig(),
     scalping: readScalpingConfig(),
-    cryptoAi: readCryptoAiConfig(),
+    cryptoAi: readCryptoAiConfiguration(),
     cryptoSimulation: readCryptoSimulationConfig(),
   };
 }

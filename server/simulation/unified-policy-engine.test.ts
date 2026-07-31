@@ -29,7 +29,7 @@ const PLAN: SimulationModelPlanEntry[] = [
   },
   {
     symbol: "BTCUSDT",
-    modelLane: "kronos_base",
+    modelLane: "chronos2",
     role: "shadow",
     required: false,
     preferredHorizonsMinutes: [15, 30, 60],
@@ -190,9 +190,9 @@ describe("unified simulation policy", () => {
       role: "veto",
       quantiles: { 0.1: -0.002, 0.5: 0.002, 0.9: 0.01 },
     });
-    const bullishShadow = evidence({ lane: "kronos_base", role: "shadow" });
+    const bullishShadow = evidence({ lane: "chronos2", role: "shadow" });
     const bearishShadow = evidence({
-      lane: "kronos_base",
+      lane: "chronos2",
       role: "shadow",
       quantiles: { 0.1: -0.03, 0.5: -0.02, 0.9: -0.01 },
     });

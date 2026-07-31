@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "./server.js";
 import { toolSchemas, type ToolName } from "./schemas.js";
 import { toolMetadata } from "./tools/metadata.js";
@@ -170,7 +169,7 @@ const validToolInputs: Record<ToolName, Record<string, unknown>> = {
 };
 
 describe("MCP tool contract", () => {
-  let server: McpServer | undefined;
+  let server: ReturnType<typeof createMcpServer> | undefined;
   let client: Client | undefined;
 
   afterEach(async () => {

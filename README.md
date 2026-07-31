@@ -54,28 +54,16 @@
 
 ### AI 가상매매 시뮬레이션
 
-- `ai-paper-simulation/v6` 계약에서 예수금·실행 시간·국내/미국 시장·AI 선정 종목 수 1~2개를 지정하는 기존 단일 종목 forward paper-session과 `ai-paper-policy/v2`를 그대로 지원
-- 미국 페어 전략은 `scalping-pair-catalog/v2`의 SOXX 또는 SMH→SOXL/SOXS, SNDK→SNXX/SNDQ, TSLA→TSLL/TSLS 또는 TSLQ, QQQ→TQQQ/SQQQ strict catalog를 사용하고 기초자산 `signalSymbol`과 가상 체결 ETF `executionSymbol`을 분리
-- 샌디스크 프리셋은 SNDK 신호에 대해 일간 +200% 목표 SNXX와 -200% 목표 SNDQ를 실행 상품으로 사용하고, 유동성 선택 근거·확인일·운용사 출처를 catalog provenance에 고정
-- 페어마다 bull·bear·cash 중 하나만 활성화하고, 레버리지 배수·예측 변동성·위험 성향으로 기초자산 노출 기준 정수 수량을 계산
-- AI 모델은 pinned `NeoQuasar/Kronos-base` 하나만 사용하며 기초자산의 동일한 확정봉 origin에서 금융 OHLCV 경로를 예측
-- Kronos-base의 비용 차감 기대수익·방향 확률·분위수 폭·calibration과 Rust `watch`/`entry_candidate`/`hold`/`exit_candidate`, 다중 시간대 일치·차트 패턴·데이터 품질을 `pair-ensemble-policy/v2`에서 정규화·결합
-- Kronos-base와 Rust 방향이 충돌하거나 Rust가 반대 exit를 내면 cash를 우선하고, 모델·Rust origin 불일치, stale·unavailable, 불량 calibration, 비정상 spread, 호가 부재 또는 세션 경계에서는 가중치를 재분배하지 않고 fail-closed
-- hysteresis, 최소 score margin, 전환 비용과 cooldown으로 횡보장의 반복 방향 전환을 제한
-- Kronos-base 단독·Rust 단독·Kronos-base+Rust 앙상블 비교 성과는 같은 origin·비용·실행 가능 가격·평가 기간에 노출을 정규화한 분석 lane으로 계산하고, 실제 forward 가상 원장은 앙상블 결정만 체결
-- Rust 신호에는 실제 계좌 holdings가 아니라 시각이 명시된 가상 원장 포지션만 격리 전달
-- `toss-securities-simulation-costs/v1`은 토스증권 고시 기준 국내 KRX 편도 0.015%(NXT 0.014%)와 KRX 일반주식 매도세 0.20%, 미국 편도 0.1%를 시장별 기본값으로 사용
-- 미국은 체결금액 USD 10 이하 토스 수수료 면제와 매도 시 SEC Section 31 0.206bps, FINRA TAF USD 0.000195/주·건당 최대 USD 9.79를 수량·체결금액 기준으로 별도 계산하며, USD 원장에는 환전 비용을 포함하지 않음
-- 국내 ETF·ETN·ELW는 일반 상장주식과 과세가 다를 수 있으므로 UI에서 적용 범위를 경고하고 사용자 override를 보존하며, 왕복 스프레드·편도 슬리피지는 증권사 고시 요율이 아닌 체결 현실성 가정으로 분리
-- 정수 수량 가상 원장에 토스 수수료, 매도 세금·미국 규제 부담금, 왕복 스프레드·슬리피지와 페어 전환 비용을 차감
-- 모델 입력 종료·Kronos-base 생성·Rust 계산·최종 판단·실행 ETF 호가 시각보다 엄격히 늦고 설정 기간 안에 있는 실행 상품 KIS 체결을 우선 사용하며, 없으면 그보다 늦게 시작한 실행 상품 확정 분봉 시가만 사용
-- 기간 종료 때 새 체결이 없으면 임의 청산하지 않고 마지막 관측가 평가와 open-position 경고를 보존
-- Kronos-base raw output·model/tokenizer/source revision·입력 종료·생성 시각·device·latency, Rust 원신호, 적용 가중치·최종 점수·결정 이유와 비교 성과를 재현 가능한 전용 run/artifact로 저장
-- 실행 화면과 결과 보고서에서 최신 Kronos-base 원시 `price_quantiles`의 Q10·중앙값·Q90 미래 가격 경로를 확정봉 origin 가격과 분리해 표시하며 누락 horizon은 보간하지 않음
-- Kronos-base의 pinned cache와 P40/CUDA 실행 조건이 없으면 자동 다운로드·fallback·임의 예측 없이 unavailable로 반환하고 페어 판단은 cash로 닫힘
-- 새로고침 뒤 최근 실행을 복원하며 서버 재시작 중이던 forward session은 재개하지 않고 fail-closed 처리
-- 신규 실시간 구독 직후 완전한 확정봉이 늦게 도착하면 `stale_final_bar`로 구분하고 설정된 횟수만 재동기화하며, 미국 거래일 캘린더가 확인되지 않으면 `future_market_schedule_unavailable`로 fail-closed 처리
-- 실제 주문 API dependency와 MCP 노출이 모두 없으며 투자 지시 또는 수익 보장으로 표시하지 않음
+- `ai-paper-simulation/v9`의 BTC·ETH, 고변동성 암호화폐, 미국 ETF 페어 세 case만 수락합니다. 요청에는 case·market·selection·strategy가 필요하며 모델 lane과 역할은 서버가 `resolvedModelPlan`으로 결정합니다.
+- `scalping-pair-catalog/v4`는 표시 신호와 모델 입력을 `displaySignalSymbol`·`modelTargetSymbol`로 구분하고, 실제 판단과 체결 증거의 `signalSymbol`은 provenance로 보존합니다.
+- FinCast와 Chronos‑2가 같은 확정봉 origin의 경로를 예측하고 Rust 기술 신호와 결합됩니다. 모델 identity·revision·입력 digest·생성 시각·latency와 Rust 신호를 run/artifact에 저장합니다.
+- 모델·Rust origin 불일치, stale/unavailable, 불량 calibration, 비정상 spread, 호가 부재 또는 세션 경계에서는 가중치를 임의 재분배하지 않고 cash로 fail-closed합니다.
+- 모델별 Q10·중앙값·Q90 경로와 Chronos‑2·Rust·ensemble 비교를 같은 origin·비용·체결 장벽으로 표시하며 누락 horizon은 보간하지 않습니다.
+- pinned cache, revision 또는 CUDA 조건이 맞지 않으면 자동 다운로드나 다른 모델 fallback 없이 해당 lane을 unavailable로 닫습니다.
+- 페어마다 bull·bear·cash 중 하나만 활성화하고 hysteresis, 최소 score margin, 전환 비용과 cooldown으로 반복 방향 전환을 제한합니다.
+- 미국 수수료, SEC·FINRA 부담금, 왕복 spread·slippage와 페어 전환 비용을 정수 수량 원장에 차감합니다.
+- 판단 이후의 다음 유효 KIS 체결을 우선하고, 없으면 그 이후 시작한 확정 분봉 시가만 사용합니다. 기간 종료 시 임의 청산하지 않고 마지막 관측가와 open-position 경고를 보존합니다.
+- 새로고침 뒤 최근 실행을 복원하되 서버 재시작 중이던 session은 자동 resume하지 않습니다. 실제 주문 API와 MCP 노출은 없습니다.
 
 ### 전략 연구와 최적화
 
@@ -238,7 +226,7 @@ Node.js는 인증, 요청 검증, 시세·환율 준비, 캐시, run 상태, art
 
 ### DB migration과 기존 데이터
 
-애플리케이션 시작 시 SQLite, PostgreSQL, MySQL/MariaDB에서 checksum ledger를 확인하며 migration을 순서대로 적용합니다. SQLite와 PostgreSQL은 migration별 transaction을 사용합니다. MySQL/MariaDB의 DDL은 implicit commit될 수 있어 전체 DDL의 원자적 rollback을 보장하지 않으며, 대신 idempotent DDL과 migration ID/checksum 검증으로 재실행과 schema drift를 통제합니다. 이미 적용된 ID의 checksum이 달라지면 시작을 중단합니다.
+애플리케이션은 PostgreSQL migration ledger의 ID와 SHA-256 checksum을 확인한 뒤 migration을 transaction으로 순서대로 적용합니다. 연결, lock 획득, migration 또는 checksum 검증이 실패하면 시작을 중단합니다. 저장소와 queue는 PostgreSQL만 지원하며 test-only 단위 검사는 PGlite를 사용합니다.
 
 | migration | 변경 | 기존 데이터 처리 |
 | --- | --- | --- |
@@ -305,10 +293,7 @@ READ_ONLY_API_TOKEN=replace-with-a-distinct-read-only-api-token
 SESSION_SECRET=replace-with-at-least-32-random-characters
 ```
 
-기존 설치에서는 `READ_ONLY_API_TOKEN`을 생략하면 한시적으로
-`DASHBOARD_PASSWORD`를 `/api/v1` Bearer 인증에도 사용합니다. 서버는 secret을
-포함하지 않는 deprecation warning을 시작 시 한 번 출력하므로 별도 토큰으로
-전환해야 합니다.
+두 값은 모두 필수이며 같으면 서버가 시작되지 않습니다.
 
 토스증권 OAuth Client Credentials를 사용한다면 다음 값을 설정합니다.
 
@@ -344,7 +329,7 @@ docker compose logs -f web compute-ipc
 docker compose down
 ```
 
-기본 저장소는 SQLite이며 `portfolio_data` Docker volume에 저장됩니다. PostgreSQL과 MySQL/MariaDB 설정은 [.env.example](.env.example)에 있습니다. 외부 DB를 선택한 상태에서 연결이나 마이그레이션이 실패하면 다른 저장소로 자동 전환하지 않고 시작을 중단합니다.
+PostgreSQL이 유일한 저장소입니다. `POSTGRES_HOST`·`POSTGRES_USER`·`POSTGRES_PASSWORD`·`POSTGRES_DATABASE` 또는 `POSTGRES_URL`이 필요하며 연결이나 migration이 실패하면 서버는 즉시 종료합니다.
 
 ### Harbor 운영 배포
 
@@ -365,7 +350,7 @@ npm run dev
 - Express API: `http://localhost:3200`
 - Rust worker socket: `/tmp/toss-portfolio-lens-compute.sock`
 
-`npm run dev`는 Vite, Express와 release Rust UDS worker를 함께 실행합니다. 명시적인 레거시 Node 계산 경로는 `npm run dev:legacy`로 실행할 수 있습니다.
+`npm run dev`는 Vite, Express와 release Rust UDS worker를 함께 실행합니다.
 
 ## 실행 모드
 
@@ -373,18 +358,9 @@ npm run dev
 | --- | --- | --- |
 | `rust_socket` | 기본 로컬·단일 호스트 저지연 실행 | Rust UDS worker |
 | `external` | 내구성 queue와 독립 worker | PostgreSQL |
-| `inline` | 개발 호환·긴급 롤백용 Node 경로 | 추가 worker 없음 |
-
-외부 worker 모드는 PostgreSQL에서만 사용할 수 있습니다.
 
 ```bash
 EXECUTION_MODE=external docker compose --profile external-compute up --build -d --no-deps web compute-worker
-```
-
-Rust UDS 장애 시 데이터 volume을 유지한 채 inline으로 임시 전환할 수 있습니다.
-
-```bash
-EXECUTION_MODE=inline docker compose up -d --no-deps web
 ```
 
 ## 주요 환경 변수
@@ -392,15 +368,15 @@ EXECUTION_MODE=inline docker compose up -d --no-deps web
 | 변수 | 설명 |
 | --- | --- |
 | `DASHBOARD_PASSWORD` | 웹 로그인 비밀번호 |
-| `READ_ONLY_API_TOKEN` | 앱이 제공하는 `/api/v1` 읽기 전용 API Bearer token. 미설정 시 deprecated 호환 fallback 적용 |
+| `READ_ONLY_API_TOKEN` | 필수 `/api/v1` 읽기 전용 API Bearer token. 웹 로그인 비밀번호와 달라야 함 |
 | `SESSION_SECRET` | 로그인 세션 HMAC 서명 값, 32자 이상 |
 | `TRUST_PROXY` | 명시적으로 신뢰할 reverse proxy IP/CIDR 목록. 미설정 시 forwarded header를 신뢰하지 않음 |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_MS` | SSE와 장시간 작업을 정리할 graceful shutdown 제한 시간, 기본 30000ms |
 | `APP_GIT_SHA` | `.git`이 없는 배포 이미지의 health/MCP build identity에 주입할 commit SHA |
 | `TOSS_API_AUTH_MODE` | `oauth_client_credentials` 또는 `static_bearer` |
 | `TOSS_API_BASE_URL` | 토스증권 또는 호환 API 주소 |
-| `DB_PROVIDER` | `sqlite`, `postgresql`, `mysql` |
-| `EXECUTION_MODE` | `rust_socket`, `external`, `inline` |
+| `POSTGRES_*` | 필수 PostgreSQL 연결·TLS 설정 |
+| `EXECUTION_MODE` | `rust_socket`, `external` |
 | `RUST_COMPUTE_*` | UDS socket, pool 크기와 timeout |
 | `RUST_WORKER_*` | external worker poll, lease, heartbeat와 recovery |
 | `MCP_ENABLED` | MCP endpoint 활성화 여부, 기본 `false` |
@@ -440,7 +416,7 @@ EXECUTION_MODE=inline docker compose up -d --no-deps web
 - HERC는 평균연결 상관거리 계층, silhouette 기반 flat cut, 군집 내·군집 간 ERC를 조합한 결정적 HERC-style 구현입니다. Ward/gap-statistic을 쓰는 특정 Raffinot 구현을 그대로 재현하지 않으며 후속 제약 repair가 동일 위험기여를 바꿀 수 있습니다.
 - golden parity는 기존 TypeScript/Node 공통 백테스트·최적화 수치와 Rust 결과를 비교합니다. 고급 optimizer·Walk-forward·Monte Carlo는 결정적 randomized fixture와 보존 불변식을 검증하지만 `proptest`/`fast-check` 기반 전 입력 생성 검사는 아직 없습니다.
 - UI·HTTP·MCP parity 검사는 도구 inventory, Zod schema, route, client와 handler 연결을 자동 확인합니다. 50개 도구의 모든 입력 조합에 대한 의미론적 3경로 동일성 E2E는 아니며 Playwright smoke는 OAuth·보고서의 데스크톱/모바일·다크/라이트 렌더링에 한정됩니다.
-- 노출·Pareto·연구 보고서의 비동기 파생 run은 Node 제어면 작업입니다. external Rust queue 환경에서도 영속 run/artifact를 만들지만 실행 중 Node 프로세스가 재시작되면 inline stale-run 복구 정책에 따라 실패 처리됩니다.
+- 노출·Pareto·연구 보고서의 비동기 파생 run은 Node 제어면 작업입니다. external Rust queue 환경에서도 영속 run/artifact를 만들며, 실행 중 Node 프로세스가 재시작되면 제어면 stale-run 복구 정책에 따라 실패 처리됩니다.
 - 실행 기록에서 optimization·outlook·노출·Pareto는 전용 결과 UI를 다시 사용합니다. 저장된 Walk-forward·Monte Carlo 등 일부 run은 현재 lazy JSON 중심이며 라이브 연구실과 같은 모든 차트를 다시 구성하지 않습니다.
 
 ## 검증
@@ -454,7 +430,7 @@ npm run docs:mcp:check
 cargo fmt --manifest-path worker/rust/Cargo.toml --check
 cargo clippy --manifest-path worker/rust/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path worker/rust/Cargo.toml
-npm run benchmark:rust-ipc
+npm run benchmark:rust-indicators
 ```
 
 `npm run test:rust-worker`는 Node/Rust golden 수치, 모든 optimizer·Monte Carlo 방식, 동일 seed/input/data revision 재현성, data revision 독립성, Walk-forward OOS 누수 probe와 비용·현금·정수 수량 ledger 보존 법칙을 release worker에서 검증합니다. Vitest에는 UI operation·HTTP route·MCP tool/schema inventory parity 검사가 포함됩니다.
@@ -486,13 +462,12 @@ npm run docs:capture-readme
 - React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, Radix UI, Recharts
 - Express 5, Zod, MCP TypeScript SDK
 - Rust 1.97, Rayon, Tokio, Unix domain socket
-- SQLite, PostgreSQL, MySQL/MariaDB
+- PostgreSQL 17, test-only PGlite
 - Vitest, Playwright, Cargo test·clippy
-- Docker Compose, Kubernetes, CloudFormation
+- Docker Compose, Kubernetes
 
 ## 추가 문서
 
 - [MCP와 ChatGPT 연결](docs/mcp-chatgpt.md)
 - [Rust 전환과 성능 보고서](docs/presentation/rust-migration-report.html)
-- [AWS 배포 가이드](infra/aws/README.md)
 - [홈랩 배포 가이드](infra/homelab/README.md)

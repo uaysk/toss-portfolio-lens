@@ -6,7 +6,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
-import { SqliteDatabase } from "../server/database.js";
+import { PGliteDatabase } from "../test-support/pglite-database.js";
 import { ArtifactRepository } from "../server/repositories/artifact-repository.js";
 import { RunRepository } from "../server/repositories/run-repository.js";
 import { ArtifactService } from "../server/services/artifact-service.js";
@@ -348,7 +348,7 @@ let stderr = "";
 worker.stderr.setEncoding("utf8");
 worker.stderr.on("data", (chunk: string) => { stderr += chunk; });
 const client = new RustComputeClient({ socketPath, poolSize: 1, timeoutMs: 30_000 });
-let parityDatabase: SqliteDatabase | undefined;
+let parityDatabase: PGliteDatabase | undefined;
 
 try {
   await waitForSocket(socketPath);
@@ -665,7 +665,7 @@ try {
     "마지막 미래 OHLC 값을 바꾸자 그 이전 기술 신호 prefix가 변경되었습니다.",
   );
 
-  parityDatabase = new SqliteDatabase(":memory:");
+  parityDatabase = new PGliteDatabase();
   const runRepository = new RunRepository(parityDatabase);
   const artifactRepository = new ArtifactRepository(parityDatabase);
   await runRepository.initialize();

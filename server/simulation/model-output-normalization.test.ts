@@ -7,11 +7,11 @@ import {
 const ORIGIN = "2026-07-24T14:30:00.000Z";
 const TARGET = "2026-07-24T14:35:00.000Z";
 const GENERATED = "2026-07-24T14:30:02.000Z";
-const MODEL_ID = "NeoQuasar/Kronos-base";
+const MODEL_ID = "amazon/chronos-2";
 
 function run(overrides: Record<string, unknown> = {}) {
   return {
-    role: "kronos_base",
+    role: "chronos2",
     expected_model_id: MODEL_ID,
     fallback_used: false,
     degraded: false,
@@ -27,10 +27,10 @@ function run(overrides: Record<string, unknown> = {}) {
     model: {
       model_id: MODEL_ID,
       model_revision: "2b554741eca47781b64468546e77fef3e85130e6",
-      tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+      tokenizer_id: "amazon/chronos-2",
       tokenizer_revision: "0e0117387f39004a9016484a186a908917e22426",
-      source_revision: "kronos-pinned",
-      loader_version: "kronos-loader-v1",
+      source_revision: "chronos2-pinned",
+      loader_version: "chronos2-loader-v1",
       license: "Apache-2.0",
       device: "cuda",
       device_name: "Tesla P40",
@@ -88,16 +88,16 @@ function normalize(
   );
 }
 
-describe("pair Kronos-base output normalization", () => {
-  it("normalizes the pinned Kronos-base run and preserves exact-origin provenance", () => {
+describe("pair Chronos-2 output normalization", () => {
+  it("normalizes the pinned Chronos-2 run and preserves exact-origin provenance", () => {
     const input = run();
     const output = normalize(input);
 
     expect(output).toMatchObject({
       alignmentStatus: "aligned",
       alignedOrigin: ORIGIN,
-      kronos: {
-        component: "kronos",
+      chronos2: {
+        component: "chronos2",
         status: "available",
         medianReturn: 0.01,
         q10Return: -0.01,
@@ -121,18 +121,16 @@ describe("pair Kronos-base output normalization", () => {
         },
       },
     });
-    expect(output.kronos.rawOutput).toEqual(input);
-    expect(output).not.toHaveProperty("chronos2");
+    expect(output.chronos2.rawOutput).toEqual(input);
   });
 
-  it("accepts a single top-level Kronos-base response without fabricating another model", () => {
+  it("accepts a single top-level Chronos-2 response without fabricating another model", () => {
     const modelRun = run();
     const output = normalizePairModelOutputs(modelRun, {
       signalSymbol: "TSLA",
       expectedOrigin: ORIGIN,
     });
-    expect(output.kronos.status).toBe("available");
-    expect(output).not.toHaveProperty("chronos2");
+    expect(output.chronos2.status).toBe("available");
   });
 
   it("fails origin alignment when the base model does not use the captured finalized bar", () => {
@@ -145,18 +143,18 @@ describe("pair Kronos-base output normalization", () => {
     const output = normalize(shifted);
     expect(output.alignmentStatus).toBe("misaligned");
     expect(output.reasonCodes).toContain("model_origin_mismatch");
-    expect(output.kronos.reasonCodes).toContain("origin_mismatch");
+    expect(output.chronos2.reasonCodes).toContain("origin_mismatch");
   });
 
-  it("rejects Kronos-small and any fallback provenance instead of relabeling it base", () => {
+  it("rejects any non-canonical model identity and fallback provenance", () => {
     const small = run({
       expected_model_id: MODEL_ID,
       model: {
         ...(run().model as object),
-        model_id: "NeoQuasar/Kronos-small",
+        model_id: "amazon/chronos-t5-small",
       },
     });
-    expect(normalize(small).kronos).toMatchObject({
+    expect(normalize(small).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["unexpected_model_id"]),
     });
@@ -171,7 +169,7 @@ describe("pair Kronos-base output normalization", () => {
         fallback_reason: "base missing",
       },
     });
-    expect(normalize(fallback).kronos).toMatchObject({
+    expect(normalize(fallback).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["model_run_provenance_inconsistent"]),
     });
@@ -185,9 +183,9 @@ describe("pair Kronos-base output normalization", () => {
         },
       ],
     }, { signalSymbol: "TSLA", expectedOrigin: ORIGIN });
-    expect(extraModel.kronos).toMatchObject({
+    expect(extraModel.chronos2).toMatchObject({
       status: "unavailable",
-      reasonCodes: ["unexpected_model_run"],
+      reasonCodes: ["duplicate_model_runs"],
     });
   });
 
@@ -198,7 +196,7 @@ describe("pair Kronos-base output normalization", () => {
         input_quality: { status: "partial", warnings: ["one auxiliary series missing"] },
       }],
     });
-    expect(normalize(partial).kronos).toMatchObject({
+    expect(normalize(partial).chronos2).toMatchObject({
       status: "degraded",
       reasonCodes: expect.arrayContaining(["input_quality_partial"]),
     });
@@ -210,7 +208,7 @@ describe("pair Kronos-base output normalization", () => {
         calibration: { status: "poor" },
       }],
     });
-    expect(normalize(invalid).kronos).toMatchObject({
+    expect(normalize(invalid).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["calibration_poor", "cuda_required"]),
     });
@@ -221,7 +219,7 @@ describe("pair Kronos-base output normalization", () => {
       { model_runs: [run(), run()] },
       { signalSymbol: "TSLA", expectedOrigin: ORIGIN },
     );
-    expect(duplicate.kronos).toMatchObject({
+    expect(duplicate.chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: ["duplicate_model_runs"],
     });
@@ -229,7 +227,7 @@ describe("pair Kronos-base output normalization", () => {
     const otherGpu = run({
       model: { ...(run().model as object), device_name: "NVIDIA A100" },
     });
-    expect(normalize(otherGpu).kronos).toMatchObject({
+    expect(normalize(otherGpu).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["required_accelerator_mismatch"]),
     });
@@ -246,7 +244,7 @@ describe("pair Kronos-base output normalization", () => {
       stop_first_probability_lower: 0.15,
       stop_first_probability_upper: 0.25,
     };
-    expect(normalize(run({ raw_series: rawSeries })).kronos).toMatchObject({
+    expect(normalize(run({ raw_series: rawSeries })).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["target_stop_invalid"]),
     });
@@ -258,7 +256,7 @@ describe("pair Kronos-base output normalization", () => {
     const horizons = rawSeries[0]!.horizons as Array<Record<string, unknown>>;
     horizons[0]!.down_probability = 0.3;
     horizons[0]!.flat_probability = 0.1;
-    expect(normalize(run({ raw_series: rawSeries })).kronos).toMatchObject({
+    expect(normalize(run({ raw_series: rawSeries })).chronos2).toMatchObject({
       status: "unavailable",
       reasonCodes: expect.arrayContaining(["direction_probability_invalid"]),
     });

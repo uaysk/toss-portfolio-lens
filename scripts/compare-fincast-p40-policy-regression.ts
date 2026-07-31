@@ -644,7 +644,7 @@ function forecastResponse(
 ): unknown {
   const originAt = input.origins[rowIds[0]!]!.origin;
   return {
-    schema_version: "scalping-ai/v1",
+    schema_version: "scalping-ai/v2",
     request_id: `policy-regression:${originAt}`,
     mode: "forecast",
     status: "available",

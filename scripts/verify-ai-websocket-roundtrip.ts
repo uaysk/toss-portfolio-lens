@@ -30,16 +30,17 @@ function isPrivateLiteral(hostname: string): boolean {
   return isIP(host) === 6 && (host.startsWith("fc") || host.startsWith("fd"));
 }
 
-function validateTestUrl(value: string): string {
+function validateTestUrl(value: string, allowInsecureSetting: string): string {
   const url = new URL(value);
   if (!["ws:", "wss:"].includes(url.protocol)
-    || url.pathname !== "/ws/scalping-ai/v1"
+    || url.pathname !== "/ws/scalping-ai/v2"
     || url.username || url.password || url.search || url.hash) {
-    throw new Error("AI_COMPUTE_URL must be the versioned AI WebSocket endpoint.");
+    throw new Error("AI verification URL must use the scalping-ai/v2 WebSocket endpoint.");
   }
   if (url.protocol === "ws:") {
-    const local = ["ai-worker", "localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname.toLowerCase());
-    if (!local && (!isPrivateLiteral(url.hostname) || !booleanSetting("AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS"))) {
+    const local = ["fincast-worker", "chronos2-worker", "localhost", "127.0.0.1", "::1", "[::1]"]
+      .includes(url.hostname.toLowerCase());
+    if (!local && (!isPrivateLiteral(url.hostname) || !booleanSetting(allowInsecureSetting))) {
       throw new Error("Remote ws:// verification is restricted to an explicitly allowed private-LAN address.");
     }
   }
@@ -90,33 +91,39 @@ function buildRequest(
 }
 
 async function main(): Promise<void> {
+  const lane = process.env.AI_VERIFY_LANE?.trim().toLowerCase() || "fincast";
+  if (lane !== "fincast" && lane !== "chronos2") {
+    throw new Error("AI_VERIFY_LANE must be fincast or chronos2.");
+  }
+  const prefix = lane === "fincast" ? "AI_FINCAST" : "AI_CHRONOS2";
   const seriesCount = boundedInteger("AI_VERIFY_SERIES_COUNT", 2, 1, 50);
   const contextBars = boundedInteger("AI_VERIFY_CONTEXT_BARS", 512, 64, 20_000);
   const timezoneValue = process.env.AI_VERIFY_TIMEZONE?.trim() || "Asia/Seoul";
   if (timezoneValue !== "Asia/Seoul" && timezoneValue !== "America/New_York") {
     throw new Error("AI_VERIFY_TIMEZONE must be Asia/Seoul or America/New_York.");
   }
-  const reconnectBaseMs = boundedInteger("AI_COMPUTE_RECONNECT_BASE_MS", 100, 1, 60_000);
-  const caPath = process.env.AI_COMPUTE_TLS_CA_FILE?.trim();
-  const configuredTokenFile = process.env.AI_COMPUTE_AUTH_TOKEN_FILE?.trim();
-  const hostSecretSource = process.env.AI_AUTH_SECRET_SOURCE?.trim();
+  const reconnectBaseMs = boundedInteger(`${prefix}_COMPUTE_RECONNECT_BASE_MS`, 100, 1, 60_000);
+  const caPath = process.env[`${prefix}_COMPUTE_TLS_CA_FILE`]?.trim();
+  const configuredTokenFile = process.env[`${prefix}_COMPUTE_AUTH_TOKEN_FILE`]?.trim();
+  const hostSecretSource = process.env[`${prefix}_AUTH_SECRET_SOURCE`]?.trim();
   const authTokenFile = configuredTokenFile
     || (hostSecretSource?.startsWith("/") ? `${hostSecretSource.replace(/\/+$/, "")}/token` : undefined)
-    || "/tmp/toss-portfolio-lens-ai-auth-token";
+    || `/tmp/toss-portfolio-lens-${lane}-auth-token`;
   const client = new AiComputeClient({
     url: validateTestUrl(
       process.env.AI_VERIFY_COMPUTE_URL
-      ?? process.env.AI_COMPUTE_URL
-      ?? "ws://127.0.0.1:18765/ws/scalping-ai/v1",
+      ?? process.env[`${prefix}_COMPUTE_URL`]
+      ?? `ws://127.0.0.1:${lane === "fincast" ? "18766" : "18767"}/ws/scalping-ai/v2`,
+      `${prefix}_COMPUTE_ALLOW_INSECURE_PRIVATE_WS`,
     ),
     authTokenFile,
-    timeoutMs: boundedInteger("AI_COMPUTE_TIMEOUT_MS", 180_000, 1_000, 3_600_000),
-    connectTimeoutMs: boundedInteger("AI_COMPUTE_CONNECT_TIMEOUT_MS", 10_000, 1_000, 60_000),
+    timeoutMs: boundedInteger(`${prefix}_COMPUTE_TIMEOUT_MS`, 180_000, 1_000, 3_600_000),
+    connectTimeoutMs: boundedInteger(`${prefix}_COMPUTE_CONNECT_TIMEOUT_MS`, 10_000, 1_000, 60_000),
     reconnectBaseMs,
-    reconnectMaxMs: boundedInteger("AI_COMPUTE_RECONNECT_MAX_MS", 10_000, reconnectBaseMs, 600_000),
-    maximumInFlight: boundedInteger("AI_COMPUTE_MAX_IN_FLIGHT", 1, 1, 1_000),
-    maximumRequestBytes: boundedInteger("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
-    maximumResponseBytes: boundedInteger("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+    reconnectMaxMs: boundedInteger(`${prefix}_COMPUTE_RECONNECT_MAX_MS`, 10_000, reconnectBaseMs, 600_000),
+    maximumInFlight: boundedInteger(`${prefix}_COMPUTE_MAX_IN_FLIGHT`, 1, 1, 1_000),
+    maximumRequestBytes: boundedInteger(`${prefix}_COMPUTE_MAX_REQUEST_BYTES`, 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
+    maximumResponseBytes: boundedInteger(`${prefix}_COMPUTE_MAX_RESPONSE_BYTES`, 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
     ...(caPath ? { tlsCa: readFileSync(caPath, "utf8") } : {}),
   });
   const request = buildRequest(seriesCount, contextBars, timezoneValue);

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { isHistoryDate, kstDateString, PortfolioHistoryStore } from "./history.js";
+import { openTestHistoryStore } from "../test-support/history-store.js";
 import { MarketDataRepository } from "./repositories/market-data-repository.js";
 import type { HistoricalOrder, Holding, Portfolio } from "./toss.js";
 
@@ -56,7 +57,7 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
 
     await store.recordPortfolio(
@@ -88,7 +89,7 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("원본 주문·일봉·복원 상태와 계산된 과거 스냅샷을 저장한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const order: HistoricalOrder = {
       orderId: "order-1",
@@ -188,7 +189,7 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("사용자가 지정한 시작일과 종료일을 포함해 조회하고 해당 기간의 과거 종목을 반환한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     await store.replaceHistoricalSnapshots("account-1", [
       {
@@ -233,7 +234,7 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("현재 해외 보유가 없어도 과거 USD 종목 기록을 반환한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     await store.replaceHistoricalSnapshots("account-1", [
       {
@@ -260,7 +261,7 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("candle 원본 응답과 정규화 OHLC를 공통 캐시에 저장한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const payload = {
       result: {

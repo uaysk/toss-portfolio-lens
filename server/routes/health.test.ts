@@ -26,7 +26,7 @@ function dependencies(
   overrides: Partial<HealthRouteDependencies> = {},
 ): HealthRouteDependencies {
   return {
-    storageBackend: "sqlite",
+    storageBackend: "postgres",
     reportStorageBackend: "local",
     reportGenerationConfigured: false,
     exchangeRateFallback: "disabled",
@@ -125,10 +125,10 @@ describe("health route", () => {
     });
   });
 
-  it("does not read or expose Rust-only scheduler state in inline mode", async () => {
+  it("does not read or expose socket scheduler state in external mode", async () => {
     const rustSchedulerSnapshot = vi.fn(() => ({ capacity: 2 }));
     const baseUrl = await startServer(dependencies({
-      executionMode: "inline",
+      executionMode: "external",
       rustSchedulerSnapshot,
     }));
     const response = await fetch(`${baseUrl}/api/health`);

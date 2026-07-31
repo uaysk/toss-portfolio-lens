@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PortfolioAnalysis } from "./analysis.js";
-import type { PortfolioBacktestService } from "./backtest.js";
+import type { BacktestRunResult } from "./backtest.js";
 import {
   OpenAiReportWriter,
   parseReportNarrative,
@@ -10,7 +10,7 @@ import {
 import type { ReportStorage } from "./report-storage.js";
 
 export const REPORT_TEMPLATE_VERSION = "portfolio-report-v1" as const;
-export type BacktestResult = Awaited<ReturnType<PortfolioBacktestService["run"]>>;
+export type BacktestResult = BacktestRunResult;
 export type PublicPortfolioAnalysis = Omit<PortfolioAnalysis, "accountId">;
 
 type ReportBase = {

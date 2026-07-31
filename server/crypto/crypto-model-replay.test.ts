@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AiResponseSchema,
   FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
+  CHRONOS_2_MODEL_ID,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
   type AiEvaluateRequest,
@@ -105,15 +105,15 @@ function restWith(
 }
 
 function model(role: CryptoReplayLane) {
-  if (role === "kronos_base") {
+  if (role === "chronos2") {
     return {
-      model_id: KRONOS_BASE_MODEL_ID,
-      model_revision: "2b554741eca47781b64468546e77fef3e85130e6",
-      tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
-      tokenizer_revision: "0e0117387f39004a9016484a186a908917e22426",
-      source_revision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
-      loader_version: "kronos-source-67b630e",
-      license: "MIT",
+      model_id: CHRONOS_2_MODEL_ID,
+      model_revision: "254b5357164a84326913b0695216f690752ac55d",
+      tokenizer_id: null,
+      tokenizer_revision: null,
+      source_revision: "v2.3.1",
+      loader_version: "chronos-forecasting-2.3.1",
+      license: "Apache-2.0",
       device: "cuda" as const,
       device_name: "Tesla P40",
       cuda_capability: "6.1",
@@ -122,8 +122,11 @@ function model(role: CryptoReplayLane) {
       loaded: true,
       precision_validation: "not_required" as const,
       memory_status: "ok" as const,
-      quantile_monotonicity_policy: "native" as const,
+      quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1" as const,
+      fp32_quantile_observations: null,
+      mixed_quantile_observations: null,
       quantile_tail_policy: "native" as const,
+      precision_failure_reasons: [],
     };
   }
   return {
@@ -159,7 +162,7 @@ function model(role: CryptoReplayLane) {
 function responseFor(
   role: CryptoReplayLane,
   request: AiEvaluateRequest,
-  predictionShift = role === "kronos_base" ? 0.0001 : 0.0002,
+  predictionShift = role === "chronos2" ? 0.0001 : 0.0002,
 ) {
   const source = request.series[0]!;
   const indexes = new Map(source.bars.map((bar, index) => [bar.timestamp, index]));
@@ -290,7 +293,7 @@ function replay(
   return new CryptoModelComparisonReplay({
     rest,
     lanes: {
-      kronos_base: lanes?.kronos_base ?? lane("kronos_base"),
+      chronos2: lanes?.chronos2 ?? lane("chronos2"),
       fincast: lanes?.fincast ?? lane("fincast"),
     },
     clock: { now: () => NOW },
@@ -308,8 +311,8 @@ describe("CryptoModelComparisonReplay", () => {
     let firstRequest: AiEvaluateRequest | undefined;
     let secondRequest: AiEvaluateRequest | undefined;
     const result = await replay(fixture.rest, {
-      kronos_base: lane("kronos_base", (request, response) => {
-        order.push("kronos");
+      chronos2: lane("chronos2", (request, response) => {
+        order.push("chronos2");
         firstRequest = request;
         responseWireBytes.push(Buffer.byteLength(JSON.stringify(response), "utf8"));
         responseShapes.push({
@@ -335,7 +338,7 @@ describe("CryptoModelComparisonReplay", () => {
       endTime: DATA_END_EXCLUSIVE - 1,
       limit: 1_024,
     });
-    expect(order).toEqual(["kronos", "fincast"]);
+    expect(order).toEqual(["chronos2", "fincast"]);
     expect(firstRequest).toBe(secondRequest);
     expect(Object.isFrozen(firstRequest)).toBe(true);
     expect(firstRequest?.series[0]?.bars).toHaveLength(INPUT_BARS);
@@ -369,22 +372,22 @@ describe("CryptoModelComparisonReplay", () => {
       originStrideMinutes: 15,
       futureBarsPerOrigin: 60,
     });
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "available",
       identityVerified: true,
       effectiveContextBars: CONTEXT_BARS,
       fallbackUsed: false,
       provenance: {
-        modelId: KRONOS_BASE_MODEL_ID,
-        modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
-        sourceRevision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+        modelId: CHRONOS_2_MODEL_ID,
+        modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+        sourceRevision: "v2.3.1",
         device: "cuda",
         deviceName: "Tesla P40",
         cudaCapability: "6.1",
         precision: "fp32",
         precisionValidation: "not_required",
         precisionFallbackUsed: false,
-        quantileMonotonicityPolicy: "native",
+        quantileMonotonicityPolicy: "chronos2_fp32_monotone_rearrangement_v1",
         fp32QuantileObservations: null,
         mixedQuantileObservations: null,
       },
@@ -423,21 +426,21 @@ describe("CryptoModelComparisonReplay", () => {
         peakVramBytes: 1_000_000,
       },
     });
-    expect(result.lanes.kronos_base.effectiveContextDigest)
+    expect(result.lanes.chronos2.effectiveContextDigest)
       .toMatch(/^[0-9a-f]{64}$/);
-    expect(result.lanes.kronos_base.predictionDigest)
+    expect(result.lanes.chronos2.predictionDigest)
       .toMatch(/^[0-9a-f]{64}$/);
-    expect(result.lanes.kronos_base.effectiveContextDigest)
+    expect(result.lanes.chronos2.effectiveContextDigest)
       .toBe(result.lanes.fincast.effectiveContextDigest);
-    expect(result.lanes.kronos_base.metrics).toHaveLength(4);
-    expect(result.lanes.kronos_base.metrics[0]).toMatchObject({
+    expect(result.lanes.chronos2.metrics).toHaveLength(4);
+    expect(result.lanes.chronos2.metrics[0]).toMatchObject({
       horizonMinutes: 5,
       count: ORIGINS,
     });
-    expect(result.lanes.kronos_base.metrics[0]!.meanPinballLoss).toBeGreaterThanOrEqual(0);
-    expect(result.lanes.kronos_base.metrics[0]!.medianReturnMae).toBeGreaterThanOrEqual(0);
-    expect(result.lanes.kronos_base.metrics[0]!.directionAccuracy).toBeGreaterThanOrEqual(0);
-    expect(result.lanes.kronos_base.metrics[0]!.quantiles).toHaveLength(7);
+    expect(result.lanes.chronos2.metrics[0]!.meanPinballLoss).toBeGreaterThanOrEqual(0);
+    expect(result.lanes.chronos2.metrics[0]!.medianReturnMae).toBeGreaterThanOrEqual(0);
+    expect(result.lanes.chronos2.metrics[0]!.directionAccuracy).toBeGreaterThanOrEqual(0);
+    expect(result.lanes.chronos2.metrics[0]!.quantiles).toHaveLength(7);
     expect(result.comparison).toEqual({
       identitiesVerified: true,
       sameInputDigest: true,
@@ -455,7 +458,7 @@ describe("CryptoModelComparisonReplay", () => {
     const fixture = restWith();
     let request: AiEvaluateRequest | undefined;
     const result = await replay(fixture.rest, {
-      kronos_base: lane("kronos_base", (observed) => {
+      chronos2: lane("chronos2", (observed) => {
         request = observed;
       }),
       fincast: lane("fincast"),
@@ -576,40 +579,23 @@ describe("CryptoModelComparisonReplay", () => {
     expect(result.rows.every((row) => row.closes.length === 8192)).toBe(true);
   });
 
-  it("accepts only the explicitly selected experimental Kronos cache loader", async () => {
-    const cacheLoader = {
+  it("rejects an unpinned Chronos-2 loader", async () => {
+    const unpinnedLoader = {
       async request(request: AiEvaluateRequest) {
-        const raw = responseFor("kronos_base", request);
-        raw.model.loader_version = "kronos-source-67b630e-kv-cache-v1";
+        const raw = responseFor("chronos2", request);
+        raw.model.loader_version = "chronos-forecasting-experimental";
         return raw;
       },
     };
-    const acceptedFixture = restWith();
-    const accepted = await replay(acceptedFixture.rest, {
-      kronos_base: cacheLoader,
-      fincast: lane("fincast"),
-    }).run({
-      symbol: "BTCUSDT",
-      costAssumptions: COSTS,
-      kronosLoaderProfile: "kv_cache_v1",
-    });
-    expect(accepted.lanes.kronos_base).toMatchObject({
-      availability: "available",
-      identityVerified: true,
-      provenance: {
-        loaderVersion: "kronos-source-67b630e-kv-cache-v1",
-      },
-    });
-
     const rejectedFixture = restWith();
     const rejected = await replay(rejectedFixture.rest, {
-      kronos_base: cacheLoader,
+      chronos2: unpinnedLoader,
       fincast: lane("fincast"),
     }).run({
       symbol: "BTCUSDT",
       costAssumptions: COSTS,
     });
-    expect(rejected.lanes.kronos_base).toMatchObject({
+    expect(rejected.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       error: { code: "MODEL_PROVENANCE_MISMATCH" },
     });
@@ -624,7 +610,7 @@ describe("CryptoModelComparisonReplay", () => {
       },
     };
     const worker = replay(fixture.rest, {
-      kronos_base: unavailable,
+      chronos2: unavailable,
       fincast: unavailable,
     }, 10_000, () => `crypto-replay:semantic-${requestOrdinal += 1}`);
     const first = await worker.run({ symbol: "BTCUSDT", costAssumptions: COSTS });
@@ -633,16 +619,16 @@ describe("CryptoModelComparisonReplay", () => {
     expect(first.requestId).not.toBe(second.requestId);
     expect(first.inputDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(first.inputDigest).toBe(second.inputDigest);
-    expect(first.lanes.kronos_base.inputDigest).toBe(first.inputDigest);
+    expect(first.lanes.chronos2.inputDigest).toBe(first.inputDigest);
     expect(second.lanes.fincast.inputDigest).toBe(second.inputDigest);
   });
 
   it("fails closed when a lane reports different effective context evidence", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
-          const raw = responseFor("kronos_base", request);
+          const raw = responseFor("chronos2", request);
           raw.series[0]!.input_quality.bar_count = CONTEXT_BARS - 1;
           return raw;
         },
@@ -653,7 +639,7 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       identityVerified: false,
       error: { code: "CONTEXT_EVIDENCE_MISMATCH" },
@@ -667,9 +653,9 @@ describe("CryptoModelComparisonReplay", () => {
   it("fails closed on revision drift and preserves a validated FinCast FP32 fallback", async () => {
     const revisionFixture = restWith();
     const revisionResult = await replay(revisionFixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
-          const raw = responseFor("kronos_base", request);
+          const raw = responseFor("chronos2", request);
           raw.model.model_revision = "unpinned-revision";
           return raw;
         },
@@ -680,16 +666,16 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(revisionResult.lanes.kronos_base).toMatchObject({
+    expect(revisionResult.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       identityVerified: false,
       error: { code: "MODEL_PROVENANCE_MISMATCH" },
     });
-    expect(revisionResult.lanes.kronos_base).not.toHaveProperty("provenance");
+    expect(revisionResult.lanes.chronos2).not.toHaveProperty("provenance");
 
     const fallbackFixture = restWith();
     const fallbackResult = await replay(fallbackFixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -729,7 +715,7 @@ describe("CryptoModelComparisonReplay", () => {
     async (field, unsafeTokenizer) => {
       const fixture = restWith();
       const result = await replay(fixture.rest, {
-        kronos_base: lane("kronos_base"),
+        chronos2: lane("chronos2"),
         fincast: {
           async request(request) {
             const raw = responseFor("fincast", request);
@@ -758,7 +744,7 @@ describe("CryptoModelComparisonReplay", () => {
   ] as const)("requires pinned Tesla P40 runtime provenance when %s drifts", async (field, value) => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -782,7 +768,7 @@ describe("CryptoModelComparisonReplay", () => {
   it("requires FinCast to disclose FP32 monotone rearrangement provenance", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -806,7 +792,7 @@ describe("CryptoModelComparisonReplay", () => {
   it("fails closed when FinCast omits or overflows qualification observations", async () => {
     const missingFixture = restWith();
     const missing = await replay(missingFixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -827,7 +813,7 @@ describe("CryptoModelComparisonReplay", () => {
 
     const overflowFixture = restWith();
     const overflow = await replay(overflowFixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -849,7 +835,7 @@ describe("CryptoModelComparisonReplay", () => {
   it("persists null mixed observations only for a bounded mixed runtime failure", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: lane("kronos_base"),
+      chronos2: lane("chronos2"),
       fincast: {
         async request(request) {
           const raw = responseFor("fincast", request);
@@ -905,11 +891,11 @@ describe("CryptoModelComparisonReplay", () => {
       bars[100]![6] = NOW + MINUTE_MS;
       return bars;
     });
-    const worker = lane("kronos_base", () => {
+    const worker = lane("chronos2", () => {
       requests += 1;
     });
     await expect(replay(fixture.rest, {
-      kronos_base: worker,
+      chronos2: worker,
       fincast: worker,
     }).run({
       symbol: "BTCUSDT",
@@ -921,7 +907,7 @@ describe("CryptoModelComparisonReplay", () => {
   it("marks a model identity mismatch unavailable without borrowing the other lane", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
           return responseFor("fincast", request);
         },
@@ -932,9 +918,9 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "unavailable",
-      expectedModelId: KRONOS_BASE_MODEL_ID,
+      expectedModelId: CHRONOS_2_MODEL_ID,
       observedModelId: FINCAST_MODEL_ID,
       identityVerified: false,
       fallbackUsed: false,
@@ -959,9 +945,9 @@ describe("CryptoModelComparisonReplay", () => {
       return index % 2 === 0 ? expanded : expanded.replace(/Z$/, "+00:00");
     };
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
-          const raw = responseFor("kronos_base", request);
+          const raw = responseFor("chronos2", request);
           for (const [index, record] of raw.evaluation!.records.entries()) {
             record.origin = pythonSerialization(record.origin, index);
             record.target_timestamp = pythonSerialization(record.target_timestamp, index + 1);
@@ -975,7 +961,7 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "available",
       identityVerified: true,
     });
@@ -990,9 +976,9 @@ describe("CryptoModelComparisonReplay", () => {
   it("rejects a worker timestamp with non-zero sub-millisecond drift", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
-          const raw = responseFor("kronos_base", request);
+          const raw = responseFor("chronos2", request);
           raw.evaluation!.records[0]!.origin = raw.evaluation!.records[0]!.origin
             .replace(/(\.\d{3})Z$/, "$1001Z");
           return raw;
@@ -1004,7 +990,7 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       error: { code: "RECORD_TIMESTAMP_INVALID" },
     });
@@ -1014,9 +1000,9 @@ describe("CryptoModelComparisonReplay", () => {
   it("rejects duplicate evaluation keys even when the response record count matches", async () => {
     const fixture = restWith();
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request(request) {
-          const raw = responseFor("kronos_base", request);
+          const raw = responseFor("chronos2", request);
           const records = raw.evaluation!.records;
           records[1] = structuredClone(records[0]!);
           return raw;
@@ -1028,7 +1014,7 @@ describe("CryptoModelComparisonReplay", () => {
       costAssumptions: COSTS,
     });
 
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       identityVerified: false,
       error: {
@@ -1044,7 +1030,7 @@ describe("CryptoModelComparisonReplay", () => {
     let fincastRequests = 0;
     const never = new Promise<never>(() => undefined);
     await expect(replay(fixture.rest, {
-      kronos_base: { request: () => never },
+      chronos2: { request: () => never },
       fincast: lane("fincast", () => {
         fincastRequests += 1;
       }),
@@ -1083,7 +1069,7 @@ describe("CryptoModelComparisonReplay", () => {
     const fixture = restWith();
     let fincastRequests = 0;
     const result = await replay(fixture.rest, {
-      kronos_base: {
+      chronos2: {
         async request() {
           throw new Error("/models/private/checkpoint and bearer-token-like-detail");
         },
@@ -1097,7 +1083,7 @@ describe("CryptoModelComparisonReplay", () => {
     });
 
     expect(fincastRequests).toBe(1);
-    expect(result.lanes.kronos_base).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       availability: "unavailable",
       fallbackUsed: false,
       error: {

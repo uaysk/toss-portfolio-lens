@@ -57,31 +57,6 @@ export class McpAuditRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
   async initialize(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS mcp_tool_audit_log (
-          audit_id VARCHAR(64) PRIMARY KEY,
-          request_id VARCHAR(64) NOT NULL,
-          protocol_request_id VARCHAR(128) NULL,
-          session_hash VARCHAR(64) NULL,
-          tool_name VARCHAR(96) NOT NULL,
-          subject_hash VARCHAR(64) NOT NULL,
-          auth_mode VARCHAR(16) NOT NULL,
-          status VARCHAR(32) NOT NULL,
-          error_code VARCHAR(96) NULL,
-          run_id VARCHAR(64) NULL,
-          started_at BIGINT NOT NULL,
-          finished_at BIGINT NOT NULL,
-          duration_ms BIGINT NOT NULL,
-          UNIQUE KEY uq_mcp_tool_audit_request (request_id),
-          KEY idx_mcp_tool_audit_started (started_at, tool_name),
-          KEY idx_mcp_tool_audit_subject (subject_hash, started_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.ensureCorrelationColumns();
-      return;
-    }
-    const integer = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS mcp_tool_audit_log (
         audit_id TEXT PRIMARY KEY,
@@ -94,9 +69,9 @@ export class McpAuditRepository {
         status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'insufficient_scope')),
         error_code TEXT,
         run_id TEXT,
-        started_at ${integer} NOT NULL,
-        finished_at ${integer} NOT NULL,
-        duration_ms ${integer} NOT NULL CHECK (duration_ms >= 0)
+        started_at BIGINT NOT NULL,
+        finished_at BIGINT NOT NULL,
+        duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0)
       )
     `);
     await this.database.run(`
@@ -111,30 +86,18 @@ export class McpAuditRepository {
   }
 
   private async ensureCorrelationColumns(): Promise<void> {
-    let names: Set<string>;
-    if (this.database.dialect === "sqlite") {
-      const rows = await this.database.query<{ name: string }>("PRAGMA table_info(mcp_tool_audit_log)");
-      names = new Set(rows.map((row) => row.name));
-    } else if (this.database.dialect === "mysql") {
-      const rows = await this.database.query<{ column_name: string }>(`
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = DATABASE() AND table_name = 'mcp_tool_audit_log'
-      `);
-      names = new Set(rows.map((row) => row.column_name));
-    } else {
-      const rows = await this.database.query<{ column_name: string }>(`
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'mcp_tool_audit_log'
-      `);
-      names = new Set(rows.map((row) => row.column_name));
-    }
-    const text = this.database.dialect === "mysql" ? "VARCHAR(128)" : "TEXT";
+    const rows = await this.database.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'mcp_tool_audit_log'
+    `);
+    const names = new Set(rows.map((row) => row.column_name));
     if (!names.has("protocol_request_id")) {
-      await this.database.run(`ALTER TABLE mcp_tool_audit_log ADD COLUMN protocol_request_id ${text} NULL`);
+      await this.database.run(
+        "ALTER TABLE mcp_tool_audit_log ADD COLUMN protocol_request_id TEXT NULL",
+      );
     }
     if (!names.has("session_hash")) {
-      const sessionType = this.database.dialect === "mysql" ? "VARCHAR(64)" : "TEXT";
-      await this.database.run(`ALTER TABLE mcp_tool_audit_log ADD COLUMN session_hash ${sessionType} NULL`);
+      await this.database.run("ALTER TABLE mcp_tool_audit_log ADD COLUMN session_hash TEXT NULL");
     }
   }
 
@@ -165,22 +128,13 @@ export class McpAuditRepository {
       Math.trunc(record.finishedAt),
       record.durationMs,
     ];
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        INSERT IGNORE INTO mcp_tool_audit_log (
-          audit_id, request_id, protocol_request_id, session_hash, tool_name, subject_hash, auth_mode, status,
-          error_code, run_id, started_at, finished_at, duration_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, values);
-    } else {
-      await this.database.run(`
-        INSERT INTO mcp_tool_audit_log (
-          audit_id, request_id, protocol_request_id, session_hash, tool_name, subject_hash, auth_mode, status,
-          error_code, run_id, started_at, finished_at, duration_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(request_id) DO NOTHING
-      `, values);
-    }
+    await this.database.run(`
+      INSERT INTO mcp_tool_audit_log (
+        audit_id, request_id, protocol_request_id, session_hash, tool_name, subject_hash, auth_mode, status,
+        error_code, run_id, started_at, finished_at, duration_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_id) DO NOTHING
+    `, values);
     const stored = await this.getByRequestId(record.requestId);
     if (!stored) throw new Error("MCP 호출 감사 로그를 저장하지 못했습니다.");
     return stored;

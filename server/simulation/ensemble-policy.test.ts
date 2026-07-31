@@ -24,7 +24,7 @@ function model(
 ): NormalizedPairModelOutput {
   return {
     normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
-    component: "kronos",
+    component: "chronos2",
     status,
     reasonCodes: status === "available" ? [] : [`model_${status}`],
     signalSymbol: "TSLA",
@@ -46,18 +46,18 @@ function model(
       warnings: [],
     },
     provenance: {
-      modelId: "NeoQuasar/Kronos-base",
+      modelId: "amazon/chronos-2",
       modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
       device: "cuda",
       deviceName: "Tesla P40",
       latencyMs: 180,
       loaded: status !== "unavailable",
     },
-    rawOutput: { role: "kronos_base" },
+    rawOutput: { role: "chronos2" },
   };
 }
 
-function models(kronos = model()): NormalizedPairModelSet {
+function models(chronos2 = model()): NormalizedPairModelSet {
   return {
     normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
     signalSymbol: "TSLA",
@@ -65,7 +65,7 @@ function models(kronos = model()): NormalizedPairModelSet {
     alignedOrigin: ORIGIN,
     alignmentStatus: "aligned",
     reasonCodes: [],
-    kronos,
+    chronos2,
     rawResponse: {},
   };
 }
@@ -115,14 +115,14 @@ function input(overrides: Partial<PairEnsembleInput> = {}): PairEnsembleInput {
   };
 }
 
-describe("Kronos-base and Rust pair ensemble policy", () => {
+describe("Chronos-2 and Rust pair ensemble policy", () => {
   it("uses an explicit aggressive versioned profile without hidden weight redistribution", () => {
     expect(validatePairEnsemblePolicyProfile(
       structuredClone(DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE),
     )).toMatchObject({
-      policyVersion: "pair-ensemble-policy/v3",
-      profileId: "aggressive-kronos-rust-v3",
-      weights: { kronos: 0.72, rust: 0.28 },
+      policyVersion: "pair-ensemble-policy/v4",
+      profileId: "aggressive-chronos2-rust-v4",
+      weights: { chronos2: 0.72, rust: 0.28 },
       entryScoreThreshold: 0.045,
       holdScoreThreshold: 0.01,
       minimumScoreMargin: 0.015,
@@ -134,7 +134,7 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
     })).toThrow(/profile values/);
   });
 
-  it("enters the leveraged bull leg when Kronos-base and Rust agree", () => {
+  it("enters the leveraged bull leg when Chronos-2 and Rust agree", () => {
     const decision = evaluatePairEnsemble(input());
     expect(decision).toMatchObject({
       direction: "bull",
@@ -144,16 +144,16 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
       degraded: false,
       origin: ORIGIN,
       eligibleAfter: DECISION,
-      weights: { kronos: 0.72, rust: 0.28 },
+      weights: { chronos2: 0.72, rust: 0.28 },
     });
     expect(decision.reasonCodes).toEqual(expect.arrayContaining([
-      "kronos_direction_actionable",
+      "chronos2_direction_actionable",
       "rust_direction_supports_ai",
       "cost_and_uncertainty_adjusted_score_passed",
     ]));
   });
 
-  it("uses Rust indicator direction/risk and Kronos target-before-stop evidence", () => {
+  it("uses Rust indicator direction/risk and Chronos2 target-before-stop evidence", () => {
     const base = model();
     const favorable = {
       ...base,
@@ -175,8 +175,8 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
       }),
     }));
     expect(decision.direction).toBe("bull");
-    expect(decision.componentScores.kronos.bull)
-      .toBeGreaterThan(evaluatePairEnsemble(input()).componentScores.kronos.bull);
+    expect(decision.componentScores.chronos2.bull)
+      .toBeGreaterThan(evaluatePairEnsemble(input()).componentScores.chronos2.bull);
     expect(decision.componentScores.rust.bull).toBeGreaterThan(0);
     expect(decision.exposureScale).toBeLessThanOrEqual(0.7);
   });
@@ -261,10 +261,10 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
     };
     const reliableDecision = evaluatePairEnsemble(input({ models: models(reliable) }));
     const unreliableDecision = evaluatePairEnsemble(input({ models: models(unreliable) }));
-    expect(reliableDecision.componentScores.kronos.pathReliability).toBe(1);
-    expect(unreliableDecision.componentScores.kronos.pathReliability).toBe(0.1);
-    expect(unreliableDecision.componentScores.kronos.bull)
-      .toBeLessThan(reliableDecision.componentScores.kronos.bull);
+    expect(reliableDecision.componentScores.chronos2.pathReliability).toBe(1);
+    expect(unreliableDecision.componentScores.chronos2.pathReliability).toBe(0.1);
+    expect(unreliableDecision.componentScores.chronos2.bull)
+      .toBeLessThan(reliableDecision.componentScores.chronos2.bull);
   });
 
   it("allows a high-risk reduced entry while Rust watch is genuinely neutral", () => {
@@ -322,14 +322,14 @@ describe("Kronos-base and Rust pair ensemble policy", () => {
       models: models(model(0.015, 0.75, "unavailable")),
     }));
     expect(unavailable.direction).toBe("cash");
-    expect(unavailable.reasonCodes).toContain("kronos_model_unavailable");
-    expect(unavailable.weights).toEqual({ kronos: 0.72, rust: 0.28 });
+    expect(unavailable.reasonCodes).toContain("chronos2_model_unavailable");
+    expect(unavailable.weights).toEqual({ chronos2: 0.72, rust: 0.28 });
 
     const degraded = evaluatePairEnsemble(input({
       models: models(model(0.015, 0.75, "degraded")),
     }));
     expect(degraded).toMatchObject({ direction: "cash", degraded: true });
-    expect(degraded.reasonCodes).toContain("kronos_model_degraded");
+    expect(degraded.reasonCodes).toContain("chronos2_model_degraded");
 
     const misaligned = models();
     misaligned.alignmentStatus = "misaligned";

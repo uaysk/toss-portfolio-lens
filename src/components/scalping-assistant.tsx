@@ -329,7 +329,7 @@ function PriceChart({ candidate, preset }: { candidate: ScalpingCandidate; prese
           {indicatorLines.map((line, index) => <Line key={line.key} dataKey={line.key} name={line.label} type="linear" dot={false} connectNulls={false} stroke={INDICATOR_LINE_COLORS[index % INDICATOR_LINE_COLORS.length]} strokeDasharray={index % 2 ? "5 3" : undefined} strokeWidth={1.25} isAnimationActive={false} />)}
           {finite(candidate.position?.averagePrice) ? <ReferenceLine y={candidate.position?.averagePrice} stroke="hsl(var(--foreground))" strokeWidth={1.4} label={{ value: "평균 매수가", fontSize: 8 }} /> : null}
           {markerPoints.map(({ marker, timestamp, price }) => (
-            <ReferenceDot key={marker.id} x={timestamp} y={price} ifOverflow="extendDomain" isFront shape={<TradeMarkerShape marker={marker} />} />
+            <ReferenceDot key={marker.id} x={timestamp} y={price} ifOverflow="extendDomain" shape={<TradeMarkerShape marker={marker} />} />
           ))}
         </ComposedChart>
       </ResponsiveContainer>

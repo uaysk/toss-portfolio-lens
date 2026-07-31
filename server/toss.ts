@@ -1,4 +1,4 @@
-import type { AppConfig } from "./env.js";
+import type { TossClientConfig } from "./contracts/toss-api.js";
 import { buildReadOnlyMarketPath, type MarketQuery, type ReadOnlyMarketFeature } from "./market.js";
 import {
   buildReadOnlyOrderDetailPath,
@@ -549,7 +549,7 @@ export class TossClient {
   private accountsCache?: CacheEntry<Account[]>;
   private readonly portfolioCache = new Map<string, CacheEntry<Portfolio>>();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(private readonly config: TossClientConfig) {}
 
   private async getAccessToken(): Promise<string> {
     if (this.config.tossApiAuthMode === "static_bearer") {

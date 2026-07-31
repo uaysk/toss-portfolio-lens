@@ -10,7 +10,7 @@ import { formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const LANE_LABELS: Record<AiSimulationStrategyComparisonLane["id"], string> = {
-  kronos: "Kronos-base",
+  chronos2: "Chronos-2",
   rust: "Rust 기술 지표",
   ensemble: "최종 전략",
 };
@@ -214,7 +214,7 @@ export function AiSimulationComparisonPanel({
         )}
         data-simulation-comparison-analytical-disclosure
       >
-        모든 lane의 비교 성과는 분석·검증용이며, 실제 가상 원장은 Kronos-base와 Rust를 결합한 최종 전략만 사용합니다.
+        모든 lane의 비교 성과는 분석·검증용이며, 실제 가상 원장은 Chronos-2와 Rust를 결합한 최종 전략만 사용합니다.
       </p>
       <div className={cn("grid grid-cols-1 gap-2 sm:grid-cols-3", compact ? "mt-2" : "mt-4")}>
         {comparison.lanes.map((lane) => (

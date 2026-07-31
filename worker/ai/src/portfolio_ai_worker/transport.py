@@ -24,8 +24,8 @@ from websockets.http11 import Request, Response
 from .contracts import AI_REQUEST_ADAPTER, AI_RESPONSE_ADAPTER, REQUEST_ID_RE, AIRequest, AIResponse
 from .service import AIService
 
-TRANSPORT_VERSION = "scalping-ai-ws/v1"
-SUBPROTOCOL = "scalping-ai-ws.v1"
+TRANSPORT_VERSION = "scalping-ai-ws/v2"
+SUBPROTOCOL = "scalping-ai-ws.v2"
 HEALTH_PATH = "/health/live"
 MINIMUM_AUTH_TOKEN_BYTES = 32
 MAXIMUM_AUTH_TOKEN_BYTES = 4_096

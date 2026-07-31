@@ -24,7 +24,7 @@ function observation(
       bear: { executionSymbol: "TSLQ", grossReturn: index === 0 ? -0.025 : 0.025 },
     },
     lanes: {
-      kronos: {
+      chronos2: {
         status: "available",
         direction: index === 0 ? "bull" : "bear",
         executionSymbol: index === 0 ? "TSLL" : "TSLQ",
@@ -103,7 +103,7 @@ describe("pair strategy comparison", () => {
       sameExecutionPolicy: true,
       common: { originCount: 2, initialCapital: 100_000 },
     });
-    expect(Object.keys(result.lanes)).toEqual(["kronos", "rust", "ensemble"]);
+    expect(Object.keys(result.lanes)).toEqual(["chronos2", "rust", "ensemble"]);
     expect(result.lanes.ensemble).toMatchObject({
       status: "available",
       analyticalOnly: true,
@@ -113,7 +113,7 @@ describe("pair strategy comparison", () => {
       executionSelectionAccuracy: 1,
       tradeCount: 2,
     });
-    expect(result.lanes.kronos.analyticalOnly).toBe(true);
+    expect(result.lanes.chronos2.analyticalOnly).toBe(true);
     expect(result.lanes.ensemble.netReturn).toBeLessThan(
       result.lanes.ensemble.cumulativeReturn,
     );
@@ -124,14 +124,14 @@ describe("pair strategy comparison", () => {
 
   it("reports unavailable/calibration ratios and model latency without fabricating results", () => {
     const missing = observation(1);
-    missing.lanes.kronos = {
+    missing.lanes.chronos2 = {
       status: "unavailable",
       unavailableReason: "model_cache_missing",
       calibrationStatus: "unavailable",
       latencyMs: 10,
     };
     const result = comparePairStrategies({ ...input, observations: [observation(0), missing] });
-    expect(result.lanes.kronos).toMatchObject({
+    expect(result.lanes.chronos2).toMatchObject({
       status: "partial",
       availableCount: 1,
       unavailableCount: 1,
@@ -155,11 +155,11 @@ describe("pair strategy comparison", () => {
     const missing = observation(0) as unknown as {
       lanes: Partial<PairStrategyComparisonObservation["lanes"]>;
     };
-    delete missing.lanes.kronos;
+    delete missing.lanes.chronos2;
     expect(() => comparePairStrategies({
       ...input,
       observations: [missing as PairStrategyComparisonObservation],
-    })).toThrow(/explicit kronos lane status/);
+    })).toThrow(/explicit chronos2 lane status/);
     expect(() => comparePairStrategies({
       ...input,
       observations: [observation(0), observation(0)],

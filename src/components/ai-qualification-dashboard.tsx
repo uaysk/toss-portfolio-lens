@@ -666,7 +666,7 @@ function CadenceContextSummary({
                     {item.model}
                   </p>
                   <p className="mt-0.5 text-[8px] font-black uppercase tracking-wide text-white/25">
-                    {item.planRole ?? "legacy"} · {item.screeningStatus ?? "legacy"}
+                    {item.planRole ?? "unassigned"} · {item.screeningStatus ?? "unavailable"}
                   </p>
                 </div>
                 <span className={cn("rounded-full px-2 py-0.5 text-[9px] font-black", statusClass)}>
@@ -961,9 +961,6 @@ export function AiQualificationRunView({
   const highVolExperiment = state.experiment?.kind === "high-volatility-profitability-backtest"
     ? state.experiment
     : undefined;
-  const kronosSteps = state.steps.filter((step) => (
-    step.id.startsWith("replay-base") || step.id.startsWith("replay-cache")
-  ));
   const fincastSteps = state.steps.filter((step) => step.id.startsWith("fincast-batch"));
   const cudaGraphSteps = state.steps.filter((step) => step.id.startsWith("cuda-graph"));
   const tensorRtSteps = state.steps.filter((step) => step.id.startsWith("tensorrt"));
@@ -1210,9 +1207,9 @@ export function AiQualificationRunView({
           ) : (
             <>
               <LaneSummary
-                title="Kronos-Base"
-                subtitle="base vs kv-cache-v1 · 48시간 BTC/ETH"
-                steps={kronosSteps}
+                title="Chronos-2"
+                subtitle="FP32 · canonical challenger lane"
+                steps={chronos2Steps}
               />
               <LaneSummary
                 title="FinCast"

@@ -41,12 +41,10 @@ class AISettings:
     max_evaluation_origins: int
     min_context_bars: int
     max_context_bars: int
-    sample_count: int
     max_request_bytes: int
     max_response_bytes: int
     model_lane: str = "fincast"
     cross_request_microbatch: bool = False
-    kronos_kv_cache_enabled: bool = False
     chronos2_input_profile: str = "compact_causal_v1"
     chronos2_batch_size: int = 32
     chronos2_context_bars: int = 1024
@@ -56,7 +54,7 @@ class AISettings:
     fincast_nvml_device_index: int = 0
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 8765
-    websocket_path: str = "/ws/scalping-ai/v1"
+    websocket_path: str = "/ws/scalping-ai/v2"
     websocket_auth_token_file: Path = Path("/app/ai-auth/token")
     websocket_generate_auth_token: bool = False
     websocket_max_connections: int = 16
@@ -81,8 +79,8 @@ class AISettings:
         if not expected_device_name:
             raise ValueError("AI_EXPECTED_CUDA_DEVICE_NAME cannot be empty")
         model_lane = os.getenv("AI_MODEL_LANE", "fincast").strip().lower()
-        if model_lane not in {"kronos_base", "fincast", "chronos_2"}:
-            raise ValueError("AI_MODEL_LANE must be kronos_base, fincast, or chronos_2")
+        if model_lane not in {"fincast", "chronos_2"}:
+            raise ValueError("AI_MODEL_LANE must be fincast or chronos_2")
         return cls(
             model_cache_dir=Path(os.getenv("AI_MODEL_CACHE_DIR", "/models")),
             manifest_path=Path(os.getenv("AI_MODEL_MANIFEST", str(package_root / "model-manifest.json"))),
@@ -95,7 +93,7 @@ class AISettings:
             max_evaluation_origins=_bounded_int("AI_MAX_EVALUATION_ORIGINS", 10_000, 1, 1_000_000),
             min_context_bars=_bounded_int(
                 "AI_MIN_CONTEXT_BARS",
-                1024 if model_lane == "chronos_2" else 512 if model_lane == "fincast" else 64,
+                1024 if model_lane == "chronos_2" else 512,
                 8,
                 8_192,
             ),
@@ -105,12 +103,10 @@ class AISettings:
                 8,
                 8_192,
             ),
-            sample_count=_bounded_int("AI_KRONOS_SAMPLE_COUNT", 20, 2, 256),
             max_request_bytes=_bounded_int("AI_MAX_REQUEST_BYTES", 64 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             max_response_bytes=_bounded_int("AI_MAX_RESPONSE_BYTES", 128 * 1024 * 1024, 1_024, 512 * 1024 * 1024),
             model_lane=model_lane,
             cross_request_microbatch=_boolean("AI_CROSS_REQUEST_MICROBATCH", False),
-            kronos_kv_cache_enabled=_boolean("AI_KRONOS_KV_CACHE_ENABLED", False),
             chronos2_input_profile=os.getenv(
                 "AI_CHRONOS2_INPUT_PROFILE",
                 "compact_causal_v1",
@@ -137,7 +133,7 @@ class AISettings:
             fincast_nvml_device_index=_bounded_int("AI_FINCAST_NVML_DEVICE_INDEX", 0, 0, 64),
             websocket_host=os.getenv("AI_WEBSOCKET_HOST", "127.0.0.1").strip(),
             websocket_port=_bounded_int("AI_WEBSOCKET_PORT", 8765, 1, 65_535),
-            websocket_path=os.getenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v1").strip(),
+            websocket_path=os.getenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v2").strip(),
             websocket_auth_token_file=Path(os.getenv("AI_WEBSOCKET_AUTH_TOKEN_FILE", "/app/ai-auth/token")),
             websocket_generate_auth_token=_boolean("AI_WEBSOCKET_GENERATE_AUTH_TOKEN", False),
             websocket_max_connections=_bounded_int("AI_WEBSOCKET_MAX_CONNECTIONS", 16, 1, 1_024),
@@ -157,8 +153,8 @@ class AISettings:
     def validate(self) -> "AISettings":
         if self.min_context_bars > self.max_context_bars:
             raise ValueError("AI_MIN_CONTEXT_BARS cannot exceed AI_MAX_CONTEXT_BARS")
-        if self.model_lane not in {"kronos_base", "fincast", "chronos_2"}:
-            raise ValueError("AI_MODEL_LANE must be kronos_base, fincast, or chronos_2")
+        if self.model_lane not in {"fincast", "chronos_2"}:
+            raise ValueError("AI_MODEL_LANE must be fincast or chronos_2")
         if self.chronos2_input_profile not in {
             "close_only",
             "ohlcv_calendar",
@@ -191,8 +187,8 @@ class AISettings:
             raise ValueError("AI expected CUDA device name cannot be empty")
         if not self.websocket_host:
             raise ValueError("AI_WEBSOCKET_HOST cannot be empty")
-        if self.websocket_path != "/ws/scalping-ai/v1":
-            raise ValueError("AI_WEBSOCKET_PATH must be /ws/scalping-ai/v1")
+        if self.websocket_path != "/ws/scalping-ai/v2":
+            raise ValueError("AI_WEBSOCKET_PATH must be /ws/scalping-ai/v2")
         if not self.websocket_auth_token_file.is_absolute():
             raise ValueError("AI_WEBSOCKET_AUTH_TOKEN_FILE must be absolute")
         if (self.websocket_tls_cert_file is None) != (self.websocket_tls_key_file is None):

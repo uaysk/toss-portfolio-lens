@@ -687,7 +687,6 @@ fn evaluate_candidate(frame: &Frame, weights: &Weights, options: &EvaluationOpti
     metrics.insert("robustScore".to_owned(), Value::Null);
     metrics.insert("cagr".to_owned(), nullable(cagr));
     metrics.insert("totalReturn".to_owned(), nullable(cumulative));
-    metrics.insert("return".to_owned(), nullable(cagr));
     metrics.insert("maxDrawdown".to_owned(), nullable(max_drawdown));
     metrics.insert("turnover".to_owned(), json!(turnover));
     metrics.insert("transactionCost".to_owned(), json!(transaction_cost));
@@ -889,7 +888,7 @@ fn candidate_is_valid(
     {
         return false;
     }
-    if as_metric(candidate, "return").is_some_and(|value| value < constraints.target_return) {
+    if as_metric(candidate, "cagr").is_some_and(|value| value < constraints.target_return) {
         return false;
     }
     !as_metric(candidate, "turnover").is_some_and(|value| value > constraints.max_turnover)
@@ -1418,9 +1417,8 @@ pub fn optimize_with_control(input: &Value, control: Option<&dyn ComputeControl>
             "seed": seed,
             "searchObjective": objective,
             "searchProxy": search_proxy,
-            "paretoObjectiveSpace": ["return", "volatility", "maxDrawdown", "cvar", "turnover", "transactionCost"],
+            "paretoObjectiveSpace": ["cagr", "volatility", "maxDrawdown", "cvar", "turnover", "transactionCost"],
             "objectiveFormulaVersion": "optimization-objectives/v2",
-            "returnCompatibilityAlias": "cagr",
         },
         "covarianceEstimator": covariance_estimator,
         "baselines": config.baseline_names,
@@ -2490,19 +2488,15 @@ mod tests {
                 > 0.0
         );
         assert!(
-            costly_candidate["metrics"]["return"].as_f64().unwrap()
-                < zero_candidate["metrics"]["return"].as_f64().unwrap()
+            costly_candidate["metrics"]["cagr"].as_f64().unwrap()
+                < zero_candidate["metrics"]["cagr"].as_f64().unwrap()
         );
     }
 
-    fn pareto_candidate(
-        portfolio_return: Option<f64>,
-        volatility: Option<f64>,
-        turnover: f64,
-    ) -> Value {
+    fn pareto_candidate(cagr: Option<f64>, volatility: Option<f64>, turnover: f64) -> Value {
         json!({
             "metrics": {
-                "return": portfolio_return,
+                "cagr": cagr,
                 "volatility": volatility,
                 "maxDrawdown": null,
                 "cvar": null,
@@ -2527,7 +2521,7 @@ mod tests {
             .map(|index| {
                 let index = index as f64;
                 json!({"metrics": {
-                    "return": index.sin() * 0.1,
+                    "cagr": index.sin() * 0.1,
                     "volatility": 0.05 + (index * 1.7).cos().abs() * 0.2,
                     "maxDrawdown": -0.02 - (index * 0.3).sin().abs() * 0.3,
                     "cvar": -0.01 - (index * 0.11).cos().abs() * 0.08,
@@ -2560,7 +2554,7 @@ mod tests {
             .map(|index| {
                 let value = index as f64;
                 json!({"metrics": {
-                    "return": value,
+                    "cagr": value,
                     "volatility": 2_000.0 - value,
                     "maxDrawdown": -(2_000.0 - value),
                     "cvar": -(2_000.0 - value),

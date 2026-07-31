@@ -1,10 +1,5 @@
 {
   "schema_version": "scalping-ai-model-manifest/v2",
-  "kronos_source": {
-    "repository": "https://github.com/shiyu-coder/Kronos",
-    "revision": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
-    "license": "MIT"
-  },
   "fincast_source": {
     "repository": "https://github.com/vincent05r/FinCast-fts",
     "revision": "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
@@ -32,14 +27,6 @@
     "sha256": "c8dc23c7e0013d85732af1dee2785263b42c7384fc1a9a0f73bfdbb0d5061244"
   },
   "models": {
-    "kronos-base": {
-      "model_id": "NeoQuasar/Kronos-base",
-      "revision": "2b554741eca47781b64468546e77fef3e85130e6",
-      "tokenizer_id": "NeoQuasar/Kronos-Tokenizer-base",
-      "tokenizer_revision": "0e0117387f39004a9016484a186a908917e22426",
-      "license": "MIT",
-      "loader_version": "kronos-source-67b630e"
-    },
     "fincast": {
       "model_id": "Vincent05R/FinCast",
       "revision": "2d7d90b159db8961d27c2cf165d51195902ef92b",

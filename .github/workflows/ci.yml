@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  node:
+  node-static:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -19,9 +19,118 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run test:release-tools
+      - name: Build and record TypeScript diagnostics
+        run: npm run check | tee typescript-diagnostics.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-static-performance
+          path: |
+            typescript-diagnostics.txt
+            .cache/performance/bundle-report.json
+          if-no-files-found: error
       - run: docker build --target verify .
       - run: docker build --target runtime-verify .
+
+  node-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VITEST_MEMORY_BUDGET_MB: "4096"
+      VITEST_MAX_PARALLEL: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/run-vitest-batches.test.mjs
+      - run: npm run test:unit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vitest-unit-performance
+          path: .cache/performance/vitest-batches.json
+          if-no-files-found: error
+
+  node-pglite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VITEST_MEMORY_BUDGET_MB: "2048"
+      VITEST_MAX_PARALLEL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:pglite
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vitest-pglite-performance
+          path: .cache/performance/vitest-batches.json
+          if-no-files-found: error
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: portfolio_test
+          POSTGRES_PASSWORD: integration-password
+          POSTGRES_DB: portfolio_lens_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portfolio_test -d portfolio_lens_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NODE_ENV: test
+      HOST: 127.0.0.1
+      CLIENT_ID: ci-client
+      CLIENT_SECRET: ci-client-secret
+      DASHBOARD_PASSWORD: ci-dashboard-password
+      READ_ONLY_API_TOKEN: ci-read-only-api-token
+      SESSION_SECRET: ci-session-secret-at-least-thirty-two-characters
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: portfolio_test
+      POSTGRES_PASSWORD: integration-password
+      POSTGRES_DATABASE: portfolio_lens_test
+      POSTGRES_TEST_HOST: 127.0.0.1
+      POSTGRES_TEST_PORT: 5432
+      POSTGRES_TEST_USER: portfolio_test
+      POSTGRES_TEST_PASSWORD: integration-password
+      POSTGRES_TEST_DATABASE: portfolio_lens_test
+      SCALPING_ENABLED: "false"
+      MCP_ENABLED: "false"
+      AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: /run/fincast-auth/token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker/rust
+      - run: npm ci
+      - run: npm run test:postgres
+      - run: npm run test:worker-queue
+      - run: cargo build --release --locked --manifest-path worker/rust/Cargo.toml
+      - run: npm run test:rust-worker-postgres
 
   rust:
     runs-on: ubuntu-latest
@@ -41,6 +150,16 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Benchmark indicator cache
+        env:
+          INDICATOR_BENCH_OUTPUT: ../../.cache/performance/rust-indicator-cache.json
+        run: cargo run --release --locked --example indicator_cache_benchmark
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-indicator-performance
+          path: .cache/performance/rust-indicator-cache.json
+          if-no-files-found: error
 
   python-ai-contract:
     runs-on: ubuntu-latest

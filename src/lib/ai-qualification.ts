@@ -20,7 +20,7 @@ export type QualificationStep = {
   order: number;
   label: string;
   description: string;
-  model: "system" | "kronos-base" | "chronos-2" | "fincast" | "comparison";
+  model: "system" | "chronos-2" | "fincast" | "comparison";
   variant: string;
   status: QualificationStepStatus;
   estimatedDurationMs: number;

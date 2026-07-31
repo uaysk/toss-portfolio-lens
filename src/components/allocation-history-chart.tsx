@@ -4,9 +4,10 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
-  Customized,
   ResponsiveContainer,
   Tooltip,
+  usePlotArea,
+  useYAxisScale,
   XAxis,
   YAxis,
 } from "recharts";
@@ -49,8 +50,6 @@ const ranges: Array<{ value: HistoryRange; label: string }> = [
 
 type ActiveAreaLabelsProps = {
   hoveredPoint?: { index: number; x: number };
-  offset?: { left?: number; top?: number; width?: number; height?: number };
-  yAxisMap?: Record<string, { scale?: unknown }>;
   chartData: ValueChartPoint[];
   series: PortfolioHistorySeries[];
 };
@@ -63,19 +62,17 @@ function estimateLabelWidth(name: string): number {
 
 function ActiveAreaLabels({
   hoveredPoint,
-  offset,
-  yAxisMap,
   chartData,
   series,
 }: ActiveAreaLabelsProps) {
+  const plotArea = usePlotArea();
+  const scale = useYAxisScale();
   if (!hoveredPoint) return null;
   const row = chartData[hoveredPoint.index];
-  const yAxis = Object.values(yAxisMap ?? {}).find((axis) => typeof axis.scale === "function");
-  const scale = yAxis?.scale;
-  const plotLeft = offset?.left;
-  const plotTop = offset?.top;
-  const plotWidth = offset?.width;
-  const plotHeight = offset?.height;
+  const plotLeft = plotArea?.x;
+  const plotTop = plotArea?.y;
+  const plotWidth = plotArea?.width;
+  const plotHeight = plotArea?.height;
   const activeX = hoveredPoint.x;
   if (
     !row
@@ -542,14 +539,10 @@ export function AllocationHistoryChart({
                     isAnimationActive={false}
                   />
                 ))}
-                <Customized
-                  component={(
-                    <ActiveAreaLabels
-                      chartData={chartData}
-                      hoveredPoint={hoveredPoint}
-                      series={series}
-                    />
-                  )}
+                <ActiveAreaLabels
+                  chartData={chartData}
+                  hoveredPoint={hoveredPoint}
+                  series={series}
                 />
               </AreaChart>
             </ResponsiveContainer>

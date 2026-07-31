@@ -1,5 +1,6 @@
 export type CandidateMetricKey =
-  | "return"
+  | "cagr"
+  | "totalReturn"
   | "volatility"
   | "maxDrawdown"
   | "sharpe"
@@ -62,7 +63,8 @@ export function candidateSignature(value: unknown): string {
 }
 
 const metricAliases: Record<CandidateMetricKey, string[]> = {
-  return: ["return", "cagr", "annualizedReturn"],
+  cagr: ["cagr"],
+  totalReturn: ["totalReturn"],
   volatility: ["volatility", "annualizedVolatility"],
   maxDrawdown: ["maxDrawdown", "drawdown"],
   sharpe: ["sharpe", "sharpeRatio"],

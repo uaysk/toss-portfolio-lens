@@ -91,26 +91,6 @@ export class ArtifactRepository {
   ) {}
 
   async initialize(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_backtest_artifacts (
-          artifact_id VARCHAR(64) PRIMARY KEY,
-          run_id VARCHAR(64) NOT NULL,
-          artifact_type VARCHAR(64) NOT NULL,
-          content_json LONGTEXT NOT NULL,
-          row_count INT NOT NULL,
-          byte_count BIGINT NOT NULL,
-          checksum VARCHAR(128) NOT NULL,
-          generated_at VARCHAR(40) NOT NULL,
-          schema_version VARCHAR(64) NOT NULL,
-          data_revision VARCHAR(128) NOT NULL,
-          UNIQUE KEY uq_portfolio_artifact_type (run_id, artifact_type),
-          CONSTRAINT fk_portfolio_artifact_run FOREIGN KEY (run_id)
-            REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      return;
-    }
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_backtest_artifacts (
         artifact_id TEXT PRIMARY KEY,
@@ -156,31 +136,17 @@ export class ArtifactRepository {
       input.dataRevision,
     ];
     const storageStartedAt = performance.now();
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        INSERT INTO portfolio_backtest_artifacts (
-          artifact_id, run_id, artifact_type, content_json, row_count, byte_count,
-          checksum, generated_at, schema_version, data_revision
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          content_json = VALUES(content_json), row_count = VALUES(row_count),
-          byte_count = VALUES(byte_count), checksum = VALUES(checksum),
-          generated_at = VALUES(generated_at), schema_version = VALUES(schema_version),
-          data_revision = VALUES(data_revision)
-      `, values);
-    } else {
-      await this.database.run(`
-        INSERT INTO portfolio_backtest_artifacts (
-          artifact_id, run_id, artifact_type, content_json, row_count, byte_count,
-          checksum, generated_at, schema_version, data_revision
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, artifact_type) DO UPDATE SET
-          content_json = excluded.content_json, row_count = excluded.row_count,
-          byte_count = excluded.byte_count, checksum = excluded.checksum,
-          generated_at = excluded.generated_at, schema_version = excluded.schema_version,
-          data_revision = excluded.data_revision
-      `, values);
-    }
+    await this.database.run(`
+      INSERT INTO portfolio_backtest_artifacts (
+        artifact_id, run_id, artifact_type, content_json, row_count, byte_count,
+        checksum, generated_at, schema_version, data_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id, artifact_type) DO UPDATE SET
+        content_json = excluded.content_json, row_count = excluded.row_count,
+        byte_count = excluded.byte_count, checksum = excluded.checksum,
+        generated_at = excluded.generated_at, schema_version = excluded.schema_version,
+        data_revision = excluded.data_revision
+    `, values);
     const stored = await this.getDescriptor(input.runId, input.type);
     if (!stored) throw new Error("artifact를 저장하지 못했습니다.");
     this.telemetry?.recordArtifactWrite({

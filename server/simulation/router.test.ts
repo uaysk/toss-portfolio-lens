@@ -209,23 +209,38 @@ describe("AI paper simulation session-only router", () => {
     }));
   });
 
-  it("validates and starts a simulation with defaults under the configured owner", async () => {
+  it("accepts only a canonical v9 request and resolves the model plan on the server", async () => {
     const api = service();
     const created = router({ service: api });
     const response = mockResponse();
     await routeHandler(created.value, "/runs", "post")({
       body: {
+        contractVersion: "ai-paper-simulation/v9",
+        simulationCase: "us_etf_pair",
+        market: { kind: "stock", country: "US" },
         initialCash: 1_000_000,
         durationMinutes: 30,
-        selection: { mode: "auto", symbolCount: 2 },
+        selection: {
+          mode: "auto",
+          criterion: "trading_amount",
+          symbolCount: 2,
+        },
+        strategy: {
+          mode: "pair",
+          pairId: "qqq-tqqq-sqqq",
+          allowDegradedMode: false,
+        },
+        execution: { mode: "paper" },
       },
     }, response);
 
-    expect(api.start).toHaveBeenCalledWith({
-      contractVersion: "ai-paper-simulation/v8",
-      sourceContractVersion: "ai-paper-simulation/v7",
-      marketCountry: "KR",
-      market: { kind: "stock", country: "KR" },
+    expect(api.start).toHaveBeenCalledOnce();
+    const [parsed, owner] = vi.mocked(api.start).mock.calls[0]!;
+    expect(owner).toBe("owner");
+    expect(parsed).toMatchObject({
+      contractVersion: "ai-paper-simulation/v9",
+      simulationCase: "us_etf_pair",
+      market: { kind: "stock", country: "US" },
       initialCash: 1_000_000,
       durationMinutes: 30,
       selection: {
@@ -236,32 +251,42 @@ describe("AI paper simulation session-only router", () => {
       preset: "risk_management",
       riskTolerance: 50,
       costs: {
-        commissionBpsPerSide: 1.5,
-        taxBpsOnExit: 20,
+        commissionBpsPerSide: 10,
+        taxBpsOnExit: 0,
         spreadBpsRoundTrip: 5,
         slippageBpsPerSide: 2,
       },
-      modelLanes: ["fincast"],
-      modelPlan: [{
+      modelLanes: ["chronos2", "fincast"],
+      resolvedModelPlan: [{
         symbol: "*",
-        modelLane: "fincast",
+        modelLane: "chronos2",
         role: "primary",
         required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }, {
+        symbol: "*",
+        modelLane: "fincast",
+        role: "shadow",
+        required: false,
         preferredHorizonsMinutes: [15, 30, 60],
       }],
       fincastCandleSeconds: 60,
       execution: { mode: "paper" },
-    }, "owner");
+    });
+    expect(parsed.contractVersion).toBe("ai-paper-simulation/v9");
+    expect(Object.keys(parsed)).not.toContain("marketCountry");
+    expect(Object.keys(parsed)).not.toContain("sourceContractVersion");
+    expect(Object.keys(parsed)).not.toContain("modelPlan");
     expect(response.status).toHaveBeenCalledWith(202);
   });
 
-  it("accepts the explicit v8 BTC·ETH modelPlan emitted by the simulation UI", async () => {
+  it("derives the canonical BTC·ETH plan instead of accepting a client model plan", async () => {
     const api = service();
     const created = router({ service: api });
     const response = mockResponse();
     await routeHandler(created.value, "/runs", "post")({
       body: {
-        contractVersion: "ai-paper-simulation/v8",
+        contractVersion: "ai-paper-simulation/v9",
         simulationCase: "btc_eth",
         market: {
           kind: "crypto_futures",
@@ -289,54 +314,24 @@ describe("AI paper simulation session-only router", () => {
           marginUsageLimitRate: 0.2,
           liquidationBufferMultiple: 2,
         },
-        modelLanes: ["chronos2", "fincast"],
-        modelPlan: [
-          {
-            symbol: "BTCUSDT",
-            modelLane: "chronos2",
-            role: "primary",
-            required: true,
-            preferredHorizonsMinutes: [30, 60, 15],
-          },
-          {
-            symbol: "BTCUSDT",
-            modelLane: "fincast",
-            role: "veto",
-            required: true,
-            preferredHorizonsMinutes: [30, 60, 15],
-          },
-          {
-            symbol: "ETHUSDT",
-            modelLane: "fincast",
-            role: "primary",
-            required: true,
-            preferredHorizonsMinutes: [15, 30, 60],
-          },
-          {
-            symbol: "ETHUSDT",
-            modelLane: "chronos2",
-            role: "shadow",
-            required: false,
-            preferredHorizonsMinutes: [15, 30, 60],
-          },
-        ],
         fincastCandleSeconds: 60,
         execution: { mode: "paper" },
       },
     }, response);
 
     expect(api.start).toHaveBeenCalledWith(expect.objectContaining({
-      contractVersion: "ai-paper-simulation/v8",
-      sourceContractVersion: "ai-paper-simulation/v8",
+      contractVersion: "ai-paper-simulation/v9",
       simulationCase: "btc_eth",
       modelLanes: ["chronos2", "fincast"],
-      modelPlan: expect.arrayContaining([
+      resolvedModelPlan: expect.arrayContaining([
         expect.objectContaining({ symbol: "BTCUSDT", modelLane: "chronos2", role: "primary" }),
         expect.objectContaining({ symbol: "BTCUSDT", modelLane: "fincast", role: "veto" }),
         expect.objectContaining({ symbol: "ETHUSDT", modelLane: "fincast", role: "primary" }),
         expect.objectContaining({ symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow" }),
       ]),
     }), "owner");
+    const [parsed] = vi.mocked(api.start).mock.calls[0]!;
+    expect(Object.keys(parsed)).not.toContain("modelPlan");
     expect(response.status).toHaveBeenCalledWith(202);
   });
 

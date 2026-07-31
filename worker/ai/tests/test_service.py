@@ -23,7 +23,14 @@ from portfolio_ai_worker.contracts import (
 )
 from portfolio_ai_worker.service import AIService, _canonical_input_digest
 
-from .helpers import DeterministicAdapter, bars, future, settings
+from .helpers import (
+    DeterministicAdapter,
+    bars,
+    fincast_provenance,
+    future,
+    provenance,
+    settings,
+)
 
 
 def _series(key: str, count: int = 80) -> ForecastSeries:
@@ -68,8 +75,12 @@ def _native_series(
 
 
 class _CadenceFailingAdapter(DeterministicAdapter):
-    def __init__(self, failing_candle_seconds: int) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        failing_candle_seconds: int,
+        model_provenance: ModelProvenance | None = None,
+    ) -> None:
+        super().__init__(model_provenance)
         self.failing_candle_seconds = failing_candle_seconds
         self.attempts: list[tuple[InferenceSeries, ...]] = []
 
@@ -92,20 +103,7 @@ class _CadenceFailingAdapter(DeterministicAdapter):
 
 
 def _model(*, loaded: bool = True) -> ModelProvenance:
-    return ModelProvenance(
-        model_id="NeoQuasar/Kronos-base",
-        model_revision="pinned-test-revision",
-        tokenizer_id="NeoQuasar/Kronos-Tokenizer-base",
-        tokenizer_revision="pinned-tokenizer-revision",
-        source_revision="pinned-test-source",
-        loader_version="test-loader",
-        license="MIT",
-        device="cpu" if loaded else "unavailable",
-        dtype="float32",
-        attention_backend="math" if loaded else "unavailable",
-        loaded=loaded,
-        quantile_monotonicity_policy="native" if loaded else "unavailable",
-    )
+    return provenance(loaded=loaded)
 
 
 def test_service_microbatches_and_returns_partial_unavailable_without_fabrication(tmp_path) -> None:
@@ -114,7 +112,7 @@ def test_service_microbatches_and_returns_partial_unavailable_without_fabricatio
     requested = tuple(_series(f"KRX:{index:06d}") for index in range(5)) + (_series("KRX:SHORT", 20),)
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="batch-1",
             mode="forecast",
             series=requested,
@@ -131,14 +129,15 @@ def test_service_microbatches_and_returns_partial_unavailable_without_fabricatio
     assert response.series[-1].unavailable.code == "INSUFFICIENT_HISTORY"
 
 
-def test_kronos_microbatching_remains_cadence_agnostic(tmp_path) -> None:
+def test_chronos2_microbatching_remains_cadence_agnostic(tmp_path) -> None:
     adapter = DeterministicAdapter()
     service = AIService(
         settings(
             tmp_path,
-            model_lane="kronos_base",
+            model_lane="chronos_2",
             min_context_bars=64,
-            max_context_bars=128,
+            max_context_bars=512,
+            chronos2_context_bars=512,
             microbatch_size=2,
         ),
         adapter,
@@ -150,8 +149,8 @@ def test_kronos_microbatching_remains_cadence_agnostic(tmp_path) -> None:
 
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
-            request_id="kronos-monolithic-cadence-regression",
+            schema_version="scalping-ai/v2",
+            request_id="chronos2-monolithic-cadence-regression",
             mode="forecast",
             series=requested,
         )
@@ -166,7 +165,10 @@ def test_kronos_microbatching_remains_cadence_agnostic(tmp_path) -> None:
 
 
 def test_fincast_mixed_cadences_are_isolated_before_inference(tmp_path) -> None:
-    adapter = _CadenceFailingAdapter(failing_candle_seconds=30)
+    adapter = _CadenceFailingAdapter(
+        failing_candle_seconds=30,
+        model_provenance=fincast_provenance(),
+    )
     service = AIService(
         settings(
             tmp_path,
@@ -186,7 +188,7 @@ def test_fincast_mixed_cadences_are_isolated_before_inference(tmp_path) -> None:
 
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="fincast-mixed-cadence-isolation",
             mode="forecast",
             series=requested,
@@ -216,7 +218,10 @@ def test_fincast_mixed_cadences_are_isolated_before_inference(tmp_path) -> None:
 
 
 def test_fincast_replay_origins_are_processed_in_microbatches_of_four(tmp_path) -> None:
-    adapter = _CadenceFailingAdapter(failing_candle_seconds=30)
+    adapter = _CadenceFailingAdapter(
+        failing_candle_seconds=30,
+        model_provenance=fincast_provenance(),
+    )
     service = AIService(
         settings(
             tmp_path,
@@ -234,7 +239,7 @@ def test_fincast_replay_origins_are_processed_in_microbatches_of_four(tmp_path) 
 
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="fincast-microbatch-four",
             mode="forecast",
             series=requested,
@@ -257,7 +262,7 @@ def test_realtime_forecast_returns_only_requested_horizons(tmp_path) -> None:
     )
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="realtime-horizon-profile",
             mode="forecast",
             forecast_profile="realtime_5_15",
@@ -274,7 +279,7 @@ def test_realtime_forecast_returns_only_requested_horizons(tmp_path) -> None:
 def test_service_enforces_environment_backed_series_limit(tmp_path) -> None:
     service = AIService(settings(tmp_path, max_series=1), DeterministicAdapter())
     request = ForecastRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id="batch-limit",
         mode="forecast",
         series=(_series("KRX:1"), _series("KRX:2")),
@@ -286,28 +291,28 @@ def test_service_enforces_environment_backed_series_limit(tmp_path) -> None:
     assert response.series == ()
 
 
-def test_single_kronos_base_run_records_exact_confirmed_bar_origin(tmp_path) -> None:
-    kronos = DeterministicAdapter(_model())
-    bindings = (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", kronos),)
-    service = AIService(settings(tmp_path), kronos, bindings)
+def test_single_chronos_2_run_records_exact_confirmed_bar_origin(tmp_path) -> None:
+    chronos2 = DeterministicAdapter(_model())
+    bindings = (ProductionModelBinding("chronos_2", "amazon/chronos-2", chronos2),)
+    service = AIService(settings(tmp_path), chronos2, bindings)
     requested = _series("US:TSLA", 180)
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
-            request_id="kronos-base-origin",
+            schema_version="scalping-ai/v2",
+            request_id="chronos2-base-origin",
             mode="forecast",
             series=(requested,),
         )
     )
 
     assert response.model_runs is not None
-    assert tuple(run.role for run in response.model_runs) == ("kronos_base",)
+    assert tuple(run.role for run in response.model_runs) == ("chronos_2",)
     run = response.model_runs[0]
     input_origin = run.input_origins[0]
     expected_context = requested.bars[-service.settings.max_context_bars :]
     assert input_origin.context_start_at == expected_context[0].timestamp
     assert input_origin.input_end_at == requested.input_end_at
-    assert input_origin.bar_count == service.settings.max_context_bars
+    assert input_origin.bar_count == len(expected_context)
     assert input_origin.input_digest == _canonical_input_digest(expected_context)
     assert len(input_origin.input_digest) == 64
     assert run.input_end_aligned is True
@@ -317,7 +322,7 @@ def test_single_kronos_base_run_records_exact_confirmed_bar_origin(tmp_path) -> 
     assert response.model == run.model
     assert response.series == run.raw_series
     assert response.status == run.status
-    assert kronos.calls[0][0].bars == expected_context
+    assert chronos2.calls[0][0].bars == expected_context
 
     changed = list(expected_context)
     assert changed[0].volume is not None
@@ -325,17 +330,17 @@ def test_single_kronos_base_run_records_exact_confirmed_bar_origin(tmp_path) -> 
     assert _canonical_input_digest(tuple(changed)) != input_origin.input_digest
 
 
-def test_kronos_base_unavailability_fails_closed(tmp_path) -> None:
-    kronos = UnavailableAdapter(_model(loaded=False), "MODEL_UNAVAILABLE", "P40 or cache unavailable")
+def test_chronos_2_unavailability_fails_closed(tmp_path) -> None:
+    chronos2 = UnavailableAdapter(_model(loaded=False), "MODEL_UNAVAILABLE", "P40 or cache unavailable")
     service = AIService(
         settings(tmp_path),
-        kronos,
-        (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", kronos),),
+        chronos2,
+        (ProductionModelBinding("chronos_2", "amazon/chronos-2", chronos2),),
     )
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
-            request_id="kronos-base-unavailable",
+            schema_version="scalping-ai/v2",
+            request_id="chronos2-base-unavailable",
             mode="forecast",
             series=(_series("US:TSLA"),),
         )
@@ -345,21 +350,21 @@ def test_kronos_base_unavailability_fails_closed(tmp_path) -> None:
     assert response.model_runs is not None
     assert len(response.model_runs) == 1
     assert response.model_runs[0].status == "unavailable"
-    assert response.model.model_id == "NeoQuasar/Kronos-base"
+    assert response.model.model_id == "amazon/chronos-2"
     assert response.series[0].unavailable is not None
     assert response.series[0].unavailable.code == "MODEL_UNAVAILABLE"
 
 
-def test_kronos_base_model_run_rejects_fallback_provenance(tmp_path) -> None:
-    kronos = DeterministicAdapter(_model())
+def test_chronos_2_model_run_rejects_fallback_provenance(tmp_path) -> None:
+    chronos2 = DeterministicAdapter(_model())
     service = AIService(
         settings(tmp_path),
-        kronos,
-        (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", kronos),),
+        chronos2,
+        (ProductionModelBinding("chronos_2", "amazon/chronos-2", chronos2),),
     )
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="forged-fallback-provenance",
             mode="forecast",
             series=(_series("US:TSLA"),),
@@ -374,15 +379,15 @@ def test_kronos_base_model_run_rejects_fallback_provenance(tmp_path) -> None:
 
 
 def test_response_rejects_multiple_or_wrong_model_roles(tmp_path) -> None:
-    kronos = DeterministicAdapter(_model())
+    chronos2 = DeterministicAdapter(_model())
     service = AIService(
         settings(tmp_path),
-        kronos,
-        (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", kronos),),
+        chronos2,
+        (ProductionModelBinding("chronos_2", "amazon/chronos-2", chronos2),),
     )
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="single-role-only",
             mode="forecast",
             series=(_series("US:TSLA"),),
@@ -454,7 +459,7 @@ def test_stock_fincast_lane_preserves_cadence_and_same_512_bar_origin_digest(
     )
     response = service.handle(
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="fincast-origin",
             mode="forecast",
             series=(requested,),

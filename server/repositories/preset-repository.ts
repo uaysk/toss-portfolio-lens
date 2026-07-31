@@ -252,10 +252,9 @@ export class PresetRepository {
   }): Promise<PortfolioPresetRecord> {
     const now = input.now ?? Date.now();
     return this.database.transaction(async (database) => {
-      const lock = database.dialect === "sqlite" ? "" : " FOR UPDATE";
       const [currentRow] = await database.query<PresetRow>(`
         SELECT * FROM portfolio_presets
-        WHERE preset_id = ? AND owner_subject = ? AND deleted_at IS NULL${lock}
+        WHERE preset_id = ? AND owner_subject = ? AND deleted_at IS NULL FOR UPDATE
       `, [input.id, input.ownerSubject]);
       if (!currentRow) throw new PresetRevisionConflictError(input.id, input.expectedRevision);
       const current = record(currentRow);
@@ -325,10 +324,9 @@ export class PresetRepository {
   }): Promise<boolean> {
     const now = input.now ?? Date.now();
     return this.database.transaction(async (database) => {
-      const lock = database.dialect === "sqlite" ? "" : " FOR UPDATE";
       const [currentRow] = await database.query<PresetRow>(`
         SELECT * FROM portfolio_presets
-        WHERE preset_id = ? AND owner_subject = ? AND deleted_at IS NULL${lock}
+        WHERE preset_id = ? AND owner_subject = ? AND deleted_at IS NULL FOR UPDATE
       `, [input.id, input.ownerSubject]);
       if (!currentRow) return false;
       const current = record(currentRow);

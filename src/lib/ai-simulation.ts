@@ -1,13 +1,9 @@
 import {
   mergeLatestModelForecasts,
-  mergeLatestKronosForecasts,
   normalizeAiSimulationModelForecasts,
-  selectLatestKronosForecasts,
-  type AiSimulationKronosForecast,
   type AiSimulationModelForecast,
 } from "./ai-simulation-forecast";
 import {
-  AI_SIMULATION_MAIN_MODEL_LANE,
   AI_SIMULATION_MODEL_LANES,
   normalizeAiSimulationCryptoStatus,
   normalizeAiSimulationFuturesPositions,
@@ -33,7 +29,6 @@ export {
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_FUTURES_MARKET,
   AI_SIMULATION_EXECUTION_MODES,
-  AI_SIMULATION_LEGACY_MODEL_LANE,
   AI_SIMULATION_MAIN_MODEL_LANE,
   AI_SIMULATION_MODEL_LANES,
   DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS,
@@ -83,7 +78,8 @@ export const AI_SIMULATION_PAIR_IDS = [
   "tsla-tsll-tslq",
   "qqq-tqqq-sqqq",
 ] as const;
-export const AI_SIMULATION_COMPARISON_LANES = ["kronos", "rust", "ensemble"] as const;
+export const AI_SIMULATION_COMPARISON_LANES = ["chronos2", "rust", "ensemble"] as const;
+export const AI_SIMULATION_PAIR_CATALOG_VERSION = "scalping-pair-catalog/v4" as const;
 
 export type AiSimulationMarketCountry = (typeof AI_SIMULATION_MARKETS)[number];
 export type AiSimulationCriterion = (typeof AI_SIMULATION_CRITERIA)[number];
@@ -228,9 +224,9 @@ export function usesDefaultAiSimulationCosts(
 }
 
 export type AiSimulationRequest = {
-  contractVersion?: "ai-paper-simulation/v8";
-  simulationCase?: AiSimulationCase;
-  marketCountry: AiSimulationMarketCountry;
+  contractVersion: "ai-paper-simulation/v9";
+  simulationCase: "us_etf_pair";
+  market: { kind: "stock"; country: "US" };
   initialCash: number;
   durationMinutes: number;
   preset: AiSimulationPreset;
@@ -238,11 +234,6 @@ export type AiSimulationRequest = {
   selection: AiSimulationSelectionRequest;
   strategy: AiSimulationStrategyRequest;
   costs: AiSimulationCosts;
-  modelLanes:
-    | [AiSimulationModelLane]
-    | [AiSimulationModelLane, AiSimulationModelLane]
-    | [AiSimulationModelLane, AiSimulationModelLane, AiSimulationModelLane];
-  modelPlan?: AiSimulationModelPlanEntry[];
   fincastCandleSeconds: 60;
   execution: { mode: "paper" };
 };
@@ -262,6 +253,7 @@ export type AiSimulationStatus = {
   limitations: string[];
   pairStrategy?: {
     enabled: boolean;
+    catalogVersion: typeof AI_SIMULATION_PAIR_CATALOG_VERSION;
     message?: string;
     catalog: AiSimulationPairCatalogItem[];
   };
@@ -433,7 +425,7 @@ export type AiSimulationSnapshot = {
   market?: AiSimulationMarket;
   marketCountry?: AiSimulationMarketCountry;
   simulationCase?: AiSimulationCase;
-  modelPlan?: AiSimulationModelPlanEntry[];
+  resolvedModelPlan?: AiSimulationModelPlanEntry[];
   currency: AiSimulationCurrency;
   initialCash: number;
   cash: number;
@@ -461,8 +453,7 @@ export type AiSimulationSnapshot = {
   charts: AiSimulationChartView[];
   trades: AiSimulationTrade[];
   decisions: AiSimulationDecision[];
-  modelForecasts?: AiSimulationModelForecast[];
-  kronosForecasts: AiSimulationKronosForecast[];
+  modelForecasts: AiSimulationModelForecast[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
   strategyComparison?: AiSimulationStrategyComparison;
@@ -556,7 +547,7 @@ export type AiSimulationReportEvidence = {
 };
 
 export type AiSimulationDecisionModelProvenance = {
-  component: "kronos" | AiSimulationModelLane;
+  component: AiSimulationModelLane;
   status: string;
   modelId?: string;
   modelRevision?: string;
@@ -596,8 +587,7 @@ export type AiSimulationRunReport = {
   charts: AiSimulationChartView[];
   modelProvenance: string[];
   decisionProvenance: AiSimulationDecisionProvenance[];
-  modelForecasts?: AiSimulationModelForecast[];
-  kronosForecasts: AiSimulationKronosForecast[];
+  modelForecasts: AiSimulationModelForecast[];
   evidence: AiSimulationReportEvidence[];
   warnings: string[];
   limits: string[];
@@ -608,8 +598,10 @@ export type AiSimulationRunReport = {
 };
 
 export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
-  marketCountry: "KR",
-  initialCash: 10_000_000,
+  contractVersion: "ai-paper-simulation/v9",
+  simulationCase: "us_etf_pair",
+  market: { kind: "stock", country: "US" },
+  initialCash: 100_000,
   durationMinutes: 60,
   preset: "risk_management",
   riskTolerance: 25,
@@ -618,9 +610,12 @@ export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
     criterion: "trading_amount",
     symbolCount: 1,
   },
-  strategy: { mode: "single" },
-  costs: defaultAiSimulationCosts("KR"),
-  modelLanes: [AI_SIMULATION_MAIN_MODEL_LANE],
+  strategy: {
+    mode: "pair",
+    pairId: "qqq-tqqq-sqqq",
+    allowDegradedMode: false,
+  },
+  costs: defaultAiSimulationCosts("US"),
   fincastCandleSeconds: 60,
   execution: { mode: "paper" },
 };
@@ -781,46 +776,35 @@ function staticPairCatalogItem(id: AiSimulationPairId): AiSimulationPairCatalogI
 }
 
 function normalizePairCatalogItem(value: unknown): AiSimulationPairCatalogItem | undefined {
-  const directId = pairIdValue(value);
-  if (directId) return staticPairCatalogItem(directId);
   const item = asRecord(value);
-  const id = pairIdValue(first(item, "id", "pairId", "pair_id", "value"));
+  const id = pairIdValue(item.pairId);
   if (!id) return undefined;
   const fallback = staticPairCatalogItem(id);
   const bull = asRecord(item.bull);
   const bear = asRecord(item.bear);
+  const displaySignalSymbol = textValue(item.displaySignalSymbol)?.toUpperCase();
+  const modelTargetSymbol = textValue(item.modelTargetSymbol)?.toUpperCase();
+  const bullSymbol = textValue(bull.executionSymbol)?.toUpperCase();
+  const bearSymbol = textValue(bear.executionSymbol)?.toUpperCase();
+  if (!displaySignalSymbol || !modelTargetSymbol || !bullSymbol || !bearSymbol) {
+    return undefined;
+  }
   const symbols = [
-    ...stringList(first(item, "symbols", "instruments", "legs")),
-    textValue(first(item, "signalSymbol", "signal_symbol")),
-    textValue(first(item, "displaySignalSymbol", "display_signal_symbol")),
-    textValue(first(item, "modelTargetSymbol", "model_target_symbol")),
-    ...stringList(first(item, "auxiliarySymbols", "auxiliary_symbols")),
-    textValue(first(bull, "executionSymbol", "execution_symbol", "symbol")),
-    textValue(first(bear, "executionSymbol", "execution_symbol", "symbol")),
+    displaySignalSymbol,
+    modelTargetSymbol,
+    ...stringList(item.auxiliarySymbols),
+    bullSymbol,
+    bearSymbol,
   ].filter((symbol): symbol is string => Boolean(symbol))
     .map((symbol) => symbol.toUpperCase())
     .filter((symbol, index, all) => all.indexOf(symbol) === index);
   return {
     id,
-    label: textValue(first(item, "label", "name", "title")) ?? fallback.label,
+    label: textValue(item.label) ?? fallback.label,
     symbols: symbols.length ? symbols : fallback.symbols,
-    displaySignalSymbol: textValue(first(
-      item,
-      "displaySignalSymbol",
-      "display_signal_symbol",
-    )) ?? fallback.displaySignalSymbol,
-    modelTargetSymbol: textValue(first(
-      item,
-      "modelTargetSymbol",
-      "model_target_symbol",
-      "signalSymbol",
-      "signal_symbol",
-    )) ?? fallback.modelTargetSymbol,
-    auxiliarySymbols: stringList(first(
-      item,
-      "auxiliarySymbols",
-      "auxiliary_symbols",
-    )),
+    displaySignalSymbol,
+    modelTargetSymbol,
+    auxiliarySymbols: stringList(item.auxiliarySymbols),
   };
 }
 
@@ -873,7 +857,7 @@ function knownAiSimulationModelLabel(value: unknown): string | undefined {
   if (!label) return undefined;
   const normalized = label.toLowerCase();
   const knownIds = [
-    "neoquasar/kronos-base",
+    "amazon/chronos-2",
     "vincent05r/fincast",
   ].filter((modelId) => normalized.includes(modelId));
   return knownIds.length === 1 ? label : undefined;
@@ -986,26 +970,15 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const duration = asRecord(first(limits, "durationMinutes", "duration_minutes", "duration"));
   const enabled = typeof source.enabled === "boolean" ? source.enabled : true;
   const capabilities = capabilityRecord(source.capabilities);
-  const pairStrategyValue = first(source, "pairStrategy", "pair_strategy");
+  const pairStrategyValue = source.pairStrategy;
   const pairStrategy = asRecord(pairStrategyValue);
-  const pairCatalog = normalizePairCatalog(
-    first(pairStrategy, "catalog", "pairs", "strategies")
-      ?? first(source, "pairCatalog", "pair_catalog", "pairStrategyCatalog", "pair_strategy_catalog"),
-  );
-  const capabilityGate = [
-    "pairStrategy",
-    "pair_strategy",
-    "pairMode",
-    "pair_mode",
-    "strategyPair",
-    "strategy_pair",
-  ].some((key) => capabilities[key] === true);
-  const pairEnabled = booleanValue(first(pairStrategy, "enabled", "available", "supported"))
-    ?? booleanValue(pairStrategyValue)
-    ?? (capabilityGate ? true : undefined);
-  const hasPairStrategy = pairEnabled !== undefined
-    || Object.keys(pairStrategy).length > 0
-    || pairCatalog.length > 0;
+  const pairCatalogVersion = textValue(pairStrategy.catalogVersion);
+  const pairCatalogCurrent = pairCatalogVersion === AI_SIMULATION_PAIR_CATALOG_VERSION;
+  const pairCatalog = pairCatalogCurrent
+    ? normalizePairCatalog(pairStrategy.pairs)
+    : [];
+  const pairEnabled = pairCatalogCurrent && pairStrategy.enabled === true;
+  const hasPairStrategy = Object.keys(pairStrategy).length > 0;
   const rawCostProfiles = asRecord(first(source, "costProfiles", "cost_profiles"));
   const costProfiles = Object.fromEntries((["KR", "US"] as const).flatMap((market) => {
     const profile = normalizeCostProfile(
@@ -1014,25 +987,16 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
     );
     return profile ? [[market, profile] as const] : [];
   })) as Partial<Record<AiSimulationMarketCountry, AiSimulationCostProfile>>;
-  const cryptoStatusValue = first(
-    source,
-    "cryptoFutures",
-    "crypto_futures",
-    "binance",
-    "crypto",
-  );
-  const hasCryptoStatus = cryptoStatusValue !== undefined
-    || [
-      "credentialsConfigured",
-      "credentials_configured",
-      "signedReadSucceeded",
-      "signed_read_succeeded",
-      "workers",
-      "modelWorkers",
-      "model_workers",
-    ].some((key) => source[key] !== undefined)
-    || capabilities.cryptoFutures === true
-    || capabilities.crypto_futures === true;
+  const cryptoStatusValue = source.cryptoFutures;
+  const cryptoMarket = asRecord(source.market);
+  const hasCryptoStatus = Object.keys(asRecord(cryptoStatusValue)).length > 0
+    || (
+      source.schemaVersion === "ai-paper-simulation/v9"
+      && cryptoMarket.kind === "crypto_futures"
+      && Object.keys(asRecord(source.credentials)).length > 0
+      && Object.keys(asRecord(source.executionGates)).length > 0
+      && Object.keys(asRecord(source.workers)).length > 0
+    );
 
   return {
     enabled,
@@ -1071,12 +1035,21 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
     limitations: stringList(first(source, "limitations", "warnings")),
     ...(Object.keys(costProfiles).length ? { costProfiles } : {}),
     ...(hasCryptoStatus
-      ? { cryptoFutures: normalizeAiSimulationCryptoStatus(source) }
+      ? {
+        cryptoFutures: normalizeAiSimulationCryptoStatus(
+          Object.keys(asRecord(cryptoStatusValue)).length > 0
+            ? cryptoStatusValue
+            : source,
+        ),
+      }
       : {}),
     ...(hasPairStrategy ? {
       pairStrategy: {
-        enabled: pairEnabled ?? false,
-        message: textValue(first(pairStrategy, "message", "reason", "limitation")),
+        enabled: pairEnabled,
+        catalogVersion: AI_SIMULATION_PAIR_CATALOG_VERSION,
+        message: pairCatalogCurrent
+          ? textValue(pairStrategy.message)
+          : "지원하지 않는 pair catalog 계약입니다.",
         catalog: pairCatalog,
       },
     } : {}),
@@ -1084,16 +1057,7 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
 }
 
 export function aiSimulationPairStrategyEnabled(status?: AiSimulationStatus): boolean {
-  if (!status) return false;
-  if (status.pairStrategy) return status.pairStrategy.enabled;
-  return [
-    "pairStrategy",
-    "pair_strategy",
-    "pairMode",
-    "pair_mode",
-    "strategyPair",
-    "strategy_pair",
-  ].some((key) => status.capabilities[key] === true);
+  return status?.pairStrategy?.enabled === true;
 }
 
 export function aiSimulationPairCatalog(
@@ -1382,10 +1346,7 @@ function mapValid<T>(value: unknown, normalizer: (item: unknown) => T | undefine
 }
 
 function comparisonLaneId(value: unknown): AiSimulationComparisonLaneId | undefined {
-  const raw = textValue(value)?.toLowerCase().replaceAll("_", "-");
-  const candidate = raw === "kronos-base" || raw === "kronosbase"
-    ? "kronos"
-    : raw;
+  const candidate = textValue(value)?.toLowerCase().replaceAll("_", "-");
   return AI_SIMULATION_COMPARISON_LANES.includes(candidate as AiSimulationComparisonLaneId)
     ? candidate as AiSimulationComparisonLaneId
     : undefined;
@@ -1605,8 +1566,7 @@ function normalizedCadence(value: unknown): AiSimulationSnapshot["decisionCadenc
 export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSnapshot {
   const outer = asRecord(payload);
   const source = Object.keys(asRecord(outer.snapshot)).length ? asRecord(outer.snapshot) : outer;
-  const legacyMarket = textValue(first(source, "marketCountry", "market_country"));
-  const market = normalizeAiSimulationMarket(source.market, legacyMarket);
+  const market = normalizeAiSimulationMarket(source.market);
   const currency = textValue(source.currency);
   const rawProgress = finiteNumber(source.progress) ?? 0;
   const rawPreset = textValue(source.preset);
@@ -1633,9 +1593,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     "executionMode",
     "execution_mode",
   )) ?? textValue(first(source, "executionMode", "execution_mode"));
-  const executionMode = (
-    ["paper", "testnet", "live"] as const
-  ).find((candidate) => candidate === executionModeValue);
+  const executionMode = executionModeValue === "paper" ? "paper" : undefined;
   const futuresPositions = market?.kind === "crypto_futures"
     ? normalizeAiSimulationFuturesPositions(
         first(source, "futuresPositions", "futures_positions") ?? source.positions,
@@ -1658,32 +1616,17 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     "simulationCase",
     "simulation_case",
   ));
-  const simulationCase = explicitSimulationCase
-    ?? (market?.kind === "crypto_futures"
-      ? rawSelection?.mode === "manual"
-        && rawSelection.symbols.every(
-          (symbol) => symbol === "BTCUSDT" || symbol === "ETHUSDT",
-        )
-        ? "btc_eth"
-        : "high_vol_crypto"
-      : market?.kind === "stock"
-        && market.country === "US"
-        && strategy?.mode === "pair"
-        ? "us_etf_pair"
-        : undefined);
-  const modelPlan = normalizeModelPlan(first(source, "modelPlan", "model_plan"));
-  const legacyKronosForecasts = selectLatestKronosForecasts(source.decisions);
-  const modelForecasts = mergeLatestModelForecasts(
-    normalizeAiSimulationModelForecasts(first(
-      source,
-      "modelForecasts",
-      "model_forecasts",
-    )),
-    legacyKronosForecasts.map((forecast) => ({
-      ...forecast,
-      lane: "kronos_base" as const,
-    })),
-  );
+  const simulationCase = explicitSimulationCase;
+  const resolvedModelPlan = normalizeModelPlan(first(
+    source,
+    "resolvedModelPlan",
+    "resolved_model_plan",
+  ));
+  const modelForecasts = normalizeAiSimulationModelForecasts(first(
+    source,
+    "modelForecasts",
+    "model_forecasts",
+  ));
 
   return {
     phase: textValue(source.phase) ?? "queued",
@@ -1692,7 +1635,7 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     market,
     marketCountry: market?.kind === "stock" ? market.country : undefined,
     ...(simulationCase ? { simulationCase } : {}),
-    ...(modelPlan.length ? { modelPlan } : {}),
+    ...(resolvedModelPlan.length ? { resolvedModelPlan } : {}),
     currency: market?.kind === "crypto_futures" || currency === "USDT"
       ? "USDT"
       : currency === "USD"
@@ -1735,9 +1678,6 @@ export function normalizeAiSimulationSnapshot(payload: unknown): AiSimulationSna
     trades: mapValid(source.trades, normalizeTrade),
     decisions: mapValid(source.decisions, normalizeDecision),
     modelForecasts,
-    kronosForecasts: modelForecasts
-      .filter((forecast) => forecast.lane === "kronos_base")
-      .map(({ lane: _lane, ...forecast }) => forecast),
     warnings: stringList(source.warnings),
     capabilities: capabilityRecord(source.capabilities),
     ...(strategyComparison ? { strategyComparison } : {}),
@@ -1823,14 +1763,8 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
   const configuration = asRecord(first(item, "configuration", "config", "request"));
   const selectionBlock = asRecord(item.selection);
   const performance = asRecord(first(item, "performance", "result", "summary"));
-  const market = textValue(first(
-    configuration,
-    "marketCountry",
-    "market_country",
-  )) ?? textValue(first(item, "marketCountry", "market_country"));
   const normalizedMarket = normalizeAiSimulationMarket(
     first(configuration, "market") ?? item.market,
-    market,
   );
   const preset = textValue(configuration.preset) ?? textValue(item.preset);
   const selection = normalizeSelectionRequest(configuration.selection)
@@ -1917,7 +1851,7 @@ function normalizeHistoryItem(value: unknown): AiSimulationHistoryItem | undefin
       : first(performance, "currency") === "USD"
       || configuration.currency === "USD"
       || item.currency === "USD"
-      || market === "US"
+      || (normalizedMarket?.kind === "stock" && normalizedMarket.country === "US")
       ? "USD"
       : "KRW",
     preset: AI_SIMULATION_PRESETS.includes(preset as AiSimulationPreset)
@@ -2016,7 +1950,7 @@ function decisionModelValue(
 function normalizeDecisionModelProvenance(
   value: unknown,
   parentOrigin: string | undefined,
-  component: "kronos" | AiSimulationModelLane,
+  component: AiSimulationModelLane,
 ): AiSimulationDecisionModelProvenance | undefined {
   const model = asRecord(value);
   if (!Object.keys(model).length) return undefined;
@@ -2050,8 +1984,8 @@ function normalizeDecisionModelProvenance(
   )) ?? textValue(first(model, "modelId", "model_id", "model"));
   const normalizedModelId = modelId?.toLowerCase();
   const expectedModel = component === "fincast"
-    ? normalizedModelId?.includes("fincast") !== false
-    : normalizedModelId === undefined || normalizedModelId === "neoquasar/kronos-base";
+    ? normalizedModelId === "vincent05r/fincast"
+    : normalizedModelId === "amazon/chronos-2";
   if (fallbackUsed || !expectedModel) {
     return undefined;
   }
@@ -2120,17 +2054,17 @@ function normalizeDecisionProvenance(
     "input_end_at",
   )) ?? textValue(first(replayInput, "origin", "inputEndAt", "input_end_at"));
   const parentDegraded = booleanValue(provenance.degraded) ?? false;
-  const kronos = normalizeDecisionModelProvenance(
-    decisionModelValue(modelsValue, ["kronos", "kronosBase", "kronos_base", "kronos-base"]),
+  const chronos2 = normalizeDecisionModelProvenance(
+    decisionModelValue(modelsValue, ["chronos2"]),
     origin,
-    "kronos",
+    "chronos2",
   );
   const fincast = normalizeDecisionModelProvenance(
     decisionModelValue(modelsValue, ["fincast", "finCast", "fin_cast", "fin-cast"]),
     origin,
     "fincast",
   );
-  const models = [kronos, fincast].filter(
+  const models = [chronos2, fincast].filter(
     (model): model is AiSimulationDecisionModelProvenance => Boolean(model),
   );
   if (!models.length) return undefined;
@@ -2263,11 +2197,8 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     ?? textValue(first(report, "runId", "run_id"))
     ?? textValue(first(root, "runId", "run_id"));
   if (!runId) return undefined;
-  const market = textValue(first(configuration, "marketCountry", "market_country"))
-    ?? snapshot?.marketCountry;
   const normalizedMarket = normalizeAiSimulationMarket(
     configuration.market ?? snapshot?.market,
-    market,
   );
   const preset = textValue(configuration.preset) ?? snapshot?.preset;
   const selected = mapValid(
@@ -2308,7 +2239,7 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     : first(performance, "currency") === "USD"
     || configuration.currency === "USD"
     || snapshot?.currency === "USD"
-    || market === "US"
+    || (normalizedMarket?.kind === "stock" && normalizedMarket.country === "US")
     ? "USD"
     : "KRW";
   const reportModels = normalizeModelProvenance(first(
@@ -2323,15 +2254,6 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       ?? first(root, "decisionProvenance", "decision_provenance"),
     normalizeDecisionProvenance,
   );
-  const rawDecisionProvenance = first(report, "decisionProvenance", "decision_provenance")
-    ?? first(root, "decisionProvenance", "decision_provenance");
-  const legacyKronosForecasts = mergeLatestKronosForecasts(
-    snapshot?.kronosForecasts ?? [],
-    selectLatestKronosForecasts([
-      report.decisions,
-      rawDecisionProvenance,
-    ]),
-  );
   const modelForecasts = mergeLatestModelForecasts(
     snapshot?.modelForecasts ?? [],
     normalizeAiSimulationModelForecasts(first(
@@ -2339,14 +2261,7 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
       "modelForecasts",
       "model_forecasts",
     ) ?? first(root, "modelForecasts", "model_forecasts")),
-    legacyKronosForecasts.map((forecast) => ({
-      ...forecast,
-      lane: "kronos_base" as const,
-    })),
   );
-  const kronosForecasts = modelForecasts
-    .filter((forecast) => forecast.lane === "kronos_base")
-    .map(({ lane: _lane, ...forecast }) => forecast);
   const inferredModels = [
     ...selected.map((item) => item.model),
     ...decisions.map((item) => item.model),
@@ -2375,9 +2290,9 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     "executionMode",
     "execution_mode",
   )) ?? textValue(first(configuration, "executionMode", "execution_mode"));
-  const executionMode = (
-    ["paper", "testnet", "live"] as const
-  ).find((candidate) => candidate === rawExecutionMode) ?? snapshot?.executionMode;
+  const executionMode = rawExecutionMode === "paper"
+    ? "paper"
+    : snapshot?.executionMode === "paper" ? "paper" : undefined;
   const futuresPositions = normalizedMarket?.kind === "crypto_futures"
     ? normalizeAiSimulationFuturesPositions(
         first(report, "futuresPositions", "futures_positions")
@@ -2458,7 +2373,6 @@ export function normalizeAiSimulationReport(payload: unknown): AiSimulationRunRe
     modelProvenance: [...new Set([...reportModels, ...inferredModels])],
     decisionProvenance,
     modelForecasts,
-    kronosForecasts,
     evidence: normalizeReportEvidence(report.evidence),
     warnings: stringList(first(report, "warnings", "limitations"))
       .concat(snapshot?.warnings ?? [])
@@ -2489,11 +2403,15 @@ export function validateAiSimulationRequest(
   limits: AiSimulationLimits = {},
 ): string[] {
   const issues: string[] = [];
-  if (!AI_SIMULATION_MARKETS.includes(request.marketCountry)) issues.push("시장 선택이 올바르지 않습니다.");
+  if (request.contractVersion !== "ai-paper-simulation/v9") {
+    issues.push("ai-paper-simulation/v9 계약만 지원합니다.");
+  }
+  if (request.market.kind !== "stock" || request.market.country !== "US") {
+    issues.push("미국 ETF 페어 시장만 지원합니다.");
+  }
   const strategy = asRecord(request.strategy);
   const strategyMode = textValue(strategy.mode);
   if (strategyMode === "pair") {
-    if (request.marketCountry !== "US") issues.push("페어 전략은 미국 시장에서만 실행할 수 있습니다.");
     if (!pairIdValue(first(strategy, "pairId", "pair_id"))) {
       issues.push("페어 전략 카탈로그를 확인해 주세요.");
     }
@@ -2504,14 +2422,9 @@ export function validateAiSimulationRequest(
     issues.push("전략 실행 방식이 올바르지 않습니다.");
   }
   if (!AI_SIMULATION_PRESETS.includes(request.preset)) issues.push("AI 전략 프리셋이 올바르지 않습니다.");
-  if (request.simulationCase === "us_etf_pair") {
-    if (
-      request.marketCountry !== "US"
-      || strategyMode !== "pair"
-      || request.modelLanes.join(",") !== "chronos2,fincast"
-    ) {
-      issues.push("미국 ETF 페어는 Chronos-2 primary·FinCast shadow 역할 정책을 사용해야 합니다.");
-    }
+  if (request.simulationCase !== "us_etf_pair" || strategyMode !== "pair") {
+    issues.push("미국 ETF 페어는 v9 canonical model plan을 사용해야 합니다.");
+  } else {
     const pairId = pairIdValue(first(strategy, "pairId", "pair_id"));
     if (
       pairId !== "qqq-tqqq-sqqq"
@@ -2519,14 +2432,6 @@ export function validateAiSimulationRequest(
       && pairId !== "spy-spxl-spxs"
     ) {
       issues.push("새 ETF 메뉴는 QQQ·반도체·SPY 페어 중 하나를 선택해야 합니다.");
-    }
-  } else {
-    if (request.modelLanes.length !== 1
-      || !AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])) {
-      issues.push("주식 시뮬레이션 모델은 Kronos-base 또는 FinCast 중 하나여야 합니다.");
-    }
-    if (strategyMode === "pair" && request.modelLanes[0] !== "kronos_base") {
-      issues.push("페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.");
     }
   }
   if (request.fincastCandleSeconds !== 60) {

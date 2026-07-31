@@ -8,6 +8,10 @@ import {
   createPairDecisionProvenance,
   verifyPairDecisionReplay,
 } from "./decision-provenance.js";
+import {
+  projectUnifiedEtfPairDecision,
+  type UnifiedEtfPairDecisionContext,
+} from "./unified-etf-pair-decision.js";
 import type { NormalizedPairModelOutput } from "./model-output-normalization.js";
 import { getPairCatalogEntry } from "./pair-catalog.js";
 
@@ -15,8 +19,8 @@ const ORIGIN = "2026-07-24T14:30:00.000Z";
 
 function model(): NormalizedPairModelOutput {
   return {
-    normalizationVersion: "pair-model-normalization/v3",
-    component: "kronos",
+    normalizationVersion: "pair-model-normalization/v4",
+    component: "chronos2",
     status: "available",
     reasonCodes: [],
     signalSymbol: "TSLA",
@@ -34,13 +38,13 @@ function model(): NormalizedPairModelOutput {
     calibration: { status: "good" },
     inputQuality: { status: "good", warnings: [] },
     provenance: {
-      modelId: "NeoQuasar/Kronos-base",
+      modelId: "amazon/chronos-2",
       modelRevision: "revision-a",
       device: "cuda",
       loaded: true,
     },
     rawOutput: {
-      model: "kronos",
+      model: "chronos2",
       quantiles: [0, 0.015, 0.03],
     },
   };
@@ -50,13 +54,13 @@ function ensembleInput(): PairEnsembleInput {
   return {
     pair: getPairCatalogEntry("tsla-tsll-tslq"),
     models: {
-      normalizationVersion: "pair-model-normalization/v3",
+      normalizationVersion: "pair-model-normalization/v4",
       signalSymbol: "TSLA",
       expectedOrigin: ORIGIN,
       alignedOrigin: ORIGIN,
       alignmentStatus: "aligned",
       reasonCodes: [],
-      kronos: model(),
+      chronos2: model(),
       rawResponse: { requestId: "request-a" },
     },
     rust: {
@@ -118,15 +122,14 @@ describe("pair decision provenance", () => {
       executionSymbol: "TSLL",
       direction: "bull",
       origin: ORIGIN,
-      weights: { kronos: 0.72, rust: 0.28 },
+      weights: { chronos2: 0.72, rust: 0.28 },
       rawInputs: {
-        kronos: { model: "kronos" },
+        chronos2: { model: "chronos2" },
         rust: { status: "entry_candidate" },
       },
     });
-    expect(first.components).toHaveProperty("kronosBull");
-    expect(first.components).not.toHaveProperty("chronos2Bull");
-    expect(first.reasons).toContain("kronos_direction_actionable");
+    expect(first.components).toHaveProperty("chronos2Bull");
+    expect(first.reasons).toContain("chronos2_direction_actionable");
     expect(verifyPairDecisionReplay(first)).toMatchObject({
       valid: true,
       reasonCodes: [],
@@ -142,6 +145,67 @@ describe("pair decision provenance", () => {
     })).toThrow(/does not reproduce/);
   });
 
+  it("replays the v9 ETF mapping and session gate instead of accepting a projected decision blindly", () => {
+    const input = ensembleInput();
+    const context = {
+      pairMapping: {
+        schemaVersion: "pair-return-mapper/v1",
+        status: "ready",
+        originAt: ORIGIN,
+        pairId: "tsla-tsll-tslq",
+        modelTargetSymbol: "TSLA",
+        auxiliarySymbols: [],
+        sampleCount: 60,
+        latestTrainingObservationAt: "2026-07-24T14:29:00.000Z",
+        bull: {
+          expectedNetReturn: 0.01,
+          q10Return: -0.005,
+          q90Return: 0.025,
+          totalCostBps: 10,
+        },
+        bear: {
+          expectedNetReturn: -0.01,
+          q10Return: -0.025,
+          q90Return: 0.005,
+          totalCostBps: 10,
+        },
+        pNetBull: 0.8,
+        pNetBear: 0.2,
+        simpleLeverageMultiplicationUsed: false,
+      },
+      selectedHorizonMinutes: 15,
+      sessionGate: {
+        policyVersion: "us-etf-session/v1",
+        canEnter: true,
+        canHold: true,
+        forceExit: false,
+        openingRange: "OR15",
+        reasons: [],
+      },
+    } as unknown as UnifiedEtfPairDecisionContext;
+    const decision = projectUnifiedEtfPairDecision(
+      input,
+      evaluatePairEnsemble(input),
+      context,
+    );
+    expect(decision.direction).toBe("bull");
+    const provenance = createPairDecisionProvenance({
+      ensembleInput: input,
+      decision,
+      replayContext: context,
+    });
+    expect(verifyPairDecisionReplay(provenance)).toMatchObject({
+      valid: true,
+      reasonCodes: [],
+    });
+
+    provenance.replayContext!.sessionGate.canEnter = false;
+    provenance.replayContext!.sessionGate.reasons.push("SESSION_BLOCKED");
+    expect(verifyPairDecisionReplay(provenance).reasonCodes).toEqual(
+      expect.arrayContaining(["input_digest_mismatch", "policy_replay_mismatch"]),
+    );
+  });
+
   it("detects raw input, decision, and sizing mutation", () => {
     const input = ensembleInput();
     const provenance = createPairDecisionProvenance({
@@ -149,7 +213,7 @@ describe("pair decision provenance", () => {
       decision: evaluatePairEnsemble(input),
       sizing: { quantity: 10 },
     });
-    provenance.replayInput.models.kronos.rawOutput = { mutated: true };
+    provenance.replayInput.models.chronos2.rawOutput = { mutated: true };
     provenance.decision.reasonCodes.push("mutated");
     provenance.sizing = { quantity: 11 };
     const verified = verifyPairDecisionReplay(provenance);

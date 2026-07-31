@@ -24,7 +24,6 @@ export const QualificationStepStatusSchema = z.enum([
 
 export const QualificationModelSchema = z.enum([
   "system",
-  "kronos-base",
   "chronos-2",
   "fincast",
   "comparison",

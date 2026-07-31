@@ -47,7 +47,7 @@ const request: FuturesOrderRequest = {
   reduceOnly: false,
   marginMode: "isolated",
   positionSide: "BOTH",
-  modelLane: "kronos_base",
+  modelLane: "chronos2_base",
   protectiveStopPrice: 95,
   typedConfirmation: "LIVE:run-1:BTCUSDT",
 };

@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { PresetRepository } from "../repositories/preset-repository.js";
 import { PRESET_EXPORT_SCHEMA_VERSION, PresetService } from "./preset-service.js";
 
 describe("PresetService import/export", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -12,7 +12,7 @@ describe("PresetService import/export", () => {
   });
 
   async function setup() {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const service = new PresetService(new PresetRepository(database));
     await service.initialize();
     return service;

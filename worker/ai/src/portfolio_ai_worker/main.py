@@ -120,7 +120,6 @@ def _preflight(service: AIService) -> int:
         "model": provenance.model_dump(mode="json"),
         "models": models,
         "features": {
-            "kronos_kv_cache_enabled": service.settings.kronos_kv_cache_enabled,
             "cross_request_microbatch": service.settings.cross_request_microbatch,
         },
         "limits": {

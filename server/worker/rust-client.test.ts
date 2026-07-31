@@ -4,7 +4,10 @@ import path from "node:path";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson } from "./contracts.js";
+import {
+  canonicalJson,
+  WORKER_PAYLOAD_SCHEMA_VERSION,
+} from "./contracts.js";
 import { RustComputeClient } from "./rust-client.js";
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -36,7 +39,7 @@ describe("RustComputeClient", () => {
           buffer = buffer.subarray(frameBytes + 4);
           projections.push(request.projection);
           const body = Buffer.from(JSON.stringify({
-            schema_version: "1.0", engine_version: request.engine_version, run_id: request.run_id,
+            schema_version: WORKER_PAYLOAD_SCHEMA_VERSION, engine_version: request.engine_version, run_id: request.run_id,
             job_kind: request.job_kind, status: "completed", summary: {}, result: request.payload.value,
             warnings: [], artifacts: [], data_revision: request.data_revision, request_hash: request.request_hash,
             projection: request.projection,
@@ -104,7 +107,7 @@ describe("RustComputeClient", () => {
           return;
         }
         const body = Buffer.from(JSON.stringify({
-          schema_version: "1.0", engine_version: request.engine_version, run_id: request.run_id,
+          schema_version: WORKER_PAYLOAD_SCHEMA_VERSION, engine_version: request.engine_version, run_id: request.run_id,
           job_kind: request.job_kind, status: "completed", summary: {}, result: request.payload.value,
           warnings: [], artifacts: [], data_revision: request.data_revision, request_hash: request.request_hash,
           payload_hash: createHash("sha256").update(canonicalJson(request.payload)).digest("hex"),
@@ -169,7 +172,7 @@ describe("RustComputeClient", () => {
           requestConnections.set(request.payload.value, currentConnection);
           const respond = () => {
             const body = Buffer.from(JSON.stringify({
-              schema_version: "1.0", engine_version: request.engine_version, run_id: request.run_id,
+              schema_version: WORKER_PAYLOAD_SCHEMA_VERSION, engine_version: request.engine_version, run_id: request.run_id,
               job_kind: request.job_kind, status: "completed", summary: {}, result: request.payload.value,
               warnings: [], artifacts: [], data_revision: request.data_revision, request_hash: request.request_hash,
               payload_hash: createHash("sha256").update(canonicalJson(request.payload)).digest("hex"),
@@ -238,7 +241,7 @@ describe("RustComputeClient", () => {
         };
         const respond = () => {
           const body = Buffer.from(JSON.stringify({
-            schema_version: "1.0", engine_version: request.engine_version, run_id: request.run_id,
+            schema_version: WORKER_PAYLOAD_SCHEMA_VERSION, engine_version: request.engine_version, run_id: request.run_id,
             job_kind: request.job_kind, status: "completed", summary: {}, result: request.payload.value,
             warnings: [], artifacts: [], data_revision: request.data_revision, request_hash: request.request_hash,
             payload_hash: createHash("sha256").update(canonicalJson(request.payload)).digest("hex"),

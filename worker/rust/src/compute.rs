@@ -845,7 +845,7 @@ fn stitched_oos_equity(walk_forward: &Value) -> Vec<Value> {
         .flatten()
         .enumerate()
         .filter_map(|(index, fold)| {
-            let portfolio_return = finite_at(fold, &["/oos/return"])?;
+            let portfolio_return = finite_at(fold, &["/oos/totalReturn"])?;
             if portfolio_return <= -1.0 {
                 return None;
             }

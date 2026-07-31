@@ -1,6 +1,6 @@
-export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v3" as const;
+export const PAIR_MODEL_NORMALIZATION_VERSION = "pair-model-normalization/v4" as const;
 
-export type PairModelComponent = "kronos";
+export type PairModelComponent = "chronos2";
 export type PairModelStatus = "available" | "degraded" | "unavailable";
 export type PairCalibrationStatus = "good" | "poor" | "unavailable";
 export type PairInputQualityStatus = "good" | "partial" | "unavailable";
@@ -85,7 +85,7 @@ export type NormalizedPairModelSet = {
   alignedOrigin?: string;
   alignmentStatus: "aligned" | "misaligned" | "unavailable";
   reasonCodes: string[];
-  kronos: NormalizedPairModelOutput;
+  chronos2: NormalizedPairModelOutput;
   rawResponse: unknown;
 };
 
@@ -158,14 +158,14 @@ function unique(values: readonly string[]): string[] {
 function componentFrom(value: unknown): PairModelComponent | undefined {
   const normalized = text(value)?.toLowerCase().replaceAll(/[\s_/-]+/g, "");
   if (!normalized) return undefined;
-  if (normalized.includes("kronosbase") || normalized === "kronos") return "kronos";
+  if (normalized === "chronos2") return "chronos2";
   return undefined;
 }
 
 function componentFromModelId(value: unknown): PairModelComponent | undefined {
   const normalized = text(value)?.toLowerCase();
   if (!normalized) return undefined;
-  if (normalized === "neoquasar/kronos-base" || normalized.includes("kronos")) return "kronos";
+  if (normalized === "amazon/chronos-2") return "chronos2";
   return undefined;
 }
 
@@ -567,7 +567,7 @@ function normalizeRun(
   }
   if (!provenance.loaded) reasonCodes.push("model_not_loaded");
   const modelId = provenance.modelId?.toLowerCase();
-  const expectedId = (options.expectedModelId ?? "neoquasar/kronos-base").toLowerCase();
+  const expectedId = (options.expectedModelId ?? "amazon/chronos-2").toLowerCase();
   if (modelId !== expectedId) reasonCodes.push("unexpected_model_id");
   const expectedModelId = provenance.expectedModelId?.toLowerCase();
   const runFallbackReason = text(first(run.wrapper, "fallback_reason", "fallbackReason"), 1_000);
@@ -755,16 +755,16 @@ export function normalizePairModelOutputs(
     }
     return normalizeRun(matches[0]!, component, options);
   };
-  const kronos = runs.some((run) => run.component === undefined)
+  const chronos2 = runs.some((run) => run.component === undefined)
     ? unavailableOutput(
-        "kronos",
+        "chronos2",
         signalSymbol,
         horizonMinutes,
         ["unexpected_model_run"],
         input,
       )
-    : normalizeComponent("kronos");
-  const origin = kronos.inputEndAt;
+    : normalizeComponent("chronos2");
+  const origin = chronos2.inputEndAt;
   const expectedAligned = !expectedOrigin || (
     origin !== undefined && Date.parse(origin) === Date.parse(expectedOrigin)
   );
@@ -774,7 +774,7 @@ export function normalizePairModelOutputs(
   const reasonCodes = unique([
     ...(!expectedAligned ? ["model_origin_mismatch"] : []),
     ...(alignmentStatus === "unavailable" ? ["model_origin_unavailable"] : []),
-    ...kronos.reasonCodes.map((reason) => `kronos:${reason}`),
+    ...chronos2.reasonCodes.map((reason) => `chronos2:${reason}`),
   ]);
   return {
     normalizationVersion: PAIR_MODEL_NORMALIZATION_VERSION,
@@ -783,7 +783,7 @@ export function normalizePairModelOutputs(
     ...(alignmentStatus === "aligned" ? { alignedOrigin: origin } : {}),
     alignmentStatus,
     reasonCodes,
-    kronos,
+    chronos2,
     rawResponse: cloneRaw(input),
   };
 }

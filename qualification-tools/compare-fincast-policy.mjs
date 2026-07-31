@@ -14790,6 +14790,35 @@ function defaultSimulationCostsForMarket(marketCountry) {
 }
 
 // server/simulation/contracts.ts
+var SIMULATION_RUN_EVENT_SCHEMA_VERSION = 1;
+var SimulationRunEventTypeSchema = external_exports.enum([
+  "snapshot",
+  "progress",
+  "changed",
+  "terminal",
+  "heartbeat"
+]);
+var SimulationRunEventStatusSchema = external_exports.enum([
+  "queued",
+  "running",
+  "cancel_requested",
+  "cancelled",
+  "completed",
+  "failed"
+]);
+var SimulationRunEventV1Schema = external_exports.object({
+  schemaVersion: external_exports.literal(SIMULATION_RUN_EVENT_SCHEMA_VERSION),
+  runId: external_exports.string().uuid(),
+  revision: external_exports.number().int().positive(),
+  type: SimulationRunEventTypeSchema,
+  emittedAt: external_exports.string().datetime({ offset: true }),
+  payload: external_exports.unknown()
+}).strict();
+var SimulationCaseSchema = external_exports.enum([
+  "btc_eth",
+  "high_vol_crypto",
+  "us_etf_pair"
+]);
 var StockSimulationMarketSchema = external_exports.object({
   kind: external_exports.literal("stock"),
   country: MarketCountrySchema
@@ -14810,21 +14839,36 @@ var DEFAULT_CRYPTO_FUTURES_MARKET = Object.freeze({
   quoteAsset: "USDT",
   contractType: "PERPETUAL"
 });
-var SimulationModelLaneSchema = external_exports.enum(["kronos_base", "fincast"]);
-var MAIN_SIMULATION_MODEL_LANE = "fincast";
+var SimulationModelLaneSchema = external_exports.enum(["fincast", "chronos2"]);
 var FinCastCandleSecondsSchema = external_exports.union([
   external_exports.literal(15),
   external_exports.literal(30),
   external_exports.literal(60)
 ]);
-var SimulationModelLanesSchema = external_exports.union([
-  external_exports.tuple([external_exports.literal("kronos_base")]),
-  external_exports.tuple([external_exports.literal("fincast")]),
-  external_exports.tuple([external_exports.literal("kronos_base"), external_exports.literal("fincast")])
-]).default([MAIN_SIMULATION_MODEL_LANE]);
+var SimulationModelLanesSchema = external_exports.array(SimulationModelLaneSchema).min(1).max(2).superRefine((lanes, context) => {
+  if (new Set(lanes).size !== lanes.length) {
+    context.addIssue({
+      code: "custom",
+      message: "\uBAA8\uB378 lane\uC740 \uC911\uBCF5\uB420 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."
+    });
+  }
+});
 var SimulationExecutionSchema = external_exports.object({
   mode: external_exports.literal("paper").default("paper")
 }).strict().default({ mode: "paper" });
+var SimulationModelRoleSchema = external_exports.enum(["primary", "veto", "shadow"]);
+var SimulationModelPlanEntrySchema = external_exports.object({
+  symbol: external_exports.string().trim().min(1).max(32),
+  modelLane: SimulationModelLaneSchema,
+  role: SimulationModelRoleSchema,
+  required: external_exports.boolean(),
+  preferredHorizonsMinutes: external_exports.array(external_exports.union([
+    external_exports.literal(5),
+    external_exports.literal(15),
+    external_exports.literal(30),
+    external_exports.literal(60)
+  ])).min(1).max(4)
+}).strict();
 var SimulationPresetSchema = external_exports.enum([
   "trend",
   "breakout",
@@ -14851,7 +14895,7 @@ var CryptoFuturesRiskLimitsSchema = external_exports.object({
   dailyLossLimitRate: external_exports.number().finite().min(5e-3).max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.dailyLossLimitRate).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.dailyLossLimitRate),
   maximumLeverage: external_exports.number().int().min(1).max(15).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.maximumLeverage),
   grossExposureLimitRate: external_exports.number().finite().min(0.1).max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.grossExposureLimitRate).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.grossExposureLimitRate),
-  marginUsageLimitRate: external_exports.number().finite().min(0.05).max(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.marginUsageLimitRate).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.marginUsageLimitRate),
+  marginUsageLimitRate: external_exports.number().finite().min(0.05).max(1).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.marginUsageLimitRate),
   liquidationBufferMultiple: external_exports.number().finite().min(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.liquidationBufferMultiple).max(5).default(DEFAULT_CRYPTO_FUTURES_RISK_LIMITS.liquidationBufferMultiple)
 }).strict();
 var SimulationCostsSchema = external_exports.object({
@@ -14890,9 +14934,22 @@ var SimulationSelectionSchema = external_exports.discriminatedUnion("mode", [
   SimulationAutoSelectionSchema,
   SimulationManualSelectionSchema
 ]);
+var HighVolatilityScannerSettingsSchema = external_exports.object({
+  symbolCount: external_exports.union([external_exports.literal(1), external_exports.literal(2)]).default(1),
+  minimumListingDays: external_exports.number().int().min(7).max(3650).default(90),
+  minimumTradingAmountUsd: external_exports.number().finite().min(1e5).max(1e11).default(25e6),
+  maximumSpreadBps: external_exports.number().finite().min(0.1).max(100).default(12),
+  depthRangeBps: external_exports.number().finite().min(1).max(100).default(10),
+  minimumDepthUsd: external_exports.number().finite().min(1e4).max(1e10).default(25e4),
+  maximumMissingRate: external_exports.number().finite().min(0).max(0.2).default(0.02),
+  rescanIntervalMinutes: external_exports.number().int().min(5).max(1440).default(30),
+  riskAppetite: external_exports.enum(["conservative", "balanced", "aggressive"]).default("balanced")
+}).strict();
 var SimulationPairIdSchema = external_exports.enum([
+  "semiconductor-soxl-soxs",
   "soxx-soxl-soxs",
   "smh-soxl-soxs",
+  "spy-spxl-spxs",
   "sndk-snxx-sndq",
   "tsla-tsll-tsls",
   "tsla-tsll-tslq",
@@ -14912,11 +14969,10 @@ var SimulationStrategySchema = external_exports.discriminatedUnion("mode", [
 ]);
 
 // server/worker/ai-contract.ts
-var SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1";
+var SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v2";
 var SCALPING_AI_HORIZONS = [5, 15, 30, 60];
 var SCALPING_AI_REALTIME_HORIZONS = [5, 15];
 var SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95];
-var KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base";
 var FINCAST_MODEL_ID = "Vincent05R/FinCast";
 var CHRONOS_2_MODEL_ID = "amazon/chronos-2";
 var finite = external_exports.number().finite();
@@ -14957,6 +15013,12 @@ var AiPriceBarSchema = external_exports.object({
   index_price: positive.nullable().optional(),
   premium_index: finite.nullable().optional(),
   funding_rate: finite.nullable().optional(),
+  btc_short_return: finite.nullable().optional(),
+  btc_realized_volatility: nonnegative.nullable().optional(),
+  eth_short_return: finite.nullable().optional(),
+  eth_realized_volatility: nonnegative.nullable().optional(),
+  benchmark_return: finite.nullable().optional(),
+  relative_strength: finite.nullable().optional(),
   complete: external_exports.literal(true)
 }).strict().superRefine((bar, context) => {
   if (bar.low > Math.min(bar.open, bar.close) || bar.high < Math.max(bar.open, bar.close) || bar.low > bar.high) {
@@ -14969,7 +15031,12 @@ var AiTargetStopSchema = external_exports.object({
   stop_price: positive
 }).strict().refine((item) => item.target_price !== item.stop_price, "target and stop must differ");
 var AiSeriesCadenceSchema = external_exports.object({
-  candle_seconds: external_exports.union([external_exports.literal(15), external_exports.literal(30), external_exports.literal(60)]),
+  candle_seconds: external_exports.union([
+    external_exports.literal(5),
+    external_exports.literal(15),
+    external_exports.literal(30),
+    external_exports.literal(60)
+  ]),
   gap_policy: external_exports.enum(["continuous", "market_session_prevalidated"])
 }).strict().superRefine((cadence, context) => {
   if (cadence.gap_policy === "market_session_prevalidated" && cadence.candle_seconds !== 60) {
@@ -15318,15 +15385,6 @@ var AiModelProvenanceSchema = external_exports.object({
       message: "peak VRAM value and measurement basis must be recorded together"
     });
   }
-  if (model.model_id === KRONOS_BASE_MODEL_ID) {
-    const invalidKronosPrecision = model.dtype !== "float32" || model.precision_validation !== void 0 && model.precision_validation !== (model.loaded ? "not_required" : "unavailable") || model.memory_status !== void 0 && model.memory_status !== (model.loaded ? "ok" : "unavailable") || model.quantile_monotonicity_policy !== void 0 && model.quantile_monotonicity_policy !== (model.loaded ? "native" : "unavailable") || model.fp32_quantile_observations !== void 0 && model.fp32_quantile_observations !== null || model.mixed_quantile_observations !== void 0 && model.mixed_quantile_observations !== null || model.quantile_tail_policy !== void 0 && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable") || (model.precision_failure_reasons?.length ?? 0) > 0;
-    if (invalidKronosPrecision) {
-      context.addIssue({
-        code: "custom",
-        message: "Kronos-family models require native float32 provenance"
-      });
-    }
-  }
   if (model.model_id === CHRONOS_2_MODEL_ID) {
     const invalidChronos2Precision = model.dtype !== "float32" || model.precision_validation !== void 0 && model.precision_validation !== (model.loaded ? "not_required" : "unavailable") || model.memory_status !== void 0 && model.memory_status !== (model.loaded ? "ok" : "unavailable") || model.quantile_monotonicity_policy !== void 0 && model.quantile_monotonicity_policy !== (model.loaded ? "chronos2_fp32_monotone_rearrangement_v1" : "unavailable") || model.fp32_quantile_observations !== void 0 && model.fp32_quantile_observations !== null || model.mixed_quantile_observations !== void 0 && model.mixed_quantile_observations !== null || model.quantile_tail_policy !== void 0 && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable") || (model.precision_failure_reasons?.length ?? 0) > 0;
     if (invalidChronos2Precision) {
@@ -15420,6 +15478,8 @@ var AiHorizonForecastSchema = external_exports.object({
   target_timestamp: timestamp,
   return_quantiles: external_exports.array(QuantileValueSchema).length(SCALPING_AI_QUANTILES.length),
   price_quantiles: external_exports.array(QuantileValueSchema).length(SCALPING_AI_QUANTILES.length),
+  native_return_quantiles: external_exports.array(QuantileValueSchema).max(99).optional(),
+  native_price_quantiles: external_exports.array(QuantileValueSchema).max(99).optional(),
   up_probability: finite.min(0).max(1).nullable().optional(),
   down_probability: finite.min(0).max(1).nullable().optional(),
   flat_probability: finite.min(0).max(1).nullable().optional(),
@@ -15431,6 +15491,40 @@ var AiHorizonForecastSchema = external_exports.object({
   valid_path_count: external_exports.number().int().nonnegative(),
   invalid_path_count: external_exports.number().int().nonnegative()
 }).strict().superRefine((value, context) => {
+  if (value.native_return_quantiles === void 0 !== (value.native_price_quantiles === void 0)) {
+    context.addIssue({
+      code: "custom",
+      message: "native return and price quantiles must be present together"
+    });
+  }
+  if (value.native_return_quantiles && value.native_price_quantiles) {
+    if (value.native_return_quantiles.length > 0 && value.native_return_quantiles.length < 7 || value.native_price_quantiles.length > 0 && value.native_price_quantiles.length < 7) {
+      context.addIssue({
+        code: "custom",
+        message: "non-empty native quantiles must contain at least seven points"
+      });
+    }
+    for (const [key, quantiles2] of [
+      ["native_return_quantiles", value.native_return_quantiles],
+      ["native_price_quantiles", value.native_price_quantiles]
+    ]) {
+      for (let index = 1; index < quantiles2.length; index += 1) {
+        if (quantiles2[index].quantile <= quantiles2[index - 1].quantile || quantiles2[index].value < quantiles2[index - 1].value) {
+          context.addIssue({
+            code: "custom",
+            path: [key, index],
+            message: "native quantiles must be strictly keyed and value-monotone"
+          });
+        }
+      }
+    }
+    if (value.native_return_quantiles.some((item, index) => item.quantile !== value.native_price_quantiles[index]?.quantile)) {
+      context.addIssue({
+        code: "custom",
+        message: "native return and price quantile probabilities must align"
+      });
+    }
+  }
   const probabilities = [
     value.up_probability,
     value.down_probability,
@@ -15508,9 +15602,8 @@ var ModelRunInputOriginSchema = external_exports.object({
   }
 });
 var ModelRunSchema = external_exports.object({
-  role: external_exports.enum(["kronos_base", "fincast", "chronos_2"]),
+  role: external_exports.enum(["fincast", "chronos_2"]),
   expected_model_id: external_exports.enum([
-    KRONOS_BASE_MODEL_ID,
     FINCAST_MODEL_ID,
     CHRONOS_2_MODEL_ID
   ]),
@@ -15525,7 +15618,7 @@ var ModelRunSchema = external_exports.object({
   input_end_aligned: external_exports.literal(true),
   raw_series: external_exports.array(SeriesForecastResultSchema).min(1).max(1e4)
 }).strict().superRefine((run, context) => {
-  const expectedModelId = run.role === "kronos_base" ? KRONOS_BASE_MODEL_ID : run.role === "chronos_2" ? CHRONOS_2_MODEL_ID : FINCAST_MODEL_ID;
+  const expectedModelId = run.role === "chronos_2" ? CHRONOS_2_MODEL_ID : FINCAST_MODEL_ID;
   if (run.expected_model_id !== expectedModelId || run.model.model_id !== expectedModelId) {
     context.addIssue({
       code: "custom",
@@ -15706,11 +15799,11 @@ var AiResponseSchema = external_exports.object({
   evaluation: EvaluationResultSchema.nullable().optional(),
   error: UnavailableSchema.nullable().optional()
 }).strict().superRefine((response, context) => {
-  if (response.model.model_id !== KRONOS_BASE_MODEL_ID && response.model.model_id !== FINCAST_MODEL_ID && response.model.model_id !== CHRONOS_2_MODEL_ID) {
+  if (response.model.model_id !== FINCAST_MODEL_ID && response.model.model_id !== CHRONOS_2_MODEL_ID) {
     context.addIssue({
       code: "custom",
       path: ["model", "model_id"],
-      message: "AI backend must use a supported pinned Kronos-base, Chronos-2, or FinCast model"
+      message: "AI backend must use a supported pinned Chronos-2 or FinCast model"
     });
   }
   if ((response.model.fallback_from ?? null) !== null || (response.model.fallback_reason ?? null) !== null) {
@@ -15763,7 +15856,7 @@ var AiResponseSchema = external_exports.object({
       return;
     }
     const independentRun = response.model_runs[0];
-    const expectedModelId = independentRun.role === "kronos_base" ? KRONOS_BASE_MODEL_ID : independentRun.role === "chronos_2" ? CHRONOS_2_MODEL_ID : FINCAST_MODEL_ID;
+    const expectedModelId = independentRun.role === "chronos_2" ? CHRONOS_2_MODEL_ID : FINCAST_MODEL_ID;
     if (response.model.model_id !== expectedModelId) {
       context.addIssue({
         code: "custom",
@@ -16139,8 +16232,8 @@ function parseModel(value, expectedLane) {
   const parsed = AiModelProvenanceSchema.safeParse(value);
   if (!parsed.success) return void 0;
   const source = parsed.data;
-  const expectedModelId = expectedLane === "fincast" ? FINCAST_MODEL_ID : expectedLane === "kronos_base" ? KRONOS_BASE_MODEL_ID : void 0;
-  if (source.model_id !== KRONOS_BASE_MODEL_ID && source.model_id !== FINCAST_MODEL_ID || expectedModelId !== void 0 && source.model_id !== expectedModelId || (source.fallback_from ?? null) !== null || (source.fallback_reason ?? null) !== null) {
+  const expectedModelId = expectedLane === "fincast" ? FINCAST_MODEL_ID : expectedLane === "chronos2" ? CHRONOS_2_MODEL_ID : void 0;
+  if (source.model_id !== FINCAST_MODEL_ID && source.model_id !== CHRONOS_2_MODEL_ID || expectedModelId !== void 0 && source.model_id !== expectedModelId || (source.fallback_from ?? null) !== null || (source.fallback_reason ?? null) !== null) {
     return void 0;
   }
   return {
@@ -16312,7 +16405,7 @@ function selectAiForecastSeries(input, config2) {
     availableCandidateCount: 0,
     selected: []
   };
-  if (!response || response.schema_version !== "scalping-ai/v1" || response.mode !== "forecast" || !model || !generatedAt || !Array.isArray(response.series)) {
+  if (!response || response.schema_version !== SCALPING_AI_SCHEMA_VERSION || response.mode !== "forecast" || !model || !generatedAt || !Array.isArray(response.series)) {
     return { ...base, status: "unavailable", reason: "invalid_forecast_response" };
   }
   if (!model.loaded) {
@@ -16518,7 +16611,7 @@ function decidePaperActions(input) {
       observation.state || observation.signalOriginAt || observation.calculationAt || observation.evidenceAt || observation.indicators || observation.chartPatternBias && observation.chartPatternBias !== "neutral"
     );
     const baseFusion = fuseForecastWithTechnical({
-      lane: input.modelLane ?? (candidate.model.modelId === FINCAST_MODEL_ID ? "fincast" : "kronos_base"),
+      lane: input.modelLane ?? (candidate.model.modelId === FINCAST_MODEL_ID ? "fincast" : "chronos2"),
       modelDirection: "long",
       modelConfidence: candidate.upProbability,
       modelOriginAt: candidate.inputEndAt,
@@ -17055,7 +17148,7 @@ function cdfProbability(points, value) {
 function forecastResponse(input, output, rowIds) {
   const originAt = input.origins[rowIds[0]].origin;
   return {
-    schema_version: "scalping-ai/v1",
+    schema_version: "scalping-ai/v2",
     request_id: `policy-regression:${originAt}`,
     mode: "forecast",
     status: "available",

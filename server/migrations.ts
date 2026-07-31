@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { DatabaseDialect, RelationalDatabase } from "./database.js";
+import type { RelationalDatabase } from "./database.js";
+import {
+  LATEST_CONTRACT_CUTOVER_MIGRATION_ID,
+  LATEST_CONTRACT_CUTOVER_SIGNATURE,
+  migrateLatestContracts,
+} from "./migrations/latest-contract-cutover.js";
 
 export type AppliedMigration = {
   id: string;
@@ -26,42 +31,16 @@ function checksum(migration: Pick<Migration, "id" | "signature">): string {
 }
 
 async function createLedger(database: RelationalDatabase): Promise<void> {
-  if (database.dialect === "mysql") {
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_schema_migrations (
-        migration_id VARCHAR(128) PRIMARY KEY,
-        checksum CHAR(64) NOT NULL,
-        applied_at BIGINT NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    return;
-  }
-  const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
   await database.run(`
     CREATE TABLE IF NOT EXISTS portfolio_schema_migrations (
       migration_id TEXT PRIMARY KEY,
       checksum TEXT NOT NULL,
-      applied_at ${timestamp} NOT NULL
+      applied_at BIGINT NOT NULL
     )
   `);
 }
 
 async function hasTable(database: RelationalDatabase, table: string): Promise<boolean> {
-  if (database.dialect === "sqlite") {
-    const rows = await database.query<{ table_name: string }>(
-      "SELECT name AS table_name FROM sqlite_master WHERE type = 'table' AND name = ?",
-      [table],
-    );
-    return rows.length > 0;
-  }
-  if (database.dialect === "mysql") {
-    const rows = await database.query<{ table_name: string }>(`
-      SELECT TABLE_NAME AS table_name
-      FROM information_schema.tables
-      WHERE table_schema = DATABASE() AND table_name = ?
-    `, [table]);
-    return rows.length > 0;
-  }
   const rows = await database.query<{ table_name: string }>(`
     SELECT table_name
     FROM information_schema.tables
@@ -71,18 +50,6 @@ async function hasTable(database: RelationalDatabase, table: string): Promise<bo
 }
 
 async function columns(database: RelationalDatabase, table: string): Promise<Set<string>> {
-  if (database.dialect === "sqlite") {
-    const rows = await database.query<{ name: string }>(`PRAGMA table_info(${table})`);
-    return new Set(rows.map((row) => row.name.toLowerCase()));
-  }
-  if (database.dialect === "mysql") {
-    const rows = await database.query<{ column_name: string }>(`
-      SELECT COLUMN_NAME AS column_name
-      FROM information_schema.columns
-      WHERE table_schema = DATABASE() AND table_name = ?
-    `, [table]);
-    return new Set(rows.map((row) => row.column_name.toLowerCase()));
-  }
   const rows = await database.query<{ column_name: string }>(`
     SELECT column_name
     FROM information_schema.columns
@@ -94,54 +61,30 @@ async function columns(database: RelationalDatabase, table: string): Promise<Set
 async function addMissingColumns(
   database: RelationalDatabase,
   table: string,
-  definitions: Record<string, Record<DatabaseDialect, string>>,
+  definitions: Record<string, string>,
 ): Promise<void> {
   if (!await hasTable(database, table)) return;
   const existing = await columns(database, table);
-  for (const [name, byDialect] of Object.entries(definitions)) {
+  for (const [name, definition] of Object.entries(definitions)) {
     if (existing.has(name.toLowerCase())) continue;
-    await database.run(`ALTER TABLE ${table} ADD COLUMN ${name} ${byDialect[database.dialect]}`);
+    await database.run(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
     existing.add(name.toLowerCase());
   }
 }
 
 export async function ensureMarketCandleVolumeColumn(database: RelationalDatabase): Promise<void> {
   await addMissingColumns(database, "portfolio_market_candles", {
-    volume: {
-      sqlite: "REAL",
-      mysql: "DOUBLE NULL",
-      postgres: "DOUBLE PRECISION",
-    },
+    volume: "DOUBLE PRECISION",
   });
 }
 
 async function ensureScalpingVolumeAvailabilityColumn(database: RelationalDatabase): Promise<void> {
   await addMissingColumns(database, "portfolio_intraday_bars", {
-    volume_available: {
-      sqlite: "INTEGER NOT NULL DEFAULT 1",
-      mysql: "TINYINT(1) NOT NULL DEFAULT 1",
-      postgres: "BOOLEAN NOT NULL DEFAULT TRUE",
-    },
+    volume_available: "BOOLEAN NOT NULL DEFAULT TRUE",
   });
 }
 
 async function primaryKeyColumns(database: RelationalDatabase, table: string): Promise<string[]> {
-  if (database.dialect === "sqlite") {
-    const rows = await database.query<{ name: string; pk: number | string }>(`PRAGMA table_info(${table})`);
-    return rows
-      .filter((row) => Number(row.pk) > 0)
-      .sort((left, right) => Number(left.pk) - Number(right.pk))
-      .map((row) => row.name.toLowerCase());
-  }
-  if (database.dialect === "mysql") {
-    const rows = await database.query<{ column_name: string; ordinal_position: number | string }>(`
-      SELECT COLUMN_NAME AS column_name, ORDINAL_POSITION AS ordinal_position
-      FROM information_schema.key_column_usage
-      WHERE table_schema = DATABASE() AND table_name = ? AND constraint_name = 'PRIMARY'
-      ORDER BY ORDINAL_POSITION
-    `, [table]);
-    return rows.map((row) => row.column_name.toLowerCase());
-  }
   const rows = await database.query<{ column_name: string; ordinal_position: number | string }>(`
     SELECT key_column.column_name, key_column.ordinal_position
     FROM information_schema.table_constraints constraint_info
@@ -159,85 +102,34 @@ async function primaryKeyColumns(database: RelationalDatabase, table: string): P
 
 export async function ensureScalpingMarketCountry(database: RelationalDatabase): Promise<void> {
   await addMissingColumns(database, "portfolio_intraday_bars", {
-    market_country: {
-      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
-      postgres: "TEXT NOT NULL DEFAULT 'KR'",
-    },
+    market_country: "TEXT NOT NULL DEFAULT 'KR'",
   });
   await addMissingColumns(database, "portfolio_scalping_predictions", {
-    market_country: {
-      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
-      postgres: "TEXT NOT NULL DEFAULT 'KR'",
-    },
+    market_country: "TEXT NOT NULL DEFAULT 'KR'",
   });
   if (await hasTable(database, "portfolio_intraday_bars")) {
     await database.run("UPDATE portfolio_intraday_bars SET market_country = 'KR' WHERE market_country IS NULL OR market_country = ''");
     const expected = ["market_country", "symbol", "interval_minutes", "open_time"];
     const current = await primaryKeyColumns(database, "portfolio_intraday_bars");
     if (current.join(",") !== expected.join(",")) {
-      if (database.dialect === "sqlite") {
-        await database.run("ALTER TABLE portfolio_intraday_bars RENAME TO portfolio_intraday_bars_market_legacy");
-        await database.run(`
-          CREATE TABLE portfolio_intraday_bars (
-            market_country TEXT NOT NULL DEFAULT 'KR',
-            symbol TEXT NOT NULL,
-            interval_minutes INTEGER NOT NULL,
-            open_time TEXT NOT NULL,
-            close_time TEXT NOT NULL,
-            session_date TEXT NOT NULL,
-            source_kind TEXT NOT NULL,
-            bar_state TEXT NOT NULL,
-            open_price REAL NOT NULL,
-            high_price REAL NOT NULL,
-            low_price REAL NOT NULL,
-            close_price REAL NOT NULL,
-            volume REAL NOT NULL,
-            volume_available INTEGER NOT NULL DEFAULT 1,
-            turnover REAL,
-            trade_count INTEGER,
-            quality_status TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
-          )
-        `);
-        await database.run(`
-          INSERT INTO portfolio_intraday_bars (
-            market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind,
-            bar_state, open_price, high_price, low_price, close_price, volume, volume_available,
-            turnover, trade_count, quality_status, updated_at
-          )
-          SELECT COALESCE(NULLIF(market_country, ''), 'KR'), symbol, interval_minutes, open_time, close_time,
-            session_date, source_kind, bar_state, open_price, high_price, low_price, close_price, volume,
-            volume_available, turnover, trade_count, quality_status, updated_at
-          FROM portfolio_intraday_bars_market_legacy
-        `);
-        await database.run("DROP TABLE portfolio_intraday_bars_market_legacy");
-      } else if (database.dialect === "mysql") {
-        await database.run(`
-          ALTER TABLE portfolio_intraday_bars
-          DROP PRIMARY KEY,
-          ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
-        `);
-      } else {
-        const [primary] = await database.query<{ constraint_name: string }>(`
-          SELECT constraint_name
-          FROM information_schema.table_constraints
-          WHERE table_schema = current_schema() AND table_name = 'portfolio_intraday_bars'
-            AND constraint_type = 'PRIMARY KEY'
-        `);
-        if (primary) {
-          if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(primary.constraint_name)) {
-            throw new Error("Unexpected PostgreSQL primary-key identifier.");
-          }
-          await database.run(`ALTER TABLE portfolio_intraday_bars DROP CONSTRAINT "${primary.constraint_name}"`);
+      const [primary] = await database.query<{ constraint_name: string }>(`
+        SELECT constraint_name
+        FROM information_schema.table_constraints
+        WHERE table_schema = current_schema() AND table_name = 'portfolio_intraday_bars'
+          AND constraint_type = 'PRIMARY KEY'
+      `);
+      if (primary) {
+        if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(primary.constraint_name)) {
+          throw new Error("Unexpected PostgreSQL primary-key identifier.");
         }
-        await database.run(`
-          ALTER TABLE portfolio_intraday_bars
-          ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
-        `);
+        await database.run(
+          `ALTER TABLE portfolio_intraday_bars DROP CONSTRAINT "${primary.constraint_name}"`,
+        );
       }
+      await database.run(`
+        ALTER TABLE portfolio_intraday_bars
+        ADD PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
+      `);
     }
   }
   if (await hasTable(database, "portfolio_scalping_predictions")) {
@@ -264,53 +156,6 @@ export async function ensureScalpingMarketCountry(database: RelationalDatabase):
 }
 
 async function createScalpingTables(database: RelationalDatabase): Promise<void> {
-  if (database.dialect === "mysql") {
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
-        market_country VARCHAR(32) NOT NULL DEFAULT 'KR',
-        symbol VARCHAR(32) NOT NULL,
-        interval_minutes INT NOT NULL,
-        open_time VARCHAR(40) NOT NULL,
-        close_time VARCHAR(40) NOT NULL,
-        session_date VARCHAR(10) NOT NULL,
-        source_kind VARCHAR(32) NOT NULL,
-        bar_state VARCHAR(16) NOT NULL,
-        open_price DOUBLE NOT NULL,
-        high_price DOUBLE NOT NULL,
-        low_price DOUBLE NOT NULL,
-        close_price DOUBLE NOT NULL,
-        volume DOUBLE NOT NULL,
-        turnover DOUBLE NULL,
-        trade_count INT NULL,
-        quality_status VARCHAR(32) NOT NULL,
-        updated_at BIGINT NOT NULL,
-        PRIMARY KEY(market_country, symbol, interval_minutes, open_time),
-        KEY idx_portfolio_intraday_session (symbol, interval_minutes, session_date, open_time),
-        KEY idx_portfolio_intraday_updated (updated_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_predictions (
-        prediction_id VARCHAR(64) PRIMARY KEY,
-        market_country VARCHAR(32) NOT NULL DEFAULT 'KR',
-        symbol VARCHAR(32) NOT NULL,
-        model_name VARCHAR(128) NOT NULL,
-        model_version VARCHAR(128) NOT NULL,
-        input_ended_at VARCHAR(40) NOT NULL,
-        generated_at VARCHAR(40) NOT NULL,
-        status VARCHAR(32) NOT NULL,
-        data_quality VARCHAR(32) NOT NULL,
-        retrospective TINYINT(1) NOT NULL,
-        payload_json LONGTEXT NOT NULL,
-        created_at BIGINT NOT NULL,
-        KEY idx_portfolio_scalping_prediction_latest (symbol, retrospective, generated_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    return;
-  }
-  const real = database.dialect === "postgres" ? "DOUBLE PRECISION" : "REAL";
-  const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
-  const boolean = database.dialect === "postgres" ? "BOOLEAN" : "INTEGER";
   await database.run(`
     CREATE TABLE IF NOT EXISTS portfolio_intraday_bars (
       market_country TEXT NOT NULL DEFAULT 'KR',
@@ -321,24 +166,20 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
       session_date TEXT NOT NULL,
       source_kind TEXT NOT NULL,
       bar_state TEXT NOT NULL,
-      open_price ${real} NOT NULL,
-      high_price ${real} NOT NULL,
-      low_price ${real} NOT NULL,
-      close_price ${real} NOT NULL,
-      volume ${real} NOT NULL,
-      turnover ${real},
+      open_price DOUBLE PRECISION NOT NULL,
+      high_price DOUBLE PRECISION NOT NULL,
+      low_price DOUBLE PRECISION NOT NULL,
+      close_price DOUBLE PRECISION NOT NULL,
+      volume DOUBLE PRECISION NOT NULL,
+      turnover DOUBLE PRECISION,
       trade_count INTEGER,
       quality_status TEXT NOT NULL,
-      updated_at ${timestamp} NOT NULL,
+      updated_at BIGINT NOT NULL,
       PRIMARY KEY(market_country, symbol, interval_minutes, open_time)
     )
   `);
   await addMissingColumns(database, "portfolio_intraday_bars", {
-    market_country: {
-      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
-      postgres: "TEXT NOT NULL DEFAULT 'KR'",
-    },
+    market_country: "TEXT NOT NULL DEFAULT 'KR'",
   });
   await database.run(`
     CREATE INDEX IF NOT EXISTS idx_portfolio_intraday_session
@@ -359,17 +200,13 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
       generated_at TEXT NOT NULL,
       status TEXT NOT NULL,
       data_quality TEXT NOT NULL,
-      retrospective ${boolean} NOT NULL,
+      retrospective BOOLEAN NOT NULL,
       payload_json TEXT NOT NULL,
-      created_at ${timestamp} NOT NULL
+      created_at BIGINT NOT NULL
     )
   `);
   await addMissingColumns(database, "portfolio_scalping_predictions", {
-    market_country: {
-      sqlite: "TEXT NOT NULL DEFAULT 'KR'",
-      mysql: "VARCHAR(32) NOT NULL DEFAULT 'KR'",
-      postgres: "TEXT NOT NULL DEFAULT 'KR'",
-    },
+    market_country: "TEXT NOT NULL DEFAULT 'KR'",
   });
   await database.run(`
     CREATE INDEX IF NOT EXISTS idx_portfolio_scalping_prediction_latest
@@ -378,135 +215,68 @@ async function createScalpingTables(database: RelationalDatabase): Promise<void>
 }
 
 export async function createScalpingRawMarketDataTables(database: RelationalDatabase): Promise<void> {
-  if (database.dialect === "mysql") {
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
-        market_country VARCHAR(32) NOT NULL,
-        symbol VARCHAR(32) NOT NULL,
-        event_id VARCHAR(240) NOT NULL,
-        provider VARCHAR(32) NOT NULL,
-        venue VARCHAR(32) NOT NULL,
-        exchange_code VARCHAR(8) NULL,
-        session_feed VARCHAR(16) NULL,
-        session_date VARCHAR(10) NOT NULL,
-        executed_at VARCHAR(40) NOT NULL,
-        received_at VARCHAR(40) NOT NULL,
-        price DOUBLE NOT NULL,
-        quantity DOUBLE NOT NULL,
-        trading_amount DOUBLE NULL,
-        side VARCHAR(16) NOT NULL,
-        cumulative_volume DOUBLE NULL,
-        cumulative_amount DOUBLE NULL,
-        execution_strength DOUBLE NULL,
-        execution_class VARCHAR(32) NULL,
-        best_bid_price DOUBLE NULL,
-        best_ask_price DOUBLE NULL,
-        recorded_at BIGINT NOT NULL,
-        PRIMARY KEY(market_country, symbol, event_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
-        snapshot_id VARCHAR(36) PRIMARY KEY,
-        market_country VARCHAR(32) NOT NULL,
-        symbol VARCHAR(32) NOT NULL,
-        provider VARCHAR(32) NOT NULL,
-        venue VARCHAR(32) NOT NULL,
-        exchange_code VARCHAR(8) NULL,
-        session_feed VARCHAR(16) NULL,
-        session_date VARCHAR(10) NOT NULL,
-        observed_at VARCHAR(40) NOT NULL,
-        received_at VARCHAR(40) NOT NULL,
-        depth VARCHAR(24) NOT NULL,
-        asks_json LONGTEXT NOT NULL,
-        bids_json LONGTEXT NOT NULL,
-        total_ask_quantity DOUBLE NULL,
-        total_bid_quantity DOUBLE NULL,
-        best_ask_price DOUBLE NOT NULL,
-        best_ask_quantity DOUBLE NOT NULL,
-        best_bid_price DOUBLE NOT NULL,
-        best_bid_quantity DOUBLE NOT NULL,
-        recorded_at BIGINT NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
-        event_id VARCHAR(36) PRIMARY KEY,
-        market_country VARCHAR(32) NOT NULL,
-        symbol VARCHAR(32) NULL,
-        event_type VARCHAR(64) NOT NULL,
-        occurred_at VARCHAR(40) NOT NULL,
-        code VARCHAR(120) NULL,
-        details_json LONGTEXT NULL,
-        recorded_at BIGINT NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-  } else {
-    const real = database.dialect === "postgres" ? "DOUBLE PRECISION" : "REAL";
-    const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
-        market_country TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        venue TEXT NOT NULL,
-        exchange_code TEXT,
-        session_feed TEXT,
-        session_date TEXT NOT NULL,
-        executed_at TEXT NOT NULL,
-        received_at TEXT NOT NULL,
-        price ${real} NOT NULL,
-        quantity ${real} NOT NULL,
-        trading_amount ${real},
-        side TEXT NOT NULL,
-        cumulative_volume ${real},
-        cumulative_amount ${real},
-        execution_strength ${real},
-        execution_class TEXT,
-        best_bid_price ${real},
-        best_ask_price ${real},
-        recorded_at ${timestamp} NOT NULL,
-        PRIMARY KEY(market_country, symbol, event_id)
-      )
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
-        snapshot_id TEXT PRIMARY KEY,
-        market_country TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        venue TEXT NOT NULL,
-        exchange_code TEXT,
-        session_feed TEXT,
-        session_date TEXT NOT NULL,
-        observed_at TEXT NOT NULL,
-        received_at TEXT NOT NULL,
-        depth TEXT NOT NULL,
-        asks_json TEXT NOT NULL,
-        bids_json TEXT NOT NULL,
-        total_ask_quantity ${real},
-        total_bid_quantity ${real},
-        best_ask_price ${real} NOT NULL,
-        best_ask_quantity ${real} NOT NULL,
-        best_bid_price ${real} NOT NULL,
-        best_bid_quantity ${real} NOT NULL,
-        recorded_at ${timestamp} NOT NULL
-      )
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
-        event_id TEXT PRIMARY KEY,
-        market_country TEXT NOT NULL,
-        symbol TEXT,
-        event_type TEXT NOT NULL,
-        occurred_at TEXT NOT NULL,
-        code TEXT,
-        details_json TEXT,
-        recorded_at ${timestamp} NOT NULL
-      )
-    `);
-  }
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_scalping_trades (
+      market_country TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      exchange_code TEXT,
+      session_feed TEXT,
+      session_date TEXT NOT NULL,
+      executed_at TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
+      quantity DOUBLE PRECISION NOT NULL,
+      trading_amount DOUBLE PRECISION,
+      side TEXT NOT NULL,
+      cumulative_volume DOUBLE PRECISION,
+      cumulative_amount DOUBLE PRECISION,
+      execution_strength DOUBLE PRECISION,
+      execution_class TEXT,
+      best_bid_price DOUBLE PRECISION,
+      best_ask_price DOUBLE PRECISION,
+      recorded_at BIGINT NOT NULL,
+      PRIMARY KEY(market_country, symbol, event_id)
+    )
+  `);
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_scalping_orderbooks (
+      snapshot_id TEXT PRIMARY KEY,
+      market_country TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      exchange_code TEXT,
+      session_feed TEXT,
+      session_date TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      depth TEXT NOT NULL,
+      asks_json TEXT NOT NULL,
+      bids_json TEXT NOT NULL,
+      total_ask_quantity DOUBLE PRECISION,
+      total_bid_quantity DOUBLE PRECISION,
+      best_ask_price DOUBLE PRECISION NOT NULL,
+      best_ask_quantity DOUBLE PRECISION NOT NULL,
+      best_bid_price DOUBLE PRECISION NOT NULL,
+      best_bid_quantity DOUBLE PRECISION NOT NULL,
+      recorded_at BIGINT NOT NULL
+    )
+  `);
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_scalping_recording_events (
+      event_id TEXT PRIMARY KEY,
+      market_country TEXT NOT NULL,
+      symbol TEXT,
+      event_type TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      code TEXT,
+      details_json TEXT,
+      recorded_at BIGINT NOT NULL
+    )
+  `);
   await createIndex(
     database,
     "idx_portfolio_scalping_trade_session",
@@ -536,23 +306,6 @@ export async function createScalpingRawMarketDataTables(database: RelationalData
 export async function widenScalpingMarketCountryForCrypto(
   database: RelationalDatabase,
 ): Promise<void> {
-  const definitions = [
-    ["portfolio_intraday_bars", "VARCHAR(32) NOT NULL DEFAULT 'KR'"],
-    ["portfolio_scalping_predictions", "VARCHAR(32) NOT NULL DEFAULT 'KR'"],
-    ["portfolio_scalping_trades", "VARCHAR(32) NOT NULL"],
-    ["portfolio_scalping_orderbooks", "VARCHAR(32) NOT NULL"],
-    ["portfolio_scalping_recording_events", "VARCHAR(32) NOT NULL"],
-  ] as const;
-  if (database.dialect === "mysql") {
-    for (const [table, definition] of definitions) {
-      if (await hasTable(database, table)) {
-        // MODIFY preserves the existing composite primary keys and row values.
-        await database.run(
-          `ALTER TABLE ${table} MODIFY COLUMN market_country ${definition}`,
-        );
-      }
-    }
-  }
   await createIndex(
     database,
     "idx_portfolio_scalping_trade_provider_venue",
@@ -568,21 +321,6 @@ export async function widenScalpingMarketCountryForCrypto(
 }
 
 async function hasIndex(database: RelationalDatabase, index: string): Promise<boolean> {
-  if (database.dialect === "sqlite") {
-    const rows = await database.query<{ index_name: string }>(
-      "SELECT name AS index_name FROM sqlite_master WHERE type = 'index' AND name = ?",
-      [index],
-    );
-    return rows.length > 0;
-  }
-  if (database.dialect === "mysql") {
-    const rows = await database.query<{ index_name: string }>(`
-      SELECT DISTINCT INDEX_NAME AS index_name
-      FROM information_schema.statistics
-      WHERE table_schema = DATABASE() AND index_name = ?
-    `, [index]);
-    return rows.length > 0;
-  }
   const rows = await database.query<{ index_name: string }>(`
     SELECT indexname AS index_name
     FROM pg_indexes
@@ -603,36 +341,12 @@ async function createIndex(
 
 async function migrateRunManagement(database: RelationalDatabase): Promise<void> {
   await addMissingColumns(database, "portfolio_backtest_runs", {
-    name: {
-      sqlite: "TEXT",
-      mysql: "VARCHAR(200) NULL",
-      postgres: "TEXT",
-    },
-    tags_json: {
-      sqlite: "TEXT NOT NULL DEFAULT '[]'",
-      mysql: "LONGTEXT NULL",
-      postgres: "TEXT NOT NULL DEFAULT '[]'",
-    },
-    archived_at: {
-      sqlite: "INTEGER",
-      mysql: "BIGINT NULL",
-      postgres: "BIGINT",
-    },
-    deleted_at: {
-      sqlite: "INTEGER",
-      mysql: "BIGINT NULL",
-      postgres: "BIGINT",
-    },
-    replay_of: {
-      sqlite: "TEXT",
-      mysql: "VARCHAR(64) NULL",
-      postgres: "TEXT",
-    },
-    manifest_json: {
-      sqlite: "TEXT",
-      mysql: "LONGTEXT NULL",
-      postgres: "TEXT",
-    },
+    name: "TEXT",
+    tags_json: "TEXT NOT NULL DEFAULT '[]'",
+    archived_at: "BIGINT",
+    deleted_at: "BIGINT",
+    replay_of: "TEXT",
+    manifest_json: "TEXT",
   });
   if (await hasTable(database, "portfolio_backtest_runs")) {
     await database.run("UPDATE portfolio_backtest_runs SET tags_json = '[]' WHERE tags_json IS NULL");
@@ -652,40 +366,6 @@ async function migrateRunManagement(database: RelationalDatabase): Promise<void>
 }
 
 async function createPresetTables(database: RelationalDatabase): Promise<void> {
-  if (database.dialect === "mysql") {
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_presets (
-        preset_id VARCHAR(64) PRIMARY KEY,
-        owner_subject VARCHAR(128) NOT NULL,
-        name VARCHAR(200) NOT NULL,
-        description TEXT NOT NULL,
-        config_json LONGTEXT NOT NULL,
-        tags_json LONGTEXT NOT NULL,
-        source_json LONGTEXT NOT NULL,
-        revision INT NOT NULL,
-        last_used_at BIGINT NULL,
-        created_at BIGINT NOT NULL,
-        updated_at BIGINT NOT NULL,
-        deleted_at BIGINT NULL,
-        KEY idx_portfolio_preset_browse (owner_subject, deleted_at, updated_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    await database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_preset_versions (
-        version_id VARCHAR(64) PRIMARY KEY,
-        preset_id VARCHAR(64) NOT NULL,
-        revision INT NOT NULL,
-        snapshot_json LONGTEXT NOT NULL,
-        created_at BIGINT NOT NULL,
-        UNIQUE KEY uq_portfolio_preset_revision (preset_id, revision),
-        KEY idx_portfolio_preset_versions (preset_id, revision),
-        CONSTRAINT fk_portfolio_preset_versions_preset FOREIGN KEY (preset_id)
-          REFERENCES portfolio_presets(preset_id) ON DELETE CASCADE
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    return;
-  }
-  const timestamp = database.dialect === "postgres" ? "BIGINT" : "INTEGER";
   await database.run(`
     CREATE TABLE IF NOT EXISTS portfolio_presets (
       preset_id TEXT PRIMARY KEY,
@@ -696,10 +376,10 @@ async function createPresetTables(database: RelationalDatabase): Promise<void> {
       tags_json TEXT NOT NULL,
       source_json TEXT NOT NULL,
       revision INTEGER NOT NULL,
-      last_used_at ${timestamp},
-      created_at ${timestamp} NOT NULL,
-      updated_at ${timestamp} NOT NULL,
-      deleted_at ${timestamp}
+      last_used_at BIGINT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      deleted_at BIGINT
     )
   `);
   await database.run(`
@@ -712,7 +392,7 @@ async function createPresetTables(database: RelationalDatabase): Promise<void> {
       preset_id TEXT NOT NULL REFERENCES portfolio_presets(preset_id) ON DELETE CASCADE,
       revision INTEGER NOT NULL,
       snapshot_json TEXT NOT NULL,
-      created_at ${timestamp} NOT NULL,
+      created_at BIGINT NOT NULL,
       UNIQUE(preset_id, revision)
     )
   `);
@@ -819,7 +499,180 @@ async function canonicalizeLocalOwner(database: RelationalDatabase): Promise<voi
   }
 }
 
+async function createPortfolioBaseSchema(database: RelationalDatabase): Promise<void> {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+      id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      account_id VARCHAR(128) NOT NULL,
+      snapshot_date CHAR(10) NOT NULL,
+      captured_at BIGINT NOT NULL,
+      origin VARCHAR(16) NOT NULL DEFAULT 'LIVE',
+      UNIQUE(account_id, snapshot_date)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_snapshots_account_date
+      ON portfolio_snapshots(account_id, snapshot_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_snapshot_items (
+      snapshot_id BIGINT NOT NULL REFERENCES portfolio_snapshots(id) ON DELETE CASCADE,
+      symbol VARCHAR(64) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      market VARCHAR(64) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      evaluation_amount DOUBLE PRECISION NOT NULL,
+      weight_percent DOUBLE PRECISION NOT NULL,
+      PRIMARY KEY(snapshot_id, market, symbol, currency)
+    )`,
+    `CREATE TABLE IF NOT EXISTS portfolio_orders (
+      account_id VARCHAR(128) NOT NULL,
+      order_id VARCHAR(128) NOT NULL,
+      symbol VARCHAR(64) NOT NULL,
+      side VARCHAR(16) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      status VARCHAR(32) NOT NULL,
+      ordered_at VARCHAR(64) NOT NULL,
+      filled_at VARCHAR(64) NOT NULL,
+      filled_quantity DOUBLE PRECISION NOT NULL,
+      average_filled_price DOUBLE PRECISION NOT NULL,
+      filled_amount DOUBLE PRECISION NOT NULL,
+      commission DOUBLE PRECISION NOT NULL,
+      tax DOUBLE PRECISION NOT NULL,
+      fetched_at BIGINT NOT NULL,
+      PRIMARY KEY(account_id, order_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_account_filled_at
+      ON portfolio_orders(account_id, filled_at)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_instruments (
+      instrument_key VARCHAR(96) PRIMARY KEY,
+      symbol VARCHAR(64) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      market VARCHAR(64) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      updated_at BIGINT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS portfolio_daily_prices (
+      instrument_key VARCHAR(96) NOT NULL REFERENCES portfolio_instruments(instrument_key) ON DELETE CASCADE,
+      price_date CHAR(10) NOT NULL,
+      open_price DOUBLE PRECISION,
+      high_price DOUBLE PRECISION,
+      low_price DOUBLE PRECISION,
+      close_price DOUBLE PRECISION NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      timestamp VARCHAR(64) NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY(instrument_key, price_date)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_daily_prices_key_date
+      ON portfolio_daily_prices(instrument_key, price_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_backtest_prices (
+      instrument_key VARCHAR(96) NOT NULL,
+      price_date CHAR(10) NOT NULL,
+      close_price DOUBLE PRECISION NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      timestamp VARCHAR(64) NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY(instrument_key, price_date)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_backtest_prices_key_date
+      ON portfolio_backtest_prices(instrument_key, price_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_benchmark_prices (
+      benchmark_key VARCHAR(32) NOT NULL,
+      price_date CHAR(10) NOT NULL,
+      close_price DOUBLE PRECISION NOT NULL,
+      timestamp VARCHAR(64) NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY(benchmark_key, price_date)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_benchmark_prices_key_date
+      ON portfolio_benchmark_prices(benchmark_key, price_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_exchange_rates (
+      rate_date CHAR(10) NOT NULL,
+      base_currency VARCHAR(8) NOT NULL,
+      quote_currency VARCHAR(8) NOT NULL,
+      rate DOUBLE PRECISION NOT NULL,
+      timestamp VARCHAR(64) NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY(rate_date, base_currency, quote_currency)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_exchange_rates_pair_date
+      ON portfolio_exchange_rates(base_currency, quote_currency, rate_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_backfill_state (
+      account_id VARCHAR(128) PRIMARY KEY,
+      status VARCHAR(16) NOT NULL,
+      phase VARCHAR(24) NOT NULL,
+      started_at VARCHAR(64),
+      completed_at VARCHAR(64),
+      updated_at VARCHAR(64) NOT NULL,
+      first_trade_date CHAR(10),
+      last_backfilled_date CHAR(10),
+      orders_imported BIGINT NOT NULL DEFAULT 0,
+      symbols_total BIGINT NOT NULL DEFAULT 0,
+      symbols_processed BIGINT NOT NULL DEFAULT 0,
+      prices_imported BIGINT NOT NULL DEFAULT 0,
+      snapshots_created BIGINT NOT NULL DEFAULT 0,
+      reconciled_symbols BIGINT NOT NULL DEFAULT 0,
+      discrepancy_symbols BIGINT NOT NULL DEFAULT 0,
+      failed_symbols BIGINT NOT NULL DEFAULT 0,
+      message TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS portfolio_cash_ledger (
+      account_id VARCHAR(128) NOT NULL,
+      entry_id VARCHAR(128) NOT NULL,
+      transaction_date CHAR(10) NOT NULL,
+      transaction_time CHAR(5) NOT NULL,
+      occurred_at VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      category VARCHAR(64) NOT NULL,
+      kind VARCHAR(64) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      amount DOUBLE PRECISION NOT NULL,
+      balance DOUBLE PRECISION NOT NULL,
+      instrument_name VARCHAR(255),
+      quantity DOUBLE PRECISION,
+      source VARCHAR(32) NOT NULL DEFAULT 'WTS_PASTE',
+      imported_at BIGINT NOT NULL,
+      PRIMARY KEY(account_id, entry_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_cash_ledger_account_date
+      ON portfolio_cash_ledger(account_id, transaction_date, transaction_time)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_market_candles (
+      source_kind VARCHAR(16) NOT NULL,
+      symbol VARCHAR(64) NOT NULL,
+      candle_interval VARCHAR(8) NOT NULL,
+      adjusted SMALLINT NOT NULL,
+      price_date CHAR(10) NOT NULL,
+      timestamp VARCHAR(64) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      open_price DOUBLE PRECISION NOT NULL,
+      high_price DOUBLE PRECISION NOT NULL,
+      low_price DOUBLE PRECISION NOT NULL,
+      close_price DOUBLE PRECISION NOT NULL,
+      volume DOUBLE PRECISION,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY(source_kind, symbol, candle_interval, adjusted, timestamp)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_market_candles_lookup
+      ON portfolio_market_candles(source_kind, symbol, candle_interval, adjusted, price_date)`,
+    `CREATE TABLE IF NOT EXISTS portfolio_candle_responses (
+      request_key CHAR(64) PRIMARY KEY,
+      feature VARCHAR(32) NOT NULL,
+      request_path VARCHAR(512) NOT NULL,
+      source_kind VARCHAR(16) NOT NULL,
+      symbol VARCHAR(64) NOT NULL,
+      candle_interval VARCHAR(8) NOT NULL,
+      adjusted SMALLINT NOT NULL,
+      payload_json TEXT NOT NULL,
+      fetched_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL
+    )`,
+  ];
+  for (const statement of statements) await database.run(statement);
+}
+
 const migrations: readonly Migration[] = [
+  {
+    id: "20260731_011_postgres_base_schema",
+    signature: "postgres-base-schema-v1;snapshots,orders,instruments,prices,backfill,cash,candles",
+    up: createPortfolioBaseSchema,
+  },
   {
     id: "20260718_001_run_management",
     signature: "portfolio_backtest_runs:name,tags_json,archived_at,deleted_at,replay_of,manifest_json;run-browse-v1",
@@ -870,6 +723,11 @@ const migrations: readonly Migration[] = [
     signature: "market-country:varchar32;value:BINANCE_USDM;provider:binance;venue:BINANCE_USDM;preserve-existing-primary-keys",
     up: widenScalpingMarketCountryForCrypto,
   },
+  {
+    id: LATEST_CONTRACT_CUTOVER_MIGRATION_ID,
+    signature: LATEST_CONTRACT_CUTOVER_SIGNATURE,
+    up: migrateLatestContracts,
+  },
 ];
 
 export async function applyPortfolioMigrations(
@@ -891,18 +749,11 @@ export async function applyPortfolioMigrations(
         return;
       }
       await migration.up(transaction);
-      if (transaction.dialect === "mysql") {
-        await transaction.run(`
-          INSERT IGNORE INTO portfolio_schema_migrations (migration_id, checksum, applied_at)
-          VALUES (?, ?, ?)
-        `, [migration.id, expectedChecksum, now]);
-      } else {
-        await transaction.run(`
-          INSERT INTO portfolio_schema_migrations (migration_id, checksum, applied_at)
-          VALUES (?, ?, ?)
-          ON CONFLICT(migration_id) DO NOTHING
-        `, [migration.id, expectedChecksum, now]);
-      }
+      await transaction.run(`
+        INSERT INTO portfolio_schema_migrations (migration_id, checksum, applied_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(migration_id) DO NOTHING
+      `, [migration.id, expectedChecksum, now]);
     });
   }
   return listAppliedMigrations(database);

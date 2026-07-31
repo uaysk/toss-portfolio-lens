@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use portfolio_lens_compute::compute;
 use portfolio_lens_compute::contracts::{
-    JobKind, OutputArtifact, WorkerInput, WorkerOutput, job_kind, parse_raw_job,
+    JobKind, OutputArtifact, WorkerInput, WorkerOutput, job_kind,
 };
 use portfolio_lens_compute::control::ComputeControl;
 use portfolio_lens_compute::repository::{
@@ -178,53 +178,21 @@ fn write_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-fn direct(kind: JobKind, legacy_result_only: bool) -> Result<()> {
+fn direct(kind: JobKind) -> Result<()> {
     let value = read_stdin_json()?;
-    let input = if value.get("schema_version").is_some() {
-        let input: WorkerInput = serde_json::from_value(value)?;
-        input.validate()?;
-        input
-    } else {
-        let payload = match kind {
-            JobKind::Backtest if value.get("simulation").is_none() => json!({"simulation": value}),
-            JobKind::Optimization if value.get("optimization").is_none() => {
-                json!({"optimization": value})
-            }
-            JobKind::MonteCarlo if value.get("monte_carlo").is_none() => {
-                json!({"monte_carlo": value})
-            }
-            _ => value,
-        };
-        parse_raw_job(kind, payload)?
-    };
-    let output = compute::compute(&input)?;
-    if legacy_result_only {
-        write_json(output.result.as_ref().unwrap_or(&Value::Null))
-    } else {
-        write_json(&output)
+    let input: WorkerInput = serde_json::from_value(value)?;
+    input.validate()?;
+    if input.job_kind != kind {
+        bail!("compute-json job kind does not match the worker payload");
     }
-}
-
-fn raw_optimization() -> Result<()> {
-    let value = read_stdin_json()?;
-    write_json(&portfolio_lens_compute::optimization::optimize(&value)?)
+    let output = compute::compute(&input)?;
+    write_json(&output)
 }
 
 fn parse_socket_input(value: Value) -> Result<WorkerInput> {
-    if value.get("schema_version").is_some() {
-        let input: WorkerInput = serde_json::from_value(value)?;
-        input.validate()?;
-        return Ok(input);
-    }
-    let kind = value
-        .get("job_kind")
-        .and_then(Value::as_str)
-        .context("socket request job_kind is required")?;
-    let payload = value
-        .get("payload")
-        .cloned()
-        .context("socket request payload is required")?;
-    parse_raw_job(job_kind(kind)?, payload)
+    let input: WorkerInput = serde_json::from_value(value)?;
+    input.validate()?;
+    Ok(input)
 }
 
 fn read_socket_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
@@ -702,20 +670,16 @@ fn durable(once: bool) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "portfolio-lens-worker commands:\n  backtest-json\n  optimize-json\n  monte-carlo-json\n  compute-json <job-kind>\n  serve --socket <path> [--max-active <count>] [--max-connections <count>]\n  health --socket <path>\n  run\n  once"
+        "portfolio-lens-worker commands:\n  compute-json <job-kind>\n  serve --socket <path> [--max-active <count>] [--max-connections <count>]\n  health --socket <path>\n  run\n  once"
     );
 }
 
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("backtest-json") => direct(JobKind::Backtest, true),
-        Some("optimize-json") => raw_optimization(),
-        Some("monte-carlo-json") => direct(JobKind::MonteCarlo, true),
-        Some("compute-json") => direct(
-            job_kind(args.get(1).context("compute-json requires a job kind")?)?,
-            false,
-        ),
+        Some("compute-json") if args.len() == 2 => direct(job_kind(
+            args.get(1).context("compute-json requires a job kind")?,
+        )?),
         Some("serve") => serve(&serve_options(&args)?),
         Some("health") => socket_health(socket_path_arg(&args, "health")?),
         Some("run") => durable(false),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { RunRepository } from "../repositories/run-repository.js";
 import { ArtifactService } from "./artifact-service.js";
@@ -15,7 +15,7 @@ import {
   type TechnicalAnalysisWorkerPayload,
 } from "./technical-analysis-service.js";
 
-const databases: SqliteDatabase[] = [];
+const databases: PGliteDatabase[] = [];
 
 afterEach(async () => {
   await Promise.all(databases.splice(0).map((database) => database.close()));
@@ -116,7 +116,7 @@ const baseRequest: TechnicalAnalysisRequest = {
 };
 
 async function harness(input: {
-  executionMode?: "inline" | "rust_socket";
+  executionMode?: "rust_socket";
   price?: () => number;
   volumes?: () => readonly [number | null, number | null];
   unknownArtifact?: boolean;
@@ -128,7 +128,7 @@ async function harness(input: {
   ) => Promise<MarketSeriesResult>;
   profileBucketCount?: number;
 } = {}) {
-  const database = new SqliteDatabase(":memory:");
+  const database = new PGliteDatabase();
   databases.push(database);
   const runRepository = new RunRepository(database);
   const artifactRepository = new ArtifactRepository(database);
@@ -860,13 +860,6 @@ describe("TechnicalAnalysisService", () => {
 
     await expect(service.safeTradeDates(prepared)).resolves.toEqual(["2024-01-02", "2024-01-03"]);
     expect(vi.mocked(marketData.getPriceSeries).mock.calls.map(([input]) => input.interval)).toEqual(["1w", "1w", "1d", "1d"]);
-  });
-
-  it("inline 모드에서는 가격 조회 전에 Rust 전용 오류를 반환한다", async () => {
-    const { service, marketData } = await harness({ executionMode: "inline" });
-    await expect(service.analyze({ ownerSubject: "owner-a", request: baseRequest }))
-      .rejects.toMatchObject({ detail: { code: "RUST_COMPUTE_REQUIRED" } });
-    expect(marketData.getPriceSeries).not.toHaveBeenCalled();
   });
 
   it("등록되지 않은 worker artifact는 저장하지 않고 명확히 거부한다", async () => {

@@ -1,9 +1,0 @@
-**
-!Dockerfile.worker
-!worker/
-!worker/python/
-!worker/python/.python-version
-!worker/python/pyproject.toml
-!worker/python/uv.lock
-!worker/python/src/
-!worker/python/src/**

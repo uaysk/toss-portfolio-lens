@@ -28,17 +28,11 @@ import {
   type UnifiedPolicyState,
 } from "../simulation/unified-policy-engine.js";
 import {
-  CHRONOS_2_MODEL_ID,
-  FINCAST_QUALIFICATION_QUANTILE_ROWS,
-  FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
-  QuantileRearrangementObservationsSchema,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
   SCALPING_AI_REALTIME_HORIZONS,
   SCALPING_AI_SCHEMA_VERSION,
   type AiForecastRequest,
-  type QuantileRearrangementObservations as WorkerQuantileRearrangementObservations,
 } from "../worker/ai-contract.js";
 import {
   CausalBinanceKlineStore,
@@ -102,13 +96,28 @@ import {
   type CryptoRustTechnicalAnalysis,
   type CryptoRustTechnicalAnalyzer,
 } from "./crypto-rust-technical.js";
+import {
+  CHRONOS2_CONTEXT_BARS,
+  DEFAULT_CONTEXT_BARS,
+  canonicalCryptoModelInputDigest,
+  normalizeLaneForecast,
+  type ModelMemoryStatus,
+  type ModelPeakVramMeasurement,
+  type ModelPrecisionValidation,
+  type ModelQuantileMonotonicityPolicy,
+  type ModelQuantileObservations,
+  type ModelQuantileTailPolicy,
+  type NormalizedLaneForecast,
+  type PrecisionFailureReason,
+} from "./crypto-forecast-normalization.js";
+import { AsyncMarketEventQueue as BoundedMarketEventQueue } from "./market-event-queue.js";
+
+export { canonicalCryptoModelInputDigest } from "./crypto-forecast-normalization.js";
 
 const MINUTE_MS = 60_000;
 const MAXIMUM_RESTORED_BARS = 1_024;
 export const CRYPTO_LOCAL_CHART_PROJECTION_BARS = 240;
 export const HIGH_VOL_CRYPTO_INFERENCE_INTERVAL_MS = 5_000;
-const DEFAULT_CONTEXT_BARS = 512;
-const CHRONOS2_CONTEXT_BARS = 1024;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_INFERENCE_DEADLINE_MS = 240_000;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
@@ -123,25 +132,10 @@ const PROGRESS_UPDATE_INTERVAL_MS = 5_000;
 const EQUITY_SAMPLE_INTERVAL_MS = 5_000;
 const MAX_EQUITY_SAMPLES_PER_LANE = 5_000;
 const MAX_RUNTIME_FORECAST_OBSERVATIONS_PER_LANE = 12_000;
-const MAX_MARKET_EVENT_QUEUE_DEPTH = 256;
 const MAX_FINAL_KLINE_RISK_EVIDENCE_BUCKETS = 3;
 const MAX_FINAL_KLINE_FUNDING_EVIDENCE = 4;
 const BOOK_TICKER_FRESHNESS_MS = 15_000;
 const MARK_PRICE_FRESHNESS_MS = 5_000;
-const PRECISION_FAILURE_REASONS = [
-  "non_finite_output",
-  "quantile_postprocessing_failed",
-  "signal_direction_agreement_below_99pct",
-  "q50_median_error_above_5pct_fp32_iqr",
-  "q50_p95_error_above_15pct_fp32_iqr",
-  "peak_vram_reduction_below_25pct",
-  "mixed_cuda_out_of_memory",
-  "mixed_unsupported_operation",
-  "mixed_setup_failure",
-  "mixed_model_load_failure",
-  "mixed_inference_failure",
-  "mixed_evaluation_failure",
-] as const;
 const SAFE_MODEL_ERROR_CODES = new Set([
   "crypto_lane_sequential_deadline_exceeded",
   "crypto_runtime_expiry_deadline_exceeded",
@@ -172,6 +166,7 @@ const SAFE_MODEL_ERROR_CODES = new Set([
   "model_quantile_observations_invalid",
   "model_quantile_tail_policy_invalid",
   "model_request_id_mismatch",
+  "model_response_contract_invalid",
   "model_response_not_object",
   "model_return_quantiles_incomplete",
   "model_return_quantiles_invalid",
@@ -189,69 +184,6 @@ const SAFE_MODEL_ERROR_CODES = new Set([
 const MAXIMUM_PROVENANCE_ERROR_CODES = 20;
 
 type UnknownRecord = Record<string, unknown>;
-type ModelPrecision = "fp16" | "fp32";
-type ModelPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
-type ModelMemoryStatus = "ok";
-type ModelQuantileMonotonicityPolicy =
-  | "native"
-  | "fp32_monotone_rearrangement_v1"
-  | "chronos2_fp32_monotone_rearrangement_v1";
-type ModelQuantileTailPolicy = "native" | "tail_clamped_q10_q90";
-type ModelPeakVramMeasurement = "cuda_allocated_or_reserved";
-type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
-type ModelQuantileObservations = {
-  rowCount: number;
-  nonFiniteValueCount: number;
-  crossingRowCount: number;
-  crossingAdjacentPairCount: number;
-  adjustedRowCount: number;
-  q50AdjustmentIqrRatioMedian: number;
-  q50AdjustmentIqrRatioP95: number;
-  q50AdjustmentIqrRatioMax: number;
-  postprocessedMonotonic: boolean;
-};
-type PinnedModelRuntimeProvenance = {
-  modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID | typeof CHRONOS_2_MODEL_ID;
-  modelRevision: string;
-  sourceRevision: string;
-  loaderVersion: string;
-  license: "MIT" | "Apache-2.0";
-  tokenizerId: string | null;
-  tokenizerRevision: string | null;
-};
-
-const PINNED_MODEL_RUNTIME_PROVENANCE = {
-  kronos_base: {
-    modelId: KRONOS_BASE_MODEL_ID,
-    modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
-    sourceRevision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
-    loaderVersion: "kronos-source-67b630e",
-    license: "MIT",
-    tokenizerId: "NeoQuasar/Kronos-Tokenizer-base",
-    tokenizerRevision: "0e0117387f39004a9016484a186a908917e22426",
-  },
-  fincast: {
-    modelId: FINCAST_MODEL_ID,
-    modelRevision: "2d7d90b159db8961d27c2cf165d51195902ef92b",
-    sourceRevision: "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4",
-    loaderVersion: "fincast-source-488b19d",
-    license: "Apache-2.0",
-    tokenizerId: null,
-    tokenizerRevision: null,
-  },
-  chronos2: {
-    modelId: CHRONOS_2_MODEL_ID,
-    modelRevision: "254b5357164a84326913b0695216f690752ac55d",
-    sourceRevision: "v2.3.1",
-    loaderVersion: "chronos-forecasting-2.3.1-compact_causal_v1",
-    license: "Apache-2.0",
-    tokenizerId: null,
-    tokenizerRevision: null,
-  },
-} as const satisfies Record<SimulationModelLane, PinnedModelRuntimeProvenance>;
-const PINNED_GPU_DEVICE_NAME = "Tesla P40";
-const PINNED_GPU_CUDA_CAPABILITY = "6.1";
-const SAFE_GPU_DEVICE_NAME = /^[A-Za-z0-9 ._()+-]{1,128}$/;
 
 export const CRYPTO_PAPER_RUNTIME_COORDINATOR_REQUIREMENTS = Object.freeze({
   lifecycle: "event_driven_background_session",
@@ -316,6 +248,12 @@ export type CryptoPaperRuntimeOptions = {
   streams: CryptoPublicStreams;
   laneClients: Partial<Record<SimulationModelLane, CryptoAiLaneClient>>;
   technicalAnalyzer?: Pick<CryptoRustTechnicalAnalyzer, "analyze">;
+  loadCalibrationResiduals?: (input: {
+    modelLane: SimulationModelLane;
+    symbol: string;
+    horizonMinutes: number;
+    originAt: string;
+  }) => readonly ConformalResidual[];
   instrumentRules:
     | BinanceInstrumentRules
     | ((
@@ -332,79 +270,6 @@ export type CryptoPaperRuntimeOptions = {
     cooldownMs: number;
   };
   onSnapshot?: CryptoPaperRuntimeSnapshotObserver;
-};
-
-type RuntimeModelForecastPoint = {
-  horizonMinutes: number;
-  targetTimestamp: string;
-  q10Price: number;
-  medianPrice: number;
-  q90Price: number;
-  upProbability?: number;
-};
-
-type RuntimeTargetStopEvidence = {
-  status: "available" | "unavailable";
-  side?: FuturesSide;
-  targetFirstProbabilityLower?: number;
-  targetFirstProbabilityUpper?: number;
-  stopFirstProbabilityLower?: number;
-  stopFirstProbabilityUpper?: number;
-  ambiguousProbability?: number;
-  neitherProbability?: number;
-  reason?: string;
-};
-
-type NormalizedLaneForecast = {
-  lane: SimulationModelLane;
-  generatedAt: number;
-  generatedAtIso: string;
-  inputEndAt: string;
-  quantiles: ReturnQuantile[];
-  horizonDistributions: Array<{
-    horizonMinutes: 5 | 15 | 30 | 60;
-    quantiles: ReturnQuantile[];
-    nativeQuantiles: ReturnQuantile[];
-    upProbability?: number;
-    downProbability?: number;
-    flatProbability?: number;
-    intervalWidth?: number;
-  }>;
-  displayPoints: RuntimeModelForecastPoint[];
-  upProbability?: number;
-  downProbability?: number;
-  flatProbability?: number;
-  probabilityMethod: "sample_paths" | "derived_quantile_cdf" | "unavailable";
-  expectedVolatility?: number;
-  volatilityMethod: "path_realized" | "quantile_implied_sigma" | "unavailable";
-  uncertaintyIntervalWidth?: number;
-  validPathCount: number;
-  invalidPathCount: number;
-  targetStop: RuntimeTargetStopEvidence;
-  modelId: string;
-  modelRevision: string;
-  sourceRevision: string;
-  loaderVersion: string;
-  license: string;
-  tokenizerId: string | null;
-  tokenizerRevision: string | null;
-  loaded: true;
-  device: "cuda";
-  deviceName: string;
-  cudaCapability: "6.1";
-  attentionBackend: "math";
-  precision: ModelPrecision;
-  precisionValidation: ModelPrecisionValidation;
-  memoryStatus: ModelMemoryStatus;
-  quantileMonotonicityPolicy: ModelQuantileMonotonicityPolicy;
-  fp32QuantileObservations?: ModelQuantileObservations;
-  mixedQuantileObservations?: ModelQuantileObservations | null;
-  quantileTailPolicy: ModelQuantileTailPolicy;
-  precisionFailureReasons: PrecisionFailureReason[];
-  latencyMs?: number;
-  peakVramBytes?: number;
-  peakVramMeasurement?: ModelPeakVramMeasurement;
-  peakVramMb?: number;
 };
 
 type RuntimeForecastObservation = NormalizedLaneForecast & {
@@ -1106,8 +971,8 @@ export function aggregatePortfolioLaneMetrics(
 
 export type CryptoPaperRuntimeSnapshot = {
   schemaVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
-  simulationCase?: SimulationStartRequest["simulationCase"];
-  modelPlan: SimulationStartRequest["modelPlan"];
+  simulationCase: SimulationStartRequest["simulationCase"];
+  resolvedModelPlan: SimulationStartRequest["resolvedModelPlan"];
   runId: string;
   phase: "running" | "completed" | "failed";
   startedAt: string;
@@ -1164,7 +1029,6 @@ export type CryptoPaperRuntimeSnapshot = {
   modelEvidence: ModelEvidence[];
   rustMarketEvidence: CryptoLiveRustMarketEvidence[];
   modelForecasts: unknown[];
-  kronosForecasts: unknown[];
   warnings: string[];
   capabilities: Record<string, boolean | number | string>;
   modelLanes: SimulationModelLane[];
@@ -1284,9 +1148,7 @@ export function cryptoRuntimeEntityId(
   input: CryptoRuntimeIdentifierInput,
 ): string {
   assertCryptoRuntimeIdentifierInput(input);
-  const lane = input.lane === "kronos_base"
-    ? "k"
-    : input.lane === "chronos2" ? "c2" : "f";
+  const lane = input.lane === "chronos2" ? "c2" : "f";
   return [
     kind,
     cryptoRuntimeScope(input.runId, input.symbol),
@@ -1302,7 +1164,7 @@ export function cryptoRuntimeClientOrderId(
   },
 ): string {
   assertCryptoRuntimeIdentifierInput(input);
-  const lane = input.lane === "kronos_base" ? "k" : "f";
+  const lane = input.lane === "chronos2" ? "c2" : "f";
   const action = input.action === "open" ? "o" : "r";
   const uniqueComponent = createHash("sha256")
     .update([
@@ -1352,75 +1214,6 @@ export function cryptoModelForecastIsFresh(input: {
   });
 }
 
-type CryptoModelInputBar = AiForecastRequest["series"][number]["bars"][number];
-
-function pythonFloatHex(value: number): string {
-  if (!Number.isFinite(value)) {
-    throw new Error("Crypto model input contains a non-finite number.");
-  }
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, value, false);
-  const bits = view.getBigUint64(0, false);
-  const negative = (bits >> 63n) === 1n;
-  const exponentBits = Number((bits >> 52n) & 0x7ffn);
-  const fractionBits = bits & 0xfffffffffffffn;
-  const sign = negative ? "-" : "";
-  if (exponentBits === 0 && fractionBits === 0n) {
-    return `${sign}0x0.0p+0`;
-  }
-  const fraction = fractionBits.toString(16).padStart(13, "0");
-  if (exponentBits === 0) {
-    return `${sign}0x0.${fraction}p-1022`;
-  }
-  const exponent = exponentBits - 1023;
-  return `${sign}0x1.${fraction}p${exponent >= 0 ? "+" : ""}${exponent}`;
-}
-
-function pythonUtcMicrosecondTimestamp(value: string): string {
-  const milliseconds = Date.parse(value);
-  if (!Number.isFinite(milliseconds)) {
-    throw new Error("Crypto model input contains an invalid timestamp.");
-  }
-  return new Date(milliseconds).toISOString().replace(/Z$/, "000Z");
-}
-
-function matchesWorkerTimestamp(value: unknown, expected: string): boolean {
-  const candidate = exactText(value);
-  return candidate === expected || candidate === pythonUtcMicrosecondTimestamp(expected);
-}
-
-export function canonicalCryptoModelInputDigest(
-  bars: readonly CryptoModelInputBar[],
-): string {
-  const number = (value: number | null | undefined): string | null => (
-    value === null || value === undefined ? null : pythonFloatHex(value)
-  );
-  const payload = bars.map((bar) => ({
-    amount: number(bar.amount),
-    benchmark_return: number(bar.benchmark_return),
-    btc_realized_volatility: number(bar.btc_realized_volatility),
-    btc_short_return: number(bar.btc_short_return),
-    close: number(bar.close),
-    complete: bar.complete,
-    eth_realized_volatility: number(bar.eth_realized_volatility),
-    eth_short_return: number(bar.eth_short_return),
-    funding_rate: number(bar.funding_rate),
-    high: number(bar.high),
-    index_price: number(bar.index_price),
-    low: number(bar.low),
-    mark_price: number(bar.mark_price),
-    open: number(bar.open),
-    premium_index: number(bar.premium_index),
-    relative_strength: number(bar.relative_strength),
-    taker_buy_amount: number(bar.taker_buy_amount),
-    taker_buy_volume: number(bar.taker_buy_volume),
-    timestamp: pythonUtcMicrosecondTimestamp(bar.timestamp),
-    trade_count: bar.trade_count ?? null,
-    volume: number(bar.volume),
-  }));
-  return createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
-}
-
 function unique(values: readonly string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
 }
@@ -1464,396 +1257,6 @@ const systemClock: CryptoRuntimeClock = {
   sleep: abortableSleep,
 };
 
-type QueuedMarketEvent =
-  | BinanceMarketEvent
-  | { kind: "model_bar"; bar: BinanceKline }
-  | { kind: "disconnect"; error?: unknown }
-  | { kind: "connection_state"; state: BinancePublicStreamConnectionState }
-  | { kind: "inference_complete" }
-  | {
-    kind: "expiry_boundary";
-    scheduling: TerminalSettlementEvidence["scheduling"];
-    eligibleAfterIngressSequence: number;
-    boundaryEvent?: {
-      event: BinanceMarketEvent;
-      ingressSequence: number;
-    };
-  };
-type CoalescedMarketEventKind = "book_ticker" | "mark_price" | "forming_kline";
-type CoalescedMarketEvent = BinanceMarketEvent;
-type MarketEventQueueToken =
-  | { kind: "direct_event"; event: QueuedMarketEvent; queueSequence: number }
-  | {
-    kind: "coalesced_event";
-    eventKind: CoalescedMarketEventKind;
-    segment: number;
-    queueSequence: number;
-  }
-  | {
-    kind: "agg_event";
-    event: Extract<BinanceMarketEvent, { kind: "agg_trade" }>;
-    ingressSequence: number;
-    fillCandidate: boolean;
-    segment: number;
-    queueSequence: number;
-  };
-
-type MarketEventQueueStats = {
-  currentDepth: number;
-  maximumDepth: number;
-  maximumAllowedDepth: number;
-  droppedNonFinalKlines: number;
-  coalescedBookTickers: number;
-  coalescedMarkPrices: number;
-  preservedCriticalMarkPrices: number;
-  droppedAggTrades: number;
-  maximumBufferedAggTrades: number;
-  overflowCount: number;
-};
-
-class AsyncMarketEventQueue {
-  private readonly events: MarketEventQueueToken[] = [];
-  private readonly coalesced = new Map<string, CoalescedMarketEvent>();
-  private readonly waiters = new Set<
-    (event: QueuedMarketEvent) => void
-  >();
-  private maximumDepth = 0;
-  private droppedNonFinalKlines = 0;
-  private coalescedBookTickers = 0;
-  private coalescedMarkPrices = 0;
-  private preservedCriticalMarkPrices = 0;
-  private droppedAggTrades = 0;
-  private maximumBufferedAggTrades = 0;
-  private overflowCount = 0;
-  private queueSequence = 0;
-  private coalescingSegment = 0;
-  private activeFillBarrierKey: string | undefined;
-  private readonly preservedMarkRiskBarrierKeys = new Set<string>();
-
-  push(
-    event: QueuedMarketEvent,
-    metadata?: {
-      ingressSequence?: number;
-      fillCandidate?: boolean;
-      fillBarrierKey?: string;
-      markRiskBarrierKey?: string;
-    },
-  ): boolean {
-    if (event.kind === "kline" && !event.final) {
-      const queueSequence = ++this.queueSequence;
-      const segment = this.coalescingSegment;
-      const coalescedKey = this.coalescedKey("forming_kline", segment);
-      const existing = this.coalesced.get(coalescedKey);
-      if (existing && event.receivedAt < eventAt(existing)) {
-        this.droppedNonFinalKlines += 1;
-        return true;
-      }
-      this.coalesced.set(coalescedKey, event);
-      if (existing) {
-        this.droppedNonFinalKlines += 1;
-        const tokenIndex = this.events.findIndex((queued) => (
-          queued.kind === "coalesced_event"
-          && queued.eventKind === "forming_kline"
-          && queued.segment === segment
-        ));
-        if (tokenIndex >= 0) {
-          this.events[tokenIndex] = {
-            kind: "coalesced_event",
-            eventKind: "forming_kline",
-            segment,
-            queueSequence,
-          };
-          this.sortByIngress();
-        }
-        return true;
-      }
-      return this.enqueue({
-        kind: "coalesced_event",
-        eventKind: "forming_kline",
-        segment,
-        queueSequence,
-      });
-    }
-    if (event.kind === "mark_price"
-      && metadata?.markRiskBarrierKey
-      && !this.preservedMarkRiskBarrierKeys.has(metadata.markRiskBarrierKey)) {
-      this.preservedMarkRiskBarrierKeys.add(metadata.markRiskBarrierKey);
-      this.preservedCriticalMarkPrices += 1;
-      this.coalescingSegment += 1;
-      return this.enqueue({
-        kind: "direct_event",
-        event,
-        queueSequence: ++this.queueSequence,
-      });
-    }
-    if (event.kind === "book_ticker" || event.kind === "mark_price") {
-      const queueSequence = ++this.queueSequence;
-      const segment = this.coalescingSegment;
-      const coalescedKey = this.coalescedKey(event.kind, segment);
-      const existingEvent = this.coalesced.get(coalescedKey);
-      const existing = existingEvent !== undefined;
-      // Exchange event time orders distinct observations. Exact ties follow
-      // callback/queue order because the local receivedAt clock may roll back.
-      if (existingEvent && event.eventTime < eventAt(existingEvent)) {
-        if (event.kind === "book_ticker") this.coalescedBookTickers += 1;
-        else this.coalescedMarkPrices += 1;
-        return true;
-      }
-      this.coalesced.set(coalescedKey, event);
-      if (existing) {
-        if (event.kind === "book_ticker") this.coalescedBookTickers += 1;
-        else this.coalescedMarkPrices += 1;
-        const tokenIndex = this.events.findIndex((queued) => (
-          queued.kind === "coalesced_event"
-          && queued.eventKind === event.kind
-          && queued.segment === segment
-        ));
-        if (tokenIndex >= 0) {
-          this.events[tokenIndex] = {
-            kind: "coalesced_event",
-            eventKind: event.kind,
-            segment,
-            queueSequence,
-          };
-          this.sortByIngress();
-        }
-        return true;
-      }
-      return this.enqueue({
-        kind: "coalesced_event",
-        eventKind: event.kind,
-        segment,
-        queueSequence,
-      });
-    }
-    // Preserve the first eligible aggregate trade. It is the causal fill
-    // barrier. Also retain the adverse minimum and maximum while the event
-    // loop is busy so a transient protective-stop crossing cannot disappear.
-    // The selected set is fixed-size even under an arbitrarily large burst.
-    if (event.kind === "agg_trade") {
-      const ingressSequence = metadata?.ingressSequence;
-      if (ingressSequence === undefined) {
-        throw new Error("aggTrade ingress sequence is required.");
-      }
-      if (metadata?.fillCandidate
-        && metadata.fillBarrierKey
-        && metadata.fillBarrierKey !== this.activeFillBarrierKey) {
-        // The first eligible fill for a pending decision is a causal barrier:
-        // risk observations before it and recovery observations after it must
-        // never coalesce into one movable token.
-        this.coalescingSegment += 1;
-        this.activeFillBarrierKey = metadata.fillBarrierKey;
-      }
-      const token: Extract<MarketEventQueueToken, { kind: "agg_event" }> = {
-        kind: "agg_event",
-        event,
-        ingressSequence,
-        fillCandidate: metadata?.fillCandidate === true,
-        segment: this.coalescingSegment,
-        queueSequence: ++this.queueSequence,
-      };
-      const waiter = this.waiters.values().next().value as
-        | ((value: QueuedMarketEvent) => void)
-        | undefined;
-      const buffered = this.events.filter(
-        (queued): queued is Extract<MarketEventQueueToken, { kind: "agg_event" }> => (
-          queued.kind === "agg_event" && queued.segment === token.segment
-        ),
-      );
-      if (waiter && buffered.length === 0) {
-        this.maximumBufferedAggTrades = Math.max(this.maximumBufferedAggTrades, 1);
-        return this.enqueue(token);
-      }
-      const candidates = [
-        ...buffered,
-        token,
-      ];
-      const selected = new Map<number, typeof candidates[number]>();
-      const select = (candidate: typeof candidates[number] | undefined) => {
-        if (candidate) selected.set(candidate.ingressSequence, candidate);
-      };
-      select(candidates.reduce((earliest, candidate) => (
-        !earliest || candidate.ingressSequence < earliest.ingressSequence
-          ? candidate
-          : earliest
-      ), undefined as typeof candidates[number] | undefined));
-      select(candidates
-        .filter((candidate) => candidate.fillCandidate)
-        .reduce((earliest, candidate) => (
-          !earliest || candidate.ingressSequence < earliest.ingressSequence
-            ? candidate
-            : earliest
-        ), undefined as typeof candidates[number] | undefined));
-      select(candidates.reduce((minimum, candidate) => (
-        !minimum || candidate.event.price < minimum.event.price ? candidate : minimum
-      ), undefined as typeof candidates[number] | undefined));
-      select(candidates.reduce((maximum, candidate) => (
-        !maximum || candidate.event.price > maximum.event.price ? candidate : maximum
-      ), undefined as typeof candidates[number] | undefined));
-      select(candidates.reduce((latest, candidate) => (
-        !latest || candidate.ingressSequence > latest.ingressSequence ? candidate : latest
-      ), undefined as typeof candidates[number] | undefined));
-      const selectedTokens = Array.from(selected.values())
-        .sort((left, right) => left.ingressSequence - right.ingressSequence);
-      this.droppedAggTrades += Math.max(0, candidates.length - selectedTokens.length);
-      this.maximumBufferedAggTrades = Math.max(
-        this.maximumBufferedAggTrades,
-        selectedTokens.length,
-      );
-      for (let index = this.events.length - 1; index >= 0; index -= 1) {
-        const queued = this.events[index]!;
-        if (queued.kind === "agg_event" && queued.segment === token.segment) {
-          this.events.splice(index, 1);
-        }
-      }
-      if (this.events.length + selectedTokens.length > MAX_MARKET_EVENT_QUEUE_DEPTH) {
-        this.overflowCount += 1;
-        return false;
-      }
-      this.events.push(...selectedTokens);
-      this.sortByIngress();
-      this.maximumDepth = Math.max(this.maximumDepth, this.events.length);
-      return true;
-    }
-    this.coalescingSegment += 1;
-    return this.enqueue({
-      kind: "direct_event",
-      event,
-      queueSequence: ++this.queueSequence,
-    });
-  }
-
-  fail(error: unknown): void {
-    this.events.length = 0;
-    this.coalesced.clear();
-    const event: QueuedMarketEvent = { kind: "disconnect", error };
-    const waiter = this.waiters.values().next().value as
-      | ((value: QueuedMarketEvent) => void)
-      | undefined;
-    if (waiter) {
-      this.waiters.delete(waiter);
-      waiter(event);
-      return;
-    }
-    this.events.push({
-      kind: "direct_event",
-      event,
-      queueSequence: ++this.queueSequence,
-    });
-    this.maximumDepth = Math.max(this.maximumDepth, this.events.length);
-  }
-
-  noteIgnoredAggTrade(): void {
-    this.droppedAggTrades += 1;
-  }
-
-  stats(): MarketEventQueueStats {
-    return {
-      currentDepth: this.events.length,
-      maximumDepth: this.maximumDepth,
-      maximumAllowedDepth: MAX_MARKET_EVENT_QUEUE_DEPTH,
-      droppedNonFinalKlines: this.droppedNonFinalKlines,
-      coalescedBookTickers: this.coalescedBookTickers,
-      coalescedMarkPrices: this.coalescedMarkPrices,
-      preservedCriticalMarkPrices: this.preservedCriticalMarkPrices,
-      droppedAggTrades: this.droppedAggTrades,
-      maximumBufferedAggTrades: this.maximumBufferedAggTrades,
-      overflowCount: this.overflowCount,
-    };
-  }
-
-  async next(
-    maximumWaitMs: number,
-    clock: CryptoRuntimeClock,
-    signal: AbortSignal,
-  ): Promise<QueuedMarketEvent | undefined> {
-    const immediate = this.shift();
-    if (immediate) return immediate;
-    if (maximumWaitMs <= 0) return undefined;
-
-    const localAbort = new AbortController();
-    const onExternalAbort = () => localAbort.abort(signal.reason);
-    signal.addEventListener("abort", onExternalAbort, { once: true });
-      let waiter:
-      | ((event: QueuedMarketEvent) => void)
-      | undefined;
-    const eventPromise = new Promise<
-      QueuedMarketEvent
-    >((resolve) => {
-      waiter = resolve;
-      this.waiters.add(resolve);
-    });
-    const sleepPromise = clock.sleep(maximumWaitMs, localAbort.signal)
-      .then(() => undefined)
-      .catch((error: unknown) => {
-        if (localAbort.signal.aborted && !signal.aborted) return undefined;
-        throw error;
-      });
-    try {
-      const result = await Promise.race([eventPromise, sleepPromise]);
-      localAbort.abort(new Error("Market event arrived before the poll timeout."));
-      return result;
-    } finally {
-      if (waiter) this.waiters.delete(waiter);
-      signal.removeEventListener("abort", onExternalAbort);
-    }
-  }
-
-  private enqueue(event: MarketEventQueueToken): boolean {
-    if (this.events.length >= MAX_MARKET_EVENT_QUEUE_DEPTH) {
-      this.overflowCount += 1;
-      if (event.kind === "coalesced_event") {
-        this.coalesced.delete(this.coalescedKey(event.eventKind, event.segment));
-      }
-      return false;
-    }
-    const waiter = this.waiters.values().next().value as
-      | ((value: QueuedMarketEvent) => void)
-      | undefined;
-    if (waiter) {
-      const resolved = this.resolveToken(event);
-      if (!resolved) return true;
-      this.waiters.delete(waiter);
-      waiter(resolved);
-      return true;
-    }
-    this.events.push(event);
-    this.sortByIngress();
-    this.maximumDepth = Math.max(this.maximumDepth, this.events.length);
-    return true;
-  }
-
-  private shift(): QueuedMarketEvent | undefined {
-    while (this.events.length) {
-      const resolved = this.resolveToken(this.events.shift()!);
-      if (resolved) return resolved;
-    }
-    return undefined;
-  }
-
-  private resolveToken(event: MarketEventQueueToken): QueuedMarketEvent | undefined {
-    if (event.kind === "direct_event" || event.kind === "agg_event") return event.event;
-    const key = this.coalescedKey(event.eventKind, event.segment);
-    const resolved = this.coalesced.get(key);
-    this.coalesced.delete(key);
-    return resolved;
-  }
-
-  private coalescedKey(kind: CoalescedMarketEventKind, segment: number): string {
-    return `${segment}:${kind}`;
-  }
-
-  private sortByIngress(): void {
-    this.events.sort((left, right) => left.queueSequence - right.queueSequence);
-  }
-}
-
-function eventAt(event: BinanceMarketEvent): number {
-  if (event.kind === "agg_trade") return event.executedAt;
-  if (event.kind === "kline") return event.receivedAt;
-  return event.eventTime;
-}
-
 function eventPrice(event: BinanceMarketEvent): number | undefined {
   if (event.kind === "agg_trade") return event.price;
   if (event.kind === "mark_price") return event.markPrice;
@@ -1872,770 +1275,6 @@ function terminalObservedPrice(event: BinanceMarketEvent): number | undefined {
   if (event.kind === "kline") return event.final ? event.open : undefined;
   if (event.kind === "mark_price") return event.markPrice;
   return (event.bidPrice + event.askPrice) / 2;
-}
-
-function normalizedPrecision(value: unknown): ModelPrecision | undefined {
-  if (value === "mixed_float16") return "fp16";
-  if (value === "float32") return "fp32";
-  return undefined;
-}
-
-function exactEnum<T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-): T | undefined {
-  return typeof value === "string" && (allowed as readonly string[]).includes(value)
-    ? value as T
-    : undefined;
-}
-
-function normalizedPrecisionFailureReasons(value: unknown): PrecisionFailureReason[] | undefined {
-  if (!Array.isArray(value) || value.length > PRECISION_FAILURE_REASONS.length) {
-    return undefined;
-  }
-  const normalized: PrecisionFailureReason[] = [];
-  for (const reason of value) {
-    const candidate = exactEnum(reason, PRECISION_FAILURE_REASONS);
-    if (!candidate || normalized.includes(candidate)) return undefined;
-    normalized.push(candidate);
-  }
-  return normalized;
-}
-
-function normalizedQuantileObservations(
-  value: unknown,
-): ModelQuantileObservations | null | undefined {
-  if (value === null) return null;
-  const parsed = QuantileRearrangementObservationsSchema.safeParse(value);
-  if (!parsed.success) return undefined;
-  const observations: WorkerQuantileRearrangementObservations = parsed.data;
-  return {
-    rowCount: observations.row_count,
-    nonFiniteValueCount: observations.non_finite_value_count,
-    crossingRowCount: observations.crossing_row_count,
-    crossingAdjacentPairCount: observations.crossing_adjacent_pair_count,
-    adjustedRowCount: observations.adjusted_row_count,
-    q50AdjustmentIqrRatioMedian: observations.q50_adjustment_iqr_ratio_median,
-    q50AdjustmentIqrRatioP95: observations.q50_adjustment_iqr_ratio_p95,
-    q50AdjustmentIqrRatioMax: observations.q50_adjustment_iqr_ratio_max,
-    postprocessedMonotonic: observations.postprocessed_monotonic,
-  };
-}
-
-function safePeakVramBytes(value: unknown): number | undefined {
-  return typeof value === "number"
-    && Number.isSafeInteger(value)
-    && value >= 0
-    ? value
-    : undefined;
-}
-
-function safePeakVramMb(value: unknown): number | undefined {
-  return typeof value === "number"
-    && Number.isFinite(value)
-    && value >= 0
-    ? value
-    : undefined;
-}
-
-function displayQuantile(
-  values: readonly unknown[],
-  wanted: number,
-): number | undefined {
-  const matches = values.flatMap((value) => {
-    const source = record(value);
-    const quantile = finite(first(source, "quantile", "q"));
-    const price = finite(first(source, "value", "price"));
-    return quantile === wanted && price !== undefined && price > 0 ? [price] : [];
-  });
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function normalizeDisplayForecastPoints(
-  horizons: readonly Record<string, unknown>[],
-  inputEndAt: string,
-  expectedTargets: AiForecastRequest["series"][number]["future_timestamps"],
-  expectedHorizons: AiForecastRequest["horizons_minutes"],
-): RuntimeModelForecastPoint[] {
-  const hasDisplayProjection = horizons.some((horizon) => (
-    first(horizon, "target_timestamp", "targetTimestamp") !== undefined
-    || first(horizon, "price_quantiles", "priceQuantiles") !== undefined
-  ));
-  // Compatibility for old fixtures/artifacts that predate price-path output.
-  // Current workers always publish the complete projection below.
-  if (!hasDisplayProjection) return [];
-  const points = expectedHorizons.map((wantedHorizon) => {
-    const horizon = horizons.find((item) => (
-      finite(first(item, "horizon_minutes", "horizonMinutes")) === wantedHorizon
-    ));
-    const targetTimestamp = exactText(first(
-      horizon,
-      "target_timestamp",
-      "targetTimestamp",
-    ));
-    const rawPrices = first(horizon, "price_quantiles", "priceQuantiles");
-    const prices = Array.isArray(rawPrices) ? rawPrices : [];
-    const orderedPrices = SCALPING_AI_QUANTILES.map((quantile) => (
-      displayQuantile(prices, quantile)
-    ));
-    const q10Price = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.1)];
-    const medianPrice = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.5)];
-    const q90Price = orderedPrices[SCALPING_AI_QUANTILES.indexOf(0.9)];
-    const upProbability = finite(first(horizon, "up_probability", "upProbability"));
-    const expectedTargetTimestamp = expectedTargets[wantedHorizon - 1];
-    if (!horizon
-      || !targetTimestamp
-      || !Number.isFinite(Date.parse(targetTimestamp))
-      || Date.parse(targetTimestamp) <= Date.parse(inputEndAt)
-      || !expectedTargetTimestamp
-      || Date.parse(targetTimestamp) !== Date.parse(expectedTargetTimestamp)
-      || prices.length !== SCALPING_AI_QUANTILES.length
-      || orderedPrices.some((price) => price === undefined || price <= 0)
-      || orderedPrices.some((price, index) => (
-        index > 0 && price! < orderedPrices[index - 1]!
-      ))
-      || q10Price === undefined
-      || medianPrice === undefined
-      || q90Price === undefined
-      || (upProbability !== undefined && (upProbability < 0 || upProbability > 1))) {
-      throw new Error("model_price_quantiles_invalid");
-    }
-    return {
-      horizonMinutes: wantedHorizon,
-      targetTimestamp: iso(Date.parse(targetTimestamp)),
-      q10Price,
-      medianPrice,
-      q90Price,
-      ...(upProbability !== undefined ? { upProbability } : {}),
-    };
-  });
-  for (let index = 1; index < points.length; index += 1) {
-    if (Date.parse(points[index]!.targetTimestamp)
-      <= Date.parse(points[index - 1]!.targetTimestamp)) {
-      throw new Error("model_price_targets_non_monotone");
-    }
-  }
-  return points;
-}
-
-function normalizedProbability(value: unknown): number | undefined {
-  const parsed = finite(value);
-  return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed : undefined;
-}
-
-function normalizedNonnegativeInteger(value: unknown): number | undefined {
-  return typeof value === "number"
-    && Number.isSafeInteger(value)
-    && value >= 0
-    ? value
-    : undefined;
-}
-
-function normalizeTargetStopEvidence(
-  value: unknown,
-  requested: AiForecastRequest["series"][number]["target_stop"],
-): RuntimeTargetStopEvidence {
-  const source = record(value);
-  const status = exactEnum(source?.status, ["available", "unavailable"] as const);
-  if (!source || !status) throw new Error("model_target_stop_invalid");
-  const reason = text(source.reason);
-  const names = [
-    ["targetFirstProbabilityLower", "target_first_probability_lower"],
-    ["targetFirstProbabilityUpper", "target_first_probability_upper"],
-    ["stopFirstProbabilityLower", "stop_first_probability_lower"],
-    ["stopFirstProbabilityUpper", "stop_first_probability_upper"],
-    ["ambiguousProbability", "ambiguous_probability"],
-    ["neitherProbability", "neither_probability"],
-  ] as const;
-  const values = Object.fromEntries(names.map(([normalized, wire]) => [
-    normalized,
-    normalizedProbability(source[wire]),
-  ])) as Record<(typeof names)[number][0], number | undefined>;
-  if (status === "unavailable") {
-    if (!reason || names.some(([, wire]) => source[wire] !== null && source[wire] !== undefined)) {
-      throw new Error("model_target_stop_invalid");
-    }
-    return { status, reason };
-  }
-  if (!requested || reason
-    || Object.values(values).some((probability) => probability === undefined)) {
-    throw new Error("model_target_stop_invalid");
-  }
-  const targetLower = values.targetFirstProbabilityLower!;
-  const targetUpper = values.targetFirstProbabilityUpper!;
-  const stopLower = values.stopFirstProbabilityLower!;
-  const stopUpper = values.stopFirstProbabilityUpper!;
-  const ambiguous = values.ambiguousProbability!;
-  const neither = values.neitherProbability!;
-  if (
-    targetLower > targetUpper
-    || stopLower > stopUpper
-    || Math.abs(targetLower + stopLower + ambiguous + neither - 1) > 1e-9
-    || Math.abs(targetUpper - targetLower - ambiguous) > 1e-9
-    || Math.abs(stopUpper - stopLower - ambiguous) > 1e-9
-  ) {
-    throw new Error("model_target_stop_invalid");
-  }
-  return {
-    status,
-    side: requested.side,
-    targetFirstProbabilityLower: targetLower,
-    targetFirstProbabilityUpper: targetUpper,
-    stopFirstProbabilityLower: stopLower,
-    stopFirstProbabilityUpper: stopUpper,
-    ambiguousProbability: ambiguous,
-    neitherProbability: neither,
-  };
-}
-
-function normalizeLaneForecast(
-  lane: SimulationModelLane,
-  raw: unknown,
-  request: AiForecastRequest,
-): NormalizedLaneForecast {
-  const wrapper = record(raw);
-  const response = record(first(wrapper, "response", "result", "output")) ?? wrapper;
-  if (!response) throw new Error("model_response_not_object");
-  if (text(first(response, "request_id", "requestId")) !== request.request_id) {
-    throw new Error("model_request_id_mismatch");
-  }
-  if (text(response.mode)?.toLowerCase() !== "forecast") {
-    throw new Error("model_mode_mismatch");
-  }
-  const responseStatus = text(response.status)?.toLowerCase();
-  if (responseStatus !== "available" && responseStatus !== "partial") {
-    const unavailable = record(response.error);
-    throw new Error(text(first(unavailable, "code", "message")) ?? "model_unavailable");
-  }
-  const generatedAt = timestamp(first(response, "generated_at", "generatedAt"));
-  if (generatedAt === undefined) throw new Error("model_generated_at_invalid");
-
-  const seriesValues = Array.isArray(response.series) ? response.series : [];
-  const expectedSeries = request.series[0]!;
-  const series = seriesValues
-    .map(record)
-    .find((item) => text(first(item, "instrument_key", "instrumentKey"))
-      === expectedSeries.instrument_key);
-  if (!series || text(series.status)?.toLowerCase() !== "available") {
-    throw new Error("model_series_unavailable");
-  }
-  const inputEndAt = exactText(first(series, "input_end_at", "inputEndAt"));
-  if (!inputEndAt || !matchesWorkerTimestamp(inputEndAt, expectedSeries.input_end_at)) {
-    throw new Error("model_input_origin_mismatch");
-  }
-  if (generatedAt < Date.parse(inputEndAt)) {
-    throw new Error("model_generated_before_origin");
-  }
-  const horizons = Array.isArray(series.horizons)
-    ? series.horizons.map(record).filter((item): item is UnknownRecord => item !== undefined)
-    : [];
-  const distributionHorizons = request.forecast_profile === "full"
-    ? request.horizons_minutes
-    : request.horizons_minutes.filter((horizonMinutes) => horizons.some((item) => finite(
-        first(item, "horizon_minutes", "horizonMinutes"),
-      ) === horizonMinutes));
-  if (distributionHorizons.length === 0) {
-    throw new Error("model_return_quantiles_incomplete");
-  }
-  const horizonDistributions = distributionHorizons.map((horizonMinutes) => {
-    const source = horizons.find((item) => finite(
-      first(item, "horizon_minutes", "horizonMinutes"),
-    ) === horizonMinutes);
-    if (!source) throw new Error("model_return_quantiles_incomplete");
-    const fixedRaw = first(source, "return_quantiles", "returnQuantiles");
-    if (!Array.isArray(fixedRaw) || fixedRaw.length !== SCALPING_AI_QUANTILES.length) {
-      throw new Error("model_return_quantiles_incomplete");
-    }
-    const normalizedFixed = fixedRaw.map((item, index): ReturnQuantile => {
-      const entry = record(item);
-      const quantile = finite(first(entry, "quantile", "q"));
-      const returnRate = finite(first(entry, "value", "return_rate", "returnRate"));
-      if (quantile !== SCALPING_AI_QUANTILES[index] || returnRate === undefined) {
-        throw new Error("model_return_quantiles_invalid");
-      }
-      return { quantile, returnRate };
-    });
-    const nativeRaw = first(
-      source,
-      "native_return_quantiles",
-      "nativeReturnQuantiles",
-    );
-    const normalizedNative = nativeRaw === undefined
-      || (Array.isArray(nativeRaw) && nativeRaw.length === 0)
-      ? normalizedFixed
-      : Array.isArray(nativeRaw)
-        ? nativeRaw.map((item): ReturnQuantile => {
-          const entry = record(item);
-          const quantile = finite(first(entry, "quantile", "q"));
-          const returnRate = finite(first(entry, "value", "return_rate", "returnRate"));
-          if (
-            quantile === undefined
-            || quantile <= 0
-            || quantile >= 1
-            || returnRate === undefined
-          ) throw new Error("model_native_quantiles_invalid");
-          return { quantile, returnRate };
-        })
-        : [];
-    if (
-      normalizedNative.length < normalizedFixed.length
-      || normalizedNative.some((item, index) => (
-        index > 0
-        && (
-          item.quantile <= normalizedNative[index - 1]!.quantile
-          || item.returnRate < normalizedNative[index - 1]!.returnRate
-        )
-      ))
-      || (lane === "chronos2" && (
-        normalizedNative[0]?.quantile !== 0.01
-        || normalizedNative.at(-1)?.quantile !== 0.99
-      ))
-    ) throw new Error("model_native_quantiles_invalid");
-    const readProbability = (snake: string, camel: string): number | undefined => {
-      const value = first(source, snake, camel);
-      if (value === undefined || value === null) return undefined;
-      const parsed = normalizedProbability(value);
-      if (parsed === undefined) throw new Error("model_direction_probabilities_invalid");
-      return parsed;
-    };
-    const rawWidth = first(
-      source,
-      "uncertainty_interval_width",
-      "uncertaintyIntervalWidth",
-    );
-    const intervalWidth = rawWidth === undefined || rawWidth === null
-      ? undefined
-      : finite(rawWidth);
-    if (rawWidth !== undefined && rawWidth !== null
-      && (intervalWidth === undefined || intervalWidth < 0)) {
-      throw new Error("model_distribution_method_invalid");
-    }
-    return {
-      horizonMinutes,
-      quantiles: normalizedFixed,
-      nativeQuantiles: normalizedNative,
-      ...(readProbability("up_probability", "upProbability") === undefined
-        ? {}
-        : { upProbability: readProbability("up_probability", "upProbability") }),
-      ...(readProbability("down_probability", "downProbability") === undefined
-        ? {}
-        : { downProbability: readProbability("down_probability", "downProbability") }),
-      ...(readProbability("flat_probability", "flatProbability") === undefined
-        ? {}
-        : { flatProbability: readProbability("flat_probability", "flatProbability") }),
-      ...(intervalWidth === undefined ? {} : { intervalWidth }),
-    };
-  });
-  const displayPoints = normalizeDisplayForecastPoints(
-    horizons,
-    inputEndAt,
-    expectedSeries.future_timestamps,
-    request.horizons_minutes,
-  );
-  const horizon = horizons.find((item) => finite(
-    first(item, "horizon_minutes", "horizonMinutes"),
-  ) === SCALPING_AI_HORIZONS[0]);
-  const rawQuantiles = horizon && Array.isArray(
-    first(horizon, "return_quantiles", "returnQuantiles"),
-  )
-    ? first(horizon, "return_quantiles", "returnQuantiles") as unknown[]
-    : [];
-  if (rawQuantiles.length !== SCALPING_AI_QUANTILES.length) {
-    throw new Error("model_return_quantiles_incomplete");
-  }
-  const quantiles = rawQuantiles.map((item, index): ReturnQuantile => {
-    const entry = record(item);
-    const quantile = finite(first(entry, "quantile", "q"));
-    const returnRate = finite(first(entry, "value", "return_rate", "returnRate"));
-    if (quantile !== SCALPING_AI_QUANTILES[index] || returnRate === undefined) {
-      throw new Error("model_return_quantiles_invalid");
-    }
-    return { quantile, returnRate };
-  });
-  for (let index = 1; index < quantiles.length; index += 1) {
-    if (quantiles[index]!.returnRate < quantiles[index - 1]!.returnRate) {
-      throw new Error("model_return_quantiles_non_monotone");
-    }
-  }
-  const optionalProbability = (key: string, camel: string): number | undefined => {
-    const rawValue = first(horizon, key, camel);
-    if (rawValue === undefined || rawValue === null) return undefined;
-    const parsed = normalizedProbability(rawValue);
-    if (parsed === undefined) throw new Error("model_direction_probabilities_invalid");
-    return parsed;
-  };
-  const upProbability = optionalProbability("up_probability", "upProbability");
-  const downProbability = optionalProbability("down_probability", "downProbability");
-  const flatProbability = optionalProbability("flat_probability", "flatProbability");
-  if (
-    upProbability !== undefined
-    && downProbability !== undefined
-    && flatProbability !== undefined
-    && Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-6
-  ) {
-    throw new Error("model_direction_probabilities_invalid");
-  }
-  const rawProbabilityMethod = first(horizon, "probability_method", "probabilityMethod");
-  const probabilityMethod = rawProbabilityMethod === undefined
-    ? "unavailable" as const
-    : exactEnum(
-        rawProbabilityMethod,
-        ["sample_paths", "derived_quantile_cdf", "unavailable"] as const,
-      );
-  const rawVolatilityMethod = first(horizon, "volatility_method", "volatilityMethod");
-  const volatilityMethod = rawVolatilityMethod === undefined
-    ? "unavailable" as const
-    : exactEnum(
-        rawVolatilityMethod,
-        ["path_realized", "quantile_implied_sigma", "unavailable"] as const,
-      );
-  if (!probabilityMethod || !volatilityMethod) {
-    throw new Error("model_distribution_method_invalid");
-  }
-  const auxiliaryProbabilitiesReported = downProbability !== undefined
-    || flatProbability !== undefined;
-  if (
-    rawProbabilityMethod !== undefined
-    && (
-      probabilityMethod === "unavailable"
-        ? upProbability !== undefined || auxiliaryProbabilitiesReported
-        : upProbability === undefined
-          || downProbability === undefined
-          || flatProbability === undefined
-          || Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-9
-    )
-  ) {
-    throw new Error("model_direction_probabilities_invalid");
-  }
-  if (
-    rawProbabilityMethod === undefined
-    && auxiliaryProbabilitiesReported
-    && (
-      upProbability === undefined
-      || downProbability === undefined
-      || flatProbability === undefined
-      || Math.abs(upProbability + downProbability + flatProbability - 1) > 1e-9
-    )
-  ) {
-    throw new Error("model_direction_probabilities_invalid");
-  }
-  const optionalNonnegative = (key: string, camel: string): number | undefined => {
-    const rawValue = first(horizon, key, camel);
-    if (rawValue === undefined || rawValue === null) return undefined;
-    const parsed = finite(rawValue);
-    if (parsed === undefined || parsed < 0) throw new Error("model_distribution_metric_invalid");
-    return parsed;
-  };
-  const expectedVolatility = optionalNonnegative(
-    "expected_volatility",
-    "expectedVolatility",
-  );
-  const uncertaintyIntervalWidth = optionalNonnegative(
-    "uncertainty_interval_width",
-    "uncertaintyIntervalWidth",
-  );
-  const rawValidPathCount = first(horizon, "valid_path_count", "validPathCount");
-  const rawInvalidPathCount = first(horizon, "invalid_path_count", "invalidPathCount");
-  const validPathCount = rawValidPathCount === undefined
-    ? 0
-    : normalizedNonnegativeInteger(rawValidPathCount);
-  const invalidPathCount = rawInvalidPathCount === undefined
-    ? 0
-    : normalizedNonnegativeInteger(rawInvalidPathCount);
-  if (validPathCount === undefined || invalidPathCount === undefined) {
-    throw new Error("model_path_count_invalid");
-  }
-  const rawTargetStop = first(horizon, "target_stop", "targetStop");
-  const targetStop = rawTargetStop === undefined
-    ? { status: "unavailable" as const, reason: "not_reported" }
-    : normalizeTargetStopEvidence(rawTargetStop, expectedSeries.target_stop);
-
-  const modelRuns = Array.isArray(first(response, "model_runs", "modelRuns"))
-    ? first(response, "model_runs", "modelRuns") as unknown[]
-    : [];
-  if (modelRuns.length !== 1) throw new Error("model_lane_count_mismatch");
-  const laneRun = record(modelRuns[0]);
-  const role = text(first(laneRun, "role", "lane"))?.toLowerCase().replaceAll("-", "_");
-  if (
-    role !== lane
-    && !(lane === "kronos_base" && role === "kronos")
-    && !(lane === "chronos2" && role === "chronos_2")
-  ) {
-    throw new Error("model_lane_identity_mismatch");
-  }
-  const expectedContext = expectedSeries.bars.slice(
-    -(lane === "chronos2" ? CHRONOS2_CONTEXT_BARS : DEFAULT_CONTEXT_BARS),
-  );
-  const expectedContextStartAt = expectedContext[0]?.timestamp;
-  const rawInputOrigins = first(laneRun, "input_origins", "inputOrigins");
-  const inputOrigins = Array.isArray(rawInputOrigins) ? rawInputOrigins.map(record) : [];
-  const inputOrigin = inputOrigins[0];
-  const originBarCount = first(inputOrigin, "bar_count", "barCount");
-  const originInputDigest = exactText(first(inputOrigin, "input_digest", "inputDigest"));
-  if (!expectedContextStartAt
-    || inputOrigins.length !== 1
-    || !inputOrigin
-    || exactText(first(inputOrigin, "instrument_key", "instrumentKey"))
-      !== expectedSeries.instrument_key
-    || !matchesWorkerTimestamp(
-      first(inputOrigin, "context_start_at", "contextStartAt"),
-      expectedContextStartAt,
-    )
-    || !matchesWorkerTimestamp(
-      first(inputOrigin, "input_end_at", "inputEndAt"),
-      expectedSeries.input_end_at,
-    )
-    || typeof originBarCount !== "number"
-    || !Number.isSafeInteger(originBarCount)
-    || originBarCount !== expectedContext.length
-    || !originInputDigest
-    || !/^[0-9a-f]{64}$/.test(originInputDigest)
-    || originInputDigest !== canonicalCryptoModelInputDigest(expectedContext)
-    || first(laneRun, "input_end_aligned", "inputEndAligned") !== true) {
-    throw new Error("model_input_origin_mismatch");
-  }
-  const model = record(first(laneRun, "model", "provenance"))
-    ?? record(first(response, "model", "provenance"));
-  const pinned = PINNED_MODEL_RUNTIME_PROVENANCE[lane];
-  if (exactText(first(laneRun, "expected_model_id", "expectedModelId")) !== pinned.modelId
-    || exactText(first(model, "model_id", "modelId", "id")) !== pinned.modelId) {
-    throw new Error("model_identity_mismatch");
-  }
-  const modelId = exactText(first(model, "model_id", "modelId", "id"));
-  const modelRevision = exactText(first(model, "model_revision", "modelRevision", "revision"));
-  const sourceRevision = exactText(first(model, "source_revision", "sourceRevision"));
-  const loaderVersion = exactText(first(model, "loader_version", "loaderVersion"));
-  const license = exactText(first(model, "license"));
-  if (modelId !== pinned.modelId
-    || modelRevision !== pinned.modelRevision
-    || sourceRevision !== pinned.sourceRevision
-    || loaderVersion !== pinned.loaderVersion
-    || license !== pinned.license) {
-    throw new Error("model_provenance_invalid");
-  }
-  const rawTokenizerId = model?.tokenizer_id !== undefined
-    ? model.tokenizer_id
-    : model?.tokenizerId;
-  const rawTokenizerRevision = model?.tokenizer_revision !== undefined
-    ? model.tokenizer_revision
-    : model?.tokenizerRevision;
-  const tokenizerId = nullableExactText(rawTokenizerId);
-  const tokenizerRevision = nullableExactText(rawTokenizerRevision);
-  if (tokenizerId === undefined
-    || tokenizerRevision === undefined
-    || tokenizerId !== pinned.tokenizerId
-    || tokenizerRevision !== pinned.tokenizerRevision) {
-    throw new Error("model_tokenizer_provenance_invalid");
-  }
-  const loaded = first(model, "loaded");
-  const device = exactText(first(model, "device"));
-  const deviceName = exactText(first(model, "device_name", "deviceName"));
-  const cudaCapability = exactText(first(model, "cuda_capability", "cudaCapability"));
-  const attentionBackend = exactText(first(model, "attention_backend", "attentionBackend"));
-  if (loaded !== true
-    || device !== "cuda"
-    || deviceName !== PINNED_GPU_DEVICE_NAME
-    || !SAFE_GPU_DEVICE_NAME.test(deviceName)
-    || cudaCapability !== PINNED_GPU_CUDA_CAPABILITY
-    || attentionBackend !== "math") {
-    throw new Error("model_runtime_provenance_invalid");
-  }
-  const precision = normalizedPrecision(first(model, "dtype", "precision"));
-  if (!precision) throw new Error("model_precision_invalid");
-
-  const rawPrecisionValidation = first(
-    model,
-    "precision_validation",
-    "precisionValidation",
-  );
-  const rawMemoryStatus = first(model, "memory_status", "memoryStatus");
-  const rawQuantileMonotonicityPolicy = first(
-    model,
-    "quantile_monotonicity_policy",
-    "quantileMonotonicityPolicy",
-  );
-  const rawFp32QuantileObservations = first(
-    model,
-    "fp32_quantile_observations",
-    "fp32QuantileObservations",
-  );
-  const rawMixedQuantileObservations = (
-    model && Object.prototype.hasOwnProperty.call(model, "mixed_quantile_observations")
-      ? model.mixed_quantile_observations
-      : model?.mixedQuantileObservations
-  );
-  const rawQuantileTailPolicy = first(
-    model,
-    "quantile_tail_policy",
-    "quantileTailPolicy",
-  );
-  const rawPrecisionFailureReasons = first(
-    model,
-    "precision_failure_reasons",
-    "precisionFailureReasons",
-  );
-  const precisionValidation = rawPrecisionValidation === undefined && lane === "kronos_base"
-    ? "not_required"
-    : exactEnum(rawPrecisionValidation, ["not_required", "passed", "fallback_fp32"] as const);
-  const memoryStatus = rawMemoryStatus === undefined && lane === "kronos_base"
-    ? "ok"
-    : exactEnum(rawMemoryStatus, ["ok"] as const);
-  const quantileMonotonicityPolicy = (
-    rawQuantileMonotonicityPolicy === undefined && lane === "kronos_base"
-  )
-    ? "native"
-    : exactEnum(
-      rawQuantileMonotonicityPolicy,
-      [
-        "native",
-        "fp32_monotone_rearrangement_v1",
-        "chronos2_fp32_monotone_rearrangement_v1",
-      ] as const,
-    );
-  const quantileTailPolicy = rawQuantileTailPolicy === undefined && lane === "kronos_base"
-    ? "native"
-    : exactEnum(rawQuantileTailPolicy, ["native", "tail_clamped_q10_q90"] as const);
-  const precisionFailureReasons = (
-    rawPrecisionFailureReasons === undefined && lane === "kronos_base"
-  )
-    ? []
-    : normalizedPrecisionFailureReasons(rawPrecisionFailureReasons);
-  if (!precisionValidation) throw new Error("model_precision_validation_invalid");
-  if (!memoryStatus) throw new Error("model_memory_status_invalid");
-  if (!quantileMonotonicityPolicy) {
-    throw new Error("model_quantile_monotonicity_policy_invalid");
-  }
-  if (!quantileTailPolicy) throw new Error("model_quantile_tail_policy_invalid");
-  if (!precisionFailureReasons) {
-    throw new Error("model_precision_failure_reasons_invalid");
-  }
-  const fp32QuantileObservations = rawFp32QuantileObservations === undefined
-    ? undefined
-    : normalizedQuantileObservations(rawFp32QuantileObservations);
-  const mixedQuantileObservations = rawMixedQuantileObservations === undefined
-    ? undefined
-    : normalizedQuantileObservations(rawMixedQuantileObservations);
-
-  const rawPeakVramBytes = first(model, "peak_vram_bytes", "peakVramBytes");
-  const rawPeakVramMeasurement = first(
-    model,
-    "peak_vram_measurement",
-    "peakVramMeasurement",
-  );
-  const peakVramBytes = rawPeakVramBytes === undefined
-    ? undefined
-    : safePeakVramBytes(rawPeakVramBytes);
-  const peakVramMeasurement = rawPeakVramMeasurement === undefined
-    ? undefined
-    : exactEnum(rawPeakVramMeasurement, ["cuda_allocated_or_reserved"] as const);
-  if ((rawPeakVramBytes !== undefined && peakVramBytes === undefined)
-    || (rawPeakVramMeasurement !== undefined && peakVramMeasurement === undefined)
-    || ((peakVramBytes === undefined) !== (peakVramMeasurement === undefined))) {
-    throw new Error("model_peak_vram_invalid");
-  }
-  const legacyPeakVramMb = safePeakVramMb(first(model, "peak_vram_mb", "peakVramMb"))
-    ?? safePeakVramMb(first(laneRun, "peak_vram_mb", "peakVramMb"));
-  const peakVramMb = peakVramBytes === undefined
-    ? legacyPeakVramMb
-    : peakVramBytes / (1024 * 1024);
-
-  if (lane === "kronos_base" || lane === "chronos2") {
-    const expectedMonotonicity = lane === "chronos2"
-      ? "chronos2_fp32_monotone_rearrangement_v1"
-      : "native";
-    if (precision !== "fp32"
-      || precisionValidation !== "not_required"
-      || memoryStatus !== "ok"
-      || quantileMonotonicityPolicy !== expectedMonotonicity
-      || (fp32QuantileObservations !== undefined && fp32QuantileObservations !== null)
-      || (mixedQuantileObservations !== undefined && mixedQuantileObservations !== null)
-      || quantileTailPolicy !== "native"
-      || precisionFailureReasons.length > 0) {
-      throw new Error("model_precision_provenance_invalid");
-    }
-  } else {
-    const mixedRuntimeFailed = precisionFailureReasons
-      .some((reason) => reason.startsWith("mixed_"));
-    const validFp32Observations = fp32QuantileObservations !== undefined
-      && fp32QuantileObservations !== null
-      && fp32QuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
-      && fp32QuantileObservations.nonFiniteValueCount === 0
-      && fp32QuantileObservations.postprocessedMonotonic;
-    const validMixedObservations = mixedRuntimeFailed
-      ? mixedQuantileObservations === null
-      : mixedQuantileObservations !== undefined
-        && mixedQuantileObservations !== null
-        && mixedQuantileObservations.rowCount === FINCAST_QUALIFICATION_QUANTILE_ROWS
-        && precisionFailureReasons.includes("non_finite_output")
-          === (mixedQuantileObservations.nonFiniteValueCount > 0)
-        && precisionFailureReasons.includes("quantile_postprocessing_failed")
-          === (
-            mixedQuantileObservations.nonFiniteValueCount === 0
-            && !mixedQuantileObservations.postprocessedMonotonic
-          );
-    const mixedPrecisionValid = precision === "fp16"
-      && precisionValidation === "passed"
-      && precisionFailureReasons.length === 0;
-    const fp32FallbackValid = precision === "fp32"
-      && precisionValidation === "fallback_fp32"
-      && precisionFailureReasons.length > 0;
-    if (!validFp32Observations || !validMixedObservations) {
-      throw new Error("model_quantile_observations_invalid");
-    }
-    if ((!mixedPrecisionValid && !fp32FallbackValid)
-      || memoryStatus !== "ok"
-      || quantileMonotonicityPolicy !== "fp32_monotone_rearrangement_v1"
-      || quantileTailPolicy !== "tail_clamped_q10_q90"
-      || peakVramBytes === undefined
-      || peakVramBytes <= 0
-      || peakVramMeasurement !== "cuda_allocated_or_reserved") {
-      throw new Error("model_precision_provenance_invalid");
-    }
-  }
-  return {
-    lane,
-    generatedAt,
-    generatedAtIso: iso(generatedAt),
-    inputEndAt,
-    quantiles,
-    horizonDistributions,
-    displayPoints,
-    ...(upProbability === undefined ? {} : { upProbability }),
-    ...(downProbability === undefined ? {} : { downProbability }),
-    ...(flatProbability === undefined ? {} : { flatProbability }),
-    probabilityMethod,
-    ...(expectedVolatility === undefined ? {} : { expectedVolatility }),
-    volatilityMethod,
-    ...(uncertaintyIntervalWidth === undefined ? {} : { uncertaintyIntervalWidth }),
-    validPathCount,
-    invalidPathCount,
-    targetStop,
-    modelId,
-    modelRevision,
-    sourceRevision,
-    loaderVersion,
-    license,
-    tokenizerId,
-    tokenizerRevision,
-    loaded: true,
-    device: "cuda",
-    deviceName,
-    cudaCapability: PINNED_GPU_CUDA_CAPABILITY,
-    attentionBackend: "math",
-    precision,
-    precisionValidation,
-    memoryStatus,
-    quantileMonotonicityPolicy,
-    fp32QuantileObservations: fp32QuantileObservations ?? undefined,
-    mixedQuantileObservations,
-    quantileTailPolicy,
-    precisionFailureReasons,
-    latencyMs: finite(first(laneRun, "latency_ms", "latencyMs"))
-      ?? finite(first(response, "latency_ms", "latencyMs")),
-    peakVramBytes,
-    peakVramMeasurement,
-    peakVramMb,
-  };
 }
 
 function atr14(bars: readonly BinanceKline[]): number {
@@ -2841,64 +1480,14 @@ function cryptoTechnicalObservation(
   const localBars = bars.slice(-CRYPTO_LOCAL_CHART_PROJECTION_BARS);
   const chart = cryptoChartProjection(localBars);
   const latest = chart.bars.at(-1);
-  const values = latest?.indicatorValues ?? {};
-  const emaFast = values["trend-ema-fast:value"];
-  const emaSlow = values["trend-ema-slow:value"];
-  const rsi = values["momentum-rsi:value"];
-  const upper = values["breakout-donchian:upper"];
-  const lower = values["breakout-donchian:lower"];
-  const bollingerUpper = values["mean-bollinger:upper"];
-  const bollingerLower = values["mean-bollinger:lower"];
   let direction: FuturesSide | "flat" = "flat";
-  if (preset === "trend" && emaFast !== undefined && emaSlow !== undefined) {
-    direction = emaFast > emaSlow ? "long" : emaFast < emaSlow ? "short" : "flat";
-  } else if (preset === "breakout" && latest) {
-    const previousWindow = localBars.slice(-21, -1);
-    const previousHigh = previousWindow.length
-      ? Math.max(...previousWindow.map((bar) => bar.high))
-      : upper;
-    const previousLow = previousWindow.length
-      ? Math.min(...previousWindow.map((bar) => bar.low))
-      : lower;
-    direction = previousHigh !== undefined && latest.close >= previousHigh
-      ? "long"
-      : previousLow !== undefined && latest.close <= previousLow
-        ? "short"
-        : "flat";
-  } else if (preset === "mean_reversion" && latest) {
-    direction = rsi !== undefined && bollingerLower !== undefined
-      && rsi <= 35 && latest.close <= bollingerLower
-      ? "long"
-      : rsi !== undefined && bollingerUpper !== undefined
-        && rsi >= 65 && latest.close >= bollingerUpper
-        ? "short"
-        : "flat";
-  } else if (emaFast !== undefined && emaSlow !== undefined && rsi !== undefined) {
-    direction = emaFast > emaSlow && rsi >= 45 && rsi <= 70
-      ? "long"
-      : emaFast < emaSlow && rsi >= 30 && rsi <= 55
-        ? "short"
-        : "flat";
-  }
   const latestAt = latest?.timestamp;
-  const latestPatterns = latestAt
-    ? chart.patterns.filter((pattern) => pattern.detectedAt === latestAt)
-    : [];
-  const bullish = latestPatterns
-    .filter((pattern) => pattern.bias === "bullish")
-    .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
-  const bearish = latestPatterns
-    .filter((pattern) => pattern.bias === "bearish")
-    .reduce((maximum, pattern) => Math.max(maximum, pattern.strength), 0);
+  // Chart indicators and candlestick patterns are projection-only. Trading
+  // direction and risk evidence must come from the Rust analyzer.
   const localIndicators = scoreRustIndicatorEvidence({
-    indicators: chart.indicators.map((indicator) => ({
-      id: indicator.id,
-      kind: indicator.kind,
-      latestValues: indicator.values,
-    })),
+    indicators: [],
     preset,
     currentPrice: latest?.close ?? 0,
-    ...(latest?.volume === undefined ? {} : { currentVolume: latest.volume }),
   });
   const rustIndicators = rust
     ? scoreRustIndicatorEvidence({
@@ -2910,9 +1499,7 @@ function cryptoTechnicalObservation(
       })
     : undefined;
   const directionalScore = rustIndicators?.directionalScore;
-  const directionalSignal = rust?.technicalSignal ?? (
-    direction === "long" ? 1 : direction === "short" ? -1 : 0
-  );
+  const directionalSignal = rust?.technicalSignal ?? 0;
   if (directionalScore !== undefined || rust) {
     const combinedScore = (directionalScore ?? 0) * 0.75 + directionalSignal * 0.25;
     direction = combinedScore >= 0.15
@@ -2923,7 +1510,7 @@ function cryptoTechnicalObservation(
   const quality = rustError
     ? "unavailable" as const
     : !rust
-      ? "good" as const
+      ? "unavailable" as const
       : rustQualityStatus?.includes("stale")
         ? "stale" as const
         : rustQualityStatus && ["unavailable", "invalid", "failed", "error"].some(
@@ -2940,9 +1527,9 @@ function cryptoTechnicalObservation(
     state: rust ? `${preset}:${direction}:${rust.status}` : `${preset}:${direction}`,
     direction,
     directionalSignal,
-    chartPatternBias: bullish === bearish ? "neutral" : bullish > bearish ? "bullish" : "bearish",
-    chartPatterns: latestPatterns.map((pattern) => pattern.name),
-    chartPatternStrength: Math.max(bullish, bearish),
+    chartPatternBias: "neutral",
+    chartPatterns: [],
+    chartPatternStrength: 0,
     indicators: rustIndicators ?? localIndicators,
     ...(rust?.originAt ?? latestAt ? { originAt: rust?.originAt ?? latestAt } : {}),
     ...(rust?.calculationAt ?? latestAt
@@ -2957,9 +1544,6 @@ function cryptoTechnicalObservation(
       scannerEvidence: rust.scannerEvidence,
     } : {}),
     components: {
-      ...(emaFast !== undefined ? { emaFast } : {}),
-      ...(emaSlow !== undefined ? { emaSlow } : {}),
-      ...(rsi !== undefined ? { rsi } : {}),
       ...(rustIndicators ? {
         rustDirectionalScore: rustIndicators.directionalScore,
         rustRiskScale: rustIndicators.riskScale,
@@ -3161,31 +1745,17 @@ function modelPlanForLane(
   request: SimulationStartRequest,
   symbol: string,
   lane: SimulationModelLane,
-): SimulationStartRequest["modelPlan"][number] | undefined {
+): SimulationStartRequest["resolvedModelPlan"][number] | undefined {
   return normalizedModelPlan(request).find((plan) => (
     plan.modelLane === lane
     && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol.toUpperCase())
   ));
 }
 
-/**
- * Runtime inputs created through the v8 schema always have a model plan.
- * Keep this defensive projection for persisted/direct v7 fixtures that
- * predate the field and are replayed without passing through the router.
- */
 function normalizedModelPlan(
   request: SimulationStartRequest,
-): SimulationStartRequest["modelPlan"] {
-  if (Array.isArray(request.modelPlan) && request.modelPlan.length > 0) {
-    return request.modelPlan;
-  }
-  return request.modelLanes.map((modelLane) => ({
-    symbol: "*",
-    modelLane,
-    role: "primary" as const,
-    required: true,
-    preferredHorizonsMinutes: [15, 30, 60],
-  }));
+): SimulationStartRequest["resolvedModelPlan"] {
+  return request.resolvedModelPlan;
 }
 
 function runtimeCalibrationResiduals(
@@ -3225,6 +1795,7 @@ function commonModelEvidence(
     states: ReadonlyMap<SimulationModelLane, LaneState>;
     rustTechnical?: CryptoRustTechnicalAnalysis;
     rustMarketEvidence?: RustMarketEvidenceV2;
+    loadCalibrationResiduals?: CryptoPaperRuntimeOptions["loadCalibrationResiduals"];
     costs: EvidenceCostBreakdown;
   },
 ): ModelEvidence[] {
@@ -3235,8 +1806,18 @@ function commonModelEvidence(
     const plan = modelPlanForLane(input.request, input.symbol, lane);
     if (!forecast || !state || !plan) continue;
     for (const distribution of forecast.horizonDistributions) {
+      const residuals = input.loadCalibrationResiduals?.({
+        modelLane: lane,
+        symbol: input.symbol,
+        horizonMinutes: distribution.horizonMinutes,
+        originAt: input.originAt,
+      }) ?? runtimeCalibrationResiduals(
+        state,
+        input.symbol,
+        distribution.horizonMinutes,
+      );
       const calibration = fitRollingConformalCalibration(
-        runtimeCalibrationResiduals(state, input.symbol, distribution.horizonMinutes),
+        residuals,
         {
           modelLane: lane,
           symbol: input.symbol,
@@ -3274,7 +1855,7 @@ function commonModelEvidence(
         calibrationAge: calibration.ageMinutes,
         featureProfile: lane === "chronos2"
           ? "compact_causal_v1"
-          : lane === "fincast" ? "fincast-native/v1" : "kronos-base-legacy/v1",
+          : "fincast-native/v1",
         dataQuality: {
           status: input.rustTechnical?.quality.status === "available"
             ? "ok"
@@ -3904,16 +2485,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         : "final_binance_1m_kline" as const;
     const policyProfile = cryptoFuturesPolicyProfile(request);
     const modelPlan = normalizedModelPlan(request);
-    const preferredExecutionLane = request.sourceContractVersion === "ai-paper-simulation/v8"
-      ? modelPlan.find((plan) => (
-        plan.role === "primary"
-        && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol)
-      ))?.modelLane ?? this.options.executionLane ?? "fincast"
-      : this.options.executionLane ?? "fincast";
+    const preferredExecutionLane = modelPlan.find((plan) => (
+      plan.role === "primary"
+      && (plan.symbol === "*" || plan.symbol.toUpperCase() === symbol)
+    ))?.modelLane ?? this.options.executionLane ?? "fincast";
     const executionLane = selectedLanes.includes(preferredExecutionLane)
       ? preferredExecutionLane
       : selectedLanes[0]!;
-    const queue = new AsyncMarketEventQueue();
+    const queue = new BoundedMarketEventQueue();
     const ingressStore = new CausalBinanceKlineStore();
     const decisionStore = new CausalBinanceKlineStore();
     // A single run has one symbol and preset. Replacing this entry whenever
@@ -4506,8 +3085,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           quoteAsset: "USDT",
           contractType: "PERPETUAL",
         },
-        ...(request.simulationCase ? { simulationCase: request.simulationCase } : {}),
-        modelPlan: structuredClone(modelPlan),
+        simulationCase: request.simulationCase,
+        resolvedModelPlan: structuredClone(modelPlan),
         currency: "USDT",
         initialCash: request.initialCash,
         cash: ledger.walletBalance,
@@ -4592,7 +3171,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         modelEvidence: routedModelEvidence.slice(-600),
         rustMarketEvidence: liveRustMarketEvidence.slice(-300),
         modelForecasts: forecasts,
-        kronosForecasts: forecasts.filter((forecast) => forecast.lane === "kronos_base"),
         warnings: unique(warnings),
         capabilities: {
           paper: true,
@@ -5932,6 +4510,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         states,
         ...(rustTechnical ? { rustTechnical } : {}),
         ...(policyRustEvidence ? { rustMarketEvidence: policyRustEvidence } : {}),
+        ...(this.options.loadCalibrationResiduals
+          ? { loadCalibrationResiduals: this.options.loadCalibrationResiduals }
+          : {}),
         costs: evidenceCosts,
       });
       routedModelEvidence.push(...routedEvidence);
@@ -5945,9 +4526,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       const primaryState = primaryPlan ? states.get(primaryPlan.modelLane) : undefined;
       let unifiedDecision: UnifiedPolicyDecision | undefined;
       if (
-        request.sourceContractVersion === "ai-paper-simulation/v8"
-        && request.simulationCase
-        && primaryPlan
+        primaryPlan
         && primaryState
       ) {
         const ledger = primaryState.ledger.snapshot();
@@ -7517,7 +6096,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             equity: states.get(executionLane)!.equity,
             charts: terminalSnapshot.charts,
             modelForecasts: terminalSnapshot.modelForecasts,
-            kronosForecasts: terminalSnapshot.kronosForecasts,
             modelComparison: comparison,
             settlementComplete: settlement.settlementComplete,
             terminalSettlement: structuredClone(settlement),
@@ -7776,8 +6354,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       startedAt,
       expiresAt,
       market: firstSnapshot.market,
-      ...(request.simulationCase ? { simulationCase: request.simulationCase } : {}),
-      modelPlan: structuredClone(normalizedModelPlan(request)),
+      simulationCase: request.simulationCase,
+      resolvedModelPlan: structuredClone(normalizedModelPlan(request)),
       currency: "USDT",
       initialCash,
       cash,
@@ -7835,9 +6413,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         (snapshot) => snapshot.rustMarketEvidence,
       ).slice(-600),
       modelForecasts,
-      kronosForecasts: modelForecasts.flatMap((value) => (
-        first(record(value), "lane") === "kronos_base" ? [value] : []
-      )),
       warnings: unique(snapshots.flatMap((snapshot) => snapshot.warnings)),
       capabilities: {
         ...firstSnapshot.capabilities,
@@ -8082,7 +6657,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           futuresRisk: terminalSnapshot.futuresRisk,
           charts: terminalSnapshot.charts,
           modelForecasts: terminalSnapshot.modelForecasts,
-          kronosForecasts: terminalSnapshot.kronosForecasts,
           modelComparison: terminalSnapshot.modelComparison,
           equity: portfolioEquity,
           warnings,

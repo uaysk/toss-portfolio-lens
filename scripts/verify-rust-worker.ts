@@ -3,8 +3,6 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { simulateBacktest, type BacktestSimulationInput } from "../server/backtest-engine.js";
-import { optimizePortfolio } from "../server/services/optimization-service.js";
 import { PORTFOLIO_ENGINE_VERSION } from "../server/services/service-envelope.js";
 import {
   canonicalJson,
@@ -16,30 +14,41 @@ import { buildSyntheticFixture } from "./benchmark-compute.js";
 
 const binary = fileURLToPath(new URL("../worker/rust/target/release/portfolio-lens-worker", import.meta.url));
 
-function serializable(input: BacktestSimulationInput): Record<string, unknown> {
-  return JSON.parse(JSON.stringify({ ...input, prices: Object.fromEntries(input.prices) })) as Record<string, unknown>;
+function serializable(input: unknown): Record<string, unknown> {
+  const source = input as { prices?: unknown };
+  return JSON.parse(JSON.stringify({
+    ...(input as Record<string, unknown>),
+    ...(source.prices instanceof Map ? { prices: Object.fromEntries(source.prices) } : {}),
+  })) as Record<string, unknown>;
 }
 
-type RustCommand = "backtest-json" | "optimize-json" | "monte-carlo-json" | "compute-json";
+type RustJobKind = WorkerInput["job_kind"];
 
 function rust(
-  command: RustCommand,
-  input: unknown,
-  jobKind?: WorkerInput["job_kind"],
-): { value: any; processMs: number } {
+  jobKind: RustJobKind,
+  payloadOrEnvelope: unknown,
+): { value: any; output: unknown; processMs: number } {
+  const supplied = payloadOrEnvelope as Partial<WorkerInput>;
+  const envelope = supplied.schema_version === WORKER_PAYLOAD_SCHEMA_VERSION
+    && supplied.job_kind === jobKind
+    ? payloadOrEnvelope as WorkerInput
+    : workerInput(jobKind, jobKind === "backtest"
+      ? { simulation: payloadOrEnvelope }
+      : jobKind === "optimization"
+        ? { optimization: payloadOrEnvelope, objective: "robust_score" }
+        : jobKind === "monte_carlo"
+          ? { monte_carlo: payloadOrEnvelope }
+          : payloadOrEnvelope as Record<string, unknown>);
   const started = performance.now();
-  const args = command === "compute-json" ? [command, assertJobKind(jobKind)] : [command];
-  const child = spawnSync(binary, args, {
-    input: JSON.stringify(input), encoding: "utf8", maxBuffer: 256 * 1024 * 1024,
+  const child = spawnSync(binary, ["compute-json", jobKind], {
+    input: JSON.stringify(envelope), encoding: "utf8", maxBuffer: 256 * 1024 * 1024,
   });
   const processMs = performance.now() - started;
-  if (child.status !== 0) throw new Error(`Rust ${command} failed: ${child.stderr || child.stdout}`);
-  return { value: JSON.parse(child.stdout), processMs };
-}
-
-function assertJobKind(value: WorkerInput["job_kind"] | undefined): WorkerInput["job_kind"] {
-  assert(value, "compute-json requires a job kind");
-  return value;
+  if (child.status !== 0) {
+    throw new Error(`Rust compute-json ${jobKind} failed: ${child.stderr || child.stdout}`);
+  }
+  const output = JSON.parse(child.stdout);
+  return { value: output.result, output, processMs };
 }
 
 function clone<T>(value: T): T {
@@ -56,101 +65,6 @@ function closeTo(left: number, right: number, tolerance: number, message: string
 
 function probability(value: unknown, message: string): void {
   assert(typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100, message);
-}
-
-type Difference = { compared: number; maxAbsolute: number; maxRelative: number };
-function compare(left: unknown, right: unknown, path: string, difference: Difference, absoluteTolerance = 1e-7, relativeTolerance = 1e-9): void {
-  if (typeof left === "number" && typeof right === "number") {
-    const absolute = Math.abs(left - right);
-    const relative = absolute / Math.max(Math.abs(left), Math.abs(right), Number.MIN_VALUE);
-    difference.compared += 1;
-    difference.maxAbsolute = Math.max(difference.maxAbsolute, absolute);
-    difference.maxRelative = Math.max(difference.maxRelative, relative);
-    if (absolute > absoluteTolerance && relative > relativeTolerance) throw new Error(`${path}: ${left} != ${right} (abs=${absolute}, rel=${relative})`);
-    return;
-  }
-  if (Array.isArray(left) || Array.isArray(right)) {
-    assert(Array.isArray(left) && Array.isArray(right), `${path}: array type mismatch`);
-    assert.equal(left.length, right.length, `${path}: array length mismatch`);
-    left.forEach((item, index) => compare(item, right[index], `${path}[${index}]`, difference, absoluteTolerance, relativeTolerance));
-    return;
-  }
-  if (left && right && typeof left === "object" && typeof right === "object") {
-    const leftObject = left as Record<string, unknown>;
-    const rightObject = right as Record<string, unknown>;
-    assert.deepEqual(Object.keys(leftObject).sort(), Object.keys(rightObject).sort(), `${path}: keys mismatch`);
-    for (const key of Object.keys(leftObject)) compare(leftObject[key], rightObject[key], `${path}.${key}`, difference, absoluteTolerance, relativeTolerance);
-    return;
-  }
-  assert.equal(left, right, `${path}: value mismatch`);
-}
-
-function legacyBacktestProjection(value: any) {
-  const comparable = [
-    "totalReturnPercent", "cagrPercent", "annualizedVolatilityPercent", "maxDrawdownPercent", "maxDrawdownDays",
-    "sharpeRatio", "sortinoRatio", "calmarRatio", "bestDailyReturnPercent", "worstDailyReturnPercent",
-    "positiveDaysPercent", "bestYearPercent", "worstYearPercent", "positiveMonthsPercent", "finalBalance",
-    "totalContributions", "totalWithdrawals",
-  ];
-  const contribution = [
-    "symbol", "name", "market", "currency", "weight", "endingValue", "profitLoss", "contributionPercent",
-    "timeLinkedContributionPercent", "localPriceContributionPercent", "fxContributionPercent",
-    "upRegimeContributionPercent", "downRegimeContributionPercent", "assetReturnPercent",
-  ];
-  const dataQuality = [
-    "alignmentPolicy", "commonReturnPolicy", "alignedValuationDays", "commonReturnObservations",
-    "carryForwardByAsset", "benchmarkCarryForwardCount",
-  ];
-  return {
-    requestedStartDate: value.requestedStartDate,
-    effectiveStartDate: value.effectiveStartDate,
-    endDate: value.endDate,
-    points: value.points.map((point: any) => ({
-      date: point.date, balance: point.balance, growth: point.growth,
-      ...(point.benchmarkGrowth !== undefined ? { benchmarkGrowth: point.benchmarkGrowth } : {}),
-      drawdownPercent: point.drawdownPercent,
-    })),
-    metrics: Object.fromEntries(comparable.map((key) => [key, value.metrics[key]])),
-    benchmarkMetrics: value.benchmarkMetrics
-      ? Object.fromEntries(comparable.filter((key) => !["finalBalance", "totalContributions", "totalWithdrawals"].includes(key)).map((key) => [key, value.benchmarkMetrics[key]]))
-      : undefined,
-    annualReturns: value.annualReturns,
-    contributions: value.contributions.map((item: any) => Object.fromEntries(contribution.map((key) => [key, item[key]]))),
-    correlations: value.correlations,
-    // The Node fallback intentionally exposes only the legacy price-alignment quality
-    // contract. Rust appends provider/realism quality fields, so golden parity must keep
-    // comparing the common surface while the extended fields are asserted separately.
-    dataQuality: Object.fromEntries(dataQuality.map((key) => [key, value.dataQuality[key]])),
-  };
-}
-
-function legacyOptimizationCandidateProjection(value: any): Record<string, unknown> | null {
-  if (value === null || value === undefined) return null;
-  const metrics = [
-    "sharpe", "sortino", "calmar", "volatility", "cvar", "informationRatio", "robustScore",
-    "return", "maxDrawdown", "turnover", "transactionCost",
-  ];
-  return {
-    weights: value.weights,
-    sampleCount: value.sampleCount,
-    metrics: Object.fromEntries(metrics.map((key) => [key, value.metrics[key]])),
-    walkForwardTestCoverage: value.walkForwardTestCoverage,
-    walkForwardSignal: value.walkForwardSignal,
-  };
-}
-
-function legacyOptimizationProjection(value: any) {
-  return {
-    warnings: value.warnings,
-    seed: value.seed,
-    sampledAssets: value.sampledAssets,
-    candidateCount: value.candidateCount,
-    candidates: value.candidates.map(legacyOptimizationCandidateProjection),
-    paretoFrontier: value.paretoFrontier.map(legacyOptimizationCandidateProjection),
-    bestByObjective: Object.fromEntries(Object.entries(value.bestByObjective)
-      .map(([key, candidate]) => [key, legacyOptimizationCandidateProjection(candidate)])),
-    futureLeakageWarning: value.futureLeakageWarning,
-  };
 }
 
 function assertBacktestLedger(value: any, quantityMode: "fractional" | "whole"): void {
@@ -228,30 +142,15 @@ function assertWalkForwardContract(value: any, expectedMode: "rolling" | "anchor
 
 const fixture = buildSyntheticFixture(420);
 fixture.backtest.transactionCostBps = 0;
-const nodeBacktestStarted = performance.now();
-const nodeBacktest = simulateBacktest(fixture.backtest);
-const nodeBacktestMs = performance.now() - nodeBacktestStarted;
-const rustBacktest = rust("backtest-json", serializable(fixture.backtest));
-const backtestDifference: Difference = { compared: 0, maxAbsolute: 0, maxRelative: 0 };
-compare(legacyBacktestProjection(nodeBacktest), legacyBacktestProjection(rustBacktest.value), "$backtest", backtestDifference);
+const rustBacktest = rust("backtest", serializable(fixture.backtest));
+const repeatedRustBacktest = rust("backtest", serializable(fixture.backtest));
+assert.deepEqual(rustBacktest.value, repeatedRustBacktest.value);
 
 fixture.optimization.candidateBudget = 120;
-// Baseline injection is a Rust v2 contract. Disable it only for the legacy random-search
-// golden so both implementations visit the exact same seeded candidate stream.
 fixture.optimization.baselines = [];
-const nodeOptimizationStarted = performance.now();
-const nodeOptimization = optimizePortfolio(fixture.optimization);
-const nodeOptimizationMs = performance.now() - nodeOptimizationStarted;
-const rustOptimization = rust("optimize-json", fixture.optimization);
-const optimizationDifference: Difference = { compared: 0, maxAbsolute: 0, maxRelative: 0 };
-compare(
-  legacyOptimizationProjection(nodeOptimization),
-  legacyOptimizationProjection(rustOptimization.value),
-  "$optimization",
-  optimizationDifference,
-  1e-8,
-  1e-9,
-);
+const rustOptimization = rust("optimization", fixture.optimization);
+const repeatedRustOptimization = rust("optimization", fixture.optimization);
+assert.deepEqual(rustOptimization.value, repeatedRustOptimization.value);
 
 const featureInput = {
   assets: [{ symbol: "AAA", name: "AAA", market: "KRX", currency: "KRW", listDate: "2024-01-02", weight: 80, lotSize: 1 }],
@@ -266,7 +165,7 @@ const featureInput = {
   cashFlows: [{ date: "2024-01-03", amount: 100, memo: "deposit" }],
   execution: { cashTargetPercent: 20, quantityMode: "whole", cashFlowRebalanceMode: "drift_reduction", tradeDatePolicy: "next_common_observation", cashAnnualYieldPercent: 0 },
 };
-const feature = rust("backtest-json", featureInput).value;
+const feature = rust("backtest", featureInput).value;
 assert.equal(feature.points[0].balance, 994);
 assert.equal(feature.trades[0].quantity, 2);
 assert.equal(feature.trades[0].transactionCost, 6);
@@ -349,7 +248,7 @@ const ledgerPropertyCases = Array.from({ length: 4 }, (_, caseIndex) => {
     },
   };
 });
-const ledgerPropertyResults = ledgerPropertyCases.map((input) => rust("backtest-json", input).value);
+const ledgerPropertyResults = ledgerPropertyCases.map((input) => rust("backtest", input).value);
 for (const result of ledgerPropertyResults) {
   assertBacktestLedger(result, "whole");
   assert.equal(result.targetWeightSchedule.length, 1);
@@ -358,12 +257,6 @@ for (const result of ledgerPropertyResults) {
   assert(result.metrics.totalDividendTaxes > 0);
   assert.equal(result.dataQuality.liquidityStatus, "provider_supplied");
 }
-const nodeScheduleInput = {
-  ...ledgerPropertyCases[0],
-  prices: new Map(Object.entries(ledgerPropertyCases[0].prices)),
-} as unknown as BacktestSimulationInput;
-assert.throws(() => simulateBacktest(nodeScheduleInput), /Rust worker/);
-
 const baselineNames = [
   "equal_weight", "current_weight", "inverse_volatility", "minimum_variance", "risk_parity", "hrp", "herc",
 ] as const;
@@ -425,8 +318,8 @@ const advancedOptimizationInput = {
     ledgerValidationBudget: 2,
   },
 };
-const advancedOptimization = rust("optimize-json", advancedOptimizationInput);
-const repeatedAdvancedOptimization = rust("optimize-json", advancedOptimizationInput);
+const advancedOptimization = rust("optimization", advancedOptimizationInput);
+const repeatedAdvancedOptimization = rust("optimization", advancedOptimizationInput);
 assert.deepEqual(advancedOptimization.value, repeatedAdvancedOptimization.value);
 const advanced = advancedOptimization.value;
 assert.equal(advanced.algorithm, "nsga_ii");
@@ -481,10 +374,9 @@ for (const policy of advanced.regimePolicyArtifact) {
   }
 }
 const optimizationWorkerOutput = WorkerOutputSchema.parse(rust(
-  "compute-json",
-  workerInput("optimization", { optimization: advancedOptimizationInput, objective: "robust_score" }),
   "optimization",
-).value);
+  workerInput("optimization", { optimization: advancedOptimizationInput, objective: "robust_score" }),
+).output);
 assert.equal((optimizationWorkerOutput.result as any).regimePolicyArtifact, undefined);
 assert(optimizationWorkerOutput.artifacts?.some((artifact) => artifact.type === "regime-policy"));
 const optimizerAlgorithms = ["random_search", "differential_evolution", "cma_es", "nsga_ii", "direct_cvar"] as const;
@@ -492,7 +384,7 @@ const optimizerMethodTimings: Record<string, number> = {};
 for (const algorithm of optimizerAlgorithms) {
   const result = algorithm === "nsga_ii"
     ? advancedOptimization
-    : rust("optimize-json", {
+    : rust("optimization", {
       ...fixture.optimization,
       algorithm,
       covarianceEstimator: "ledoit_wolf",
@@ -513,8 +405,8 @@ const monteInput = {
   initialAmount: 100_000_000, horizonDays: 252, pathCount: 2_000, blockLength: 20,
   seed: 88_001, goalAmount: 120_000_000, quantiles: [0.05, 0.5, 0.95], samplePathCount: 3,
 };
-const monteFirst = rust("monte-carlo-json", monteInput);
-const monteSecond = rust("monte-carlo-json", monteInput);
+const monteFirst = rust("monte_carlo", monteInput);
+const monteSecond = rust("monte_carlo", monteInput);
 assert.deepEqual(monteFirst.value, monteSecond.value);
 assert.equal(monteFirst.value.method, "correlated_moving_block_bootstrap");
 assert.equal(monteFirst.value.pathCount, 2_000);
@@ -549,8 +441,8 @@ for (const [method, expectedLabel] of Object.entries(monteMethods)) {
     lotSizes: Object.fromEntries(fixture.optimization.priceSeries.map((item, index) => [item.key, index % 2 === 0 ? 2 : 5])),
     calibrationOrigins: 2,
   };
-  const first = rust("monte-carlo-json", input);
-  const second = rust("monte-carlo-json", input);
+  const first = rust("monte_carlo", input);
+  const second = rust("monte_carlo", input);
   assert.deepEqual(first.value, second.value, `${method} must be seed deterministic`);
   const result = first.value;
   assert.equal(result.method, expectedLabel);
@@ -586,14 +478,13 @@ const reproducibilityPayload = { monte_carlo: {
   calibrationOrigins: 1,
 } };
 const reproducibilityInput = workerInput("monte_carlo", reproducibilityPayload);
-const reproducibilityFirst = WorkerOutputSchema.parse(rust("compute-json", reproducibilityInput, "monte_carlo").value);
-const reproducibilitySecond = WorkerOutputSchema.parse(rust("compute-json", reproducibilityInput, "monte_carlo").value);
+const reproducibilityFirst = WorkerOutputSchema.parse(rust("monte_carlo", reproducibilityInput).output);
+const reproducibilitySecond = WorkerOutputSchema.parse(rust("monte_carlo", reproducibilityInput).output);
 assert.deepEqual(reproducibilityFirst, reproducibilitySecond);
 const revisionChanged = WorkerOutputSchema.parse(rust(
-  "compute-json",
-  workerInput("monte_carlo", reproducibilityPayload, "synthetic-revision-b"),
   "monte_carlo",
-).value);
+  workerInput("monte_carlo", reproducibilityPayload, "synthetic-revision-b"),
+).output);
 assert.deepEqual(reproducibilityFirst.result, revisionChanged.result);
 assert.deepEqual(reproducibilityFirst.summary, revisionChanged.summary);
 assert.deepEqual(reproducibilityFirst.artifacts, revisionChanged.artifacts);
@@ -602,10 +493,9 @@ assert.notEqual(reproducibilityFirst.data_revision, revisionChanged.data_revisio
 const seedChangedPayload = clone(reproducibilityPayload);
 seedChangedPayload.monte_carlo.seed += 1;
 const seedChanged = WorkerOutputSchema.parse(rust(
-  "compute-json",
-  workerInput("monte_carlo", seedChangedPayload),
   "monte_carlo",
-).value);
+  workerInput("monte_carlo", seedChangedPayload),
+).output);
 assert.notDeepEqual(reproducibilityFirst.result, seedChanged.result);
 assert.notEqual(reproducibilityFirst.payload_hash, seedChanged.payload_hash);
 
@@ -639,14 +529,14 @@ const walkForwardPayload = {
     seeds: [101, 202],
   },
 };
-const rollingOutput = WorkerOutputSchema.parse(rust("compute-json", walkForwardPayload, "walk_forward").value);
-const rollingRepeated = WorkerOutputSchema.parse(rust("compute-json", walkForwardPayload, "walk_forward").value);
+const rollingOutput = WorkerOutputSchema.parse(rust("walk_forward", walkForwardPayload).output);
+const rollingRepeated = WorkerOutputSchema.parse(rust("walk_forward", walkForwardPayload).output);
 assert.deepEqual(rollingOutput, rollingRepeated);
 const rolling = rollingOutput.result as any;
 assertWalkForwardContract(rolling, "rolling");
 const anchoredPayload = clone(walkForwardPayload);
 anchoredPayload.walkForwardConfig.mode = "anchored";
-const anchoredOutput = WorkerOutputSchema.parse(rust("compute-json", anchoredPayload, "walk_forward").value);
+const anchoredOutput = WorkerOutputSchema.parse(rust("walk_forward", anchoredPayload).output);
 assertWalkForwardContract(anchoredOutput.result, "anchored");
 
 // Change only the first fold's first OOS price. Training selection must remain byte-for-byte
@@ -657,18 +547,24 @@ const selectedAsset = Object.entries(firstFold.weights)
   .sort((left: any, right: any) => right[1] - left[1])[0]![0];
 const selectedSeries = leakageProbePayload.optimization.priceSeries.find((item) => item.key === selectedAsset)!;
 selectedSeries.points[firstFold.testStartIndex + 1]!.value *= 1.35;
-const leakageProbe = WorkerOutputSchema.parse(rust("compute-json", leakageProbePayload, "walk_forward").value).result as any;
+const leakageProbe = WorkerOutputSchema.parse(rust("walk_forward", leakageProbePayload).output).result as any;
 assert.deepEqual(leakageProbe.folds[0].weights, firstFold.weights);
 assert.equal(leakageProbe.folds[0].selectedSeed, firstFold.selectedSeed);
 assert.deepEqual(leakageProbe.folds[0].selected, firstFold.selected);
-assert.notEqual(leakageProbe.folds[0].oos.return, firstFold.oos.return);
+assert.notEqual(leakageProbe.folds[0].oos.totalReturn, firstFold.oos.totalReturn);
 
 process.stdout.write(`${JSON.stringify({
   schemaVersion: "rust-worker-verification-v2",
   generatedAt: new Date().toISOString(),
-  legacyParity: {
-    backtest: { ...backtestDifference, nodeMs: nodeBacktestMs, rustProcessMs: rustBacktest.processMs },
-    optimization: { ...optimizationDifference, nodeMs: nodeOptimizationMs, rustProcessMs: rustOptimization.processMs },
+  deterministicCompute: {
+    backtest: {
+      digest: sha256(rustBacktest.value),
+      processMs: rustBacktest.processMs,
+    },
+    optimization: {
+      digest: sha256(rustOptimization.value),
+      processMs: rustOptimization.processMs,
+    },
   },
   featureInvariants: {
     initialBalanceAfterCost: feature.points[0].balance,

@@ -1,10 +1,9 @@
 import { z } from "zod";
 
-export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v1" as const;
+export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v2" as const;
 export const SCALPING_AI_HORIZONS = [5, 15, 30, 60] as const;
 export const SCALPING_AI_REALTIME_HORIZONS = [5, 15] as const;
 export const SCALPING_AI_QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95] as const;
-export const KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base" as const;
 export const FINCAST_MODEL_ID = "Vincent05R/FinCast" as const;
 export const CHRONOS_2_MODEL_ID = "amazon/chronos-2" as const;
 
@@ -457,28 +456,6 @@ export const AiModelProvenanceSchema = z.object({
       message: "peak VRAM value and measurement basis must be recorded together",
     });
   }
-  if (model.model_id === KRONOS_BASE_MODEL_ID) {
-    const invalidKronosPrecision = model.dtype !== "float32"
-      || (model.precision_validation !== undefined
-        && model.precision_validation !== (model.loaded ? "not_required" : "unavailable"))
-      || (model.memory_status !== undefined
-        && model.memory_status !== (model.loaded ? "ok" : "unavailable"))
-      || (model.quantile_monotonicity_policy !== undefined
-        && model.quantile_monotonicity_policy !== (model.loaded ? "native" : "unavailable"))
-      || (model.fp32_quantile_observations !== undefined
-        && model.fp32_quantile_observations !== null)
-      || (model.mixed_quantile_observations !== undefined
-        && model.mixed_quantile_observations !== null)
-      || (model.quantile_tail_policy !== undefined
-        && model.quantile_tail_policy !== (model.loaded ? "native" : "unavailable"))
-      || (model.precision_failure_reasons?.length ?? 0) > 0;
-    if (invalidKronosPrecision) {
-      context.addIssue({
-        code: "custom",
-        message: "Kronos-family models require native float32 provenance",
-      });
-    }
-  }
   if (model.model_id === CHRONOS_2_MODEL_ID) {
     const invalidChronos2Precision = model.dtype !== "float32"
       || (model.precision_validation !== undefined
@@ -791,9 +768,8 @@ const ModelRunInputOriginSchema = z.object({
 });
 
 const ModelRunSchema = z.object({
-  role: z.enum(["kronos_base", "fincast", "chronos_2"]),
+  role: z.enum(["fincast", "chronos_2"]),
   expected_model_id: z.enum([
-    KRONOS_BASE_MODEL_ID,
     FINCAST_MODEL_ID,
     CHRONOS_2_MODEL_ID,
   ]),
@@ -808,9 +784,7 @@ const ModelRunSchema = z.object({
   input_end_aligned: z.literal(true),
   raw_series: z.array(SeriesForecastResultSchema).min(1).max(10_000),
 }).strict().superRefine((run, context) => {
-  const expectedModelId = run.role === "kronos_base"
-    ? KRONOS_BASE_MODEL_ID
-    : run.role === "chronos_2"
+  const expectedModelId = run.role === "chronos_2"
       ? CHRONOS_2_MODEL_ID
       : FINCAST_MODEL_ID;
   if (run.expected_model_id !== expectedModelId || run.model.model_id !== expectedModelId) {
@@ -1034,14 +1008,13 @@ export const AiResponseSchema = z.object({
   error: UnavailableSchema.nullable().optional(),
 }).strict().superRefine((response, context) => {
   if (
-    response.model.model_id !== KRONOS_BASE_MODEL_ID
-    && response.model.model_id !== FINCAST_MODEL_ID
+    response.model.model_id !== FINCAST_MODEL_ID
     && response.model.model_id !== CHRONOS_2_MODEL_ID
   ) {
     context.addIssue({
       code: "custom",
       path: ["model", "model_id"],
-      message: "AI backend must use a supported pinned Kronos-base, Chronos-2, or FinCast model",
+      message: "AI backend must use a supported pinned Chronos-2 or FinCast model",
     });
   }
   if ((response.model.fallback_from ?? null) !== null || (response.model.fallback_reason ?? null) !== null) {
@@ -1096,9 +1069,7 @@ export const AiResponseSchema = z.object({
       return;
     }
     const independentRun = response.model_runs[0]!;
-    const expectedModelId = independentRun.role === "kronos_base"
-      ? KRONOS_BASE_MODEL_ID
-      : independentRun.role === "chronos_2"
+    const expectedModelId = independentRun.role === "chronos_2"
         ? CHRONOS_2_MODEL_ID
         : FINCAST_MODEL_ID;
     if (response.model.model_id !== expectedModelId) {

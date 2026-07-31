@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://toss-portfolio-lens.local/contracts/worker/input-v1.schema.json",
+  "$id": "https://toss-portfolio-lens.local/contracts/worker/input-v2.schema.json",
   "title": "Toss Portfolio Lens compute worker input",
   "$defs": {
     "job_kind": {
@@ -33,7 +33,7 @@
     "payload"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "const": "2.0" },
     "engine_version": { "type": "string", "minLength": 1, "maxLength": 64 },
     "run_id": { "type": "string", "minLength": 1, "maxLength": 64 },
     "job_kind": { "$ref": "#/$defs/job_kind" },

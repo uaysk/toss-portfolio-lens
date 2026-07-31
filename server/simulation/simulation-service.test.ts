@@ -44,7 +44,7 @@ function fincastQuantileObservations() {
 
 function model(
   loaded = true,
-  lane: "kronos_base" | "fincast" = "kronos_base",
+  lane: "chronos2" | "fincast" = "chronos2",
 ) {
   if (lane === "fincast") {
     return {
@@ -73,12 +73,12 @@ function model(
     };
   }
   return {
-    model_id: "NeoQuasar/Kronos-base",
+    model_id: "amazon/chronos-2",
     model_revision: "revision-a",
-    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_id: "amazon/chronos-2",
     tokenizer_revision: "tokenizer-revision-a",
-    source_revision: "kronos-source-revision-a",
-    loader_version: "kronos-source-revision-a",
+    source_revision: "chronos2-source-revision-a",
+    loader_version: "chronos2-source-revision-a",
     license: "MIT",
     device: loaded ? "cuda" : "unavailable",
     dtype: "float32",
@@ -117,11 +117,11 @@ function forecastSeries(
 
 function forecast(
   loaded = true,
-  lane: "kronos_base" | "fincast" = "kronos_base",
+  lane: "chronos2" | "fincast" = "chronos2",
 ) {
   return {
     forecast: {
-      schema_version: "scalping-ai/v1",
+      schema_version: "scalping-ai/v2",
       request_id: "simulation-forecast",
       mode: "forecast",
       status: loaded ? "available" : "unavailable",
@@ -156,10 +156,9 @@ function staleForecast() {
 
 function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
   return {
-    contractVersion: "ai-paper-simulation/v8",
-    sourceContractVersion: "ai-paper-simulation/v7",
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase: "us_etf_pair",
     market: { kind: "stock", country: "KR" },
-    marketCountry: "KR",
     initialCash: 100_000,
     durationMinutes: 60,
     selection: {
@@ -167,6 +166,7 @@ function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
       criterion: "trading_amount",
       symbolCount,
     },
+    strategy: { mode: "single" },
     preset: "risk_management",
     riskTolerance: 50,
     costs: {
@@ -175,10 +175,10 @@ function request(symbolCount: 1 | 2 = 1): SimulationStartRequest {
       spreadBpsRoundTrip: 20,
       slippageBpsPerSide: 10,
     },
-    modelLanes: ["kronos_base"],
-    modelPlan: [{
+    modelLanes: ["chronos2"],
+    resolvedModelPlan: [{
       symbol: "*",
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
       role: "primary",
       required: true,
       preferredHorizonsMinutes: [15, 30, 60],
@@ -362,17 +362,21 @@ async function eventually<T>(
   predicate: (value: T) => boolean,
   message: string,
 ): Promise<T> {
+  let latest: T | undefined;
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const value = await read();
+    latest = value;
     if (predicate(value)) return value;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
-  throw new Error(`Timed out waiting for ${message}`);
+  throw new Error(
+    `Timed out waiting for ${message}; latest=${JSON.stringify(latest)}`,
+  );
 }
 
 function harness(options: {
   aiAvailable?: boolean;
-  modelLane?: "kronos_base" | "fincast";
+  modelLane?: "chronos2" | "fincast";
   artifactFailureAfter?: number;
   artifactGate?: Promise<void>;
   createGate?: Promise<void>;
@@ -657,7 +661,8 @@ describe("AI trading simulation service", () => {
       pairStrategy: {
         pairs: Array<{
           pairId: string;
-          signalSymbol: string;
+          displaySignalSymbol: string;
+          modelTargetSymbol: string;
           bull: { executionSymbol: string; leverageMultiplier: number };
           bear: { executionSymbol: string; leverageMultiplier: number };
         }>;
@@ -678,14 +683,15 @@ describe("AI trading simulation service", () => {
       orderApiDependency: false,
       mcp: false,
       autonomousPaperTrading: true,
-      stockModelLanes: "kronos_base,fincast,chronos2",
-      stockModelLaneConcurrency: "role_routed_for_v8_etf",
+      stockModelLanes: "fincast,chronos2",
+      stockModelLaneConcurrency: "server_resolved_for_v9",
     });
     expect(status.limitations.join(" ")).toContain("실제 주문 API를 호출하지 않는");
     expect(status.pairStrategy.pairs).toEqual(expect.arrayContaining([
       expect.objectContaining({
         pairId: "sndk-snxx-sndq",
-        signalSymbol: "SNDK",
+        displaySignalSymbol: "SNDK",
+        modelTargetSymbol: "SNDK",
         bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
         bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
       }),
@@ -716,7 +722,7 @@ describe("AI trading simulation service", () => {
     expect(setup.removeListener).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps v2 additive with initial/terminal legacy artifacts and O(delta) patches", async () => {
+  it("keeps v2 additive with initial/terminal query projections and O(delta) patches", async () => {
     let persistedState: unknown;
     const appendPatch = vi.fn(async (input: {
       type: string;
@@ -785,7 +791,7 @@ describe("AI trading simulation service", () => {
     await eventually(
       () => setup.artifacts.length,
       (length) => length === 7,
-      "initial compatibility artifacts",
+      "initial query projection artifacts",
     );
     const expectedTypes = [
       "simulation-selection",
@@ -845,7 +851,7 @@ describe("AI trading simulation service", () => {
       report: {
         evidence: {
           selection: expect.objectContaining({
-            schemaVersion: "ai-paper-simulation/v8",
+            schemaVersion: "ai-paper-simulation/v9",
           }),
           artifacts: expect.arrayContaining(
             expectedTypes.map((type) => expect.objectContaining({ type })),
@@ -858,12 +864,12 @@ describe("AI trading simulation service", () => {
     await setup.service.close("test_complete");
   });
 
-  it("runs one FinCast stock lane with the same causal Rust cutoff and no Kronos fallback", async () => {
+  it("runs one FinCast stock lane with the same causal Rust cutoff and no Chronos2 fallback", async () => {
     const setup = harness({ modelLane: "fincast" });
     const input: SimulationStartRequest = {
       ...request(1),
       modelLanes: ["fincast"],
-      modelPlan: [{
+      resolvedModelPlan: [{
         symbol: "*",
         modelLane: "fincast",
         role: "primary",
@@ -933,104 +939,31 @@ describe("AI trading simulation service", () => {
     await setup.service.close("test_complete");
   });
 
-  it("normalizes a legacy stock request across v7 storage, live reads, history, reports, and artifacts", async () => {
-    const setup = harness();
-    const legacyInput = Object.fromEntries(
-      Object.entries(request(1)).filter(([key]) => ![
-        "contractVersion",
-        "sourceContractVersion",
-        "modelPlan",
-        "market",
-      ].includes(key)),
-    );
-    const parsed = createSimulationStartRequestSchema({
-      maxDurationMinutes: 390,
-    }).parse(legacyInput);
-    expect(parsed).toMatchObject({
-      contractVersion: "ai-paper-simulation/v8",
-      sourceContractVersion: "ai-paper-simulation/v7",
-      market: { kind: "stock", country: "KR" },
-      marketCountry: "KR",
-    });
-
-    const started = await setup.service.start(parsed, "owner");
-    expect(started).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      snapshot: {
-        schemaVersion: "ai-paper-simulation/v8",
-        market: { kind: "stock", country: "KR" },
-        marketCountry: "KR",
+  it("rejects legacy or incomplete stock contracts before starting a run", () => {
+    const schema = createSimulationStartRequestSchema({ maxDurationMinutes: 390 });
+    const canonical = {
+      contractVersion: "ai-paper-simulation/v9",
+      simulationCase: "us_etf_pair",
+      market: { kind: "stock", country: "US" },
+      initialCash: 100_000,
+      durationMinutes: 60,
+      selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
+      strategy: {
+        mode: "pair",
+        pairId: "qqq-tqqq-sqqq",
+        allowDegradedMode: false,
       },
-    });
-    expect(setup.runService.create).toHaveBeenCalledWith(expect.objectContaining({
-      config: expect.objectContaining({
-        schema_version: "ai-paper-simulation/v8",
-        market: { kind: "stock", country: "KR" },
-        market_country: "KR",
-      }),
-    }));
-
-    await waitForPhase(setup, started.runId, "running");
-    expect(await setup.service.get(started.runId, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      run: {
-        schemaVersion: "ai-paper-simulation/v8",
-        market: { kind: "stock", country: "KR" },
-      },
-      snapshot: { market: { kind: "stock", country: "KR" } },
-    });
-    expect(await setup.service.current("owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      snapshot: { market: { kind: "stock", country: "KR" } },
-    });
-
-    await setup.service.cancel(started.runId, "owner");
-    expect(setup.run()?.summary).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      market_country: "KR",
-      snapshot: { market: { kind: "stock", country: "KR" } },
-    });
-    expect(setup.latestArtifact("simulation-selection")?.content).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-    });
-    expect(setup.latestArtifact("simulation-diagnostics")?.content).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      snapshot: { market: { kind: "stock", country: "KR" } },
-    });
-
-    expect(await setup.service.list({}, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      items: [{
-        schemaVersion: "ai-paper-simulation/v8",
-        market: { kind: "stock", country: "KR" },
-        marketCountry: "KR",
-      }],
-    });
-    expect(await setup.service.report(started.runId, "owner")).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
-      market: { kind: "stock", country: "KR" },
-      run: { market: { kind: "stock", country: "KR" } },
-      report: {
-        configuration: {
-          market: { kind: "stock", country: "KR" },
-          marketCountry: "KR",
-        },
-        evidence: {
-          selection: { market: { kind: "stock", country: "KR" } },
-        },
-      },
-      snapshot: { market: { kind: "stock", country: "KR" } },
-    });
-    await setup.service.close("test_complete");
+      execution: { mode: "paper" },
+    };
+    expect(() => schema.parse({ ...canonical, contractVersion: "ai-paper-simulation/v8" }))
+      .toThrow();
+    const { contractVersion: _contractVersion, ...missingVersion } = canonical;
+    expect(() => schema.parse(missingVersion)).toThrow();
+    expect(() => schema.parse({ ...canonical, marketCountry: "US" })).toThrow();
+    expect(() => schema.parse({ ...canonical, modelLanes: ["chronos2"] })).toThrow();
   });
 
-  it("persists the normalized stock market at the v8 result root on completion", async () => {
+  it("persists the normalized stock market at the v9 result root on completion", async () => {
     let now = Date.parse(CREATED_AT);
     const artifactGate = deferred();
     const setup = harness({ artifactGate: artifactGate.promise, now: () => now });
@@ -1045,7 +978,7 @@ describe("AI trading simulation service", () => {
       "v8 stock result completion",
     );
     expect(setup.run()?.result).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
+      schemaVersion: "ai-paper-simulation/v9",
       market: { kind: "stock", country: "KR" },
       snapshot: { market: { kind: "stock", country: "KR" } },
     });
@@ -1246,7 +1179,7 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, {
       signal: expect.any(AbortSignal),
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
       maximumInputEndAt: "2026-07-24T00:04:00.000Z",
     });
 
@@ -1551,7 +1484,7 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, {
       signal: expect.any(AbortSignal),
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
     });
     expect(running.snapshot.selected.map(({ symbol }) => symbol)).toEqual(selected);
     expect(running.snapshot.charts.map(({ symbol }) => symbol)).toEqual(selected);
@@ -1612,7 +1545,7 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, {
       signal: expect.any(AbortSignal),
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
     });
     expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
       symbols: ["AAA", "CCC"],
@@ -1645,7 +1578,10 @@ describe("AI trading simulation service", () => {
         : fullWorkspace(input.symbols ?? [], candidates),
     ) as never);
 
-    const started = await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
+    const started = await setup.service.start({
+      ...request(1),
+      market: { kind: "stock", country: "US" },
+    }, "owner");
     const running = await waitForPhase(setup, started.runId, "running") as unknown as {
       snapshot: { selected: Array<{ symbol: string }> };
     };
@@ -1665,7 +1601,7 @@ describe("AI trading simulation service", () => {
       interval: "1m",
     }, {
       signal: expect.any(AbortSignal),
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
     });
     expect(setup.market.workspace).toHaveBeenNthCalledWith(2, expect.objectContaining({
       marketCountry: "US",
@@ -1742,7 +1678,10 @@ describe("AI trading simulation service", () => {
       },
     } as never);
 
-    await setup.service.start({ ...request(1), marketCountry: "US" }, "owner");
+    await setup.service.start({
+      ...request(1),
+      market: { kind: "stock", country: "US" },
+    }, "owner");
     await eventually(
       setup.run,
       (run) => run?.status === "failed",

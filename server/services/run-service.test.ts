@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { RunRepository } from "../repositories/run-repository.js";
 import { ArtifactService } from "./artifact-service.js";
@@ -17,14 +17,14 @@ function deferred<T = void>() {
 }
 
 describe("RunService persistence and cancellation", () => {
-  const databases: SqliteDatabase[] = [];
+  const databases: PGliteDatabase[] = [];
 
   afterEach(async () => {
     await Promise.all(databases.splice(0).map((database) => database.close()));
   });
 
   async function setup(maxConcurrentRuns = 1) {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     databases.push(database);
     const runs = new RunRepository(database);
     const artifacts = new ArtifactRepository(database);

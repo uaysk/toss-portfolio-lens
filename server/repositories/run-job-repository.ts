@@ -144,14 +144,7 @@ function json(value: unknown): string {
 export class RunJobRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
-  private assertPostgres(): void {
-    if (this.database.dialect !== "postgres") {
-      throw new Error("외부 Rust compute queue는 PostgreSQL에서만 사용할 수 있습니다.");
-    }
-  }
-
   async initialize(): Promise<void> {
-    this.assertPostgres();
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_worker_artifacts (
         artifact_id TEXT PRIMARY KEY,
@@ -221,10 +214,19 @@ export class RunJobRepository {
       ON portfolio_run_jobs(deadline_at)
       WHERE state IN ('queued', 'running')
     `);
+    const [legacy] = await this.database.query<{ active_count: number | string }>(`
+      SELECT COUNT(*) AS active_count
+      FROM portfolio_run_jobs
+      WHERE state IN ('queued', 'running') AND payload_schema_version <> ?
+    `, [WORKER_PAYLOAD_SCHEMA_VERSION]);
+    if (Number(legacy?.active_count ?? 0) > 0) {
+      throw new Error(
+        `worker payload ${WORKER_PAYLOAD_SCHEMA_VERSION} 전환 전에 구 schema queued/running job을 모두 종료해야 합니다.`,
+      );
+    }
   }
 
   async putInput(input: WorkerInput, now = Date.now()): Promise<WorkerArtifactRecord> {
-    this.assertPostgres();
     const parsed = WorkerInputSchema.parse(input);
     const [run] = await this.database.query<{
       run_kind: PortfolioRunKind;
@@ -270,7 +272,6 @@ export class RunJobRepository {
     deadlineAt?: number;
     now?: number;
   }): Promise<RunJobRecord> {
-    this.assertPostgres();
     const now = input.now ?? Date.now();
     const priority = Math.max(-100, Math.min(100, Math.trunc(input.priority ?? 0)));
     const maxAttempts = Math.max(1, Math.min(10, Math.trunc(input.maxAttempts ?? 3)));
@@ -327,7 +328,6 @@ export class RunJobRepository {
   }
 
   async get(runId: string): Promise<RunJobRecord | undefined> {
-    this.assertPostgres();
     const [row] = await this.database.query<JobRow>("SELECT * FROM portfolio_run_jobs WHERE run_id = ?", [runId]);
     return row ? jobRecord(row) : undefined;
   }
@@ -342,7 +342,6 @@ export class RunJobRepository {
     deadlineAt: number;
     now?: number;
   }): Promise<boolean> {
-    this.assertPostgres();
     const now = input.now ?? Date.now();
     const deadlineAt = Math.trunc(input.deadlineAt);
     if (deadlineAt <= now) throw new Error("external compute job retry deadline은 현재 시각보다 늦어야 합니다.");
@@ -354,6 +353,7 @@ export class RunJobRepository {
         FROM portfolio_run_jobs job
         JOIN portfolio_backtest_runs run ON run.run_id = job.run_id
         WHERE job.run_id = ?
+          AND run.archived_at IS NULL
         FOR UPDATE OF job, run
       `, [input.runId]);
       if (!row || row.owner_subject !== input.ownerSubject) return false;
@@ -374,6 +374,7 @@ export class RunJobRepository {
             summary_json = NULL, result_json = NULL, error_json = NULL, warnings_json = '[]',
             started_at = NULL, finished_at = NULL, updated_at = ?
         WHERE run_id = ? AND owner_subject = ? AND status = ?
+          AND archived_at IS NULL
       `, [input.totalCandidates, now, input.runId, input.ownerSubject, row.run_status]);
       if (jobUpdate.affectedRows !== 1 || runUpdate.affectedRows !== 1) throw new Error("external job 재시도 상태 전이가 충돌했습니다.");
       await this.addEvent(database, input.runId, "external_retry_requested", {
@@ -387,7 +388,6 @@ export class RunJobRepository {
   }
 
   async claim(workerId: string, leaseMs: number, now = Date.now()): Promise<RunJobRecord | undefined> {
-    this.assertPostgres();
     if (!workerId.trim()) throw new Error("worker id가 필요합니다.");
     const safeLeaseMs = Math.max(1_000, Math.min(600_000, Math.trunc(leaseMs)));
     return this.database.transaction(async (database) => {
@@ -432,7 +432,6 @@ export class RunJobRepository {
     renewed: boolean;
     cancellationRequested: boolean;
   }> {
-    this.assertPostgres();
     const safeLeaseMs = Math.max(1_000, Math.min(600_000, Math.trunc(leaseMs)));
     const result = await this.database.run(`
       UPDATE portfolio_run_jobs
@@ -457,7 +456,6 @@ export class RunJobRepository {
     currentValidationWindow?: string;
     now?: number;
   }): Promise<boolean> {
-    this.assertPostgres();
     const now = input.now ?? Date.now();
     const result = await this.database.run(`
       UPDATE portfolio_backtest_runs run
@@ -490,7 +488,6 @@ export class RunJobRepository {
     dataRevision: string;
     now?: number;
   }): Promise<"completed" | "cancelled" | "lost"> {
-    this.assertPostgres();
     const now = input.now ?? Date.now();
     const output = WorkerOutputSchema.parse(input.output);
     if (output.run_id !== input.runId || output.status !== "completed") {
@@ -552,7 +549,6 @@ export class RunJobRepository {
     retryDelayMs?: number;
     now?: number;
   }): Promise<"requeued" | "failed" | "cancelled" | "lost"> {
-    this.assertPostgres();
     const now = input.now ?? Date.now();
     return this.database.transaction(async (database) => {
       const [row] = await database.query<JobRow & { run_status: string }>(`
@@ -590,7 +586,6 @@ export class RunJobRepository {
   }
 
   async cancel(runId: string, ownerSubject: string, now = Date.now()): Promise<"cancelled" | "requested" | false> {
-    this.assertPostgres();
     return this.database.transaction(async (database) => {
       const [row] = await database.query<JobRow & { run_status: string }>(`
         SELECT job.*, run.status AS run_status
@@ -616,7 +611,6 @@ export class RunJobRepository {
   }
 
   async expireDeadline(runId: string, now = Date.now()): Promise<"failed" | "cancelled" | "lost"> {
-    this.assertPostgres();
     return this.database.transaction(async (database) => {
       const [row] = await database.query<JobRow & { run_status: string }>(`
         SELECT job.*, run.status AS run_status
@@ -644,7 +638,6 @@ export class RunJobRepository {
     failed: number;
     cancelled: number;
   }> {
-    this.assertPostgres();
     const safeLimit = Math.max(1, Math.min(1_000, Math.trunc(limit)));
     return this.database.transaction(async (database) => {
       const result = { requeued: 0, failed: 0, cancelled: 0 };
@@ -757,7 +750,6 @@ export class RunJobRepository {
   }
 
   private async getArtifactForRun(runId: string, role: WorkerArtifactRole): Promise<WorkerArtifactRecord | undefined> {
-    this.assertPostgres();
     const [row] = await this.database.query<ArtifactRow>(`
       SELECT * FROM portfolio_worker_artifacts WHERE run_id = ? AND artifact_role = ?
     `, [runId, role]);

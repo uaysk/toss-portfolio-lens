@@ -639,13 +639,6 @@ export class TechnicalAnalysisService {
     cacheNonce?: string;
   }): Promise<ReturnType<typeof envelope>> {
     const normalized = normalizeTechnicalAnalysisRequest(input.request);
-    if (this.runs.executionMode === "inline") {
-      throw new ServiceError({
-        code: "RUST_COMPUTE_REQUIRED",
-        message: "기술적 분석은 Rust compute 실행 모드에서만 사용할 수 있습니다.",
-        retryable: false,
-      });
-    }
     if (this.runs.executionMode === "rust_socket" && !this.rustCompute) {
       throw new ServiceError({
         code: "RUST_COMPUTE_UNAVAILABLE",

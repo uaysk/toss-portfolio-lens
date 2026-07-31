@@ -34,7 +34,7 @@ function terminalQuantiles(monteCarlo: unknown): Array<{ quantile: number; balan
 function stitchedOos(foldsValue: unknown): Array<{ fold: number; date: string; equity: number }> {
   let equity = 1;
   return array(foldsValue).flatMap((fold, index) => {
-    const portfolioReturn = metric(fold, "oos", "return");
+    const portfolioReturn = metric(fold, "oos", "totalReturn");
     if (portfolioReturn === null || portfolioReturn <= -1) return [];
     equity *= 1 + portfolioReturn;
     const row = record(fold);

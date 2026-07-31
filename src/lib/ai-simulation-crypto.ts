@@ -1,8 +1,7 @@
-export const AI_SIMULATION_MODEL_LANES = ["kronos_base", "fincast", "chronos2"] as const;
+export const AI_SIMULATION_MODEL_LANES = ["fincast", "chronos2"] as const;
 export const AI_SIMULATION_MAIN_MODEL_LANE = "fincast" as const;
-export const AI_SIMULATION_LEGACY_MODEL_LANE = "kronos_base" as const;
 export const AI_SIMULATION_FINCAST_CANDLE_SECONDS = [60, 30, 15] as const;
-export const AI_SIMULATION_EXECUTION_MODES = ["paper", "testnet", "live"] as const;
+export const AI_SIMULATION_EXECUTION_MODES = ["paper"] as const;
 export const AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH = 100;
 export const AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH = 100_000_000;
 
@@ -71,8 +70,8 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS: Readonly<
 });
 
 export type AiSimulationCryptoRequest = {
-  contractVersion?: "ai-paper-simulation/v8";
-  simulationCase?: Extract<AiSimulationCase, "btc_eth" | "high_vol_crypto">;
+  contractVersion: "ai-paper-simulation/v9";
+  simulationCase: Extract<AiSimulationCase, "btc_eth" | "high_vol_crypto">;
   market: Extract<AiSimulationMarket, { kind: "crypto_futures" }>;
   initialCash: number;
   durationMinutes: number;
@@ -97,16 +96,13 @@ export type AiSimulationCryptoRequest = {
   };
   riskLimits: AiSimulationCryptoRiskLimits;
   scanner?: AiSimulationHighVolatilityScannerSettings;
-  modelLanes:
-    | [AiSimulationModelLane]
-    | [AiSimulationModelLane, AiSimulationModelLane]
-    | [AiSimulationModelLane, AiSimulationModelLane, AiSimulationModelLane];
-  modelPlan?: AiSimulationModelPlanEntry[];
   fincastCandleSeconds: AiSimulationFinCastCandleSeconds;
   execution: { mode: "paper" };
 };
 
 export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
+  contractVersion: "ai-paper-simulation/v9",
+  simulationCase: "high_vol_crypto",
   market: { ...AI_SIMULATION_CRYPTO_FUTURES_MARKET },
   initialCash: 10_000,
   durationMinutes: 120,
@@ -125,7 +121,17 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
     slippageBpsPerSide: 1,
   },
   riskLimits: { ...DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS },
-  modelLanes: [AI_SIMULATION_MAIN_MODEL_LANE],
+  scanner: {
+    symbolCount: 1,
+    minimumListingDays: 90,
+    minimumTradingAmountUsd: 25_000_000,
+    maximumSpreadBps: 12,
+    depthRangeBps: 10,
+    minimumDepthUsd: 250_000,
+    maximumMissingRate: 0.02,
+    rescanIntervalMinutes: 30,
+    riskAppetite: "balanced",
+  },
   fincastCandleSeconds: 60,
   execution: { mode: "paper" },
 };
@@ -341,9 +347,9 @@ function criterion(value: unknown): AiSimulationCriterion | undefined {
 
 function modelLane(value: unknown): AiSimulationModelLane | undefined {
   const candidate = text(value)?.toLowerCase().replaceAll("-", "_");
-  if (candidate === "kronos" || candidate === "kronosbase") return "kronos_base";
-  return AI_SIMULATION_MODEL_LANES.includes(candidate as AiSimulationModelLane)
-    ? candidate as AiSimulationModelLane
+  const canonical = candidate === "chronos_2" ? "chronos2" : candidate;
+  return AI_SIMULATION_MODEL_LANES.includes(canonical as AiSimulationModelLane)
+    ? canonical as AiSimulationModelLane
     : undefined;
 }
 
@@ -368,7 +374,6 @@ function numberRecord(value: unknown): Record<string, number> {
 
 export function normalizeAiSimulationMarket(
   value: unknown,
-  legacyMarketCountry?: unknown,
 ): AiSimulationMarket | undefined {
   const market = record(value);
   const kind = text(market.kind)?.toLowerCase();
@@ -383,9 +388,8 @@ export function normalizeAiSimulationMarket(
     }
     return undefined;
   }
-  const country = text(first(market, "country", "marketCountry", "market_country"))
-    ?? text(legacyMarketCountry);
-  if (kind === "stock" || !kind) {
+  const country = text(market.country);
+  if (kind === "stock") {
     return country === "KR" || country === "US" ? { kind: "stock", country } : undefined;
   }
   return undefined;
@@ -520,70 +524,68 @@ export function normalizeAiSimulationCandidates(
 function normalizeWorker(value: unknown, fallbackLane?: AiSimulationModelLane): AiSimulationWorkerStatus | undefined {
   if (value === undefined || value === null) return undefined;
   const worker = record(value);
-  const lane = modelLane(first(worker, "lane", "id", "role", "modelLane", "model_lane")) ?? fallbackLane;
+  const lane = fallbackLane;
   if (!lane) return undefined;
-  const status = text(first(worker, "status", "state", "health")) ?? "unavailable";
-  const modelId = text(first(worker, "modelId", "model_id", "model"));
-  const modelRevision = text(first(worker, "modelRevision", "model_revision", "revision"));
-  const device = text(first(worker, "device", "deviceName", "device_name"));
-  const latencyMs = number(first(worker, "latencyMs", "latency_ms"));
-  const peakVramMb = number(first(worker, "peakVramMb", "peak_vram_mb", "vramMb", "vram_mb"));
-  const reason = text(first(worker, "reason", "message", "error"));
+  const status = text(worker.status);
+  const workerPrecision = text(worker.precision);
+  const canonicalStatus = (
+    ["healthy", "degraded", "unavailable", "memory_pressure"] as const
+  ).find((candidate) => candidate === status);
+  const canonicalPrecision = (
+    ["fp16", "fp32", "unknown"] as const
+  ).find((candidate) => candidate === workerPrecision);
+  const canonicalKeys = new Set(["status", "precision"]);
+  if (!canonicalStatus
+    || !canonicalPrecision
+    || Object.keys(worker).some((key) => !canonicalKeys.has(key))) {
+    return {
+      lane,
+      status: "unavailable",
+      available: false,
+      precision: "unknown",
+      reason: "unsupported_worker_telemetry_contract",
+    };
+  }
   return {
     lane,
-    status,
-    available: bool(first(worker, "available", "ready", "healthy"))
-      ?? ["available", "ready", "healthy", "running", "connected"].includes(status.toLowerCase()),
-    precision: precision(first(worker, "precision", "dtype")),
-    ...(modelId === undefined ? {} : { modelId }),
-    ...(modelRevision === undefined ? {} : { modelRevision }),
-    ...(device === undefined ? {} : { device }),
-    ...(latencyMs === undefined ? {} : { latencyMs }),
-    ...(peakVramMb === undefined ? {} : { peakVramMb }),
-    ...(reason === undefined ? {} : { reason }),
+    status: canonicalStatus,
+    available: canonicalStatus === "healthy",
+    precision: canonicalPrecision,
   };
 }
 
 export function normalizeAiSimulationCryptoStatus(payload: unknown): AiSimulationCryptoStatus {
   const root = record(payload);
-  const crypto = record(first(root, "cryptoFutures", "crypto_futures", "binance", "crypto"));
-  const source = Object.keys(crypto).length ? { ...root, ...crypto } : root;
-  const credentials = record(first(source, "credentials", "credentialStatus", "credential_status"));
-  const gates = record(first(source, "executionGates", "execution_gates", "gates"));
-  const workersSource = record(first(source, "workers", "modelWorkers", "model_workers"));
+  const crypto = record(root.cryptoFutures);
+  const source = Object.keys(crypto).length ? crypto : root;
+  if (source.schemaVersion !== "ai-paper-simulation/v9") {
+    return {
+      credentialsConfigured: false,
+      signedReadSucceeded: false,
+      executionGates: { paper: false, testnet: false, live: false },
+      workers: {},
+    };
+  }
+  const credentials = record(source.credentials);
+  const gates = record(source.executionGates);
+  const workersSource = record(source.workers);
   const workers: AiSimulationCryptoStatus["workers"] = {};
   for (const lane of AI_SIMULATION_MODEL_LANES) {
-    const worker = normalizeWorker(first(
-      workersSource,
-      lane,
-      lane.replaceAll("_", "-"),
-      lane === "kronos_base" ? "kronos" : lane,
-    ), lane);
+    const worker = normalizeWorker(workersSource[lane], lane);
     if (worker) workers[lane] = worker;
   }
+  const credentialsConfigured = bool(credentials.configured) ?? false;
+  const signedReadSucceeded = bool(credentials.signedReadSucceeded) ?? false;
+  const canonicalPaperGate = bool(gates.paper) ?? false;
+  const canonicalTestnetGate = gates.testnet === false;
+  const canonicalLiveGate = gates.live === false;
   return {
-    credentialsConfigured: bool(first(
-      credentials,
-      "configured",
-      "credentialsConfigured",
-      "credentials_configured",
-    )) ?? bool(first(source, "credentialsConfigured", "credentials_configured", "binanceCredentialsConfigured")) ?? false,
-    signedReadSucceeded: bool(first(
-      credentials,
-      "signedReadSucceeded",
-      "signed_read_succeeded",
-      "signedRead",
-    )) ?? bool(first(source, "signedReadSucceeded", "signed_read_succeeded")) ?? false,
+    credentialsConfigured,
+    signedReadSucceeded,
     executionGates: {
-      paper: bool(first(gates, "paper", "paperEnabled", "paper_enabled"))
-        ?? bool(first(source, "paperEnabled", "paper_enabled"))
-        ?? true,
-      testnet: bool(first(gates, "testnet", "testnetEnabled", "testnet_enabled"))
-        ?? bool(first(source, "testnetEnabled", "testnet_enabled"))
-        ?? false,
-      live: bool(first(gates, "live", "liveEnabled", "live_enabled", "realOrder"))
-        ?? bool(first(source, "liveEnabled", "live_enabled", "realOrder"))
-        ?? false,
+      paper: canonicalTestnetGate && canonicalLiveGate ? canonicalPaperGate : false,
+      testnet: false,
+      live: false,
     },
     workers,
   };
@@ -842,21 +844,13 @@ export function validateAiSimulationCryptoRequest(
       issues.push(`테스트 기간은 ${limits.maximumDurationMinutes}분 이하여야 합니다.`);
     }
   }
-  if (!AI_SIMULATION_MODEL_LANES.includes(request.modelLanes[0])
-    || request.modelLanes.length > 3
-    || new Set(request.modelLanes).size !== request.modelLanes.length) {
-    issues.push("모델 lane을 하나 이상 중복 없이 선택해 주세요.");
+  if (request.contractVersion !== "ai-paper-simulation/v9") {
+    issues.push("ai-paper-simulation/v9 계약만 지원합니다.");
   }
   if (!AI_SIMULATION_FINCAST_CANDLE_SECONDS.includes(request.fincastCandleSeconds)) {
     issues.push("FinCast 모델 봉은 1분, 30초, 15초 중 하나여야 합니다.");
-  } else if (
-    request.fincastCandleSeconds < 60
-    && (
-      request.modelLanes.length !== 1
-      || request.modelLanes[0] !== "fincast"
-    )
-  ) {
-    issues.push("15초·30초 모델 봉은 FinCast 단독 lane에서만 사용할 수 있습니다.");
+  } else if (request.fincastCandleSeconds < 60) {
+    issues.push("v9 canonical model plan은 1분 모델 봉만 지원합니다.");
   }
   if (request.execution.mode !== "paper") issues.push("현재 운영에서는 paper 실행만 허용됩니다.");
   if (!["trend", "breakout", "mean_reversion", "risk_management"].includes(request.preset)) {

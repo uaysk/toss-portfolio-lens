@@ -10,9 +10,11 @@ import {
   validateAiSimulationCryptoRequest,
 } from "@/lib/ai-simulation";
 
-describe("ai simulation v7 crypto contract", () => {
-  it("normalizes legacy stocks and the Binance USD-M discriminated market", () => {
-    expect(normalizeAiSimulationMarket(undefined, "KR")).toEqual({ kind: "stock", country: "KR" });
+describe("ai simulation v9 crypto contract", () => {
+  it("normalizes only discriminated stock and Binance USD-M markets", () => {
+    expect(normalizeAiSimulationMarket(undefined)).toBeUndefined();
+    expect(normalizeAiSimulationMarket({ kind: "stock", country: "KR" }))
+      .toEqual({ kind: "stock", country: "KR" });
     expect(normalizeAiSimulationMarket({
       kind: "crypto_futures",
       venue: "BINANCE_USDM",
@@ -69,11 +71,12 @@ describe("ai simulation v7 crypto contract", () => {
   it("exposes only boolean/enum worker status and keeps live closed", () => {
     expect(normalizeAiSimulationCryptoStatus({
       cryptoFutures: {
-        credentials: { configured: true, signedReadSucceeded: true, secretKey: "must-not-pass" },
+        schemaVersion: "ai-paper-simulation/v9",
+        credentials: { configured: true, signedReadSucceeded: true },
         executionGates: { paper: true, testnet: false, live: false },
         workers: {
-          kronos_base: { status: "ready", available: true, precision: "float32" },
-          fincast: { status: "memory_pressure", available: false, precision: "half" },
+          chronos2: { status: "healthy", precision: "fp32" },
+          fincast: { status: "memory_pressure", precision: "fp16" },
         },
       },
     })).toEqual({
@@ -81,9 +84,9 @@ describe("ai simulation v7 crypto contract", () => {
       signedReadSucceeded: true,
       executionGates: { paper: true, testnet: false, live: false },
       workers: {
-        kronos_base: {
-          lane: "kronos_base",
-          status: "ready",
+        chronos2: {
+          lane: "chronos2",
+          status: "healthy",
           available: true,
           precision: "fp32",
         },
@@ -94,6 +97,47 @@ describe("ai simulation v7 crypto contract", () => {
           precision: "fp16",
         },
       },
+    });
+  });
+
+  it("fails old detailed AI worker telemetry and missing v9 status versions closed", () => {
+    expect(normalizeAiSimulationCryptoStatus({
+      cryptoFutures: {
+        schemaVersion: "ai-paper-simulation/v9",
+        credentials: { configured: true, signedReadSucceeded: true },
+        executionGates: { paper: true, testnet: false, live: false },
+        workers: {
+          chronos2: {
+            status: "ready",
+            available: true,
+            precision: "float32",
+            model_id: "amazon/chronos-2",
+            peak_vram_mb: 6_000,
+          },
+        },
+      },
+    })).toMatchObject({
+      workers: {
+        chronos2: {
+          status: "unavailable",
+          available: false,
+          precision: "unknown",
+          reason: "unsupported_worker_telemetry_contract",
+        },
+      },
+    });
+    expect(normalizeAiSimulationCryptoStatus({
+      credentialsConfigured: true,
+      signedReadSucceeded: true,
+      paperEnabled: true,
+      workers: {
+        chronos2: { status: "ready", available: true },
+      },
+    })).toEqual({
+      credentialsConfigured: false,
+      signedReadSucceeded: false,
+      executionGates: { paper: false, testnet: false, live: false },
+      workers: {},
     });
   });
 
@@ -119,7 +163,7 @@ describe("ai simulation v7 crypto contract", () => {
       same_costs: true,
       same_fill_barrier: true,
       models: {
-        kronos: { status: "complete", dtype: "float32", pinball_loss: 0.01 },
+        chronos2: { status: "complete", dtype: "float32", pinball_loss: 0.01 },
         fincast: {
           status: "complete",
           dtype: "float16",
@@ -141,7 +185,7 @@ describe("ai simulation v7 crypto contract", () => {
       },
     });
     expect(comparison?.lanes.map(({ id, precision }) => [id, precision])).toEqual([
-      ["kronos_base", "fp32"],
+      ["chronos2", "fp32"],
       ["fincast", "fp16"],
     ]);
     expect(comparison?.lanes[1]).toMatchObject({
@@ -178,8 +222,8 @@ describe("ai simulation v7 crypto contract", () => {
     });
   });
 
-  it("allows paper only and requires at least one unique model lane", () => {
-    expect(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST.modelLanes).toEqual(["fincast"]);
+  it("uses strict v9 requests and allows paper only", () => {
+    expect(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST.contractVersion).toBe("ai-paper-simulation/v9");
     expect(validateAiSimulationCryptoRequest(DEFAULT_AI_SIMULATION_CRYPTO_REQUEST)).toEqual([]);
     expect(validateAiSimulationCryptoRequest({
       ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,

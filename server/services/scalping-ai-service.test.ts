@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { aiRequestBase, type AiEvaluateRequest, type AiForecastRequest, type AiResponse } from "../worker/ai-contract.js";
+import {
+  aiRequestBase,
+  CHRONOS_2_MODEL_ID,
+  type AiEvaluateRequest,
+  type AiForecastRequest,
+  type AiResponse,
+} from "../worker/ai-contract.js";
 import { ScalpingAiService } from "./scalping-ai-service.js";
 
 const start = Date.parse("2026-07-21T00:00:00.000Z");
@@ -26,10 +32,10 @@ function requestBase(requestId: string): AiRequestBase {
 
 function model() {
   return {
-    model_id: "NeoQuasar/Kronos-base",
+    model_id: CHRONOS_2_MODEL_ID,
     model_revision: "revision-a",
-    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
-    tokenizer_revision: "revision-t",
+    tokenizer_id: null,
+    tokenizer_revision: null,
     source_revision: "source-a",
     loader_version: "portfolio-ai-loader/v1",
     license: "MIT",
@@ -37,12 +43,19 @@ function model() {
     dtype: "float32" as const,
     attention_backend: "unavailable" as const,
     loaded: false,
+    precision_validation: "unavailable" as const,
+    memory_status: "unavailable" as const,
+    quantile_monotonicity_policy: "unavailable" as const,
+    fp32_quantile_observations: null,
+    mixed_quantile_observations: null,
+    quantile_tail_policy: "unavailable" as const,
+    precision_failure_reasons: [],
   };
 }
 
 function unavailable(mode: "forecast" | "evaluate", requestId: string): AiResponse {
   return {
-    schema_version: "scalping-ai/v1",
+    schema_version: "scalping-ai/v2",
     request_id: requestId,
     mode,
     status: "unavailable",
@@ -79,7 +92,7 @@ describe("ScalpingAiService", () => {
     const service = new ScalpingAiService(
       { request: vi.fn(async () => response) } as never,
       { putPrediction } as never,
-      { enqueue: vi.fn() } as never,
+      { enqueueOrchestration: vi.fn() } as never,
       20,
     );
     const result = await service.forecast(request, undefined, "US");
@@ -87,7 +100,7 @@ describe("ScalpingAiService", () => {
     expect(putPrediction).toHaveBeenCalledWith(expect.objectContaining({
       status: "unavailable",
       dataQuality: "model_unavailable",
-      modelName: "NeoQuasar/Kronos-base",
+      modelName: CHRONOS_2_MODEL_ID,
       modelVersion: "revision-a",
       marketCountry: "US",
       retrospective: false,
@@ -123,13 +136,12 @@ describe("ScalpingAiService", () => {
     const service = new ScalpingAiService(
       { request: vi.fn(async () => response) } as never,
       { putPrediction: vi.fn() } as never,
-      { enqueue } as never,
+      { enqueueOrchestration: enqueue } as never,
       20,
     );
     const result = await service.evaluate(request);
     expect(result.run).toMatchObject({ id: "run-1", kind: "scalping_prediction_evaluation" });
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
-      allowInlineInExternal: true,
       totalCandidates: 1,
       config: expect.objectContaining({ retrospective: true, random_split: false }),
     }));
@@ -140,7 +152,7 @@ describe("ScalpingAiService", () => {
     const service = new ScalpingAiService(
       { request: vi.fn() } as never,
       { putPrediction: vi.fn() } as never,
-      { enqueue } as never,
+      { enqueueOrchestration: enqueue } as never,
       20,
     );
     const baseRequest: AiEvaluateRequest = {
@@ -165,7 +177,7 @@ describe("ScalpingAiService", () => {
     expect(first.config.instruments[0].origins_checksum).not.toBe(second.config.instruments[0].origins_checksum);
   });
 
-  it("FinCast cadence를 Kronos와 다른 evaluation provenance 및 재사용 키로 보존한다", async () => {
+  it("FinCast cadence를 Chronos2와 다른 evaluation provenance 및 재사용 키로 보존한다", async () => {
     const enqueue = vi.fn(async (input) => ({
       run: { id: `run-${enqueue.mock.calls.length}`, kind: input.kind },
       reused: false,
@@ -173,7 +185,7 @@ describe("ScalpingAiService", () => {
     const service = new ScalpingAiService(
       { request: vi.fn() } as never,
       { putPrediction: vi.fn() } as never,
-      { enqueue } as never,
+      { enqueueOrchestration: enqueue } as never,
       20,
     );
     const baseRequest: AiEvaluateRequest = {
@@ -204,10 +216,10 @@ describe("ScalpingAiService", () => {
       })),
     });
 
-    const kronos = enqueue.mock.calls[0]![0];
+    const chronos2 = enqueue.mock.calls[0]![0];
     const fincast = enqueue.mock.calls[1]![0];
-    expect(kronos.config).toMatchObject({
-      model_lane: "kronos_base",
+    expect(chronos2.config).toMatchObject({
+      model_lane: "chronos2",
       instruments: [{ input_cadence: null }],
     });
     expect(fincast.config).toMatchObject({
@@ -219,7 +231,7 @@ describe("ScalpingAiService", () => {
         },
       }],
     });
-    expect(kronos.dataRevision).not.toBe(fincast.dataRevision);
+    expect(chronos2.dataRevision).not.toBe(fincast.dataRevision);
   });
 
   it("fails closed before progress or artifacts when evaluation model identity drifts from the requested lane", async () => {
@@ -256,7 +268,7 @@ describe("ScalpingAiService", () => {
     const service = new ScalpingAiService(
       { request: vi.fn(async () => response) } as never,
       { putPrediction: vi.fn() } as never,
-      { enqueue } as never,
+      { enqueueOrchestration: enqueue } as never,
       20,
     );
 

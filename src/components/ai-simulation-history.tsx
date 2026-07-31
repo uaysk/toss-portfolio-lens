@@ -87,7 +87,6 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 const MODEL_LANE_LABELS: Record<AiSimulationModelLane, string> = {
-  kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
   chronos2: "Chronos-2 · Primary",
 };
@@ -99,8 +98,8 @@ function modelLaneFromIdentity(
   const identity = [component, modelId].filter(Boolean).join(" ").toLowerCase()
     .replaceAll("-", "_");
   if (identity.includes("fincast")) return "fincast";
-  if (identity.includes("chronos2") || identity.includes("chronos_2")) return "chronos2";
-  if (identity.includes("kronos_base") || identity.includes("kronos")) return "kronos_base";
+  if (identity.includes("chronos2") || identity.includes("chronos_2")
+    || identity.includes("amazon/chronos_2")) return "chronos2";
   return undefined;
 }
 
@@ -404,11 +403,7 @@ export function SimulationRunReportView({
   const { performance, configuration } = report;
   const quantityUnit = performance.currency === "USDT" ? "계약" : "주";
   const selectedSymbols = report.selected.map(({ name, symbol }) => name ? `${name} · ${symbol}` : symbol);
-  const modelForecasts = report.modelForecasts
-    ?? report.kronosForecasts.map((forecast) => ({
-      ...forecast,
-      lane: "kronos_base" as const,
-    }));
+  const modelForecasts = report.modelForecasts;
   const costs = configuration.costs
     ? Object.entries(configuration.costs).map(([key, value]) => `${key} ${value}bps`)
     : [];

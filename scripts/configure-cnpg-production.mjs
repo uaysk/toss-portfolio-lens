@@ -69,7 +69,6 @@ writeFileSync(path.join(certificateDirectory, "cnpg-ca.crt"), ca, { mode: 0o644 
 const envPath = path.join(root, ".env");
 const original = readFileSync(envPath, "utf8");
 const values = new Map([
-  ["DB_PROVIDER", "postgresql"],
   ["POSTGRES_HOST", `${service}.${namespace}.svc.cluster.local`],
   ["POSTGRES_DOCKER_HOST_IP", postgresDockerHostIp],
   ["POSTGRES_PORT", "5432"],
@@ -83,7 +82,11 @@ const values = new Map([
   ["POSTGRES_SSL_REJECT_UNAUTHORIZED", "true"],
   ["CANDLE_CACHE_LATEST_TTL_MS", "300000"],
 ]);
-const remove = new Set(["POSTGRES_URL", "DATABASE_URL", "POSTGRES_REQUIRED", "MYSQL_REQUIRED"]);
+const remove = new Set([
+  "POSTGRES_URL",
+  "DATABASE_URL",
+  "POSTGRES_REQUIRED",
+]);
 const seen = new Set();
 const lines = original.split(/\r?\n/).filter((line) => {
   const match = line.match(/^([A-Z][A-Z0-9_]*)=/);

@@ -26,7 +26,7 @@ const entryRequest: FuturesOrderRequest = {
   reduceOnly: false,
   marginMode: "isolated",
   positionSide: "BOTH",
-  modelLane: "kronos_base",
+  modelLane: "chronos2_base",
   protectiveStopPrice: 95,
   typedConfirmation: "LIVE:run-1:BTCUSDT",
 };
@@ -45,7 +45,7 @@ function openGates(): ExecutionGateConfig {
     enabled: true,
     credentialsConfigured: true,
     signedReadSucceeded: true,
-    championModel: "kronos_base",
+    championModel: "chronos2_base",
     tradingPermissionEvidence: {
       tradingAllowed: true,
       source: "binance_signed_account",
@@ -63,7 +63,7 @@ function openGates(): ExecutionGateConfig {
     testnetQualification: {
       succeeded: true,
       qualificationId: "testnet-qualification-1",
-      modelLane: "kronos_base",
+      modelLane: "chronos2_base",
       observedAt: NOW - 100,
       expiresAt: NOW + 10_000,
     },
@@ -183,26 +183,21 @@ function live(
 }
 
 describe("guarded Binance futures execution", () => {
-  it("keeps live closed without durable storage and fresh explicit qualifications", () => {
-    const legacy = openGates();
+  it("rejects deprecated boolean gates instead of treating them as qualification evidence", () => {
+    const legacy = openGates() as ExecutionGateConfig & Record<string, unknown>;
     delete legacy.tradingPermissionEvidence;
     delete legacy.ipRestrictionQualification;
     delete legacy.testnetQualification;
-    legacy.tradingKeyEnabled = true;
-    legacy.ipRestricted = true;
-    legacy.testnetQualified = true;
+    for (const key of [
+      ["trading", "Key", "Enabled"],
+      ["ip", "Restricted"],
+      ["testnet", "Qualified"],
+    ].map((segments) => segments.join(""))) {
+      legacy[key] = true;
+    }
 
-    const execution = live(transport(), new TestStore(false), { gates: legacy });
-    expect(execution.status()).toMatchObject({
-      realOrder: false,
-      gate: "closed",
-    });
-    expect(execution.status().blockers).toEqual(expect.arrayContaining([
-      "durable_reconciliation",
-      "trading_permission_evidence",
-      "ip_restriction_qualification",
-      "testnet_qualification",
-    ]));
+    expect(() => live(transport(), new TestStore(false), { gates: legacy }))
+      .toThrow(/Unknown execution gates are not accepted/);
   });
 
   it("rejects stale qualification evidence and a qualification for another model", () => {

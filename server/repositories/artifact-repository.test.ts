@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { ArtifactRepository } from "./artifact-repository.js";
 import { RunRepository } from "./run-repository.js";
 
 describe("ArtifactRepository canonical checksum", () => {
   it("객체 key 삽입 순서와 무관하게 inline/external artifact checksum을 고정한다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const runs = new RunRepository(database);
       const artifacts = new ArtifactRepository(database);
@@ -42,7 +42,7 @@ describe("ArtifactRepository canonical checksum", () => {
   });
 
   it("기술적 분석 artifact를 공통 portfolio URI로 노출한다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const runs = new RunRepository(database);
       const artifacts = new ArtifactRepository(database);
@@ -77,7 +77,7 @@ describe("ArtifactRepository canonical checksum", () => {
   });
 
   it("같은 run/type을 덮어써도 artifact ID를 유지하고 새 content를 반환한다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const runs = new RunRepository(database);
       const artifacts = new ArtifactRepository(database);
@@ -119,7 +119,7 @@ describe("ArtifactRepository canonical checksum", () => {
   });
 
   it("put 이후 descriptor metadata만 조회하고 content_json을 다시 읽지 않는다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const runs = new RunRepository(database);
       const artifacts = new ArtifactRepository(database);

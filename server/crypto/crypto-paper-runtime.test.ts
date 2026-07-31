@@ -4,7 +4,6 @@ import type { SimulationModelLane, SimulationStartRequest } from "../simulation/
 import {
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
-  SCALPING_AI_REALTIME_HORIZONS,
   type AiForecastRequest,
 } from "../worker/ai-contract.js";
 import type {
@@ -130,18 +129,17 @@ const scannerSnapshot: BinanceScannerSnapshot = {
 };
 
 function simulationRequest(
-  lanes: SimulationStartRequest["modelLanes"] = ["kronos_base"],
+  lanes: SimulationStartRequest["modelLanes"] = ["chronos2"],
 ): SimulationStartRequest {
   return {
-    contractVersion: "ai-paper-simulation/v8",
-    sourceContractVersion: "ai-paper-simulation/v7",
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase: "btc_eth",
     market: {
       kind: "crypto_futures",
       venue: "BINANCE_USDM",
       quoteAsset: "USDT",
       contractType: "PERPETUAL",
     },
-    marketCountry: "US",
     initialCash: 10_000,
     durationMinutes: 1,
     selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
@@ -155,7 +153,7 @@ function simulationRequest(
       slippageBpsPerSide: 1,
     },
     modelLanes: lanes,
-    modelPlan: lanes.map((modelLane) => ({
+    resolvedModelPlan: lanes.map((modelLane) => ({
       symbol: "*",
       modelLane,
       role: "primary",
@@ -376,12 +374,11 @@ function riskPrelude(at = START + 10, price = 100): Array<{ at: number; event: B
   ];
 }
 
-const longReturns = [-0.01, -0.005, 0.005, 0.02, 0.04, 0.06, 0.08];
-const shortReturns = [-0.08, -0.06, -0.04, -0.02, -0.005, 0.005, 0.01];
+const longReturns = [-0.005, -0.002, 0.005, 0.015, 0.025, 0.035, 0.04];
+const shortReturns = [-0.04, -0.035, -0.025, -0.015, -0.005, 0.002, 0.005];
 const flatReturns = [0, 0, 0, 0, 0, 0, 0];
-const kronosModelRevision = "2b554741eca47781b64468546e77fef3e85130e6";
-const kronosSourceRevision = "67b630e67f6a18c9e9be918d9b4337c960db1e9a";
-const kronosTokenizerRevision = "0e0117387f39004a9016484a186a908917e22426";
+const chronos2ModelRevision = "254b5357164a84326913b0695216f690752ac55d";
+const chronos2SourceRevision = "v2.3.1";
 const fincastModelRevision = "2d7d90b159db8961d27c2cf165d51195902ef92b";
 const fincastSourceRevision = "488b19d1d85fa2b3d4b93469530cefdcf1cc97a4";
 
@@ -408,23 +405,33 @@ function response(
   modelOverrides: UnknownRecord = {},
 ) {
   const model = {
-    model_id: lane === "kronos_base" ? "NeoQuasar/Kronos-base" : "Vincent05R/FinCast",
-    model_revision: lane === "kronos_base" ? kronosModelRevision : fincastModelRevision,
-    source_revision: lane === "kronos_base" ? kronosSourceRevision : fincastSourceRevision,
-    loader_version: lane === "kronos_base"
-      ? "kronos-source-67b630e"
+    model_id: lane === "chronos2" ? "amazon/chronos-2" : "Vincent05R/FinCast",
+    model_revision: lane === "chronos2" ? chronos2ModelRevision : fincastModelRevision,
+    source_revision: lane === "chronos2" ? chronos2SourceRevision : fincastSourceRevision,
+    loader_version: lane === "chronos2"
+      ? "chronos-forecasting-2.3.1-compact_causal_v1"
       : "fincast-source-488b19d",
-    license: lane === "kronos_base" ? "MIT" : "Apache-2.0",
-    tokenizer_id: lane === "kronos_base" ? "NeoQuasar/Kronos-Tokenizer-base" : null,
-    tokenizer_revision: lane === "kronos_base" ? kronosTokenizerRevision : null,
+    license: "Apache-2.0",
+    tokenizer_id: null,
+    tokenizer_revision: null,
     loaded: true,
     device: "cuda",
     device_name: "Tesla P40",
     cuda_capability: "6.1",
     attention_backend: "math",
-    dtype: lane === "kronos_base" ? "float32" : "mixed_float16",
-    ...(lane === "kronos_base"
-      ? { peak_vram_mb: 6_000 }
+    dtype: lane === "chronos2" ? "float32" : "mixed_float16",
+    ...(lane === "chronos2"
+      ? {
+        precision_validation: "not_required",
+        peak_vram_bytes: 6_000 * 1024 * 1024,
+        peak_vram_measurement: "cuda_allocated_or_reserved",
+        memory_status: "ok",
+        quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+        fp32_quantile_observations: null,
+        mixed_quantile_observations: null,
+        quantile_tail_policy: "native",
+        precision_failure_reasons: [],
+      }
       : {
         precision_validation: "passed",
         peak_vram_bytes: 4_000 * 1024 * 1024,
@@ -443,20 +450,96 @@ function response(
     ...modelOverrides,
   };
   const modelInputBars = request.series[0]!.bars.slice(-512);
+  const inputEndAt = Date.parse(request.series[0]!.input_end_at);
+  const nativeQuantiles = lane === "chronos2"
+    ? [0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
+      0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99]
+    : [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+  const directionProbabilities = returns[3]! > 0
+    ? { up: 0.85, down: 0.1, flat: 0.05 }
+    : returns[3]! < 0
+      ? { up: 0.1, down: 0.85, flat: 0.05 }
+      : { up: 0.475, down: 0.475, flat: 0.05 };
+  const nativeReturn = (quantile: number): number => {
+    const rightIndex = SCALPING_AI_QUANTILES.findIndex(
+      (fixedQuantile) => fixedQuantile >= quantile,
+    );
+    if (rightIndex === -1) return returns.at(-1)!;
+    if (rightIndex === 0) return returns[0]!;
+    const leftQuantile = SCALPING_AI_QUANTILES[rightIndex - 1]!;
+    const rightQuantile = SCALPING_AI_QUANTILES[rightIndex]!;
+    const weight = (quantile - leftQuantile) / (rightQuantile - leftQuantile);
+    return returns[rightIndex - 1]!
+      + weight * (returns[rightIndex]! - returns[rightIndex - 1]!);
+  };
+  const series = [{
+    instrument_key: request.series[0]!.instrument_key,
+    status: "available" as const,
+    input_end_at: request.series[0]!.input_end_at,
+    horizons: SCALPING_AI_HORIZONS.map((horizon) => ({
+      horizon_minutes: horizon,
+      target_timestamp: new Date(inputEndAt + horizon * 60_000).toISOString(),
+      return_quantiles: SCALPING_AI_QUANTILES.map((quantile, index) => ({
+        quantile,
+        value: returns[index],
+      })),
+      price_quantiles: SCALPING_AI_QUANTILES.map((quantile, index) => ({
+        quantile,
+        value: 100 * (1 + returns[index]!),
+      })),
+      native_return_quantiles: nativeQuantiles.map((quantile) => ({
+        quantile,
+        value: nativeReturn(quantile),
+      })),
+      native_price_quantiles: nativeQuantiles.map((quantile) => ({
+        quantile,
+        value: 100 * (1 + nativeReturn(quantile)),
+      })),
+      up_probability: directionProbabilities.up,
+      down_probability: directionProbabilities.down,
+      flat_probability: directionProbabilities.flat,
+      probability_method: "derived_quantile_cdf" as const,
+      expected_volatility: 0.01,
+      volatility_method: "quantile_implied_sigma" as const,
+      uncertainty_interval_width: 0.02,
+      target_stop: { status: "unavailable" as const, reason: "not configured" },
+      valid_path_count: 0,
+      invalid_path_count: 0,
+    })),
+    input_quality: {
+      status: "good" as const,
+      bar_count: modelInputBars.length,
+      missing_volume_ratio: 0,
+      missing_amount_ratio: 0,
+      irregular_interval_count: 0,
+      warnings: [],
+    },
+    distribution_shift: {
+      status: "unavailable" as const,
+      reason: "reference_statistics_not_published" as const,
+    },
+    unavailable: null,
+  }];
+  const generatedAtIso = new Date(generatedAt).toISOString();
   return {
+    schema_version: request.schema_version,
     request_id: request.request_id,
     mode: "forecast",
     status: "available",
-    generated_at: new Date(generatedAt).toISOString(),
-    model: structuredClone(model),
-    latency_ms: 10,
+    generated_at: generatedAtIso,
+    model,
     model_runs: [{
-      role: lane,
-      expected_model_id: lane === "kronos_base"
-        ? "NeoQuasar/Kronos-base"
+      role: lane === "chronos2" ? "chronos_2" as const : "fincast" as const,
+      expected_model_id: lane === "chronos2"
+        ? "amazon/chronos-2"
         : "Vincent05R/FinCast",
+      status: "available" as const,
+      generated_at: generatedAtIso,
       latency_ms: 10,
-      model: structuredClone(model),
+      degraded: false,
+      fallback_used: false,
+      fallback_reason: null,
+      model,
       input_origins: [{
         instrument_key: request.series[0]!.instrument_key,
         context_start_at: modelInputBars[0]!.timestamp,
@@ -465,19 +548,9 @@ function response(
         input_digest: canonicalCryptoModelInputDigest(modelInputBars),
       }],
       input_end_aligned: true,
+      raw_series: series,
     }],
-    series: [{
-      instrument_key: request.series[0]!.instrument_key,
-      status: "available",
-      input_end_at: request.series[0]!.input_end_at,
-      horizons: [{
-        horizon_minutes: 5,
-        return_quantiles: SCALPING_AI_QUANTILES.map((quantile, index) => ({
-          quantile,
-          value: returns[index],
-        })),
-      }],
-    }],
+    series,
   };
 }
 
@@ -493,8 +566,11 @@ function responseWithDisplayPath(
   const originalHorizon = (series.horizons as UnknownRecord[])[0]!;
   const returnQuantiles = structuredClone(originalHorizon.return_quantiles);
   series.horizons = SCALPING_AI_HORIZONS.map((horizon, horizonIndex) => ({
+    ...structuredClone(originalHorizon),
     horizon_minutes: horizon,
     up_probability: 0.64,
+    down_probability: 0.31,
+    flat_probability: 0.05,
     target_timestamp: new Date(
       inputEndAt
       + horizon * 60_000
@@ -595,7 +671,7 @@ function rustTechnicalAnalysis(
     originAt,
     calculationAt: originAt,
     signalAt: originAt,
-    earliestEligibleAt: new Date(Date.parse(originAt) + 60_000).toISOString(),
+    earliestEligibleAt: originAt,
     status: "entry_candidate",
     technicalSignal: 1,
     basisPrice: last.close,
@@ -698,11 +774,11 @@ function rustTechnicalAnalysis(
       bollingerWidthExpansion: 1.1,
       relativeVolume: 1.25,
       tradingAmount: 5_000_000,
-      spreadBps: null,
-      orderbookDepth: null,
-      orderbookImbalance: null,
-      executionStrength: null,
-      liquidityQuality: null,
+      spreadBps: 2,
+      orderbookDepth: 1_000_000,
+      orderbookImbalance: 0.2,
+      executionStrength: 0.8,
+      liquidityQuality: 0.9,
       exitRisk: 0.1,
       sessionVwap: null,
       openingRange5: null,
@@ -710,23 +786,17 @@ function rustTechnicalAnalysis(
       openingRange30: null,
       timeOfDayRelativeVolume: null,
       benchmarkRelativeStrength: null,
-      quoteFreshnessMs: null,
+      quoteFreshnessMs: 0,
       regime: "trend",
       passedGates: ["trend"],
       blockedGates: [],
       unavailableFields: [
-        "spreadBps",
-        "orderbookDepth",
-        "orderbookImbalance",
-        "executionStrength",
-        "liquidityQuality",
         "sessionVwap",
         "openingRange5",
         "openingRange15",
         "openingRange30",
         "timeOfDayRelativeVolume",
         "benchmarkRelativeStrength",
-        "quoteFreshnessMs",
       ],
       originAt,
       observedAt: originAt,
@@ -742,6 +812,105 @@ function rustTechnicalAnalysis(
       usesQuoteVolumeAsAmount: true,
     },
   };
+}
+
+function shortRustTechnicalAnalysis(
+  bars: readonly BinanceKline[],
+): CryptoRustTechnicalAnalysis {
+  const analysis = rustTechnicalAnalysis(bars);
+  return {
+    ...analysis,
+    technicalSignal: -1,
+    stopCandidatePrice: analysis.basisPrice * 1.01,
+    targetCandidatePrice: analysis.basisPrice * 0.98,
+    multiTimeframeAgreement: "aligned_bearish",
+    multiTimeframeTrends: {
+      "1m": "bearish",
+      "5m": "bearish",
+      "15m": "bearish",
+    },
+    calculations: analysis.calculations.map((calculation) => {
+      if (calculation.id === "ema-fast-9") {
+        return {
+          ...calculation,
+          latest: {
+            at: calculation.latest!.at,
+            values: { value: analysis.basisPrice * 0.99 },
+          },
+          previous: {
+            at: calculation.previous!.at,
+            values: { value: analysis.basisPrice },
+          },
+        };
+      }
+      if (calculation.id === "ema-slow-21") {
+        return {
+          ...calculation,
+          latest: {
+            at: calculation.latest!.at,
+            values: { value: analysis.basisPrice * 1.01 },
+          },
+          previous: {
+            at: calculation.previous!.at,
+            values: { value: analysis.basisPrice * 1.01 },
+          },
+        };
+      }
+      if (calculation.id === "adx-dmi-14") {
+        return {
+          ...calculation,
+          latest: {
+            at: calculation.latest!.at,
+            values: { adx: 35, plus_di: 10, minus_di: 40 },
+          },
+          previous: {
+            at: calculation.previous!.at,
+            values: { adx: 30, plus_di: 12, minus_di: 35 },
+          },
+        };
+      }
+      return calculation;
+    }),
+  };
+}
+
+function lowStopRustTechnicalAnalysis(
+  bars: readonly BinanceKline[],
+): CryptoRustTechnicalAnalysis {
+  const analysis = rustTechnicalAnalysis(bars);
+  return {
+    ...analysis,
+    stopCandidatePrice: analysis.basisPrice * 0.5,
+  };
+}
+
+type TestRuntimeOptions = ConstructorParameters<typeof CryptoPaperRuntime>[0];
+
+function testRuntime(options: TestRuntimeOptions): CryptoPaperRuntime {
+  return new CryptoPaperRuntime({
+    technicalAnalyzer: {
+      analyze: async ({ bars }) => rustTechnicalAnalysis(bars),
+    },
+    loadCalibrationResiduals: ({
+      modelLane,
+      symbol,
+      horizonMinutes,
+      originAt,
+    }) => Array.from({ length: 30 }, (_unused, index) => {
+      const resolvedAt = Date.parse(originAt) - (index + 1) * 60_000;
+      return {
+        modelLane,
+        symbol,
+        horizonMinutes,
+        originAt: new Date(resolvedAt - 60_000).toISOString(),
+        resolvedAt: new Date(resolvedAt).toISOString(),
+        predictedQ10: -0.01,
+        predictedQ90: 0.01,
+        actualReturn: 0,
+      };
+    }),
+    ...options,
+  });
 }
 
 function artifact(
@@ -793,7 +962,7 @@ async function runProvenanceSimulation(options: {
       ]
       : []),
   ]);
-  const runtime = new CryptoPaperRuntime({
+  const runtime = testRuntime({
     rest: rest(),
     streams,
     laneClients: { [options.lane]: client },
@@ -876,7 +1045,7 @@ describe("CryptoPaperRuntime", () => {
 
   it("serializes same-lane worker calls even when portfolio symbols request concurrently", async () => {
     const clock = new ScheduledClock();
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams: new ScheduledStreams(clock, []),
       laneClients: {},
@@ -916,9 +1085,9 @@ describe("CryptoPaperRuntime", () => {
     const secondController = new AbortController();
     const request = {} as AiForecastRequest;
 
-    const first = requestLane("kronos_base", client, request, firstController.signal);
+    const first = requestLane("chronos2", client, request, firstController.signal);
     await vi.waitFor(() => expect(client.request).toHaveBeenCalledTimes(1));
-    const second = requestLane("kronos_base", client, request, secondController.signal);
+    const second = requestLane("chronos2", client, request, secondController.signal);
     await Promise.resolve();
     expect(client.request).toHaveBeenCalledTimes(1);
     expect(maximumActive).toBe(1);
@@ -935,7 +1104,7 @@ describe("CryptoPaperRuntime", () => {
   it("scopes same-timestamp portfolio identifiers by run and symbol", () => {
     const common = {
       runId: "crypto-run-1",
-      lane: "kronos_base" as const,
+      lane: "chronos2" as const,
       at: START + 123,
       sequence: 1,
     };
@@ -955,7 +1124,7 @@ describe("CryptoPaperRuntime", () => {
     }
   });
 
-  it("matches the Python worker canonical input digest byte-for-byte", () => {
+  it("matches the AI worker canonical input digest byte-for-byte", () => {
     expect(canonicalCryptoModelInputDigest([
       {
         timestamp: "2026-07-25T00:00:59.999Z",
@@ -992,7 +1161,7 @@ describe("CryptoPaperRuntime", () => {
 
   it("shares a portfolio daily-loss gate without blocking an offset sleeve early", () => {
     const gate = new PortfolioDailyLossGate({
-      lanes: ["kronos_base"],
+      lanes: ["chronos2"],
       symbols: ["BTCUSDT", "ETHUSDT"],
       perSymbolInitialCash: 5_000,
       dailyLossLimitRate: 0.03,
@@ -1000,7 +1169,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     expect(gate.observe({
-      lane: "kronos_base",
+      lane: "chronos2",
       symbol: "BTCUSDT",
       equity: 4_800,
       observedAt: START + 1_000,
@@ -1011,7 +1180,7 @@ describe("CryptoPaperRuntime", () => {
       closeAllReduceOnly: false,
     });
     expect(gate.observe({
-      lane: "kronos_base",
+      lane: "chronos2",
       symbol: "ETHUSDT",
       equity: 5_200,
       observedAt: START + 1_001,
@@ -1022,7 +1191,7 @@ describe("CryptoPaperRuntime", () => {
       closeAllReduceOnly: false,
     });
     expect(gate.observe({
-      lane: "kronos_base",
+      lane: "chronos2",
       symbol: "BTCUSDT",
       equity: 4_500,
       observedAt: START + 2_000,
@@ -1032,11 +1201,11 @@ describe("CryptoPaperRuntime", () => {
       blocked: true,
       closeAllReduceOnly: true,
     });
-    expect(gate.state("kronos_base").blocked).toBe(true);
+    expect(gate.state("chronos2").blocked).toBe(true);
 
     const rollover = Date.parse("2026-07-26T00:00:00.000Z");
     expect(gate.observe({
-      lane: "kronos_base",
+      lane: "chronos2",
       symbol: "ETHUSDT",
       equity: 5_100,
       observedAt: rollover,
@@ -1214,8 +1383,8 @@ describe("CryptoPaperRuntime", () => {
 
   it("preserves matching portfolio lane provenance and fails mismatches closed", () => {
     const provenance = {
-      modelId: "NeoQuasar/Kronos-base",
-      modelRevision: kronosModelRevision,
+      modelId: "amazon/chronos-2",
+      modelRevision: chronos2ModelRevision,
       precision: "fp32",
       device: "cuda",
     };
@@ -1246,20 +1415,20 @@ describe("CryptoPaperRuntime", () => {
     });
   });
 
-  it("normalizes omitted Kronos precision provenance to safe native defaults", async () => {
-    const { result } = await runProvenanceSimulation({ lane: "kronos_base" });
+  it("normalizes omitted Chronos2 precision provenance to safe native defaults", async () => {
+    const { result } = await runProvenanceSimulation({ lane: "chronos2" });
     const comparisonLane = (
       artifact(result, "simulation-comparison").lanes as UnknownRecord[]
     )[0]!;
     const comparisonProvenance = comparisonLane.provenance as UnknownRecord;
     expect(comparisonProvenance).toMatchObject({
-      modelId: "NeoQuasar/Kronos-base",
-      modelRevision: kronosModelRevision,
-      sourceRevision: kronosSourceRevision,
-      loaderVersion: "kronos-source-67b630e",
-      license: "MIT",
-      tokenizerId: "NeoQuasar/Kronos-Tokenizer-base",
-      tokenizerRevision: kronosTokenizerRevision,
+      modelId: "amazon/chronos-2",
+      modelRevision: chronos2ModelRevision,
+      sourceRevision: chronos2SourceRevision,
+      loaderVersion: "chronos-forecasting-2.3.1-compact_causal_v1",
+      license: "Apache-2.0",
+      tokenizerId: null,
+      tokenizerRevision: null,
       loaded: true,
       device: "cuda",
       deviceName: "Tesla P40",
@@ -1268,7 +1437,7 @@ describe("CryptoPaperRuntime", () => {
       precision: "fp32",
       precisionValidation: "not_required",
       memoryStatus: "ok",
-      quantileMonotonicityPolicy: "native",
+      quantileMonotonicityPolicy: "chronos2_fp32_monotone_rearrangement_v1",
       quantileTailPolicy: "native",
       precisionFailureReasons: [],
       peakVramMb: 6_000,
@@ -1284,9 +1453,9 @@ describe("CryptoPaperRuntime", () => {
     });
   });
 
-  it("accepts explicit null Kronos quantile observations from the Python wire response", async () => {
+  it("accepts explicit null Chronos2 quantile observations from the Python wire response", async () => {
     const { result } = await runProvenanceSimulation({
-      lane: "kronos_base",
+      lane: "chronos2",
       modelOverrides: () => ({
         fp32_quantile_observations: null,
         mixed_quantile_observations: null,
@@ -1296,7 +1465,7 @@ describe("CryptoPaperRuntime", () => {
       artifact(result, "simulation-comparison").lanes as UnknownRecord[]
     )[0]!;
     expect(comparisonLane).toMatchObject({
-      id: "kronos_base",
+      id: "chronos2",
       status: "completed",
     });
     expect((
@@ -1309,14 +1478,14 @@ describe("CryptoPaperRuntime", () => {
   });
 
   it("keeps matching child provenance in the portfolio lane and marks drift partial", async () => {
-    const { result, runtime } = await runProvenanceSimulation({ lane: "kronos_base" });
+    const { result, runtime } = await runProvenanceSimulation({ lane: "chronos2" });
     const firstSnapshot = (result.result as {
       snapshot: CryptoPaperRuntimeSnapshot;
     }).snapshot;
     const secondSnapshot = structuredClone(firstSnapshot);
     secondSnapshot.runId = "crypto-run-1:2:ETHUSDT";
     const request: SimulationStartRequest = {
-      ...simulationRequest(["kronos_base"]),
+      ...simulationRequest(["chronos2"]),
       selection: { mode: "auto", criterion: "volatility", symbolCount: 2 },
     };
     const aggregate = (
@@ -1338,12 +1507,12 @@ describe("CryptoPaperRuntime", () => {
       (matching.modelComparison as UnknownRecord).lanes as UnknownRecord[]
     )[0]!;
     expect(matchingLane).toMatchObject({
-      id: "kronos_base",
+      id: "chronos2",
       status: "healthy",
       provenanceConsistent: true,
       provenance: {
-        modelId: "NeoQuasar/Kronos-base",
-        modelRevision: kronosModelRevision,
+        modelId: "amazon/chronos-2",
+        modelRevision: chronos2ModelRevision,
         precision: "fp32",
       },
     });
@@ -1360,16 +1529,16 @@ describe("CryptoPaperRuntime", () => {
     );
     expect(((drifted.modelComparison as UnknownRecord).lanes as UnknownRecord[])[0])
       .toMatchObject({
-        id: "kronos_base",
+        id: "chronos2",
         status: "partial",
         provenanceConsistent: false,
         unavailableReason: "portfolio_model_provenance_inconsistent",
       });
   });
 
-  it("publishes strict realtime 5/15 minute price paths for the candle timeline", async () => {
+  it("publishes strict full-horizon price paths for the v9 candle timeline", async () => {
     const { result } = await runProvenanceSimulation({
-      lane: "kronos_base",
+      lane: "chronos2",
       transform: (raw) => responseWithDisplayPath(raw),
     });
     const snapshot = (result.result as {
@@ -1379,14 +1548,14 @@ describe("CryptoPaperRuntime", () => {
     const points = forecast.points as UnknownRecord[];
 
     expect(forecast).toMatchObject({
-      lane: "kronos_base",
+      lane: "chronos2",
       signalSymbol: "BTCUSDT",
       status: "available",
-      modelId: "NeoQuasar/Kronos-base",
+      modelId: "amazon/chronos-2",
     });
-    expect(points.map((point) => point.horizonMinutes)).toEqual([5, 15]);
+    expect(points.map((point) => point.horizonMinutes)).toEqual(SCALPING_AI_HORIZONS);
     expect(points.map((point) => Date.parse(point.targetTimestamp as string))).toEqual(
-      SCALPING_AI_REALTIME_HORIZONS.map((horizon) => (
+      SCALPING_AI_HORIZONS.map((horizon) => (
         Date.parse(forecast.origin as string) + horizon * 60_000
       )),
     );
@@ -1398,8 +1567,8 @@ describe("CryptoPaperRuntime", () => {
       upProbability: 0.64,
       predictedMedianReturn: 0,
       model: {
-        modelId: "NeoQuasar/Kronos-base",
-        modelRevision: kronosModelRevision,
+        modelId: "amazon/chronos-2",
+        modelRevision: chronos2ModelRevision,
         device: "cuda",
       },
     });
@@ -1411,7 +1580,37 @@ describe("CryptoPaperRuntime", () => {
       maximumLeverage: 15,
       liquidationBufferMultiple: 2,
     });
-    expect(snapshot.kronosForecasts).toEqual(snapshot.modelForecasts);
+    expect(snapshot).not.toHaveProperty("chronos2Forecasts");
+  });
+
+  it("rejects the pre-price-path forecast shape instead of hiding it as unavailable", async () => {
+    const { result } = await runProvenanceSimulation({
+      lane: "chronos2",
+      transform: (raw) => {
+        const output = structuredClone(raw);
+        for (const series of output.series) {
+          for (const horizon of series.horizons as UnknownRecord[]) {
+            delete horizon.target_timestamp;
+            delete horizon.price_quantiles;
+          }
+        }
+        return output;
+      },
+    });
+    expect((
+      artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+    )[0]).toMatchObject({
+      attempts: 1,
+      successes: 0,
+      errors: ["model_price_quantiles_invalid"],
+    });
+    expect((result.result as { snapshot: CryptoPaperRuntimeSnapshot }).snapshot.modelForecasts)
+      .toEqual([expect.objectContaining({
+        lane: "chronos2",
+        status: "unavailable",
+        unavailableReason: "model_price_quantiles_invalid",
+        points: [],
+      })]);
   });
 
   it("fails forecast visibility closed after later failures, circuit-open origins, or max horizon", () => {
@@ -1455,7 +1654,7 @@ describe("CryptoPaperRuntime", () => {
         invocation += 1;
         if (invocation > 1) throw new Error("model_call_failed");
         return responseWithDisplayPath(response(
-          "kronos_base",
+          "chronos2",
           request,
           Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
           flatReturns,
@@ -1476,10 +1675,10 @@ describe("CryptoPaperRuntime", () => {
         event: nextFinalKline(START + 60_000, START + 120_100),
       },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -1502,7 +1701,7 @@ describe("CryptoPaperRuntime", () => {
     expect(client.request).toHaveBeenCalledTimes(2);
     expect(terminal.modelForecasts).toEqual([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         status: "unavailable",
         points: [],
         unavailableReason: "model_forecast_stale",
@@ -1534,7 +1733,7 @@ describe("CryptoPaperRuntime", () => {
 
   it("fails a display path closed when a model target is not the requested timestamp", async () => {
     const { result } = await runProvenanceSimulation({
-      lane: "kronos_base",
+      lane: "chronos2",
       transform: (raw) => responseWithDisplayPath(raw, {
         shiftedTargetHorizon: 15,
       }),
@@ -1545,7 +1744,7 @@ describe("CryptoPaperRuntime", () => {
 
     expect(snapshot.modelForecasts).toEqual([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         status: "unavailable",
         points: [],
         unavailableReason: "model_price_quantiles_invalid",
@@ -1555,7 +1754,7 @@ describe("CryptoPaperRuntime", () => {
 
   it("fails closed when explicit up/down/flat probabilities do not sum to one", async () => {
     const { result } = await runProvenanceSimulation({
-      lane: "kronos_base",
+      lane: "chronos2",
       transform: (raw) => {
         const output = structuredClone(raw);
         const horizon = output.series[0]!.horizons[0] as UnknownRecord;
@@ -1574,7 +1773,7 @@ describe("CryptoPaperRuntime", () => {
 
     expect(snapshot.modelForecasts).toEqual([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         status: "unavailable",
         points: [],
         unavailableReason: "model_direction_probabilities_invalid",
@@ -1749,6 +1948,27 @@ describe("CryptoPaperRuntime", () => {
   });
 
   it.each([
+    ["peak_vram_mb", 4_000],
+    ["peakVramBytes", 4_000 * 1024 * 1024],
+    ["peakVramMeasurement", "cuda_allocated_or_reserved"],
+  ] as const)(
+    "rejects the legacy VRAM telemetry field %s",
+    async (field, value) => {
+      const { result } = await runProvenanceSimulation({
+        lane: "fincast",
+        modelOverrides: () => ({ [field]: value }),
+      });
+      expect((
+        artifact(result, "simulation-provenance").modelLanes as UnknownRecord[]
+      )[0]).toMatchObject({
+        attempts: 1,
+        successes: 0,
+        errors: ["model_peak_vram_invalid"],
+      });
+    },
+  );
+
+  it.each([
     ["validated precision profile", {
       dtype: "float32",
       precision_validation: "fallback_fp32",
@@ -1827,10 +2047,10 @@ describe("CryptoPaperRuntime", () => {
     ["tokenizer_id", "/tmp/private-tokenizer/id"],
     ["tokenizer_revision", "/tmp/private-tokenizer/revision"],
   ] as const)(
-    "requires the pinned Kronos %s and bounds the persisted error",
+    "requires the pinned Chronos2 %s and bounds the persisted error",
     async (field, unsafeValue) => {
       const { result } = await runProvenanceSimulation({
-        lane: "kronos_base",
+        lane: "chronos2",
         modelOverrides: () => ({ [field]: unsafeValue }),
       });
       const serialized = JSON.stringify(result.artifacts);
@@ -2007,7 +2227,7 @@ describe("CryptoPaperRuntime", () => {
   it("lets only a final kline trigger inference and fills on the first strictly later eligible event", async () => {
     const clock = new ScheduledClock();
     const observed: AiForecastRequest[] = [];
-    const client = laneClient("kronos_base", START + 150, longReturns, observed);
+    const client = laneClient("chronos2", START + 150, longReturns, observed);
     const streams = new ScheduledStreams(clock, [
       ...riskPrelude(),
       { at: START + 50, event: finalKline(START + 50, false) },
@@ -2016,10 +2236,10 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 200, event: aggTrade(START + 200) },
     ]);
     const snapshots: unknown[] = [];
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -2044,7 +2264,7 @@ describe("CryptoPaperRuntime", () => {
     )).toBe(true);
     const trades = artifact(result, "simulation-trades");
     const lanes = trades.lanes as UnknownRecord;
-    const ledger = (lanes.kronos_base as UnknownRecord).ledger as UnknownRecord;
+    const ledger = (lanes.chronos2 as UnknownRecord).ledger as UnknownRecord;
     const fills = ledger.fills as Array<UnknownRecord>;
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({
@@ -2129,7 +2349,7 @@ describe("CryptoPaperRuntime", () => {
     const riskEvents = Array.from({ length: 15 }, (_, index) => (
       riskPrelude(START + 100 + index * 4_000, 100 + index / 100)
     )).flat();
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams: new ScheduledStreams(clock, [
         { at: START + 50, event: finalKline(START + 50, true) },
@@ -2149,7 +2369,6 @@ describe("CryptoPaperRuntime", () => {
     const result = await runtime.run({
       request: {
         ...simulationRequest(["fincast"]),
-        sourceContractVersion: "ai-paper-simulation/v8",
         simulationCase: "high_vol_crypto",
       },
       snapshot: scannerSnapshot,
@@ -2249,15 +2468,15 @@ describe("CryptoPaperRuntime", () => {
       rustBars = input.bars;
       return rustTechnicalAnalysis(input.bars);
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: { klines },
       streams: new ScheduledStreams(clock, [
         ...riskPrelude(),
         { at: START + 100, event: finalKline(START + 100, true) },
       ]),
       laneClients: {
-        kronos_base: laneClient(
-          "kronos_base",
+        chronos2: laneClient(
+          "chronos2",
           START + 150,
           longReturns,
           observed,
@@ -2316,7 +2535,7 @@ describe("CryptoPaperRuntime", () => {
       expect(input.bars.at(-1)!.closeTime).toBeLessThanOrEqual(START + 14_999);
       return rustTechnicalAnalysis(input.bars);
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: {
         ...rest(),
         aggregateTrades: vi.fn().mockResolvedValue(historicalTrades),
@@ -2343,10 +2562,10 @@ describe("CryptoPaperRuntime", () => {
     expect(observed).toHaveLength(1);
     expect(analyze).toHaveBeenCalledTimes(1);
     expect(observed[0]).toMatchObject({
-      forecast_profile: "realtime_5_15",
-      horizons_minutes: [5, 15],
+      forecast_profile: "full",
+      horizons_minutes: SCALPING_AI_HORIZONS,
     });
-    expect(observed[0]!.series[0]!.future_timestamps).toHaveLength(15);
+    expect(observed[0]!.series[0]!.future_timestamps).toHaveLength(60);
     const sentBars = observed[0]!.series[0]!.bars;
     expect(sentBars).toHaveLength(64);
     expect(sentBars.slice(1).every((bar, index) => (
@@ -2447,7 +2666,7 @@ describe("CryptoPaperRuntime", () => {
         if (fails) throw new Error("bounded cached Rust failure");
         return rustTechnicalAnalysis(input.bars);
       });
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: {
           ...rest(),
           aggregateTrades: vi.fn().mockResolvedValue(historicalTrades),
@@ -2488,9 +2707,9 @@ describe("CryptoPaperRuntime", () => {
     },
   );
 
-  it("computes one exact-origin Rust snapshot and shares it across Kronos and FinCast lanes", async () => {
+  it("computes one exact-origin Rust snapshot and shares it across Chronos2 and FinCast lanes", async () => {
     const clock = new ScheduledClock();
-    const kronosRequests: AiForecastRequest[] = [];
+    const chronos2Requests: AiForecastRequest[] = [];
     const fincastRequests: AiForecastRequest[] = [];
     const analyze = vi.fn(async (input: {
       bars: readonly BinanceKline[];
@@ -2501,15 +2720,15 @@ describe("CryptoPaperRuntime", () => {
       ...riskPrelude(START + 60_010),
       { at: START + 60_200, event: aggTrade(START + 60_200) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient(
-          "kronos_base",
+        chronos2: laneClient(
+          "chronos2",
           START + 150,
           longReturns,
-          kronosRequests,
+          chronos2Requests,
           withCompleteDistributionEvidence,
         ),
         fincast: laneClient(
@@ -2527,7 +2746,7 @@ describe("CryptoPaperRuntime", () => {
     });
     const result = await runtime.run({
       request: {
-        ...simulationRequest(["kronos_base", "fincast"]),
+        ...simulationRequest(["chronos2", "fincast"]),
         durationMinutes: 2,
       },
       snapshot: scannerSnapshot,
@@ -2536,21 +2755,21 @@ describe("CryptoPaperRuntime", () => {
     });
 
     expect(analyze).toHaveBeenCalledTimes(1);
-    expect(kronosRequests).toHaveLength(1);
+    expect(chronos2Requests).toHaveLength(1);
     expect(fincastRequests).toHaveLength(1);
-    expect(kronosRequests[0]!.series[0]!.target_stop).toEqual({
+    expect(chronos2Requests[0]!.series[0]!.target_stop).toEqual({
       side: "long",
       stop_price: 99,
       target_price: 102,
     });
-    expect(fincastRequests[0]).toEqual(kronosRequests[0]);
+    expect(fincastRequests[0]).toEqual(chronos2Requests[0]);
     const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
     const laneDecisions = decisions.filter((decision) => (
-      decision.lane === "kronos_base" || decision.lane === "fincast"
+      decision.lane === "chronos2" || decision.lane === "fincast"
     ));
     expect(laneDecisions).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         fusionPolicyVersion: "forecast-technical-fusion/v1",
         technicalOriginAt: new Date(START).toISOString(),
         technicalEngineVersion: "scalping-analysis/1.4.0",
@@ -2605,7 +2824,7 @@ describe("CryptoPaperRuntime", () => {
       .map((decision) => JSON.stringify(decision.technicalScannerEvidence));
     expect(new Set(scannerEvidenceByLane).size).toBe(1);
     const inputDigests = laneDecisions
-      .filter((decision) => decision.requestDigest)
+      .filter((decision) => decision.requestDigest && decision.fusionPolicyVersion)
       .map((decision) => decision.requestDigest);
     expect(new Set(inputDigests).size).toBe(1);
   });
@@ -2614,7 +2833,7 @@ describe("CryptoPaperRuntime", () => {
     const clock = new ScheduledClock();
     const observed: AiForecastRequest[] = [];
     const analyze = vi.fn().mockRejectedValue(new Error("bounded test failure"));
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams: new ScheduledStreams(clock, [
         ...riskPrelude(),
@@ -2622,7 +2841,7 @@ describe("CryptoPaperRuntime", () => {
         { at: START + 200, event: aggTrade(START + 200) },
       ]),
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, observed),
+        chronos2: laneClient("chronos2", START + 150, longReturns, observed),
       },
       technicalAnalyzer: { analyze },
       instrumentRules: rules,
@@ -2638,15 +2857,15 @@ describe("CryptoPaperRuntime", () => {
     expect(analyze).toHaveBeenCalledTimes(1);
     expect(observed[0]!.series[0]!.target_stop).toBeNull();
     const trades = artifact(result, "simulation-trades");
-    const lane = (trades.lanes as UnknownRecord).kronos_base as UnknownRecord;
+    const lane = (trades.lanes as UnknownRecord).chronos2 as UnknownRecord;
     expect(((lane.ledger as UnknownRecord).fills as unknown[])).toEqual([]);
     expect(artifact(result, "simulation-decisions").decisions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          lane: "kronos_base",
+          lane: "chronos2",
           action: "none",
           status: "blocked",
-          reason: "technical_quality_unavailable",
+          reason: "RUST_EVIDENCE_UNAVAILABLE",
         }),
       ]),
     );
@@ -2690,16 +2909,16 @@ describe("CryptoPaperRuntime", () => {
       const request = observed[0];
       if (!request) throw new Error("worker request was not observed before resolution");
       worker.resolve(response(
-        "kronos_base",
+        "chronos2",
         request,
         START + 32_000,
         longReturns,
       ));
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -2730,7 +2949,7 @@ describe("CryptoPaperRuntime", () => {
     ))).toBe(true);
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({
@@ -2773,7 +2992,7 @@ describe("CryptoPaperRuntime", () => {
         const result = invocation === 0
           ? firstWorker.promise
           : Promise.resolve(response(
-            "kronos_base",
+            "chronos2",
             request,
             Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
             longReturns,
@@ -2802,16 +3021,16 @@ describe("CryptoPaperRuntime", () => {
       const request = requests[0];
       if (!request) throw new Error("first worker request was not observed");
       firstWorker.resolve(response(
-        "kronos_base",
+        "chronos2",
         request,
         START + 124_000,
         longReturns,
       ));
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -2836,7 +3055,7 @@ describe("CryptoPaperRuntime", () => {
       inFlight: false,
     });
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[0]).toMatchObject({
       action: "open",
@@ -2872,16 +3091,16 @@ describe("CryptoPaperRuntime", () => {
     ]);
     clock.schedule(START + 120_200, () => {
       worker.resolve(response(
-        "kronos_base",
+        "chronos2",
         workerRequest!,
         START + 120_200,
         longReturns,
       ));
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -2932,17 +3151,17 @@ describe("CryptoPaperRuntime", () => {
     ]);
     clock.schedule(START + 360_200, () => {
       worker.resolve(response(
-        "kronos_base",
+        "chronos2",
         workerRequest!,
         START + 360_200,
         longReturns,
       ));
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: {
+        chronos2: {
           request: vi.fn((request) => {
             workerRequest = structuredClone(request);
             return worker.promise;
@@ -2963,9 +3182,9 @@ describe("CryptoPaperRuntime", () => {
     const comparison = artifact(result, "simulation-comparison");
     const lanes = comparison.lanes as Array<UnknownRecord>;
     const metrics = lanes[0]!.metrics as UnknownRecord;
-    // Origin=100, the exact five-minute target closes at 105, and q50=2%.
+    // Origin=100, the exact five-minute target closes at 105, and q50=1.5%.
     // The later 120 close must not be substituted after the worker returns.
-    expect(metrics.medianReturnMae as number).toBeCloseTo(0.03, 10);
+    expect(metrics.medianReturnMae as number).toBeCloseTo(0.035, 10);
   });
 
   it("never looks back to a kline open that preceded model completion", async () => {
@@ -2981,11 +3200,11 @@ describe("CryptoPaperRuntime", () => {
       },
       { at: START + 60_200, event: aggTrade(START + 60_200, 102) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, observed),
+        chronos2: laneClient("chronos2", START + 150, longReturns, observed),
       },
       instrumentRules: rules,
       clock,
@@ -3000,7 +3219,7 @@ describe("CryptoPaperRuntime", () => {
     });
     const trades = artifact(result, "simulation-trades");
     const lanes = trades.lanes as UnknownRecord;
-    const ledger = (lanes.kronos_base as UnknownRecord).ledger as UnknownRecord;
+    const ledger = (lanes.chronos2 as UnknownRecord).ledger as UnknownRecord;
     const fills = ledger.fills as Array<UnknownRecord>;
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({
@@ -3020,11 +3239,11 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 190, event: markPrice(START + 190, 400) },
       { at: START + 200, event: aggTrade(START + 200, 400) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3038,7 +3257,7 @@ describe("CryptoPaperRuntime", () => {
     });
     const trades = artifact(result, "simulation-trades");
     const lanes = trades.lanes as UnknownRecord;
-    const ledger = (lanes.kronos_base as UnknownRecord).ledger as UnknownRecord;
+    const ledger = (lanes.chronos2 as UnknownRecord).ledger as UnknownRecord;
     const equity = ledger.equity as number;
     const grossExposure = ledger.grossExposure as number;
     const totalIsolatedMargin = ledger.totalIsolatedMargin as number;
@@ -3050,9 +3269,9 @@ describe("CryptoPaperRuntime", () => {
     expect((fills[0]!.quantity as number) * 400).toBeLessThan(15_000);
   });
 
-  it("keeps long and short lanes independent on the same canonical request and fill barrier", async () => {
+  it("routes comparison lanes through the same canonical primary decision and fill barrier", async () => {
     const clock = new ScheduledClock();
-    const kronosRequests: AiForecastRequest[] = [];
+    const chronos2Requests: AiForecastRequest[] = [];
     const fincastRequests: AiForecastRequest[] = [];
     const streams = new ScheduledStreams(clock, [
       ...riskPrelude(),
@@ -3072,15 +3291,15 @@ describe("CryptoPaperRuntime", () => {
         },
       },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient(
-          "kronos_base",
+        chronos2: laneClient(
+          "chronos2",
           START + 130,
           longReturns,
-          kronosRequests,
+          chronos2Requests,
         ),
         fincast: laneClient("fincast", START + 160, shortReturns, fincastRequests),
       },
@@ -3089,45 +3308,32 @@ describe("CryptoPaperRuntime", () => {
       contextBars: 64,
     });
     const result = await runtime.run({
-      request: simulationRequest(["kronos_base", "fincast"]),
+      request: simulationRequest(["chronos2", "fincast"]),
       snapshot: scannerSnapshot,
       selected: candidate,
       context: context().value,
     });
     expect((result.result as UnknownRecord).snapshot).toMatchObject({
-      executionLane: "fincast",
+      executionLane: "chronos2",
     });
-    expect(kronosRequests).toEqual(fincastRequests);
+    expect(chronos2Requests).toEqual(fincastRequests);
 
     const trades = artifact(result, "simulation-trades");
     const lanes = trades.lanes as UnknownRecord;
-    const kronosFills = ((lanes.kronos_base as UnknownRecord).ledger as UnknownRecord)
+    const chronos2Fills = ((lanes.chronos2 as UnknownRecord).ledger as UnknownRecord)
       .fills as Array<UnknownRecord>;
     const fincastFills = ((lanes.fincast as UnknownRecord).ledger as UnknownRecord)
       .fills as Array<UnknownRecord>;
-    expect(kronosFills).toHaveLength(2);
-    expect(fincastFills).toHaveLength(2);
-    expect(kronosFills[0]).toMatchObject({
+    expect(chronos2Fills).toHaveLength(2);
+    expect(fincastFills).toEqual([]);
+    expect(chronos2Fills[0]).toMatchObject({
       side: "long",
       decisionAt: START + 160,
       executedAt: START + 200,
     });
-    expect(fincastFills[0]).toMatchObject({
-      side: "short",
-      decisionAt: START + 160,
-      executedAt: START + 200,
-    });
-    expect(kronosFills[1]).toMatchObject({
+    expect(chronos2Fills[1]).toMatchObject({
       action: "reduce",
       side: "long",
-      reduceOnly: true,
-      reason: "terminal_settlement",
-      decisionAt: START + 60_000,
-      executedAt: START + 60_002,
-    });
-    expect(fincastFills[1]).toMatchObject({
-      action: "reduce",
-      side: "short",
       reduceOnly: true,
       reason: "terminal_settlement",
       decisionAt: START + 60_000,
@@ -3166,19 +3372,18 @@ describe("CryptoPaperRuntime", () => {
     expect(settlement.commonFillBarrierDigest).toEqual(expect.any(String));
     expect(settlement.lanes).toEqual([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         status: "settled",
         settledBy: "terminal_reduce",
         remainingQuantity: 0,
         fillEventKind: "agg_trade",
       }),
-      expect.objectContaining({
+      {
         lane: "fincast",
-        status: "settled",
-        settledBy: "terminal_reduce",
-        remainingQuantity: 0,
-        fillEventKind: "agg_trade",
-      }),
+        required: false,
+        status: "not_required",
+        decisionSource: "not_required",
+      },
     ]);
   });
 
@@ -3196,11 +3401,11 @@ describe("CryptoPaperRuntime", () => {
         },
       },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3220,7 +3425,7 @@ describe("CryptoPaperRuntime", () => {
       context: context().value,
     });
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     const fills = ledger.fills as UnknownRecord[];
     const opened = fills[0]!;
@@ -3251,7 +3456,7 @@ describe("CryptoPaperRuntime", () => {
       + (closed.realizedPnl as number)
       + (ledger.funding as number)
       - (ledger.fees as number),
-      12,
+      11,
     );
     expect(closingRow).toMatchObject({
       exitTax: expect.any(Number),
@@ -3299,11 +3504,11 @@ describe("CryptoPaperRuntime", () => {
         return { close };
       }),
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3318,7 +3523,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     expect(ledger.positions).toEqual([]);
     expect(ledger.fills).toEqual([
@@ -3367,11 +3572,11 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 70_000, event: delayedPreExpiryTrade },
       { at: START + 120_100, event: settlementBar },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3385,7 +3590,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     expect(ledger.positions).toEqual([]);
     expect(ledger.fills).toEqual([
@@ -3425,7 +3630,7 @@ describe("CryptoPaperRuntime", () => {
     });
     expect(settlement.lanes).toEqual([
       expect.objectContaining({
-        lane: "kronos_base",
+        lane: "chronos2",
         status: "settled",
         fillEventKind: "final_kline_open",
         remainingQuantity: 0,
@@ -3440,11 +3645,11 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 100, event: finalKline(START + 100, true) },
       { at: START + 200, event: aggTrade(START + 200) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3458,7 +3663,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     expect((ledger.fills as unknown[])).toHaveLength(1);
     expect((ledger.positions as unknown[])).toHaveLength(1);
@@ -3471,7 +3676,7 @@ describe("CryptoPaperRuntime", () => {
       status: "unsettled_fail_closed",
       lanes: [
         expect.objectContaining({
-          lane: "kronos_base",
+          lane: "chronos2",
           status: "unsettled_fail_closed",
           unavailableReason: "terminal_settlement_unavailable",
           remainingQuantity: expect.any(Number),
@@ -3498,7 +3703,7 @@ describe("CryptoPaperRuntime", () => {
       sameFillBarrier: false,
       lanes: [
         expect.objectContaining({
-          id: "kronos_base",
+          id: "chronos2",
           status: "partial",
           unavailableReason: "terminal_settlement_unavailable",
         }),
@@ -3527,11 +3732,11 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 200, event: aggTrade(START + 200) },
       { at: START + 60_010, disconnect: new Error("settlement socket closed") },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3581,11 +3786,11 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 59_900, event: markPrice(START + 59_900, 95) },
       { at: START + 60_100, event: markPrice(START + 60_100, 0.1) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -3600,7 +3805,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     const fills = ledger.fills as Array<UnknownRecord>;
     expect(fills).toHaveLength(2);
@@ -3614,7 +3819,7 @@ describe("CryptoPaperRuntime", () => {
       expect.arrayContaining([
         expect.objectContaining({
           action: "reduce",
-          reason: "daily_loss_gate",
+          reason: "protection",
           decisionAt: new Date(START + 59_900).toISOString(),
           status: "skipped",
           terminalSettlementOutcome: "superseded_by_liquidation",
@@ -3627,7 +3832,7 @@ describe("CryptoPaperRuntime", () => {
       status: "settled",
       lanes: [
         expect.objectContaining({
-          lane: "kronos_base",
+          lane: "chronos2",
           decisionSource: "existing_risk_reduce",
           status: "settled",
           settledBy: "liquidation",
@@ -3649,7 +3854,7 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 100, event: finalKline(START + 100, true) },
       { at: START + 200, event: aggTrade(START + 200) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {},
@@ -3680,7 +3885,7 @@ describe("CryptoPaperRuntime", () => {
     });
   });
 
-  it("blocks new entries at a 3% UTC loss and closes the position reduce-only", async () => {
+  it("closes protectively before the 3% UTC loss limit can be reached", async () => {
     const clock = new ScheduledClock();
     const observed: AiForecastRequest[] = [];
     const wideSpreadCandidate = { ...candidate, spreadBps: 9 };
@@ -3691,11 +3896,14 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 300, event: markPrice(START + 300, 95) },
       { at: START + 400, event: aggTrade(START + 400, 94) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, observed),
+        chronos2: laneClient("chronos2", START + 150, longReturns, observed),
+      },
+      technicalAnalyzer: {
+        analyze: async ({ bars }) => lowStopRustTechnicalAnalysis(bars),
       },
       instrumentRules: rules,
       clock,
@@ -3709,23 +3917,22 @@ describe("CryptoPaperRuntime", () => {
     });
     const trades = artifact(result, "simulation-trades");
     const lanes = trades.lanes as UnknownRecord;
-    const ledger = (lanes.kronos_base as UnknownRecord).ledger as UnknownRecord;
+    const ledger = (lanes.chronos2 as UnknownRecord).ledger as UnknownRecord;
     const fills = ledger.fills as Array<UnknownRecord>;
     expect(fills).toHaveLength(2);
     expect(fills[1]).toMatchObject({
       action: "reduce",
       reduceOnly: true,
-      reason: "daily_loss_gate",
+      reason: "protection",
       executedAt: START + 400,
     });
     const terminal = (result.result as UnknownRecord).snapshot as UnknownRecord;
     expect(terminal.futuresRisk).toMatchObject({
-      newEntriesBlocked: true,
       dailyLossLimitRatio: 0.03,
     });
   });
 
-  it("closes a child sleeve reduce-only when its shared portfolio gate crosses", async () => {
+  it("protects a child sleeve before its shared portfolio gate crosses", async () => {
     const clock = new ScheduledClock();
     const wideSpreadCandidate = { ...candidate, spreadBps: 9 };
     const streams = new ScheduledStreams(clock, [
@@ -3735,18 +3942,21 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 300, event: markPrice(START + 300, 95) },
       { at: START + 400, event: aggTrade(START + 400, 94) },
     ]);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
+      },
+      technicalAnalyzer: {
+        analyze: async ({ bars }) => lowStopRustTechnicalAnalysis(bars),
       },
       instrumentRules: rules,
       clock,
       contextBars: 64,
     });
     const sharedGate = new PortfolioDailyLossGate({
-      lanes: ["kronos_base"],
+      lanes: ["chronos2"],
       symbols: ["BTCUSDT", "ETHUSDT"],
       perSymbolInitialCash: 5_000,
       dailyLossLimitRate: 0.01,
@@ -3785,14 +3995,14 @@ describe("CryptoPaperRuntime", () => {
       portfolioDailyLossGate: sharedGate,
     });
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     const fills = ledger.fills as Array<UnknownRecord>;
-    expect(sharedGate.state("kronos_base").blocked).toBe(true);
+    expect(sharedGate.state("chronos2").blocked).toBe(false);
     expect(fills[1]).toMatchObject({
       action: "reduce",
       reduceOnly: true,
-      reason: "daily_loss_gate",
+      reason: "protection",
       executedAt: START + 400,
     });
     expect(ledger.positions).toEqual([]);
@@ -3807,7 +4017,7 @@ describe("CryptoPaperRuntime", () => {
         requests.push(structuredClone(request));
         if (requests.length === 1) {
           return Promise.resolve(response(
-            "kronos_base",
+            "chronos2",
             request,
             START + 150,
             longReturns,
@@ -3834,16 +4044,16 @@ describe("CryptoPaperRuntime", () => {
       const request = requests[1];
       if (!request) throw new Error("second worker request was not observed");
       secondWorker.resolve(response(
-        "kronos_base",
+        "chronos2",
         request,
         START + 60_400,
         longReturns,
       ));
     });
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -3856,7 +4066,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({
@@ -3899,7 +4109,7 @@ describe("CryptoPaperRuntime", () => {
         return { close };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {},
@@ -3938,7 +4148,7 @@ describe("CryptoPaperRuntime", () => {
         });
     }
     const taskContext = context();
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams: new ScheduledStreams(clock, schedule),
       laneClients: {},
@@ -3953,7 +4163,7 @@ describe("CryptoPaperRuntime", () => {
       context: taskContext.value,
     });
     const equity = artifact(result, "simulation-equity");
-    const points = (equity.lanes as UnknownRecord).kronos_base as Array<{
+    const points = (equity.lanes as UnknownRecord).chronos2 as Array<{
       timestamp: string;
       equity: number;
     }>;
@@ -3984,7 +4194,7 @@ describe("CryptoPaperRuntime", () => {
         return restBars();
       }),
     } satisfies Pick<BinanceRestMarketData, "klines">;
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: delayedRest,
       streams: new ScheduledStreams(clock, []),
       laneClients: {},
@@ -3999,24 +4209,24 @@ describe("CryptoPaperRuntime", () => {
       context: context().value,
     });
     const terminal = (result.result as UnknownRecord).snapshot as UnknownRecord;
-    expect(Date.parse(terminal.startedAt as string)).toBe(START + 30_000);
+    expect(Date.parse(terminal.startedAt as string)).toBe(START + 60_000);
     expect(
       Date.parse(terminal.expiresAt as string) - Date.parse(terminal.startedAt as string),
     ).toBe(60_000);
     expect(artifact(result, "simulation-diagnostics")).toMatchObject({
-      setupDurationMs: 30_000,
+      setupDurationMs: 60_000,
     });
   });
 
   it("blocks inference when bookTicker and markPrice are missing and exposes the reason", async () => {
     const clock = new ScheduledClock();
-    const client = laneClient("kronos_base", START + 150, longReturns, []);
-    const runtime = new CryptoPaperRuntime({
+    const client = laneClient("chronos2", START + 150, longReturns, []);
+    const runtime = testRuntime({
       rest: rest(),
       streams: new ScheduledStreams(clock, [
         { at: START + 100, event: finalKline(START + 100, true) },
       ]),
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -4057,13 +4267,13 @@ describe("CryptoPaperRuntime", () => {
           return await new Promise<never>(() => undefined);
         }),
       };
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: rest(),
         streams: new ScheduledStreams(clock, [
           ...riskPrelude(START + 59_000),
           { at: START + 59_500, event: finalKline(START + 59_500, true) },
         ]),
-        laneClients: { kronos_base: client },
+        laneClients: { chronos2: client },
         instrumentRules: rules,
         clock,
         contextBars: 64,
@@ -4110,7 +4320,7 @@ describe("CryptoPaperRuntime", () => {
     };
     const snapshots: CryptoPaperRuntimeSnapshot[] = [];
     const close = vi.fn().mockResolvedValue(undefined);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams: {
         subscribe: async (_symbols, onEvent) => {
@@ -4123,7 +4333,7 @@ describe("CryptoPaperRuntime", () => {
           return { close };
         },
       },
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -4145,7 +4355,7 @@ describe("CryptoPaperRuntime", () => {
     expect(close).toHaveBeenCalledTimes(1);
     const snapshotsAfterReturn = snapshots.length;
     worker.resolve(response(
-      "kronos_base",
+      "chronos2",
       workerRequest!,
       START + 200,
       longReturns,
@@ -4171,11 +4381,14 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, shortReturns, []),
+        chronos2: laneClient("chronos2", START + 150, shortReturns, []),
+      },
+      technicalAnalyzer: {
+        analyze: async ({ bars }) => shortRustTechnicalAnalysis(bars),
       },
       instrumentRules: rules,
       clock,
@@ -4197,7 +4410,7 @@ describe("CryptoPaperRuntime", () => {
       context: context().value,
     });
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
     expect(fills[1]).toMatchObject({ action: "reduce", reason: "liquidation" });
@@ -4223,11 +4436,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4250,7 +4463,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({
@@ -4282,11 +4495,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4315,7 +4528,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 400 });
     const terminal = (result.result as UnknownRecord).snapshot as CryptoPaperRuntimeSnapshot;
@@ -4344,11 +4557,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4372,7 +4585,7 @@ describe("CryptoPaperRuntime", () => {
       context: context().value,
     });
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
     expect(fills[1]).toMatchObject({ action: "reduce", reason: "protection" });
@@ -4421,16 +4634,16 @@ describe("CryptoPaperRuntime", () => {
     };
     const client: CryptoAiLaneClient = {
       request: vi.fn(async (request: AiForecastRequest) => response(
-        "kronos_base",
+        "chronos2",
         request,
         Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
         longReturns,
       )),
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: marketRest,
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -4441,9 +4654,9 @@ describe("CryptoPaperRuntime", () => {
       selected: candidate,
       context: context().value,
     });
-    expect(marketRest.klines).toHaveBeenCalledTimes(2);
+    expect(marketRest.klines).toHaveBeenCalledTimes(3);
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 60_200 });
@@ -4490,11 +4703,11 @@ describe("CryptoPaperRuntime", () => {
       };
       const fundingSpy = vi.spyOn(FuturesPaperLedger.prototype, "applyFunding");
       try {
-        const runtime = new CryptoPaperRuntime({
+        const runtime = testRuntime({
           rest: marketRest,
           streams,
           laneClients: {
-            kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+            chronos2: laneClient("chronos2", START + 150, longReturns, []),
           },
           instrumentRules: rules,
           clock,
@@ -4548,7 +4761,7 @@ describe("CryptoPaperRuntime", () => {
           context: context().value,
         });
 
-        expect(marketRest.klines).toHaveBeenCalledTimes(2);
+        expect(marketRest.klines).toHaveBeenCalledTimes(3);
         expect(fundingSpy).toHaveBeenCalledTimes(1);
         expect(fundingSpy).toHaveBeenCalledWith({
           eventId: `funding:BTCUSDT:${fundingEventAt}`,
@@ -4557,7 +4770,7 @@ describe("CryptoPaperRuntime", () => {
           eventAt: fundingEventAt,
         });
         const trades = artifact(result, "simulation-trades");
-        const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+        const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
           .ledger as UnknownRecord);
         const fills = ledger.fills as UnknownRecord[];
         expect(fills).toHaveLength(1);
@@ -4596,11 +4809,11 @@ describe("CryptoPaperRuntime", () => {
           return { close: vi.fn().mockResolvedValue(undefined) };
         },
       };
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: rest(),
         streams,
         laneClients: {
-          kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+          chronos2: laneClient("chronos2", START + 150, longReturns, []),
         },
         instrumentRules: rules,
         clock,
@@ -4633,7 +4846,7 @@ describe("CryptoPaperRuntime", () => {
         context: context().value,
       });
       const trades = artifact(result, "simulation-trades");
-      const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
         .ledger as UnknownRecord).fills as UnknownRecord[];
       expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
       expect(fills[1]).toMatchObject({ action: "reduce", reason: "liquidation" });
@@ -4661,11 +4874,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4695,7 +4908,7 @@ describe("CryptoPaperRuntime", () => {
       context: context().value,
     });
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[1]).toMatchObject({
       action: "reduce",
@@ -4724,11 +4937,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4757,7 +4970,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills[0]).toMatchObject({
       action: "open",
@@ -4795,11 +5008,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4826,7 +5039,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 200 });
@@ -4857,11 +5070,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -4888,7 +5101,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({
@@ -4944,16 +5157,16 @@ describe("CryptoPaperRuntime", () => {
     };
     const client: CryptoAiLaneClient = {
       request: vi.fn(async (request: AiForecastRequest) => response(
-        "kronos_base",
+        "chronos2",
         request,
         Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
         longReturns,
       )),
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -4972,7 +5185,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({
@@ -5021,16 +5234,16 @@ describe("CryptoPaperRuntime", () => {
       ]);
       const client: CryptoAiLaneClient = {
         request: vi.fn(async (request: AiForecastRequest) => response(
-          "kronos_base",
+          "chronos2",
           request,
           Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
           longReturns,
         )),
       };
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: rest(),
         streams,
-        laneClients: { kronos_base: client },
+        laneClients: { chronos2: client },
         instrumentRules: rules,
         clock,
         contextBars: 64,
@@ -5042,7 +5255,7 @@ describe("CryptoPaperRuntime", () => {
         context: context().value,
       });
       const trades = artifact(result, "simulation-trades");
-      return ((((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      return ((((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
         .ledger as UnknownRecord).fills as UnknownRecord[]);
     };
 
@@ -5062,11 +5275,11 @@ describe("CryptoPaperRuntime", () => {
   it.each([
     {
       label: "single lane",
-      lanes: ["kronos_base"] as ["kronos_base"],
+      lanes: ["chronos2"] as ["chronos2"],
     },
     {
       label: "two lanes",
-      lanes: ["kronos_base", "fincast"] as ["kronos_base", "fincast"],
+      lanes: ["chronos2", "fincast"] as ["chronos2", "fincast"],
     },
   ])(
     "replays one canonical pre-receipt funding settlement for $label",
@@ -5139,7 +5352,7 @@ describe("CryptoPaperRuntime", () => {
       }
       const fundingSpy = vi.spyOn(FuturesPaperLedger.prototype, "applyFunding");
       try {
-        const runtime = new CryptoPaperRuntime({
+        const runtime = testRuntime({
           rest: rest(),
           streams,
           laneClients,
@@ -5283,16 +5496,16 @@ describe("CryptoPaperRuntime", () => {
       };
       const client: CryptoAiLaneClient = {
         request: vi.fn(async (request: AiForecastRequest) => response(
-          "kronos_base",
+          "chronos2",
           request,
           Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
           longReturns,
         )),
       };
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: rest(),
         streams,
-        laneClients: { kronos_base: client },
+        laneClients: { chronos2: client },
         instrumentRules: rules,
         clock,
         contextBars: 64,
@@ -5311,7 +5524,7 @@ describe("CryptoPaperRuntime", () => {
       });
 
       const trades = artifact(result, "simulation-trades");
-      const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+      const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
         .ledger as UnknownRecord).fills as UnknownRecord[];
       expect(fills).toHaveLength(2);
       expect(fills[0]).toMatchObject({
@@ -5362,16 +5575,16 @@ describe("CryptoPaperRuntime", () => {
     ]);
     const client: CryptoAiLaneClient = {
       request: vi.fn(async (request: AiForecastRequest) => response(
-        "kronos_base",
+        "chronos2",
         request,
         Math.max(clock.now(), Date.parse(request.series[0]!.input_end_at)),
         longReturns,
       )),
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
-      laneClients: { kronos_base: client },
+      laneClients: { chronos2: client },
       instrumentRules: rules,
       clock,
       contextBars: 64,
@@ -5384,7 +5597,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const ledger = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const ledger = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord);
     expect(ledger.fills).toEqual([]);
     const decisions = artifact(result, "simulation-decisions").decisions as UnknownRecord[];
@@ -5413,11 +5626,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -5443,7 +5656,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({
@@ -5472,11 +5685,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -5503,7 +5716,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
@@ -5535,11 +5748,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -5573,7 +5786,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
@@ -5605,11 +5818,11 @@ describe("CryptoPaperRuntime", () => {
         return { close: vi.fn().mockResolvedValue(undefined) };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {
-        kronos_base: laneClient("kronos_base", START + 150, longReturns, []),
+        chronos2: laneClient("chronos2", START + 150, longReturns, []),
       },
       instrumentRules: rules,
       clock,
@@ -5644,7 +5857,7 @@ describe("CryptoPaperRuntime", () => {
     });
 
     const trades = artifact(result, "simulation-trades");
-    const fills = (((trades.lanes as UnknownRecord).kronos_base as UnknownRecord)
+    const fills = (((trades.lanes as UnknownRecord).chronos2 as UnknownRecord)
       .ledger as UnknownRecord).fills as UnknownRecord[];
     expect(fills).toHaveLength(2);
     expect(fills[0]).toMatchObject({ action: "open", executedAt: START + 300 });
@@ -5679,7 +5892,7 @@ describe("CryptoPaperRuntime", () => {
           }
           clock.schedule(START + 1_000, () => {
             const complete = () => worker.resolve(response(
-              "kronos_base",
+              "chronos2",
               workerRequest!,
               START + 1_000,
               longReturns,
@@ -5696,11 +5909,11 @@ describe("CryptoPaperRuntime", () => {
           return { close };
         },
       };
-      const runtime = new CryptoPaperRuntime({
+      const runtime = testRuntime({
         rest: rest(),
         streams,
         laneClients: {
-          kronos_base: {
+          chronos2: {
             request: vi.fn((request) => {
               workerRequest = structuredClone(request);
               return worker.promise;
@@ -5750,7 +5963,7 @@ describe("CryptoPaperRuntime", () => {
         return { close };
       },
     };
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {},
@@ -5777,7 +5990,7 @@ describe("CryptoPaperRuntime", () => {
       { at: START + 100, disconnect: new Error("socket closed") },
     ]);
     const snapshots: Array<{ phase: string }> = [];
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {},
@@ -5822,7 +6035,7 @@ describe("CryptoPaperRuntime", () => {
   ])("fails closed before subscribing for $label", async ({ instrumentRules }) => {
     const clock = new ScheduledClock();
     const streams = new ScheduledStreams(clock, []);
-    const runtime = new CryptoPaperRuntime({
+    const runtime = testRuntime({
       rest: rest(),
       streams,
       laneClients: {},

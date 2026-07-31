@@ -64,6 +64,24 @@ describe("AiSimulation", () => {
     expect(layout.charts.map((chart) => chart.symbol)).toEqual([primary, ...leveraged]);
   });
 
+  it("uses the v4 catalog model target instead of forecast sort order for pair charts", () => {
+    const layout = aiSimulationChartLayout({
+      market: { kind: "stock", country: "US" },
+      strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
+      decisions: [],
+      charts: ["SPY", "SPXL", "SPXS"].map((symbol) => ({
+        symbol,
+        currency: "USD",
+        bars: [],
+        indicators: [],
+        patterns: [],
+      })),
+    }, [{ signalSymbol: "SPXL" }, { signalSymbol: "SPY" }]);
+
+    expect(layout.primarySymbol).toBe("SPY");
+    expect(layout.charts.map((chart) => chart.symbol)).toEqual(["SPY", "SPXL", "SPXS"]);
+  });
+
   it("keeps crypto charts in a full-width vertical layout", () => {
     const layout = aiSimulationChartLayout({
       market: {
@@ -111,23 +129,18 @@ describe("AiSimulation", () => {
     expect(markup).not.toContain('data-simulation-history="true"');
   });
 
-  it("builds explicit v8 payloads for every top-level strategy case", () => {
-    expect(cryptoRequestForCase("btc_eth", DEFAULT_AI_SIMULATION_CRYPTO_REQUEST))
-      .toMatchObject({
-        contractVersion: "ai-paper-simulation/v8",
+  it("builds strict v9 payloads and leaves model-plan resolution to the server", () => {
+    const btcRequest = cryptoRequestForCase("btc_eth", DEFAULT_AI_SIMULATION_CRYPTO_REQUEST);
+    expect(btcRequest).toMatchObject({
+        contractVersion: "ai-paper-simulation/v9",
         simulationCase: "btc_eth",
         selection: { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
-        modelLanes: ["chronos2", "fincast"],
-        modelPlan: [
-          { symbol: "BTCUSDT", modelLane: "chronos2", role: "primary", required: true },
-          { symbol: "BTCUSDT", modelLane: "fincast", role: "veto", required: true },
-          { symbol: "ETHUSDT", modelLane: "fincast", role: "primary", required: true },
-          { symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow", required: false },
-        ],
       });
+    expect(btcRequest).not.toHaveProperty("modelLanes");
+    expect(btcRequest).not.toHaveProperty("modelPlan");
     expect(cryptoRequestForCase("high_vol_crypto", DEFAULT_AI_SIMULATION_CRYPTO_REQUEST))
       .toMatchObject({
-        contractVersion: "ai-paper-simulation/v8",
+        contractVersion: "ai-paper-simulation/v9",
         simulationCase: "high_vol_crypto",
         selection: { mode: "auto", symbolCount: 1 },
         scanner: {
@@ -136,26 +149,26 @@ describe("AiSimulation", () => {
           rescanIntervalMinutes: 30,
         },
       });
-    expect(etfRequest({
+    const pairRequest = etfRequest({
       ...DEFAULT_AI_SIMULATION_REQUEST,
       strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
-    })).toMatchObject({
-      contractVersion: "ai-paper-simulation/v8",
-      simulationCase: "us_etf_pair",
-      marketCountry: "US",
-      strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
-      modelPlan: [
-        { symbol: "*", modelLane: "chronos2", role: "primary", required: true },
-        { symbol: "*", modelLane: "fincast", role: "shadow", required: false },
-      ],
     });
+    expect(pairRequest).toMatchObject({
+      contractVersion: "ai-paper-simulation/v9",
+      simulationCase: "us_etf_pair",
+      market: { kind: "stock", country: "US" },
+      strategy: { mode: "pair", pairId: "spy-spxl-spxs", allowDegradedMode: false },
+    });
+    expect(pairRequest).not.toHaveProperty("marketCountry");
+    expect(pairRequest).not.toHaveProperty("modelLanes");
+    expect(pairRequest).not.toHaveProperty("modelPlan");
   });
 
   it("renders fail-closed evidence, tails, policy gates, costs, mapping, and scanner facts", () => {
     const snapshot: AiSimulationSnapshot = {
       phase: "running",
       simulationCase: "high_vol_crypto",
-      modelPlan: [{
+      resolvedModelPlan: [{
         symbol: "*",
         modelLane: "chronos2",
         role: "primary",
@@ -172,7 +185,7 @@ describe("AiSimulation", () => {
       charts: [],
       trades: [],
       decisions: [],
-      kronosForecasts: [],
+      modelForecasts: [],
       warnings: [],
       capabilities: {},
       modelEvidence: [{
@@ -287,7 +300,7 @@ describe("AiSimulation", () => {
       charts: [],
       trades: [],
       decisions,
-      kronosForecasts: [],
+      modelForecasts: [],
       warnings: [],
       capabilities: {},
     };
@@ -319,7 +332,7 @@ describe("AiSimulation", () => {
         executedAt: "2026-07-25T00:01:00.000Z",
       }],
       decisions: [],
-      kronosForecasts: [],
+      modelForecasts: [],
       warnings: [],
       capabilities: {},
     };
@@ -334,7 +347,7 @@ describe("AiSimulation", () => {
       <AiSimulationStrategySettings
         request={{
           ...DEFAULT_AI_SIMULATION_REQUEST,
-          marketCountry: "US",
+          market: { kind: "stock", country: "US" },
           strategy: {
             mode: "pair",
             pairId: "tsla-tsll-tslq",
@@ -350,9 +363,9 @@ describe("AiSimulation", () => {
     );
     expect(markup).toContain('data-simulation-pair-settings="true"');
     expect(markup).toContain('aria-label="미국 페어 카탈로그"');
-    expect(markup).toContain("시장은 미국으로 고정");
-    expect(markup).toContain("Kronos-base, Rust 기술 지표");
-    expect(markup).toContain("거래하지 않고 cash로 닫습니다.");
+    expect(markup).toContain("Chronos-2가 기초 ETF를 예측");
+    expect(markup).toContain("Rust 세션·유동성 gate");
+    expect(markup).toContain("Model target과 execution leg는 분리");
     expect(markup).not.toContain('type="checkbox"');
     expect(markup).not.toContain("degraded 실행 허용");
   });
@@ -365,7 +378,7 @@ describe("AiSimulation", () => {
       mode: "pair",
       pairId: "qqq-tqqq-sqqq",
     })).toMatchObject({
-      marketCountry: "US",
+      market: { kind: "stock", country: "US" },
       initialCash: 100_000,
       selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
       strategy: {
@@ -373,12 +386,11 @@ describe("AiSimulation", () => {
         pairId: "qqq-tqqq-sqqq",
         allowDegradedMode: false,
       },
-      modelLanes: ["kronos_base"],
       costs: { commissionBpsPerSide: 10, taxBpsOnExit: 0 },
     });
   });
 
-  it("renders mobile one-column and desktop three-column Kronos-base/Rust/final comparisons", () => {
+  it("renders mobile one-column and desktop three-column Chronos-2/Rust/final comparisons", () => {
     const comparison: AiSimulationStrategyComparison = {
       conditionId: "ui-condition-1",
       pairId: "tsla-tsll-tslq",
@@ -388,7 +400,7 @@ describe("AiSimulation", () => {
       incompleteCount: 0,
       lanes: [
         {
-          id: "kronos",
+          id: "chronos2",
           status: "completed",
           analyticalOnly: true,
           cumulativeReturn: 0.012,
@@ -415,9 +427,9 @@ describe("AiSimulation", () => {
     expect(markup).toContain('data-simulation-strategy-comparison="ui-condition-1"');
     expect(markup).toContain("grid-cols-1");
     expect(markup).toContain("sm:grid-cols-3");
-    expect(markup).toContain('data-simulation-comparison-lane="kronos"');
+    expect(markup).toContain('data-simulation-comparison-lane="chronos2"');
     expect(markup).toContain('data-simulation-comparison-lane="ensemble"');
-    expect(markup).toContain("Kronos-base");
+    expect(markup).toContain("Chronos-2");
     expect(markup).toContain("Rust 기술 지표");
     expect(markup).toContain("최종 전략");
     expect(markup).toContain("forward 실행 정책");
@@ -426,7 +438,7 @@ describe("AiSimulation", () => {
     expect(markup).toContain("bull 3 · bear 1 · cash 5");
     expect(markup.match(/data-simulation-comparison-analytical-only="true"/g)).toHaveLength(3);
     expect(markup).toContain("technical_confirmed");
-    expect(markup).not.toContain("Chronos");
-    expect(markup).not.toContain("Kronos-small");
+    expect(markup).not.toContain("Kronos-base");
+    expect(markup).not.toContain("NeoQuasar");
   });
 });

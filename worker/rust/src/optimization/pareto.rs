@@ -15,7 +15,7 @@ impl ParetoPoint {
     pub(super) fn from_candidate(candidate: &Value) -> Self {
         Self {
             values: [
-                as_metric(candidate, "return"),
+                as_metric(candidate, "cagr"),
                 as_metric(candidate, "volatility").map(|value| -value),
                 as_metric(candidate, "maxDrawdown").map(|value| -value.abs()),
                 as_metric(candidate, "cvar").map(|value| -value.abs()),

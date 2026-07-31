@@ -8,6 +8,7 @@ import {
   parseBenchmarkKeys,
 } from "./analysis.js";
 import { PortfolioHistoryStore, type PortfolioHistory } from "./history.js";
+import { openTestHistoryStore } from "../test-support/history-store.js";
 
 describe("portfolio analysis query", () => {
   it("기간 프리셋을 KST 달력 일수로 변환하고 첫 거래일을 넘지 않는다", () => {
@@ -64,7 +65,7 @@ describe("portfolio analysis query", () => {
   });
 
   it("전일 국내·해외 비중으로 가격과 환율의 일간수익률을 가중한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     try {
       await store.upsertInstruments([
         { symbol: "AAA", name: "국내", market: "KRX", currency: "KRW" },

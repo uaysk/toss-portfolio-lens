@@ -440,7 +440,11 @@ function evaluateCircuitBreakers(
     && (
       rust.quoteFreshnessMs === null
       || rust.quoteFreshnessMs > 120_000
-      || finiteTimestamp(rust.observedAt, "rust.observedAt") > originMs
+      // Binance finalized bars use an inclusive `:59.999` model origin while
+      // the Rust indicator contract names the same boundary as the next exact
+      // minute. Preserve causality while accepting that one-millisecond
+      // representation difference.
+      || finiteTimestamp(rust.observedAt, "rust.observedAt") > originMs + 1
     )
   ) triggers.push("DATA_STALE");
   if (

@@ -52,7 +52,6 @@ const CRITERION_LABELS: Record<AiSimulationCriterion, string> = {
 };
 
 const MODEL_LABELS: Record<AiSimulationModelLane, string> = {
-  kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
   chronos2: "Chronos-2 · Primary",
 };
@@ -412,30 +411,6 @@ function CandidateTable({
   );
 }
 
-export function toggleCryptoModelLane(
-  current: AiSimulationCryptoRequest["modelLanes"],
-  lane: AiSimulationModelLane,
-): AiSimulationCryptoRequest["modelLanes"] {
-  if (current.includes(lane) && current.length === 1) return current;
-  const toggled = current.includes(lane)
-    ? current.filter((item) => item !== lane)
-    : [...current, lane];
-  const canonical = (["chronos2", "fincast", "kronos_base"] as const)
-    .filter((item) => toggled.includes(item));
-  if (canonical.length === 3) return ["chronos2", "fincast", "kronos_base"];
-  if (
-    canonical.length === 2
-    && canonical.includes("kronos_base")
-    && canonical.includes("fincast")
-  ) {
-    return ["kronos_base", "fincast"];
-  }
-  if (canonical.length === 2) return [canonical[0], canonical[1]];
-  return canonical[0] === "fincast"
-    ? ["fincast"]
-    : canonical[0] === "chronos2" ? ["chronos2"] : ["kronos_base"];
-}
-
 export function AiSimulationCryptoSetup({
   request,
   status,
@@ -477,8 +452,7 @@ export function AiSimulationCryptoSetup({
   };
 }) {
   const paperGateOpen = status?.executionGates.paper === true;
-  const requiredLanes = request.modelPlan?.filter(({ required }) => required)
-    .map(({ modelLane }) => modelLane) ?? request.modelLanes;
+  const requiredLanes = ["chronos2", "fincast"] as const;
   const selectedWorkersAvailable = requiredLanes.every(
     (lane) => status?.workers[lane]?.available === true,
   );
@@ -505,20 +479,6 @@ export function AiSimulationCryptoSetup({
     : !selectedWorkersAvailable
       ? "선택한 모든 모델 worker가 사용 가능해야 시작할 수 있습니다."
       : undefined;
-  const toggleLane = (lane: AiSimulationModelLane) => {
-    const selected = request.modelLanes.includes(lane);
-    if (selected && request.modelLanes.length === 1) return;
-    const next = toggleCryptoModelLane(request.modelLanes, lane);
-    onRequestChange({
-      ...request,
-      modelLanes: next,
-      fincastCandleSeconds: (
-        next.length === 1 && next[0] === "fincast"
-          ? request.fincastCandleSeconds
-          : 60
-      ),
-    });
-  };
   const toggleManualSymbol = (symbol: string) => {
     if (request.selection.mode !== "manual") return;
     if (
@@ -561,20 +521,17 @@ export function AiSimulationCryptoSetup({
       <div className="mt-5 grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
         <section className="rounded-2xl bg-secondary p-4" aria-label="실행 capability">
           <div className="flex items-center gap-2"><ShieldCheck className="size-4" /><p className="text-xs font-black">실행 gate</p></div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
+          <div className="mt-3 grid gap-2">
             <CapabilityCard label="PAPER" enabled={paperGateOpen} detail="현재 허용 · 가상 원장" />
-            <CapabilityCard label="TESTNET" enabled={status?.executionGates.testnet ?? false} detail="qualification 전 잠금" />
-            <CapabilityCard label="LIVE" enabled={status?.executionGates.live ?? false} detail="명시 승인 전 잠금" />
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <p className="rounded-xl bg-card p-3 text-[9px] leading-4"><LockKeyhole className="mb-2 size-3.5" /><strong>자격 증명</strong><br /><span className="text-muted-foreground">{status?.credentialsConfigured ? "서버 설정됨" : "미설정 또는 숨김"}</span></p>
             <p className="rounded-xl bg-card p-3 text-[9px] leading-4"><Database className="mb-2 size-3.5" /><strong>signed read</strong><br /><span className="text-muted-foreground">{status?.signedReadSucceeded ? "성공" : "미확인"}</span></p>
           </div>
         </section>
-        <section className="grid gap-3 sm:grid-cols-3" aria-label="모델 worker 상태">
+        <section className="grid gap-3 sm:grid-cols-2" aria-label="모델 worker 상태">
           <WorkerCard lane="chronos2" status={status?.workers.chronos2} />
           <WorkerCard lane="fincast" status={status?.workers.fincast} />
-          <WorkerCard lane="kronos_base" status={status?.workers.kronos_base} />
         </section>
       </div>
 
@@ -650,16 +607,9 @@ export function AiSimulationCryptoSetup({
         <fieldset className="rounded-2xl bg-secondary p-3">
           <legend className="px-1 text-[10px] font-black text-muted-foreground">모델 역할</legend>
           <div className="mt-1 flex min-h-10 flex-wrap items-center gap-1.5">
-            {(request.modelPlan ?? []).map((entry) => (
-              <span
-                key={`${entry.symbol}-${entry.modelLane}-${entry.role}`}
-                className="rounded-full bg-card px-2 py-1 text-[8px] font-black"
-                data-model-role={entry.role}
-                data-model-lane={entry.modelLane}
-              >
-                {entry.symbol} · {MODEL_LABELS[entry.modelLane]} · {entry.role}
-              </span>
-            ))}
+            <span className="rounded-full bg-card px-2 py-1 text-[8px] font-black">
+              서버가 v9 canonical plan을 확정합니다
+            </span>
           </div>
         </fieldset>
         <div className="rounded-2xl bg-secondary p-3">

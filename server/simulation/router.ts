@@ -229,7 +229,7 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
           realOrder: false,
         },
         workers: {
-          kronos_base: { status: "unavailable", precision: "unknown" },
+          chronos2_base: { status: "unavailable", precision: "unknown" },
           fincast: { status: "unavailable", precision: "unknown" },
         },
       });

@@ -213,7 +213,7 @@ async function main(): Promise<void> {
     throw new Error("AI_BENCHMARK_CANDLE_SECONDS must be 15, 30, or 60");
   }
   const url = process.env.AI_BENCHMARK_URL
-    ?? "ws://172.30.1.14:18765/ws/scalping-ai/v1";
+    ?? "ws://fincast-worker:8766/ws/scalping-ai/v2";
   const authTokenFile = process.env.AI_BENCHMARK_AUTH_TOKEN_FILE;
   if (!authTokenFile) throw new Error("AI_BENCHMARK_AUTH_TOKEN_FILE is required");
   const client = new AiComputeClient({

@@ -112,7 +112,7 @@ def _quantile_values(values: Sequence[float]) -> tuple[QuantileValue, ...]:
 
 
 def _valid_return_bar(bar: PredictedBar) -> bool:
-    # Kronos predicts each OHLC field directly, so a finite path can contain
+    # Forecast models predict each OHLC field directly, so a finite path can contain
     # small candle-envelope crossings. Return statistics consume the raw close
     # path without rewriting it; first-passage analysis is gated separately.
     values = (bar.open, bar.high, bar.low, bar.close)

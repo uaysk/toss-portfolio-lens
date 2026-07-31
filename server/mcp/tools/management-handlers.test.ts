@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../../database.js";
+import { PGliteDatabase } from "../../../test-support/pglite-database.js";
 import { ArtifactRepository } from "../../repositories/artifact-repository.js";
 import { OptimizationRepository } from "../../repositories/optimization-repository.js";
 import { PresetRepository } from "../../repositories/preset-repository.js";
@@ -15,7 +15,7 @@ function result(value: unknown): Record<string, unknown> {
 }
 
 describe("management MCP handlers", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -23,7 +23,7 @@ describe("management MCP handlers", () => {
   });
 
   async function setup() {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const runs = new RunRepository(database);
     const artifactRepository = new ArtifactRepository(database);
     const presets = new PresetService(new PresetRepository(database));
@@ -252,12 +252,11 @@ describe("management MCP handlers", () => {
     let started!: () => void;
     const startedPromise = new Promise<void>((resolve) => { started = resolve; });
     const releasePromise = new Promise<void>((resolve) => { release = resolve; });
-    await runService.enqueue({
+    await runService.enqueueOrchestration({
       ownerSubject: "owner-a",
       kind: "stress_test",
       config: { blocker: true },
       dataRevision: "revision-derived",
-      allowInlineInExternal: true,
       task: async () => {
         started();
         await releasePromise;

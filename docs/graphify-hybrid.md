@@ -8,9 +8,11 @@ This project augments Graphify's deterministic graph traversal with a persistent
 4. Reciprocal-rank fusion.
 5. Qwen3 Reranker 4B over the bounded candidate set.
 6. BFS expansion over real Graphify edges.
-7. GPT-5.6 Terra structured synthesis with source locations.
+7. GPT-5.3 Codex Spark structured synthesis with source locations.
 
 Secrets stay in `.env.graphify` and the Kubernetes `pg/graphify-db` Secret. The project MCP configuration contains no credentials.
+Set `GRAPHIFY_SYNTHESIS_MODEL` only when an explicit model override is needed. The default is
+`gpt-5.3-codex-spark`.
 
 ## Commands
 
@@ -19,6 +21,7 @@ scripts/graphify-hybrid/run.sh setup
 scripts/graphify-hybrid/run.sh index
 scripts/graphify-hybrid/run.sh query "한국어 또는 영어 코드 질문"
 scripts/graphify-hybrid/run.sh query "호출 관계" --context call
+scripts/graphify-hybrid/run.sh query "검색 근거만" --no-synthesis
 scripts/graphify-hybrid/run.sh status
 scripts/graphify-hybrid/run.sh benchmark --out graphify-out/hybrid-benchmark.json
 ```
@@ -43,4 +46,3 @@ The role is `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, and owns only the dedic
 - `graphify-hybrid`: semantic retrieval and hybrid index status
 
 Both are stdio servers and start on demand in MCP-compatible clients.
-

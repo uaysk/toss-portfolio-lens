@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dashboardAnalysisError, isDashboardAnalysisOperation, parseDashboardRunId } from "./dashboard-analysis.js";
-import { BacktestValidationError } from "./backtest-engine.js";
+import { BacktestValidationError } from "./contracts/backtest.js";
 import { TossApiError } from "./toss.js";
 
 describe("dashboard advanced analysis contract", () => {

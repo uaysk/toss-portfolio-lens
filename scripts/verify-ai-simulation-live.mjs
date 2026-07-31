@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const baseUrl = (process.env.SIMULATION_VERIFY_URL || "http://127.0.0.1:3200").replace(/\/+$/, "");
-const marketCountry = process.env.SIMULATION_VERIFY_MARKET === "KR" ? "KR" : "US";
+const marketCountry = "US";
 const configuredSelectionMode = process.env.SIMULATION_VERIFY_SELECTION_MODE?.trim();
 const manualSymbols = (process.env.SIMULATION_VERIFY_SYMBOLS || "")
   .split(",")
@@ -190,7 +190,7 @@ const sessionCookie = cookie(loginResponse);
 const headers = { accept: "application/json", cookie: sessionCookie };
 
 const status = await json(await fetch(`${baseUrl}/api/portfolio/simulation/status`, { headers }), "상태 조회 실패");
-assert(status.schemaVersion === "ai-paper-simulation/v7", "시뮬레이션 status 계약이 v7이 아닙니다.");
+assert(status.schemaVersion === "ai-paper-simulation/v9", "시뮬레이션 status 계약이 v9이 아닙니다.");
 assert(status.enabled === true, "AI 시뮬레이션이 비활성 상태입니다.");
 assert(status.capabilities?.realOrder === false, "realOrder capability가 false가 아닙니다.");
 assert(status.capabilities?.orderApiDependency === false, "orderApiDependency capability가 false가 아닙니다.");
@@ -213,10 +213,17 @@ const start = await json(await fetch(`${baseUrl}/api/portfolio/simulation/runs`,
   method: "POST",
   headers: { ...headers, "content-type": "application/json" },
   body: JSON.stringify({
-    marketCountry,
-    initialCash: marketCountry === "US" ? 100_000 : 10_000_000,
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase: "us_etf_pair",
+    market: { kind: "stock", country: "US" },
+    initialCash: 100_000,
     durationMinutes,
     selection,
+    strategy: {
+      mode: "pair",
+      pairId: "qqq-tqqq-sqqq",
+      allowDegradedMode: false,
+    },
     preset,
     riskTolerance,
     costs: {
@@ -225,6 +232,8 @@ const start = await json(await fetch(`${baseUrl}/api/portfolio/simulation/runs`,
       spreadBpsRoundTrip: 5,
       slippageBpsPerSide: 2,
     },
+    fincastCandleSeconds: 60,
+    execution: { mode: "paper" },
   }),
 }), "시뮬레이션 시작 실패");
 const runId = start.runId;
@@ -253,9 +262,9 @@ try {
     latest.snapshot.phase === "running" || latest.snapshot.phase === "completed",
     `시뮬레이션이 실행 상태에 도달하지 못했습니다: ${latest.snapshot.phase}`,
   );
-  assert(latest.snapshot.schemaVersion === "ai-paper-simulation/v7", "run snapshot 계약이 v7이 아닙니다.");
-  assert(latest.snapshot.market?.kind === "stock", "legacy stock 요청이 v7 stock market으로 정규화되지 않았습니다.");
-  assert(latest.snapshot.market?.country === marketCountry, "v7 stock market.country가 legacy marketCountry 요청과 다릅니다.");
+  assert(latest.snapshot.schemaVersion === "ai-paper-simulation/v9", "run snapshot 계약이 v9이 아닙니다.");
+  assert(latest.snapshot.market?.kind === "stock", "v9 stock market이 snapshot에 보존되지 않았습니다.");
+  assert(latest.snapshot.market?.country === marketCountry, "v9 stock market.country가 요청과 다릅니다.");
   assert(latest.snapshot.selection?.mode === selection.mode, "run snapshot 선택 방식이 요청과 다릅니다.");
   if (selection.mode === "manual") {
     assert(
@@ -268,7 +277,7 @@ try {
   }
   assert(latest.snapshot.preset === preset, "run snapshot 프리셋이 요청과 다릅니다.");
   assert(latest.snapshot.riskTolerance === riskTolerance, "run snapshot 공격·방어 성향이 요청과 다릅니다.");
-  assert(latest.snapshot.initialCash === (marketCountry === "US" ? 100_000 : 10_000_000), "run snapshot 시작 예수금이 요청과 다릅니다.");
+  assert(latest.snapshot.initialCash === 100_000, "run snapshot 시작 예수금이 요청과 다릅니다.");
   assert(latest.snapshot.selected?.length === requestedSymbolCount, "AI 선정 종목 수가 요청과 다릅니다.");
   assert(new Set(latest.snapshot.selected.map(({ symbol }) => symbol)).size === requestedSymbolCount, "AI 선정 종목이 중복되었습니다.");
   if (selection.mode === "manual") {

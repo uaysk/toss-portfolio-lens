@@ -5,8 +5,9 @@ import {
 } from "./contracts.js";
 import {
   AiModelProvenanceSchema,
+  CHRONOS_2_MODEL_ID,
   FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
+  SCALPING_AI_SCHEMA_VERSION,
   type QuantileRearrangementObservations,
 } from "../worker/ai-contract.js";
 import {
@@ -385,11 +386,11 @@ function parseModel(
   const source = parsed.data;
   const expectedModelId = expectedLane === "fincast"
     ? FINCAST_MODEL_ID
-    : expectedLane === "kronos_base" ? KRONOS_BASE_MODEL_ID : undefined;
+    : expectedLane === "chronos2" ? CHRONOS_2_MODEL_ID : undefined;
   if (
     (
-      source.model_id !== KRONOS_BASE_MODEL_ID
-      && source.model_id !== FINCAST_MODEL_ID
+      source.model_id !== FINCAST_MODEL_ID
+      && source.model_id !== CHRONOS_2_MODEL_ID
     )
     || (expectedModelId !== undefined && source.model_id !== expectedModelId)
     || (source.fallback_from ?? null) !== null
@@ -632,7 +633,7 @@ export function selectAiForecastSeries(
     availableCandidateCount: 0,
     selected: [] as AiPaperForecastCandidate[],
   } as const;
-  if (!response || response.schema_version !== "scalping-ai/v1" || response.mode !== "forecast"
+  if (!response || response.schema_version !== SCALPING_AI_SCHEMA_VERSION || response.mode !== "forecast"
     || !model || !generatedAt || !Array.isArray(response.series)) {
     return { ...base, status: "unavailable", reason: "invalid_forecast_response" };
   }
@@ -927,7 +928,7 @@ export function decidePaperActions(input: {
     );
     const baseFusion = fuseForecastWithTechnical({
       lane: input.modelLane ?? (
-        candidate.model.modelId === FINCAST_MODEL_ID ? "fincast" : "kronos_base"
+        candidate.model.modelId === FINCAST_MODEL_ID ? "fincast" : "chronos2"
       ),
       modelDirection: "long",
       modelConfidence: candidate.upProbability,

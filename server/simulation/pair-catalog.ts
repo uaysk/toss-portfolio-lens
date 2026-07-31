@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v3" as const;
-export const LEGACY_PAIR_CATALOG_VERSION = "scalping-pair-catalog/v2" as const;
+export const PAIR_CATALOG_VERSION = "scalping-pair-catalog/v4" as const;
 
 const PairSymbolSchema = z.string()
   .trim()
@@ -43,21 +42,12 @@ export const PairCatalogEntrySchema = z.object({
   displaySignalSymbol: PairSymbolSchema,
   modelTargetSymbol: PairSymbolSchema,
   auxiliarySymbols: z.array(PairSymbolSchema).max(8),
-  /** @deprecated v2 compatibility alias for modelTargetSymbol. */
-  signalSymbol: PairSymbolSchema,
   bull: PairExecutionLegSchema,
   bear: PairExecutionLegSchema,
   allowedSessions: z.array(PairSessionSchema).min(1).max(4),
   maxSpreadBps: z.number().finite().positive().max(5_000),
   selectionProvenance: PairSelectionProvenanceSchema.optional(),
 }).strict().superRefine((entry, context) => {
-  if (entry.signalSymbol !== entry.modelTargetSymbol) {
-    context.addIssue({
-      code: "custom",
-      path: ["signalSymbol"],
-      message: "signalSymbol must remain an alias of modelTargetSymbol.",
-    });
-  }
   if (entry.bull.leverageMultiplier <= 0) {
     context.addIssue({
       code: "custom",
@@ -80,7 +70,7 @@ export const PairCatalogEntrySchema = z.object({
   if (new Set(symbols).size !== symbols.length) {
     context.addIssue({
       code: "custom",
-      path: ["signalSymbol"],
+      path: ["modelTargetSymbol"],
       message: "signal, bull, and bear symbols must be distinct.",
     });
   }
@@ -108,25 +98,12 @@ export const PairCatalogEntrySchema = z.object({
 });
 export type PairCatalogEntry = z.infer<typeof PairCatalogEntrySchema>;
 
-const LegacyPairCatalogEntryV2Schema = z.object({
-  catalogVersion: z.literal(LEGACY_PAIR_CATALOG_VERSION),
-  pairId: z.string().trim().min(1).max(96).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  marketCountry: z.literal("US"),
-  currency: z.literal("USD"),
-  signalSymbol: PairSymbolSchema,
-  bull: PairExecutionLegSchema,
-  bear: PairExecutionLegSchema,
-  allowedSessions: z.array(PairSessionSchema).min(1).max(4),
-  maxSpreadBps: z.number().finite().positive().max(5_000),
-  selectionProvenance: PairSelectionProvenanceSchema.optional(),
-}).strict();
-
 export type PairCatalog = ReadonlyMap<string, Readonly<PairCatalogEntry>>;
 
 export type PairExecutionMapping =
   | {
       pairId: string;
-      signalSymbol: string;
+      displaySignalSymbol: string;
       modelTargetSymbol: string;
       auxiliarySymbols: string[];
       direction: "cash";
@@ -135,7 +112,7 @@ export type PairExecutionMapping =
     }
   | {
       pairId: string;
-      signalSymbol: string;
+      displaySignalSymbol: string;
       modelTargetSymbol: string;
       auxiliarySymbols: string[];
       direction: "bull" | "bear";
@@ -144,16 +121,7 @@ export type PairExecutionMapping =
     };
 
 export function validatePairCatalogEntry(input: unknown): PairCatalogEntry {
-  const current = PairCatalogEntrySchema.safeParse(input);
-  if (current.success) return current.data;
-  const legacy = LegacyPairCatalogEntryV2Schema.parse(input);
-  return PairCatalogEntrySchema.parse({
-    ...legacy,
-    catalogVersion: PAIR_CATALOG_VERSION,
-    displaySignalSymbol: legacy.signalSymbol,
-    modelTargetSymbol: legacy.signalSymbol,
-    auxiliarySymbols: [],
-  });
+  return PairCatalogEntrySchema.parse(input);
 }
 
 export function createPairCatalog(entries: readonly unknown[]): PairCatalog {
@@ -190,7 +158,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "QQQ",
     modelTargetSymbol: "QQQ",
     auxiliarySymbols: [],
-    signalSymbol: "QQQ",
     bull: { executionSymbol: "TQQQ", leverageMultiplier: 3 },
     bear: { executionSymbol: "SQQQ", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
@@ -204,7 +171,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "SMH",
     modelTargetSymbol: "SOXX",
     auxiliarySymbols: ["SMH", "QQQ"],
-    signalSymbol: "SOXX",
     bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
@@ -218,7 +184,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "SMH",
     modelTargetSymbol: "SMH",
     auxiliarySymbols: [],
-    signalSymbol: "SMH",
     bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
@@ -232,7 +197,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "SNDK",
     modelTargetSymbol: "SNDK",
     auxiliarySymbols: [],
-    signalSymbol: "SNDK",
     bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
     bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
     allowedSessions: ["regular"],
@@ -256,7 +220,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "SOXX",
     modelTargetSymbol: "SOXX",
     auxiliarySymbols: [],
-    signalSymbol: "SOXX",
     bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
@@ -270,7 +233,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "SPY",
     modelTargetSymbol: "SPY",
     auxiliarySymbols: [],
-    signalSymbol: "SPY",
     bull: { executionSymbol: "SPXL", leverageMultiplier: 3 },
     bear: { executionSymbol: "SPXS", leverageMultiplier: -3 },
     allowedSessions: ["regular"],
@@ -284,7 +246,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "TSLA",
     modelTargetSymbol: "TSLA",
     auxiliarySymbols: [],
-    signalSymbol: "TSLA",
     bull: { executionSymbol: "TSLL", leverageMultiplier: 2 },
     bear: { executionSymbol: "TSLQ", leverageMultiplier: -2 },
     allowedSessions: ["regular"],
@@ -298,7 +259,6 @@ const DEFAULT_PAIR_ENTRIES = [
     displaySignalSymbol: "TSLA",
     modelTargetSymbol: "TSLA",
     auxiliarySymbols: [],
-    signalSymbol: "TSLA",
     bull: { executionSymbol: "TSLL", leverageMultiplier: 2 },
     bear: { executionSymbol: "TSLS", leverageMultiplier: -1 },
     allowedSessions: ["regular"],
@@ -341,7 +301,7 @@ export function mapPairDirection(
   if (direction === "cash") {
     return {
       pairId: entry.pairId,
-      signalSymbol: entry.signalSymbol,
+      displaySignalSymbol: entry.displaySignalSymbol,
       modelTargetSymbol: entry.modelTargetSymbol,
       auxiliarySymbols: [...entry.auxiliarySymbols],
       direction,
@@ -352,7 +312,7 @@ export function mapPairDirection(
   const leg = entry[direction];
   return {
     pairId: entry.pairId,
-    signalSymbol: entry.signalSymbol,
+    displaySignalSymbol: entry.displaySignalSymbol,
     modelTargetSymbol: entry.modelTargetSymbol,
     auxiliarySymbols: [...entry.auxiliarySymbols],
     direction,

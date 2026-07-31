@@ -1,4 +1,8 @@
-import type { BacktestRunRequest, PortfolioBacktestService } from "../backtest.js";
+import type {
+  BacktestRunRequest,
+  BacktestRunResult,
+  PortfolioBacktestService,
+} from "../backtest.js";
 import type { ArtifactType } from "../repositories/artifact-repository.js";
 import type { PortfolioRunRecord } from "../repositories/run-repository.js";
 import type { MarketDataService } from "./market-data-service.js";
@@ -19,7 +23,7 @@ export type SharedBacktestRequest = BacktestRunRequest & {
   report?: BacktestReportOption;
 };
 
-export type BacktestRunResult = Awaited<ReturnType<PortfolioBacktestService["run"]>>;
+export type { BacktestRunResult } from "../backtest.js";
 
 export class BacktestService {
   constructor(
@@ -262,20 +266,7 @@ export class BacktestService {
         },
       });
     }
-    const calculated = await this.engine.run(backtestRequest);
-    const calculatedRevision = await this.marketData.repository.dataRevision();
-    return this.runs.execute({
-      ownerSubject,
-      kind: "backtest",
-      config: backtestRequest,
-      dataRevision: calculatedRevision,
-      task: async () => ({
-        summary: calculated.metrics,
-        result: calculated,
-        warnings: calculated.warnings,
-        artifacts: backtestArtifacts(calculated),
-      }),
-    });
+    throw new Error(`지원하지 않는 compute 실행 모드입니다: ${this.runs.executionMode satisfies never}`);
   }
 
 }

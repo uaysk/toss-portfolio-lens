@@ -7,7 +7,7 @@ describe("build info", () => {
     expect(mcpSchemaHash()).toBe(mcpSchemaHash());
     expect(buildInfo()).toMatchObject({
       mcpToolCount: 53,
-      workerSchemaVersion: "1.0",
+      workerSchemaVersion: "2.0",
       mcpSchemaVersion: "1.1",
     });
   });

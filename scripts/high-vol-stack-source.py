@@ -1402,7 +1402,7 @@ def request_payload(
 ) -> dict[str, Any]:
     request_id = f"hv-{lane}-{tasks[0][1]}-{len(tasks)}"
     return {
-        "schema_version": "scalping-ai/v1",
+        "schema_version": "scalping-ai/v2",
         "request_id": request_id,
         "mode": "forecast",
         "forecast_profile": "full",
@@ -1782,9 +1782,6 @@ def load_repository(
             )
             values.extend(kline_rows(path))
         rest_paths = sorted((raw / "rest-klines" / symbol).glob("*.json"))
-        legacy_rest_path = raw / "rest-klines" / f"{symbol}.json"
-        if legacy_rest_path.is_file():
-            rest_paths.append(legacy_rest_path)
         for supplemental_path in rest_paths:
             values.extend(
                 rest_kline_rows(

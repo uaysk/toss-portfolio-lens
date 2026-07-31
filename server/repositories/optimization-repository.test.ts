@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { OptimizationRepository } from "./optimization-repository.js";
 import { RunRepository } from "./run-repository.js";
 
 describe("OptimizationRepository candidate paging", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -12,7 +12,7 @@ describe("OptimizationRepository candidate paging", () => {
   });
 
   it("1,000개를 넘는 후보를 순번으로 조회하고 복제용 전체 목록을 반환한다", async () => {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const runs = new RunRepository(database);
     const repository = new OptimizationRepository(database);
     await runs.initialize();

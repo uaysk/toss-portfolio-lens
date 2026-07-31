@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { hybridRetrieve, indexStatus, synthesizeWithTerra } from "./core.js";
+import { hybridRetrieve, indexStatus, synthesizeWithModel } from "./core.js";
 
 const server = new McpServer({
   name: "graphify-hybrid",
@@ -13,7 +13,7 @@ server.registerTool(
   "hybrid_query",
   {
     title: "Graphify hybrid query",
-    description: "Search Graphify with lexical, Qwen3 embedding, pgvector, Qwen3 reranking, graph traversal, and optional Terra synthesis.",
+    description: "Search Graphify with lexical, Qwen3 embedding, pgvector, Qwen3 reranking, graph traversal, and optional model synthesis.",
     inputSchema: {
       question: z.string().min(1),
       depth: z.number().int().min(0).max(4).default(2),
@@ -30,7 +30,7 @@ server.registerTool(
       contextFilters,
     });
     const result = synthesize
-      ? { ...retrieval, synthesis: await synthesizeWithTerra(retrieval) }
+      ? { ...retrieval, synthesis: await synthesizeWithModel(retrieval) }
       : retrieval;
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -56,4 +56,3 @@ server.registerTool(
 );
 
 await server.connect(new StdioServerTransport());
-

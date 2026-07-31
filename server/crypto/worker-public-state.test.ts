@@ -12,7 +12,7 @@ function snapshot(
 ): AiComputeClientSnapshot {
   return {
     connection,
-    transportVersion: "scalping-ai-ws/v1",
+    transportVersion: "scalping-ai-ws/v2",
     secure: false,
     pendingRequests: 0,
     worker: {
@@ -20,7 +20,7 @@ function snapshot(
       generated_at: "2026-07-25T00:00:00.000Z",
       model: {
         loaded: input.memoryStatus !== "memory_pressure",
-        model_id: "NeoQuasar/Kronos-base",
+        model_id: "amazon/chronos-2",
         model_revision: "revision",
         device: input.memoryStatus === "memory_pressure" ? "unavailable" : "cuda",
         precision: input.precision ?? "float32",

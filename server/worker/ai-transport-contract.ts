@@ -4,12 +4,11 @@ import {
   AiResponseSchema,
   CHRONOS_2_MODEL_ID,
   FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
 } from "./ai-contract.js";
 
-export const SCALPING_AI_TRANSPORT_VERSION = "scalping-ai-ws/v1" as const;
-export const SCALPING_AI_WEBSOCKET_PATH = "/ws/scalping-ai/v1" as const;
-export const SCALPING_AI_WEBSOCKET_SUBPROTOCOL = "scalping-ai-ws.v1" as const;
+export const SCALPING_AI_TRANSPORT_VERSION = "scalping-ai-ws/v2" as const;
+export const SCALPING_AI_WEBSOCKET_PATH = "/ws/scalping-ai/v2" as const;
+export const SCALPING_AI_WEBSOCKET_SUBPROTOCOL = "scalping-ai-ws.v2" as const;
 
 const requestId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 const transportBase = {
@@ -52,7 +51,7 @@ export const AiWorkerStatusSchema = z.object({
   model: z.object({
     loaded: z.boolean(),
     device: z.enum(["cuda", "cpu", "unavailable"]),
-    model_id: z.enum([KRONOS_BASE_MODEL_ID, FINCAST_MODEL_ID, CHRONOS_2_MODEL_ID]),
+    model_id: z.enum([FINCAST_MODEL_ID, CHRONOS_2_MODEL_ID]),
     model_revision: z.string().min(1).max(256),
     precision: z.enum(["float32", "mixed_float16"]).optional(),
     precision_validation: z.enum(["not_required", "passed", "fallback_fp32", "unavailable"]).optional(),
@@ -93,30 +92,6 @@ export const AiWorkerStatusSchema = z.object({
       path: ["model", "memory_status"],
       message: "memory_pressure must fail closed with an unavailable unloaded worker",
     });
-  }
-  if (worker.model.model_id === KRONOS_BASE_MODEL_ID) {
-    const invalidKronosPrecision = (
-      worker.model.precision !== undefined && worker.model.precision !== "float32"
-    ) || (
-      worker.model.precision_validation !== undefined
-      && worker.model.precision_validation !== (worker.model.loaded ? "not_required" : "unavailable")
-    ) || (
-      worker.model.memory_status !== undefined
-      && worker.model.memory_status !== (worker.model.loaded ? "ok" : "unavailable")
-    ) || (
-      worker.model.quantile_monotonicity_policy !== undefined
-      && worker.model.quantile_monotonicity_policy !== (worker.model.loaded ? "native" : "unavailable")
-    ) || (
-      worker.model.quantile_tail_policy !== undefined
-      && worker.model.quantile_tail_policy !== (worker.model.loaded ? "native" : "unavailable")
-    );
-    if (invalidKronosPrecision) {
-      context.addIssue({
-        code: "custom",
-        path: ["model"],
-        message: "Kronos-base worker requires native float32 status provenance",
-      });
-    }
   }
   if (worker.model.model_id === CHRONOS_2_MODEL_ID) {
     const fieldsPresent = worker.model.precision !== undefined

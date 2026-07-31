@@ -43,7 +43,7 @@ describe("forecast technical fusion", () => {
 
   it("vetoes a strong conflict without reversing the model", () => {
     const result = fuseForecastWithTechnical({
-      lane: "kronos_base",
+      lane: "chronos2",
       modelDirection: "short",
       modelConfidence: 0.8,
       modelOriginAt: origin,
@@ -82,7 +82,7 @@ describe("forecast technical fusion", () => {
 
   it("fails closed when configured evidence has no causal timestamp", () => {
     const result = fuseForecastWithTechnical({
-      lane: "kronos_base",
+      lane: "chronos2",
       modelDirection: "long",
       modelConfidence: 0.8,
       modelOriginAt: origin,

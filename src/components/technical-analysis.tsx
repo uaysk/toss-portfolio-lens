@@ -549,7 +549,7 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                         x={barDate}
                         y={y}
                         ifOverflow="extendDomain"
-                        isFront
+
                         shape={<TradeMarkerShape marker={marker} />}
                       />
                     );

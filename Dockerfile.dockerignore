@@ -3,7 +3,11 @@
 !package.json
 !package-lock.json
 !tsconfig.json
+!tsconfig.base.json
+!tsconfig.app.json
 !tsconfig.server.json
+!tsconfig.scripts.json
+!tsconfig.tests.json
 !vite.config.ts
 !tailwind.config.ts
 !postcss.config.js
@@ -13,6 +17,8 @@
 !src/**
 !server/
 !server/**
+!test-support/
+!test-support/**
 !contracts/
 !contracts/**
 !public/
@@ -21,4 +27,5 @@
 !docs/
 !docs/mcp-chatgpt.md
 !scripts/
+!scripts/run-vitest-batches.mjs
 !scripts/verify-runtime-modules.mjs

@@ -5,8 +5,8 @@ describe("portfolio outlook combiner", () => {
   it("OOS·Monte Carlo·stress를 결합하고 누락 calibration을 경고한다", () => {
     const result = combinePortfolioOutlook({
       walkForward: { folds: [
-        { testEnd: "2024-03-01", trainCount: 20, oos: { return: 0.1, sampleCount: 5 } },
-        { testEnd: "2024-04-01", trainCount: 20, oos: { return: -0.05, sampleCount: 5 } },
+        { testEnd: "2024-03-01", trainCount: 20, oos: { totalReturn: 0.1, sampleCount: 5 } },
+        { testEnd: "2024-04-01", trainCount: 20, oos: { totalReturn: -0.05, sampleCount: 5 } },
       ] },
       monteCarlo: {
         distributions: { terminalBalance: { percentiles: [{ quantile: 0.5, value: 110 }] } },

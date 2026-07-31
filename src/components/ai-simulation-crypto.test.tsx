@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   AiSimulationAssetClassControl,
   AiSimulationCryptoSetup,
-  toggleCryptoModelLane,
 } from "@/components/ai-simulation-crypto";
 import {
   AiSimulationFuturesLedger,
@@ -26,25 +25,8 @@ describe("crypto futures simulation UI", () => {
       <AiSimulationCryptoSetup
         request={{
           ...DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
-          contractVersion: "ai-paper-simulation/v8",
+          contractVersion: "ai-paper-simulation/v9",
           simulationCase: "high_vol_crypto",
-          modelLanes: ["chronos2", "fincast"],
-          modelPlan: [
-            {
-              symbol: "*",
-              modelLane: "chronos2",
-              role: "primary",
-              required: true,
-              preferredHorizonsMinutes: [15, 30, 60],
-            },
-            {
-              symbol: "*",
-              modelLane: "fincast",
-              role: "veto",
-              required: true,
-              preferredHorizonsMinutes: [15, 30, 60],
-            },
-          ],
           scanner: {
             symbolCount: 1,
             minimumListingDays: 90,
@@ -134,19 +116,11 @@ describe("crypto futures simulation UI", () => {
     expect(setup).toMatch(
       /aria-label="암호화폐 증거금 사용률 상한"[^>]*max="100"/,
     );
-    expect(setup).toContain('data-execution-capability="live"');
+    expect(setup).toContain('data-execution-capability="paper"');
+    expect(setup).not.toContain('data-execution-capability="live"');
     expect(
       setup.match(/<button[^>]*data-crypto-simulation-start[^>]*>/)?.[0],
     ).toContain("disabled");
-  });
-
-  it("keeps the dual-lane tuple in the backend contract order", () => {
-    expect(toggleCryptoModelLane(["kronos_base", "fincast"], "kronos_base"))
-      .toEqual(["fincast"]);
-    expect(toggleCryptoModelLane(["fincast"], "kronos_base"))
-      .toEqual(["kronos_base", "fincast"]);
-    expect(toggleCryptoModelLane(["kronos_base"], "kronos_base"))
-      .toEqual(["kronos_base"]);
   });
 
   it("renders long cyan/short amber ledger semantics and independent lanes", () => {
@@ -190,7 +164,7 @@ describe("crypto futures simulation UI", () => {
         sameCosts: true,
         sameFillBarrier: true,
         lanes: [
-          { id: "kronos_base", status: "complete", precision: "fp32", metrics: {} },
+          { id: "chronos2", status: "complete", precision: "fp32", metrics: {} },
           {
             id: "fincast",
             status: "complete",
@@ -219,7 +193,7 @@ describe("crypto futures simulation UI", () => {
         ],
       }} />,
     );
-    expect(comparison).toContain('data-model-lane="kronos_base"');
+    expect(comparison).toContain('data-model-lane="chronos2"');
     expect(comparison).toContain('data-model-lane="fincast"');
     expect(comparison).toContain('data-model-lane-provenance="fincast"');
     expect(comparison).toContain("Vincent05R/FinCast");

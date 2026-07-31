@@ -274,6 +274,10 @@ const temporaryRoot = await mkdtemp(path.join(tmpdir(), "tpl-mcp-browser-"));
 let browser;
 let exitCode = 0;
 try {
+  const smokePostgresUrl = process.env.MCP_SMOKE_POSTGRES_URL?.trim();
+  if (!smokePostgresUrl) {
+    throw new Error("MCP_SMOKE_POSTGRES_URL is required and must target a disposable PostgreSQL database.");
+  }
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const redirectUri = `http://localhost:${port}/oauth/callback`;
@@ -302,12 +306,12 @@ try {
     PORT: String(port),
     PUBLIC_APP_URL: baseUrl,
     DASHBOARD_PASSWORD: ownerPassword,
+    READ_ONLY_API_TOKEN: `read-only-${randomBytes(24).toString("base64url")}`,
     SESSION_SECRET: randomBytes(48).toString("base64url"),
     TOSS_API_AUTH_MODE: "static_bearer",
     TOSS_API_BEARER_TOKEN: `synthetic-${randomBytes(24).toString("base64url")}`,
     TOSS_API_BASE_URL: "http://127.0.0.1:9",
-    DB_PROVIDER: "sqlite",
-    DATABASE_PATH: path.join(temporaryRoot, "browser.sqlite"),
+    POSTGRES_URL: smokePostgresUrl,
     REPORTS_PATH: reportsDirectory,
     MCP_ENABLED: "true",
     MCP_AUTH_MODE: "oauth",

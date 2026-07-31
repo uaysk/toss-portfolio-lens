@@ -13,6 +13,22 @@
 `org.opencontainers.image.revision` OCI label로 보존한다. push 결과의 manifest digest를 release 파일에
 기록한 뒤 digest를 pull하고 label이 `APP_GIT_SHA`와 일치하는지 검사한다.
 
+push 직후에는 Harbor의 Trivy adapter로 각 digest를 다시 스캔한다. 스캔 결과는 credential을 포함하지 않는
+mode 600 JSON으로 `.cache/security/`에 저장한다. 수정 가능한 Critical 또는 High 취약점이 있으면 해당
+release를 배포하지 않고 base image나 직접 dependency를 갱신한 뒤 새 Git SHA와 새 digest로 다시
+build·push·scan한다.
+
+```bash
+npm run verify:harbor-trivy -- "$WEB_IMAGE" \
+  --output .cache/security/harbor-trivy-web.json
+npm run verify:harbor-trivy -- "$RUST_WORKER_IMAGE" \
+  --output .cache/security/harbor-trivy-rust-worker.json
+```
+
+Trivy DB에 수정 버전이 없거나 애플리케이션에서 도달할 수 없는 항목을 예외 처리하려면 CVE, package,
+installed/fixed version, 도달성 근거와 만료일을 release 보고서에 남긴다. 단순히 severity를 낮추거나
+스캔을 생략해 배포 게이트를 통과시키지 않는다.
+
 ## Main host release
 
 Git에 넣지 않는 `.env.harbor.release`에 현재 release set을 저장한다.
@@ -57,43 +73,20 @@ docker compose \
 
 ## GPU worker release
 
-Kronos-base, FinCast, Chronos-2는 서로 다른 저장소, digest, token과 프로세스를 유지한다. 모델 cache와 safetensors는
-이미지에 포함하지 않으며 GPU 호스트의 검증된 read-only cache를 계속 mount한다.
+FinCast와 Chronos‑2는 서로 다른 저장소, digest, token과 프로세스를 유지한다. 모델 cache와
+safetensors는 이미지에 포함하지 않고 GPU 호스트의 검증된 read-only cache를 mount한다.
 
-Kronos 배포에는 `compose.harbor-kronos.yaml`, FinCast 배포에는
-`compose.harbor-fincast.yaml`, Chronos-2 배포에는 `compose.harbor-chronos2.yaml`을 기존 GPU/각 lane의
-remote overlay 뒤에 추가한다. 각각 `AI_WORKER_IMAGE`, `AI_FINCAST_WORKER_IMAGE`,
-`AI_CHRONOS2_WORKER_IMAGE`를 Harbor digest로 설정하고 명시적으로 `pull`한 뒤
-`up -d --no-build --pull never`를 사용한다. registry 여유 공간과 GPU worker preflight를 확인하기 전에는
-대형 worker 이미지를 publish하거나 기존 worker를 교체하지 않는다.
+FinCast는 `compose.ai-remote-fincast.yaml`과 `compose.harbor-fincast.yaml`, Chronos‑2는
+`compose.ai-remote-chronos2.yaml`과 `compose.harbor-chronos2.yaml`을 적용한다. 각각
+`AI_FINCAST_WORKER_IMAGE`, `AI_CHRONOS2_WORKER_IMAGE`를 Harbor digest로 설정한 뒤 명시적으로
+`pull`하고 `up -d --no-build --pull never`를 사용한다.
 
-Kronos의 canonical pull-only 명령은 다음과 같다.
+두 worker의 endpoint와 token은 공유하지 않는다. cache가 없거나 revision/hash가 다르면 자동
+download나 다른 모델 fallback 없이 unavailable로 닫혀야 한다.
 
-```bash
-docker compose \
-  -f compose.yaml \
-  -f compose.ai-gpu.yaml \
-  -f compose.ai-remote-worker.yaml \
-  -f compose.harbor-kronos.yaml \
-  pull ai-worker
-
-docker compose \
-  -f compose.yaml \
-  -f compose.ai-gpu.yaml \
-  -f compose.ai-remote-worker.yaml \
-  -f compose.harbor-kronos.yaml \
-  up -d --no-build --pull never --no-deps ai-worker
-```
-
-FinCast는 메인 worker이므로 위 파일 목록 대신 `compose.ai-remote-fincast.yaml`과
-`compose.harbor-fincast.yaml`을 순서대로 추가해 프로필 없이 `fincast-worker`를 pull·기동한다.
-Kronos-base를 복구할 때만 `--profile legacy-kronos`를 사용한다.
-
-Chronos-2는 `compose.ai-remote-chronos2.yaml`과 `compose.harbor-chronos2.yaml`을 추가하고
-`--profile chronos2`로 `chronos2-worker`만 pull·기동한다. 운영 web에는 별도의
-`AI_CHRONOS2_COMPUTE_URL`과 `AI_CHRONOS2_AUTH_SECRET_SOURCE`를 설정한다. 이 token은 FinCast와
-Kronos-base token을 재사용하지 않으며, 모델 cache가 없거나 revision/hash가 다르면 worker가
-자동 다운로드나 다른 모델 fallback 없이 unavailable로 닫혀야 한다.
+GPU worker 이미지도 push한 digest별로 같은 Trivy 검사를 수행한다. 모델 cache와 weights는 이미지 밖의
+read-only mount이므로 이미지 취약점 보고서와 별도로 checksum을 검증한다. GPU가 다른 검증 작업에
+할당된 동안에는 worker 이미지를 publish할 수 있어도 running container를 재시작하지 않는다.
 
 ## Local cache retention and bounded cleanup
 
@@ -103,7 +96,7 @@ Kronos-base token을 재사용하지 않으며, 모델 cache가 없거나 revisi
 `uv` download cache를 포함한 재사용 가능한 build cache까지 제거할 수 있다.
 
 정리는 디스크 압박이 실제로 확인된 경우에만 수행한다. 먼저 `docker system df`, `docker buildx du`와
-`docker ps -a`를 확인하고, 현재 release의 `git-<full-sha>` tag가 web, Rust, Kronos, FinCast 각 저장소에
+`docker ps -a`를 확인하고, 현재 release의 `git-<full-sha>` tag가 web, Rust, FinCast, Chronos‑2 각 저장소에
 남아 있는지 검증한다. 그 뒤에도 정리가 필요하면 tagged latest release를 보존하는 기본 image prune과
 30일보다 오래된 builder cache만 대상으로 하는 제한 명령을 사용한다.
 

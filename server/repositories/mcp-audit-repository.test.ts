@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { McpAuditRepository } from "./mcp-audit-repository.js";
 
 describe("McpAuditRepository", () => {
   it("payload나 token 없이 호출 메타데이터를 멱등 저장하고 기간 정리한다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const repository = new McpAuditRepository(database);
       await repository.initialize();
@@ -44,7 +44,7 @@ describe("McpAuditRepository", () => {
   });
 
   it("오류 코드와 insufficient scope를 구조화해 저장한다", async () => {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     try {
       const repository = new McpAuditRepository(database);
       await repository.initialize();

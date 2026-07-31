@@ -1,14 +1,14 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
+    "composite": true,
+    "declaration": true,
+    "incremental": true,
     "outDir": "dist/server",
     "rootDir": "server",
+    "tsBuildInfoFile": ".cache/tsbuildinfo/server.tsbuildinfo",
     "types": ["node"]
   },
   "include": ["server/**/*.ts"],

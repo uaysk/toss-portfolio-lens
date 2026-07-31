@@ -70,8 +70,8 @@ export type CryptoSimulationCoordinatorOptions = {
     symbol: string,
     requiredMaximumNotional: number,
   ) => Promise<void>;
-  workers?: Partial<Record<"kronos_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
-  workerState?: () => Partial<Record<"kronos_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
+  workers?: Partial<Record<"chronos2_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
+  workerState?: () => Partial<Record<"chronos2_base" | "fincast" | "chronos2", CryptoWorkerPublicState>>;
   runtimeSnapshots?: Map<string, unknown>;
   maximumActiveSessions?: number;
   runEvents?: SimulationRunEventPublisher;
@@ -224,7 +224,7 @@ export class CryptoSimulationCoordinator {
         realOrder: false,
       },
       workers: {
-        kronos_base: workers.kronos_base
+        chronos2_base: workers.chronos2_base
           ?? { status: "unavailable", precision: "unknown" },
         fincast: workers.fincast
           ?? { status: "unavailable", precision: "unknown" },
@@ -278,10 +278,7 @@ export class CryptoSimulationCoordinator {
       let highVolatility: HighVolatilityScannerSnapshot | undefined;
       let selectedByHighVolatility: BinanceScannerCandidate[] | undefined;
       let snapshot: BinanceScannerSnapshot;
-      if (
-        input.sourceContractVersion === AI_SIMULATION_CONTRACT_VERSION
-        && input.simulationCase === "high_vol_crypto"
-      ) {
+      if (input.simulationCase === "high_vol_crypto") {
         const scannerResult = await this.options.scanner
           .highVolatilitySelectionSnapshot(input.scanner!);
         snapshot = scannerResult.snapshot;
@@ -507,7 +504,7 @@ export class CryptoSimulationCoordinator {
           ...(highVolatility ? { highVolatilityScanner: highVolatility } : {}),
           modelLanes: input.modelLanes,
           simulationCase: input.simulationCase,
-          modelPlan: input.modelPlan,
+          resolvedModelPlan: input.resolvedModelPlan,
           fincastCandleSeconds: input.fincastCandleSeconds,
           executionMode: "paper",
           execution: { mode: "paper", realOrder: false },

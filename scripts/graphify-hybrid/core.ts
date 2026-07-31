@@ -71,10 +71,10 @@ export type HybridQueryResult = {
     rerankedCandidates: number;
     elapsedMs: number;
   };
-  synthesis?: TerraSynthesis;
+  synthesis?: GraphifySynthesis;
 };
 
-export type TerraSynthesis = {
+export type GraphifySynthesis = {
   answer: string;
   evidence: Array<{
     nodeId: string;
@@ -100,7 +100,7 @@ type ApiConfig = {
   apiKey: string;
   embeddingModel: string;
   rerankerModel: string;
-  terraModel: string;
+  synthesisModel: string;
 };
 
 const DEFAULT_PROJECT = "toss-portfolio-lens";
@@ -121,7 +121,9 @@ export function apiConfigFromEnv(): ApiConfig {
     apiKey: requiredEnv("OPENAI_API_KEY"),
     embeddingModel: process.env.GRAPHIFY_EMBEDDING_MODEL?.trim() || "qwen3-embedding-4b",
     rerankerModel: process.env.GRAPHIFY_RERANKER_MODEL?.trim() || "qwen3-reranker-4b",
-    terraModel: process.env.GRAPHIFY_TERRA_MODEL?.trim() || "gpt-5.6-terra",
+    synthesisModel:
+      process.env.GRAPHIFY_SYNTHESIS_MODEL?.trim()
+      || "gpt-5.3-codex-spark",
   };
 }
 
@@ -261,7 +263,7 @@ async function sourceSnippet(root: string, node: GraphNode): Promise<string> {
   if (!resolved) return "";
   try {
     const content = await readFile(resolved, "utf8");
-    if (content.length > 2_000_000) return "";
+    if (content.length > 2_000_000 || content.includes("\0")) return "";
     const lines = content.split(/\r?\n/);
     const line = sourceLine(String(node.source_location || ""));
     const start = Math.max(0, line - 3);
@@ -319,7 +321,7 @@ export async function buildRetrievalDocuments(input: {
         communityName ? `community: ${communityName}` : "",
         ...(relations.get(node.id) || []),
         snippets[index] ? `source snippet:\n${snippets[index]}` : "",
-      ].filter(Boolean).join("\n").slice(0, 12_000);
+      ].filter(Boolean).join("\n").replaceAll("\0", "").slice(0, 12_000);
       const contentHash = createHash("sha256")
         .update(`${input.embeddingModel}\0${searchText}`)
         .digest("hex");
@@ -397,8 +399,45 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
   return vectors;
 }
 
+export async function runContinuousBatchWorkers<T>(
+  items: T[],
+  batchSize: number,
+  concurrency: number,
+  worker: (batch: T[]) => Promise<void>,
+): Promise<void> {
+  let nextOffset = 0;
+  const workerCount = Math.min(concurrency, Math.ceil(items.length / batchSize));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextOffset < items.length) {
+        const offset = nextOffset;
+        nextOffset += batchSize;
+        await worker(items.slice(offset, offset + batchSize));
+      }
+    }),
+  );
+}
+
 function vectorLiteral(vector: number[]): string {
   return `[${vector.join(",")}]`;
+}
+
+export function assertSafeProjectReplacement(
+  existingNodeIds: string[],
+  documentNodeIds: string[],
+  allowReplacement = false,
+): void {
+  if (allowReplacement || existingNodeIds.length < 100 || documentNodeIds.length < 100) return;
+  const documents = new Set(documentNodeIds);
+  const overlap = existingNodeIds.filter((nodeId) => documents.has(nodeId)).length;
+  const denominator = Math.min(existingNodeIds.length, documentNodeIds.length);
+  const overlapRatio = denominator > 0 ? overlap / denominator : 1;
+  if (overlapRatio < 0.25) {
+    throw new Error(
+      `Refusing to replace project index: only ${overlap}/${denominator} node IDs overlap. ` +
+      "Verify --project, or set GRAPHIFY_ALLOW_PROJECT_REPLACEMENT=1 for an intentional full replacement.",
+    );
+  }
 }
 
 export async function indexGraph(input: {
@@ -436,29 +475,21 @@ export async function indexGraph(input: {
        FROM graphify_node_embeddings WHERE project = $1`,
       [project],
     );
+    assertSafeProjectReplacement(
+      existing.rows.map((row) => row.node_id),
+      documents.map((document) => document.nodeId),
+      process.env.GRAPHIFY_ALLOW_PROJECT_REPLACEMENT === "1",
+    );
     const hashes = new Map(existing.rows.map((row) => [row.node_id, `${row.embedding_model}:${row.content_hash}`]));
     const pending = documents.filter(
       (document) => hashes.get(document.nodeId) !== `${config.embeddingModel}:${document.contentHash}`,
     );
     const reusedCount = documents.length - pending.length;
-    const batchSize = Math.max(1, Math.min(64, input.batchSize || 32));
+    const batchSize = Math.max(1, Math.min(64, input.batchSize || 64));
     const concurrency = Math.max(1, Math.min(8, input.concurrency || 4));
     let embeddedCount = 0;
-    const waveSize = batchSize * concurrency;
-    for (let offset = 0; offset < pending.length; offset += waveSize) {
-      const wave = pending.slice(offset, offset + waveSize);
-      const batches: RetrievalDocument[][] = [];
-      for (let batchOffset = 0; batchOffset < wave.length; batchOffset += batchSize) {
-        batches.push(wave.slice(batchOffset, batchOffset + batchSize));
-      }
-      const embeddedBatches = await Promise.all(
-        batches.map(async (batch) => ({
-          batch,
-          vectors: await embedTexts(batch.map((document) => document.searchText)),
-        })),
-      );
-      const batch = embeddedBatches.flatMap((item) => item.batch);
-      const vectors = embeddedBatches.flatMap((item) => item.vectors);
+    await runContinuousBatchWorkers(pending, batchSize, concurrency, async (batch) => {
+      const vectors = await embedTexts(batch.map((document) => document.searchText));
       const values: unknown[] = [];
       const rows = batch.map((document, index) => {
         const base = values.length;
@@ -502,7 +533,7 @@ export async function indexGraph(input: {
       );
       embeddedCount += batch.length;
       input.onProgress?.(embeddedCount, pending.length, reusedCount);
-    }
+    });
     const nodeIds = documents.map((document) => document.nodeId);
     const removed = await client.query(
       `DELETE FROM graphify_node_embeddings
@@ -785,9 +816,9 @@ function synthesisSchema() {
   };
 }
 
-export async function synthesizeWithTerra(
+export async function synthesizeWithModel(
   result: Omit<HybridQueryResult, "synthesis">,
-): Promise<TerraSynthesis> {
+): Promise<GraphifySynthesis> {
   const config = apiConfigFromEnv();
   const evidence = {
     seeds: result.seeds.map(({ searchText: _searchText, ...seed }) => seed),
@@ -822,7 +853,7 @@ export async function synthesizeWithTerra(
     },
   ];
   const body: Record<string, unknown> = {
-    model: config.terraModel,
+    model: config.synthesisModel,
     messages,
     max_completion_tokens: 4_000,
     response_format: {
@@ -838,12 +869,12 @@ export async function synthesizeWithTerra(
     const response = await apiRequest<{
       choices: Array<{ message: { content: string } }>;
     }>("/chat/completions", body);
-    return JSON.parse(response.choices[0].message.content) as TerraSynthesis;
+    return JSON.parse(response.choices[0].message.content) as GraphifySynthesis;
   } catch (error) {
     const fallback = await apiRequest<{
       choices: Array<{ message: { content: string } }>;
     }>("/chat/completions", {
-      model: config.terraModel,
+      model: config.synthesisModel,
       messages: [
         ...messages,
         { role: "system", content: "Return only valid JSON matching the requested answer/evidence/limitations shape." },
@@ -851,9 +882,11 @@ export async function synthesizeWithTerra(
       max_completion_tokens: 4_000,
     });
     try {
-      return JSON.parse(fallback.choices[0].message.content) as TerraSynthesis;
+      return JSON.parse(fallback.choices[0].message.content) as GraphifySynthesis;
     } catch {
-      throw new Error(`Terra did not return valid structured JSON: ${String(error)}`);
+      throw new Error(
+        `Synthesis model ${config.synthesisModel} did not return valid structured JSON: ${String(error)}`,
+      );
     }
   }
 }

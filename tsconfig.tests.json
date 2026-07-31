@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".cache/types/tests",
+    "rootDir": ".",
+    "tsBuildInfoFile": ".cache/tsbuildinfo/tests.tsbuildinfo",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "server/**/*.test.ts",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "test-support/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "./tsconfig.server.json"
+    }
+  ]
+}

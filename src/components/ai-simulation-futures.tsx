@@ -19,7 +19,6 @@ import { formatMoney, formatQuantity } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const MODEL_LABELS: Record<AiSimulationModelComparisonLane["id"], string> = {
-  kronos_base: "Kronos-base · Legacy",
   fincast: "FinCast · Main",
   chronos2: "Chronos-2 · Primary",
 };
@@ -294,7 +293,7 @@ export function AiSimulationModelComparisonPanel({
           <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-secondary"><GitCompareArrows className="size-4" /></span>
           <div>
             <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">MODEL COMPARISON</p>
-            <h2 className="mt-1 text-lg font-black">FinCast Main · Kronos Legacy 독립 비교</h2>
+            <h2 className="mt-1 text-lg font-black">FinCast · Chronos-2 독립 비교</h2>
             <p className="mt-1 text-[9px] leading-4 text-muted-foreground">자동 우승자·fallback 위장·즉시 앙상블 없이 원본 lane을 그대로 표시합니다.</p>
           </div>
         </div>

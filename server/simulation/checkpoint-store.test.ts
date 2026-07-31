@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  type DatabaseDialect,
   type DatabaseRow,
   type RelationalDatabase,
   type RunResult,
-  SqliteDatabase,
 } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { RunRepository } from "../repositories/run-repository.js";
 import {
   SIMULATION_CHECKPOINT_SCHEMA_VERSION,
@@ -13,7 +12,7 @@ import {
 import { SimulationCheckpointStore } from "./checkpoint-store.js";
 
 async function setupStore(options: ConstructorParameters<typeof SimulationCheckpointStore>[1] = {}) {
-  const database = new SqliteDatabase(":memory:");
+  const database = new PGliteDatabase();
   const runs = new RunRepository(database);
   await runs.initialize();
   const store = new SimulationCheckpointStore(database, options);
@@ -252,7 +251,7 @@ describe("SimulationCheckpointStore v2", () => {
       await persisted;
 
       const readEventBytes = async (
-        database: SqliteDatabase,
+        database: PGliteDatabase,
         runId: string,
       ): Promise<number> => {
         const [row] = await database.query<{ events_json: string }>(`
@@ -446,15 +445,13 @@ describe("SimulationCheckpointStore v2", () => {
 class RecordingDatabase implements RelationalDatabase {
   readonly statements: string[] = [];
 
-  constructor(readonly dialect: DatabaseDialect) {}
-
   async query<T extends DatabaseRow>(): Promise<T[]> {
     return [];
   }
 
   async run(sql: string): Promise<RunResult> {
     this.statements.push(sql.replace(/\s+/g, " ").trim());
-    return { affectedRows: 0, insertId: 0 };
+    return { affectedRows: 0 };
   }
 
   async transaction<T>(work: (database: RelationalDatabase) => Promise<T>): Promise<T> {
@@ -464,26 +461,16 @@ class RecordingDatabase implements RelationalDatabase {
   async close(): Promise<void> {}
 }
 
-describe("SimulationCheckpointStore dialect schema", () => {
-  it.each(["sqlite", "postgres", "mysql"] as const)(
-    "%s DDL이 공통 repository abstraction에서 유효한 dialect 타입을 사용한다",
-    async (dialect) => {
-      const database = new RecordingDatabase(dialect);
-      await new SimulationCheckpointStore(database).initialize();
-      const ddl = database.statements.join("\n");
-      expect(ddl).toContain("portfolio_simulation_checkpoint_manifests");
-      expect(ddl).toContain("portfolio_simulation_checkpoint_chunks");
-      if (dialect === "mysql") {
-        expect(ddl).toContain("LONGTEXT");
-        expect(ddl).toContain("ENGINE=InnoDB");
-        expect(ddl).toContain("KEY idx_simulation_checkpoint_revision");
-      } else {
-        expect(ddl).not.toContain("LONGTEXT");
-        expect(ddl).not.toContain("ENGINE=InnoDB");
-        expect(ddl).toContain("CREATE INDEX IF NOT EXISTS idx_simulation_checkpoint_revision");
-      }
-      if (dialect === "postgres") expect(ddl).toContain("manifest_seq BIGINT");
-      if (dialect === "sqlite") expect(ddl).toContain("manifest_seq INTEGER");
-    },
-  );
+describe("SimulationCheckpointStore PostgreSQL schema", () => {
+  it("owns one PostgreSQL DDL shape without dialect branches", async () => {
+    const database = new RecordingDatabase();
+    await new SimulationCheckpointStore(database).initialize();
+    const ddl = database.statements.join("\n");
+    expect(ddl).toContain("portfolio_simulation_checkpoint_manifests");
+    expect(ddl).toContain("portfolio_simulation_checkpoint_chunks");
+    expect(ddl).toContain("manifest_seq BIGINT");
+    expect(ddl).toContain("CREATE INDEX IF NOT EXISTS idx_simulation_checkpoint_revision");
+    expect(ddl).not.toContain("LONGTEXT");
+    expect(ddl).not.toContain("ENGINE=InnoDB");
+  });
 });

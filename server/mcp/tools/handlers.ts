@@ -15,10 +15,8 @@ import type {
   TechnicalStrategyService,
 } from "../../services/technical-strategy-service.js";
 import type { OptimizationRepository } from "../../repositories/optimization-repository.js";
-import type { RunRepository, PortfolioRunKind, PortfolioRunRecord } from "../../repositories/run-repository.js";
+import type { RunRepository } from "../../repositories/run-repository.js";
 import type { PresetService } from "../../services/preset-service.js";
-import { PRESET_EXPORT_SCHEMA_VERSION, PresetValidationError } from "../../services/preset-service.js";
-import { PresetRevisionConflictError, type PresetSource } from "../../repositories/preset-repository.js";
 import {
   analyzePairedReturnSeries,
   analyzeReturnSeries,
@@ -28,28 +26,35 @@ import {
   type ReturnSeriesInput,
 } from "../../services/quant-math.js";
 import {
-  buildParetoFrontier,
-  buildWalkForwardWindows,
-  optimizePortfolio,
   type OptimizationInput,
   type OptimizationOutput,
   type OptimizationObjective,
   type PortfolioCandidate,
-} from "../../services/optimization-service.js";
+} from "../../contracts/optimization.js";
 import { envelope, HISTORICAL_LIMITATION, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "../../services/service-envelope.js";
 import type { McpResourceRegistry } from "../resources.js";
-import { resolvedPresetExecutionSchemas, toolSchemas, type ToolName } from "../schemas.js";
+import { resolvedPresetExecutionSchemas, type ToolName } from "../schemas.js";
 import type { RustComputeClient } from "../../worker/rust-client.js";
 import type { ArtifactType } from "../../repositories/artifact-repository.js";
 import { isArtifactType } from "../../repositories/artifact-repository.js";
 import { analyzePortfolioExposures } from "../../services/exposure-service.js";
 import { ResearchReportService } from "../../services/research-report-service.js";
-import { buildInfo } from "../../build-info.js";
-import { randomUUID } from "node:crypto";
 import { enforceToolRequestLimits } from "../../services/tool-request-limits.js";
 import { TossApiError } from "../../toss.js";
-import { MCP_VISIBLE_RUN_KINDS, mcpVisibleRun } from "../run-visibility.js";
+import { mcpVisibleRun } from "../run-visibility.js";
 import { createMcpDomainRegistry } from "./domain-registry.js";
+import {
+  createPresetManagementHandlers,
+  presetOperation,
+} from "./preset-management-handlers.js";
+import {
+  object,
+  recordValue,
+  runResultEnvelope,
+  serviceNotFound,
+  type GenericInput,
+} from "./handler-support.js";
+import { createRunManagementHandlers } from "./run-management-handlers.js";
 
 export type ToolHandler = (input: unknown, ownerSubject: string) => Promise<unknown>;
 
@@ -76,12 +81,6 @@ export type McpToolDependencies = {
   maxAssets: number;
   maxDateRangeYears: number;
 };
-
-type GenericInput = Record<string, unknown>;
-
-function object(input: unknown): GenericInput {
-  return input as GenericInput;
-}
 
 function rustTaskResult(output: Awaited<ReturnType<RustComputeClient["compute"]>>) {
   return {
@@ -237,42 +236,6 @@ function stressRequest(baseInput: BacktestRunRequest, scenario: GenericInput): B
     ...(scenario.rebalanceFrequency ? { rebalanceFrequency: scenario.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"] } : {}),
     ...(scenario.rebalanceThresholdPercent !== undefined ? { rebalanceThresholdPercent: Number(scenario.rebalanceThresholdPercent) } : {}),
   };
-}
-
-function runResultEnvelope(run: {
-  id: string;
-  kind: string;
-  status: string;
-  progress: number;
-  completedCandidates: number;
-  totalCandidates: number;
-  currentValidationWindow?: string;
-  dataRevision: string;
-  warnings: string[];
-  input: unknown;
-  summary?: unknown;
-  result?: unknown;
-  error?: unknown;
-}, request: unknown, artifactIndex: unknown[] = [], includeStoredResult = true) {
-  return envelope({
-    request,
-    dataRevision: run.dataRevision,
-    warnings: run.warnings,
-    dataQuality: {},
-    result: {
-      run_id: run.id,
-      kind: run.kind,
-      status: run.status,
-      progress: run.progress,
-      completed_candidates: run.completedCandidates,
-      total_candidates: run.totalCandidates,
-      current_validation_window: run.currentValidationWindow,
-      summary: run.summary,
-      ...(includeStoredResult ? { result: run.result } : {}),
-      error: run.error,
-      artifact_index: artifactIndex,
-    },
-  });
 }
 
 function optimizationInput(
@@ -514,159 +477,6 @@ function metricDistributions(rows: Array<{ metrics: Record<string, unknown> }>) 
   ]));
 }
 
-const REPLAY_TOOL_BY_KIND: Partial<Record<PortfolioRunKind, ToolName>> = {
-  backtest: "run_portfolio_backtest",
-  optimization: "optimize_portfolio",
-  walk_forward: "walk_forward_optimize",
-  stress_test: "stress_test_portfolio",
-  weight_sensitivity: "analyze_weight_sensitivity",
-  start_date_sensitivity: "analyze_start_date_sensitivity",
-  rebalance_sensitivity: "analyze_rebalance_sensitivity",
-  cash_flow_sensitivity: "analyze_cash_flow_sensitivity",
-  monte_carlo: "simulate_portfolio_monte_carlo",
-  outlook: "analyze_portfolio_outlook",
-  exposure_analysis: "analyze_portfolio_exposures",
-  pareto_frontier: "build_pareto_frontier",
-  research_report: "generate_research_report",
-  technical_analysis: "analyze_technical_signals",
-  technical_strategy: "run_technical_strategy_backtest",
-};
-
-function serviceNotFound(entity: "run" | "preset", id: string): ServiceError {
-  return new ServiceError({
-    code: entity === "run" ? "RUN_NOT_FOUND" : "PRESET_NOT_FOUND",
-    message: entity === "run" ? "run을 찾을 수 없습니다." : "preset을 찾을 수 없습니다.",
-    retryable: false,
-    details: { id },
-  });
-}
-
-async function presetOperation<T>(operation: () => Promise<T>): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof PresetRevisionConflictError) {
-      throw new ServiceError({
-        code: "PRESET_REVISION_CONFLICT",
-        message: "preset이 다른 요청에서 변경되었습니다. 최신 revision을 다시 조회해 주세요.",
-        retryable: false,
-        details: {
-          preset_id: error.presetId,
-          expected_revision: error.expectedRevision,
-          current_revision: error.currentRevision,
-        },
-      });
-    }
-    if (error instanceof PresetValidationError) {
-      throw new ServiceError({
-        code: "INVALID_PRESET",
-        message: error.message,
-        retryable: false,
-        ...(error.field ? { field: error.field } : {}),
-      });
-    }
-    throw error;
-  }
-}
-
-function runListArchived(value: unknown): boolean | "all" {
-  if (value === "all") return "all";
-  return value === "archived";
-}
-
-function eventCursor(value: unknown): { after: number; afterId?: string } | undefined {
-  if (value === undefined) return undefined;
-  const raw = String(value);
-  if (/^\d{1,16}$/.test(raw)) return { after: Number(raw) };
-  try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as { after?: unknown; id?: unknown };
-    if (!Number.isSafeInteger(parsed.after) || Number(parsed.after) < 0) throw new Error("invalid timestamp");
-    if (parsed.id === undefined) return { after: Number(parsed.after) };
-    if (typeof parsed.id !== "string" || parsed.id.length < 1 || parsed.id.length > 64) throw new Error("invalid event id");
-    return { after: Number(parsed.after), afterId: parsed.id };
-  } catch {
-    throw new ServiceError({ code: "INVALID_EVENT_CURSOR", message: "run event cursor가 올바르지 않습니다.", retryable: false, field: "cursor" });
-  }
-}
-
-function runManifest(run: PortfolioRunRecord, artifacts: Awaited<ReturnType<ArtifactService["list"]>>) {
-  return {
-    schema_version: "portfolio-lens-run-manifest/v1",
-    captured_at: new Date(run.createdAt).toISOString(),
-    finalized: false,
-    run: {
-      id: run.id,
-      kind: run.kind,
-      request_hash: run.requestHash,
-      data_revision: run.dataRevision,
-      engine_version: run.engineVersion,
-      status: run.status,
-      input: run.input,
-      created_at: run.createdAt,
-      started_at: run.startedAt,
-      finished_at: run.finishedAt,
-      replay_of: run.replayOf,
-    },
-    build: buildInfo(),
-    reproducibility: {
-      deterministic_when: "동일 seed, 정규화 입력, data revision, 엔진·worker schema 버전이 동일할 때",
-      seed: recordValue(run.input)?.seed ?? null,
-      artifact_checksums: artifacts.map((artifact) => ({
-        type: artifact.type,
-        checksum: artifact.checksum,
-        rows: artifact.rowCount,
-        bytes: artifact.byteCount,
-        schema_version: artifact.schemaVersion,
-      })),
-    },
-  };
-}
-
-function finalizedRunManifest(
-  base: unknown,
-  run: PortfolioRunRecord,
-  artifacts: Awaited<ReturnType<ArtifactService["list"]>>,
-) {
-  const stored = recordValue(base) ?? {};
-  const storedRun = recordValue(stored.run) ?? {};
-  const reproducibility = recordValue(stored.reproducibility) ?? {};
-  const coreArtifacts = artifacts.filter((artifact) => artifact.type !== "research-report");
-  return {
-    ...stored,
-    schema_version: "portfolio-lens-run-manifest/v1",
-    finalized: true,
-    finalized_at: new Date(run.finishedAt ?? run.updatedAt).toISOString(),
-    run: {
-      ...storedRun,
-      id: run.id,
-      kind: run.kind,
-      request_hash: run.requestHash,
-      data_revision: run.dataRevision,
-      engine_version: run.engineVersion,
-      status: run.status,
-      input: run.input,
-      created_at: run.createdAt,
-      started_at: run.startedAt,
-      finished_at: run.finishedAt,
-      replay_of: run.replayOf,
-    },
-    reproducibility: {
-      ...reproducibility,
-      artifact_checksums: coreArtifacts.map((artifact) => ({
-        type: artifact.type,
-        checksum: artifact.checksum,
-        rows: artifact.rowCount,
-        bytes: artifact.byteCount,
-        schema_version: artifact.schemaVersion,
-      })),
-    },
-  };
-}
-
-function recordValue(value: unknown): GenericInput | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as GenericInput : undefined;
-}
-
 type PresetExecutionTool =
   | "analyze_technical_signals"
   | "validate_technical_strategy"
@@ -867,231 +677,6 @@ export async function resolvePresetExecution(
     if (!used) throw serviceNotFound("preset", preset.id);
   }
   return resolved;
-}
-
-async function resolvedPresetConfig(
-  dependencies: McpToolDependencies,
-  ownerSubject: string,
-  value: GenericInput,
-  fallback?: unknown,
-): Promise<{ config: unknown; source: PresetSource }> {
-  const source = (recordValue(value.source) ?? { type: "manual" }) as PresetSource;
-  const explicit = recordValue(value.config);
-  const symbols = Array.isArray(value.symbols)
-    ? (value.symbols as unknown[]).filter((item): item is string => typeof item === "string")
-    : undefined;
-  if (explicit) return {
-    config: symbols ? { ...explicit, symbols } : explicit,
-    source,
-  };
-  if (source.type === "run") {
-    const run = mcpVisibleRun(await dependencies.runRepository.get(String(source.runId), ownerSubject));
-    if (!run) throw serviceNotFound("run", String(source.runId));
-    const base = recordValue(run.input) ?? { input: run.input };
-    return { config: symbols ? { ...base, symbols } : base, source };
-  }
-  if (source.type === "optimization_candidate" || source.type === "pareto_candidate") {
-    const runId = String(source.runId);
-    const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-    if (!run) throw serviceNotFound("run", runId);
-    if (run.kind !== "optimization") {
-      throw new ServiceError({ code: "INVALID_RUN_KIND", message: "최적화 후보 preset에는 optimization run이 필요합니다.", retryable: false });
-    }
-    const index = Math.max(0, Number(source.candidateIndex ?? 0));
-    const candidate = await dependencies.optimizationRepository.getCandidateAt(
-      runId,
-      index,
-      source.type === "pareto_candidate",
-    );
-    if (!candidate) {
-      throw new ServiceError({ code: "CANDIDATE_NOT_FOUND", message: "저장할 최적화 후보를 찾을 수 없습니다.", retryable: false });
-    }
-    return {
-      config: {
-        symbols: Object.keys(candidate.weights),
-        weights: candidate.weights,
-        optimization_run_id: runId,
-        candidate_id: candidate.id,
-        candidate_rank: candidate.rank,
-        metrics: candidate.metrics,
-      },
-      source,
-    };
-  }
-  if (source.type === "current_portfolio") {
-    const holdings = Array.isArray(source.holdings) ? source.holdings : [];
-    const holdingRecords = holdings.map(recordValue).filter((item): item is GenericInput => Boolean(item));
-    const explicitWeights = Object.fromEntries(holdingRecords
-      .filter((item) => typeof item.symbol === "string" && typeof item.weight === "number")
-      .map((item) => [String(item.symbol), Number(item.weight)]));
-    const currencies = new Set(holdingRecords.map((item) => item.currency).filter((item): item is string => typeof item === "string"));
-    const evaluationTotal = holdingRecords.reduce((sum, item) => sum + (typeof item.evaluationAmount === "number" ? item.evaluationAmount : 0), 0);
-    const sameCurrencyWeights = currencies.size <= 1 && evaluationTotal > 0
-      ? Object.fromEntries(holdingRecords
-        .filter((item) => typeof item.symbol === "string" && typeof item.evaluationAmount === "number")
-        .map((item) => [String(item.symbol), Number(item.evaluationAmount) / evaluationTotal]))
-      : undefined;
-    const defaultWeights = Object.keys(explicitWeights).length === holdingRecords.length
-      ? explicitWeights
-      : sameCurrencyWeights;
-    return {
-      config: {
-        symbols: symbols ?? holdings.map((item) => recordValue(item)?.symbol).filter((item): item is string => typeof item === "string"),
-        holdings,
-        ...(defaultWeights ? { defaultWeights } : {}),
-        ...(typeof recordValue(source.summary)?.cashWeight === "number"
-          ? { cashWeight: Number(recordValue(source.summary)?.cashWeight) }
-          : {}),
-        benchmark: recordValue(source.summary)?.benchmark,
-        sourceAsOf: source.asOf,
-        dataQuality: {
-          defaultWeights: defaultWeights ? "available" : "unavailable",
-          cashWeight: typeof recordValue(source.summary)?.cashWeight === "number" ? "available" : "unavailable",
-          ...(!defaultWeights && currencies.size > 1
-            ? { warning: "다중 통화 보유 평가액에 공통 기준통화 환산값이 없어 기본 비중을 추정하지 않았습니다." }
-            : {}),
-        },
-      },
-      source,
-    };
-  }
-  if (fallback !== undefined) {
-    const base = recordValue(fallback) ?? { value: fallback };
-    return { config: symbols ? { ...base, symbols } : base, source };
-  }
-  return { config: { symbols: symbols ?? [] }, source };
-}
-
-function importDocument(value: unknown): {
-  name: string;
-  description: string;
-  config: unknown;
-  tags: string[];
-  source: PresetSource;
-} {
-  let parsed = value;
-  if (typeof value === "string") {
-    try { parsed = JSON.parse(value) as unknown; } catch {
-      throw new ServiceError({ code: "INVALID_PRESET_IMPORT", message: "preset 가져오기 JSON을 해석할 수 없습니다.", retryable: false });
-    }
-  }
-  const root = recordValue(parsed);
-  const preset = recordValue(root?.preset);
-  if (!root || root.schema_version !== PRESET_EXPORT_SCHEMA_VERSION || !preset || typeof preset.name !== "string") {
-    throw new ServiceError({ code: "INVALID_PRESET_IMPORT", message: "지원하지 않는 preset export 문서입니다.", retryable: false });
-  }
-  return {
-    name: preset.name,
-    description: typeof preset.description === "string" ? preset.description : "",
-    config: preset.config,
-    tags: Array.isArray(preset.tags) ? preset.tags.filter((tag): tag is string => typeof tag === "string") : [],
-    source: (recordValue(preset.source) ?? { type: "unknown" }) as PresetSource,
-  };
-}
-
-function nestedRunId(value: unknown, depth = 0): string | undefined {
-  if (depth > 5) return undefined;
-  const source = recordValue(value);
-  if (!source) return undefined;
-  const direct = source.run_id ?? source.runId;
-  if (typeof direct === "string") return direct;
-  return nestedRunId(source.result, depth + 1) ?? nestedRunId(source.run, depth + 1);
-}
-
-async function walkForward(value: GenericInput, loaded: LoadedReturnSeries, context: {
-  updateProgress: (progress: number, detail?: Record<string, unknown>) => Promise<void>;
-  throwIfCancelled: () => Promise<void>;
-}) {
-  const assetCount = (value.symbols as string[]).length;
-  const assetReturns = loaded.returns.slice(0, assetCount);
-  const benchmarkReturns = value.benchmark ? loaded.returns[assetCount] : undefined;
-  const aligned = alignReturnSeries(assetReturns);
-  const windows = buildWalkForwardWindows(aligned.dates.length, {
-    trainWindow: Number(value.trainWindow),
-    testWindow: Number(value.testWindow),
-    step: Number(value.step),
-  });
-  if (!windows.length) throw new ServiceError({ code: "INSUFFICIENT_WALK_FORWARD_DATA", message: "학습·검증 구간을 만들 데이터가 부족합니다.", retryable: false });
-  const totalBudget = Number(value.candidateBudget);
-  if (totalBudget < windows.length) {
-    throw new ServiceError({
-      code: "CANDIDATE_BUDGET_TOO_SMALL",
-      message: `Walk-forward ${windows.length}개 구간을 모두 검증하려면 candidate budget이 최소 ${windows.length}이어야 합니다.`,
-      retryable: false,
-      field: "candidateBudget",
-    });
-  }
-  const selected: Array<{ window: unknown; weights: Record<string, number>; oos: ReturnType<typeof analyzeReturnSeries> }> = [];
-  const selectionCounts = new Map<string, number>();
-  const baseFoldBudget = Math.floor(totalBudget / windows.length);
-  const budgetRemainder = totalBudget % windows.length;
-  let completedCandidates = 0;
-  const objective = value.objective as OptimizationObjective;
-  for (let index = 0; index < windows.length; index += 1) {
-    await context.throwIfCancelled();
-    const window = windows[index];
-    const trainStart = aligned.dates[window.trainStartIndex];
-    const trainEnd = aligned.dates[window.trainEndIndex];
-    const alignedTrainingReturns = assetReturns.map((series): ReturnSeriesInput => ({
-      key: series.key,
-      label: series.label,
-      points: aligned.dates.slice(window.trainStartIndex, window.trainEndIndex + 1).map((date, relative) => ({
-        date,
-        value: aligned.byKey[series.key][window.trainStartIndex + relative],
-      })),
-    }));
-    const trainingPrices = alignedTrainingReturns.map((series) => returnsToPrices(series, 0, series.points.length - 1));
-    const trainingBenchmark = benchmarkReturns ? {
-      ...benchmarkReturns,
-      points: benchmarkReturns.points.filter((point) => point.date >= trainStart && point.date <= trainEnd),
-    } : undefined;
-    const foldBudget = baseFoldBudget + (index < budgetRemainder ? 1 : 0);
-    const output = optimizePortfolio({
-      ...optimizationInput(value, { ...loaded, prices: trainingPrices }, false),
-      priceSeries: trainingPrices,
-      benchmark: trainingBenchmark,
-      candidateBudget: foldBudget,
-      seed: Number(value.seed) + index,
-    });
-    const best = output.bestByObjective[objective];
-    if (!best) continue;
-    const oos = analyzeReturnSeries(portfolioReturns(aligned, best.weights, window.testStartIndex, window.testEndIndex));
-    for (const symbol of Object.keys(best.weights)) selectionCounts.set(symbol, (selectionCounts.get(symbol) ?? 0) + 1);
-    selected.push({
-      window: {
-        ...window,
-        trainStart: aligned.dates[window.trainStartIndex],
-        trainEnd: aligned.dates[window.trainEndIndex],
-        testStart: aligned.dates[window.testStartIndex],
-        testEnd: aligned.dates[window.testEndIndex],
-      },
-      weights: best.weights,
-      oos,
-    });
-    completedCandidates += foldBudget;
-    await context.updateProgress(completedCandidates / totalBudget, {
-      completedCandidates,
-      totalCandidates: totalBudget,
-      currentValidationWindow: `${index + 1}/${windows.length}`,
-    });
-  }
-  const weightChanges = selected.slice(1).map((fold, index) => {
-    const previous = selected[index].weights;
-    const keys = new Set([...Object.keys(previous), ...Object.keys(fold.weights)]);
-    return 0.5 * Array.from(keys).reduce((sum, key) => sum + Math.abs((previous[key] ?? 0) - (fold.weights[key] ?? 0)), 0);
-  });
-  const worst = [...selected].sort((a, b) => (a.oos.sharpeRatio ?? -Infinity) - (b.oos.sharpeRatio ?? -Infinity))[0];
-  return {
-    folds: selected,
-    worst_validation_window: worst?.window ?? null,
-    weight_stability: weightChanges.length ? 1 - weightChanges.reduce((sum, item) => sum + item, 0) / weightChanges.length : null,
-    selection_frequency: Object.fromEntries(Array.from(selectionCounts, ([symbol, count]) => [symbol, count / Math.max(1, selected.length)])),
-    oos_summary: {
-      fold_count: selected.length,
-      average_sharpe: selected.length ? selected.reduce((sum, fold) => sum + (fold.oos.sharpeRatio ?? 0), 0) / selected.length : null,
-      worst_sharpe: worst?.oos.sharpeRatio ?? null,
-    },
-  };
 }
 
 export function createToolHandlers(dependencies: McpToolDependencies): Record<ToolName, ToolHandler> {
@@ -1372,13 +957,12 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       const value = object(input);
       const calculate = () => analyzePortfolioExposures(value.assets as never, Boolean(value.lookThrough));
       if (value.executionMode === "async") {
-        const queued = await dependencies.runs.enqueue({
+        const queued = await dependencies.runs.enqueueOrchestration({
           ownerSubject,
           kind: "exposure_analysis",
           config: value,
           dataRevision: "user-supplied-exposure-snapshot",
           totalCandidates: 1,
-          allowInlineInExternal: true,
           task: async (context) => {
             await context.throwIfCancelled();
             const analysis = calculate();
@@ -1527,18 +1111,6 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       let loaded: LoadedReturnSeries | undefined;
       let ledger: Awaited<ReturnType<typeof optimizationLedgerTemplate>> | undefined;
       try {
-        if (dependencies.runs.executionMode === "inline" && (
-          value.algorithm !== "random_search"
-          || (value.groupConstraints as unknown[]).length > 0
-          || Object.keys(value.robustScoreWeights as Record<string, number>).length > 0
-          || recordValue(value.regimePolicySearch)?.enabled === true
-        )) {
-          throw new ServiceError({
-            code: "RUST_ADVANCED_OPTIMIZER_REQUIRED",
-            message: "고급 optimizer 알고리즘·그룹 제약·사용자 robust score·국면 정책은 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
-            retryable: false,
-          });
-        }
         preflightPhase = "market_data";
         loaded = await dependencies.returnSeries.load({
           symbols,
@@ -1548,11 +1120,7 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           adjusted: true,
         });
         preflightPhase = "ledger_template";
-        ledger = dependencies.runs.executionMode === "inline"
-          ? { warnings: [
-            "inline 호환 엔진은 legacy random-search 계산만 수행하며 Ledoit–Wolf, 기준 포트폴리오, IS/OOS robust score 분리와 2단계 ledger 재검증은 Rust 실행 모드가 필요합니다.",
-          ] }
-          : await optimizationLedgerTemplate(dependencies, value);
+        ledger = await optimizationLedgerTemplate(dependencies, value);
       } catch (error) {
         await throwPersistedOptimizationPreflightFailure({
           dependencies,
@@ -1584,25 +1152,6 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           totalCandidates: budget,
           payload: workerPayload,
         })
-        : dependencies.runs.executionMode === "rust_socket"
-          ? await dependencies.runs.enqueue({
-            ownerSubject,
-            kind: "optimization",
-            config: value,
-            dataRevision: loaded.dataRevision,
-            totalCandidates: budget,
-            task: async (context) => {
-              await context.throwIfCancelled();
-              const output = await requireRust(dependencies).compute<OptimizationOutput>("optimization", workerPayload, { signal: context.signal });
-              const candidates = output.artifacts.find((artifact) => artifact.type === "candidates")?.content as PortfolioCandidate[] | undefined
-                ?? output.result.candidates;
-              const frontier = output.artifacts.find((artifact) => artifact.type === "worker-pareto-frontier")?.content as PortfolioCandidate[] | undefined
-                ?? output.result.paretoFrontier;
-              await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, candidates, frontier);
-              await context.updateProgress(1, { completedCandidates: candidates.length, totalCandidates: budget });
-              return rustTaskResult(output);
-            },
-          })
         : await dependencies.runs.enqueue({
           ownerSubject,
           kind: "optimization",
@@ -1611,37 +1160,20 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           totalCandidates: budget,
           task: async (context) => {
             await context.throwIfCancelled();
-            const output = optimizePortfolio(optimizationInput(value, loaded, false));
-            await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, output.candidates, output.paretoFrontier);
-            await context.updateProgress(1, { completedCandidates: output.candidateCount, totalCandidates: budget });
-            return {
-              summary: { best: output.bestByObjective[value.objective as OptimizationObjective], candidate_count: output.candidateCount, pareto_count: output.paretoFrontier.length },
-              result: { ...output, candidates: output.candidates.slice(0, 20), paretoFrontier: output.paretoFrontier.slice(0, 100) },
-              warnings: [...loaded.warnings, ...output.warnings],
-              artifacts: [{ type: "candidates", content: output.candidates, rowCount: output.candidates.length }],
-            };
+            const output = await requireRust(dependencies).compute<OptimizationOutput>("optimization", workerPayload, { signal: context.signal });
+            const candidates = output.artifacts.find((artifact) => artifact.type === "candidates")?.content as PortfolioCandidate[] | undefined
+              ?? output.result.candidates;
+            const frontier = output.artifacts.find((artifact) => artifact.type === "worker-pareto-frontier")?.content as PortfolioCandidate[] | undefined
+              ?? output.result.paretoFrontier;
+            await persistOptimization(dependencies, context.runId, value.objective as OptimizationObjective, Number(value.seed), budget, value, candidates, frontier);
+            await context.updateProgress(1, { completedCandidates: candidates.length, totalCandidates: budget });
+            return rustTaskResult(output);
           },
         });
       return runResultEnvelope(queued.run, value);
     },
     walk_forward_optimize: async (input, ownerSubject) => {
       const value = await resolvePresetExecution(dependencies, ownerSubject, object(input), "walk_forward_optimize");
-      if (dependencies.runs.executionMode === "inline" && (
-        value.algorithm !== "random_search"
-        || value.mode !== "rolling"
-        || Number(value.gap) !== 0
-        || Number(value.embargo) !== 0
-        || (value.seeds as number[]).length !== 1
-        || (value.groupConstraints as unknown[]).length > 0
-        || Object.keys(value.robustScoreWeights as Record<string, number>).length > 0
-        || recordValue(value.regimePolicySearch)?.enabled === true
-      )) {
-        throw new ServiceError({
-          code: "RUST_ADVANCED_WALK_FORWARD_REQUIRED",
-          message: "anchored·gap·embargo·다중 seed Walk-forward와 고급 optimizer 옵션은 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
-          retryable: false,
-        });
-      }
       value.candidateBudget = Math.min(Number(value.candidateBudget), dependencies.maxCandidateBudget);
       const symbols = [...value.symbols as string[], ...(value.benchmark ? [String(value.benchmark)] : [])];
       const loaded = await dependencies.returnSeries.load({ symbols, fromDate: String(value.fromDate), toDate: String(value.toDate), currencyMode: value.currencyMode as never, adjusted: true });
@@ -1689,36 +1221,19 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           totalCandidates: Number(value.candidateBudget),
           payload: workerPayload,
         })
-        : dependencies.runs.executionMode === "rust_socket"
-          ? await dependencies.runs.enqueue({
-            ownerSubject,
-            kind: "walk_forward",
-            config: value,
-            dataRevision: loaded.dataRevision,
-            totalCandidates: Number(value.candidateBudget),
-            task: async (context) => {
-              await context.throwIfCancelled();
-              const output = await requireRust(dependencies).compute("walk_forward", workerPayload, { signal: context.signal });
-              await context.updateProgress(1, { completedCandidates: Number(value.candidateBudget), totalCandidates: Number(value.candidateBudget) });
-              return rustTaskResult(output);
-            },
-          })
         : await dependencies.runs.enqueue({
-        ownerSubject,
-        kind: "walk_forward",
-        config: value,
-        dataRevision: loaded.dataRevision,
-        totalCandidates: Number(value.candidateBudget),
-        task: async (context) => {
-          const result = await walkForward(value, loaded, context as never);
-          return {
-            summary: result.oos_summary,
-            result,
-            warnings: loaded.warnings,
-            artifacts: [{ type: "walk-forward", content: result.folds, rowCount: result.folds.length }],
-          };
-        },
-      });
+          ownerSubject,
+          kind: "walk_forward",
+          config: value,
+          dataRevision: loaded.dataRevision,
+          totalCandidates: Number(value.candidateBudget),
+          task: async (context) => {
+            await context.throwIfCancelled();
+            const output = await requireRust(dependencies).compute("walk_forward", workerPayload, { signal: context.signal });
+            await context.updateProgress(1, { completedCandidates: Number(value.candidateBudget), totalCandidates: Number(value.candidateBudget) });
+            return rustTaskResult(output);
+          },
+        });
       return runResultEnvelope(queued.run, value);
     },
     stress_test_portfolio: async (input, ownerSubject) => {
@@ -1749,17 +1264,15 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       });
       const preparedScenarios: Array<{ id: string; name: unknown; config: BacktestRunRequest; simulation: unknown }> = [];
       const preparationWarnings: string[] = [];
-      if (dependencies.runs.executionMode === "external" || dependencies.runs.executionMode === "rust_socket") {
-        for (let index = 0; index < requests.length; index += 1) {
-          const prepared = await dependencies.backtestEngine.prepare(requests[index]);
-          preparationWarnings.push(...prepared.responseContext.warnings);
-          preparedScenarios.push({
-            id: `stress-${index + 1}`,
-            name: scenarios[index].name,
-            config: requests[index],
-            simulation: prepared.simulation,
-          });
-        }
+      for (let index = 0; index < requests.length; index += 1) {
+        const prepared = await dependencies.backtestEngine.prepare(requests[index]);
+        preparationWarnings.push(...prepared.responseContext.warnings);
+        preparedScenarios.push({
+          id: `stress-${index + 1}`,
+          name: scenarios[index].name,
+          config: requests[index],
+          simulation: prepared.simulation,
+        });
       }
       const revision = await dependencies.marketData.repository.dataRevision();
       const workerPayload = { scenarios: preparedScenarios, market_warnings: Array.from(new Set(preparationWarnings)) };
@@ -1772,83 +1285,19 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
           totalCandidates: scenarios.length,
           payload: workerPayload,
         })
-        : dependencies.runs.executionMode === "rust_socket"
-          ? await dependencies.runs.enqueue({
-            ownerSubject,
-            kind: "stress_test",
-            config: value,
-            dataRevision: revision,
-            totalCandidates: scenarios.length,
-            task: async (context) => {
-              await context.throwIfCancelled();
-              const output = await requireRust(dependencies).compute("stress_test", workerPayload, { signal: context.signal });
-              await context.updateProgress(1, { completedCandidates: scenarios.length, totalCandidates: scenarios.length });
-              return rustTaskResult(output);
-            },
-          })
         : await dependencies.runs.enqueue({
-        ownerSubject,
-        kind: "stress_test",
-        config: value,
-        dataRevision: revision,
-        totalCandidates: scenarios.length,
-        task: async (context) => {
-          const results = [];
-          const warnings: string[] = [];
-          for (let index = 0; index < scenarios.length; index += 1) {
+          ownerSubject,
+          kind: "stress_test",
+          config: value,
+          dataRevision: revision,
+          totalCandidates: scenarios.length,
+          task: async (context) => {
             await context.throwIfCancelled();
-            const scenario = scenarios[index];
-            const base = { ...value.baseConfig as BacktestRunRequest };
-            const exclude = new Set((scenario.excludeSymbols as string[] | undefined) ?? []);
-            const assets = base.assets.filter((asset) => !exclude.has(asset.symbol));
-            const total = assets.reduce((sum, asset) => sum + asset.weight, 0);
-            if (!assets.length || total <= 0) {
-              throw new ServiceError({
-                code: "EMPTY_STRESS_PORTFOLIO",
-                message: "stress scenario가 모든 종목을 제외할 수 없습니다.",
-                retryable: false,
-              });
-            }
-            const request = {
-              ...base,
-              assets: assets.map((asset) => ({ ...asset, weight: asset.weight / total * 100 })),
-              ...(scenario.startDate !== undefined ? { startDate: String(scenario.startDate) } : {}),
-              ...(scenario.endDate !== undefined ? { endDate: String(scenario.endDate) } : {}),
-              ...(scenario.transactionCostBps !== undefined ? { transactionCostBps: Number(scenario.transactionCostBps) } : {}),
-              ...(scenario.monthlyCashFlow !== undefined ? { monthlyCashFlow: Number(scenario.monthlyCashFlow) } : {}),
-              ...(scenario.cashFlowFrequency ? { cashFlowFrequency: scenario.cashFlowFrequency as NonNullable<BacktestRunRequest["cashFlowFrequency"]> } : {}),
-              ...(scenario.cashFlowTiming ? { cashFlowTiming: scenario.cashFlowTiming as NonNullable<BacktestRunRequest["cashFlowTiming"]> } : {}),
-              ...(scenario.currencyMode ? { currencyMode: scenario.currencyMode as "local" | "KRW" } : {}),
-              ...(scenario.rebalanceFrequency ? { rebalanceFrequency: scenario.rebalanceFrequency as BacktestRunRequest["rebalanceFrequency"] } : {}),
-              ...(scenario.rebalanceThresholdPercent !== undefined ? { rebalanceThresholdPercent: Number(scenario.rebalanceThresholdPercent) } : {}),
-            };
-            const result = await dependencies.backtestEngine.run(request);
-            const summary = {
-              ...result.metrics,
-              cvar95Percent: result.advanced.tailRisk.expectedShortfall95Percent,
-            };
-            results.push({
-              id: `stress-${index + 1}`,
-              name: scenario.name,
-              summary,
-              data_quality: result.dataQuality,
-              warnings: result.warnings,
-            });
-            warnings.push(...result.warnings.map((warning) => `${scenario.name}: ${warning}`));
-            await context.updateProgress((index + 1) / scenarios.length, { completedCandidates: index + 1, totalCandidates: scenarios.length });
-          }
-          const result = {
-            referenceScenarioId: scenarios.length ? "stress-1" : null,
-            scenarios: results,
-          };
-          return {
-            summary: { scenario_count: results.length },
-            result,
-            warnings: Array.from(new Set(warnings)),
-            artifacts: [{ type: "result", content: result, rowCount: results.length }],
-          };
-        },
-      });
+            const output = await requireRust(dependencies).compute("stress_test", workerPayload, { signal: context.signal });
+            await context.updateProgress(1, { completedCandidates: scenarios.length, totalCandidates: scenarios.length });
+            return rustTaskResult(output);
+          },
+        });
       return runResultEnvelope(queued.run, value);
     },
     build_pareto_frontier: async (input, ownerSubject) => {
@@ -1857,13 +1306,12 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
       if (run.kind !== "optimization") throw new ServiceError({ code: "INVALID_RUN_KIND", message: "최적화 run이 필요합니다.", retryable: false });
       if (value.executionMode === "async") {
-        const queued = await dependencies.runs.enqueue({
+        const queued = await dependencies.runs.enqueueOrchestration({
           ownerSubject,
           kind: "pareto_frontier",
           config: value,
           dataRevision: run.dataRevision,
           totalCandidates: Number(value.limit),
-          allowInlineInExternal: true,
           task: async (context) => {
             await context.throwIfCancelled();
             const candidates = await dependencies.optimizationRepository.listParetoCandidates(run.id, Number(value.limit));
@@ -2021,13 +1469,6 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
     analyze_rebalance_sensitivity: (input, ownerSubject) => enqueueSensitivity(dependencies, "rebalance_sensitivity", object(input), ownerSubject),
     analyze_cash_flow_sensitivity: (input, ownerSubject) => enqueueSensitivity(dependencies, "cash_flow_sensitivity", object(input), ownerSubject),
     simulate_portfolio_monte_carlo: async (input, ownerSubject) => {
-      if (dependencies.runs.executionMode === "inline") {
-        throw new ServiceError({
-          code: "RUST_COMPUTE_REQUIRED",
-          message: "Monte Carlo는 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
-          retryable: false,
-        });
-      }
       const value = object(input);
       const loaded = await dependencies.returnSeries.load({
         symbols: value.symbols as string[],
@@ -2068,13 +1509,6 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       return runResultEnvelope(dispatched.run, value);
     },
     analyze_portfolio_outlook: async (input, ownerSubject) => {
-      if (dependencies.runs.executionMode === "inline") {
-        throw new ServiceError({
-          code: "RUST_COMPOSITE_OUTLOOK_REQUIRED",
-          message: "통합 outlook은 rust_socket 또는 external Rust worker 실행 모드가 필요합니다.",
-          retryable: false,
-        });
-      }
       const value = object(input);
       const base = value.baseConfig as BacktestRunRequest;
       const optimizationSettings = value.optimization as GenericInput;
@@ -2309,408 +1743,11 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
       return runResultEnvelope(queued.run, value);
     },
     explain_data_quality: (input) => dependencies.analytics.dataQuality(object(input) as never),
-    get_run_status: async (input, ownerSubject) => {
-      const value = object(input);
-      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
-      if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
-      return runResultEnvelope(run, value, [], false);
-    },
-    cancel_run: async (input, ownerSubject) => {
-      const value = object(input);
-      const before = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
-      if (!before) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
-      const cancelled = await dependencies.runs.cancel(String(value.runId), ownerSubject);
-      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
-      if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
-      const result = runResultEnvelope(run, value, [], false) as { result: GenericInput };
-      result.result.cancel_requested = cancelled;
-      return result;
-    },
-    get_run_result: async (input, ownerSubject) => {
-      const value = object(input);
-      const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
-      if (!run) throw new ServiceError({ code: "RUN_NOT_FOUND", message: "run을 찾을 수 없습니다.", retryable: false });
-      const artifactIndex = await dependencies.artifacts.list(run.id);
-      const shouldExternalize = dependencies.artifacts.shouldExternalize(run.result);
-      const response = runResultEnvelope(run, value, artifactIndex, !shouldExternalize) as { result: GenericInput; warnings: string[] };
-      if (shouldExternalize) {
-        response.result.result_externalized = true;
-        response.warnings.push("대용량 실행 결과는 artifact index의 resource URI로 조회해야 합니다.");
-      }
-      return response;
-    },
-    list_runs: async (input, ownerSubject) => {
-      const value = object(input);
-      const listed = await dependencies.runRepository.list({
-        ownerSubject,
-        ...(value.query ? { search: String(value.query) } : {}),
-        kinds: (value.kinds as PortfolioRunKind[]).length
-          ? value.kinds as PortfolioRunKind[]
-          : [...MCP_VISIBLE_RUN_KINDS],
-        statuses: value.statuses as never,
-        tags: value.tags as string[],
-        archived: runListArchived(value.archived),
-        ...(value.cursor ? { cursor: String(value.cursor) } : {}),
-        limit: Number(value.limit),
-      });
-      return envelope({
-        request: value,
-        dataRevision: "multiple-runs",
-        result: { items: listed.items, runs: listed.items, next_cursor: listed.nextCursor, nextCursor: listed.nextCursor },
-        dataQuality: { returned: listed.items.length, persistent: true },
-      });
-    },
-    get_run_events: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!run) throw serviceNotFound("run", runId);
-      const limit = Number(value.limit);
-      const cursor = eventCursor(value.cursor);
-      const events = await dependencies.runRepository.getEvents(runId, ownerSubject, {
-        ...cursor,
-        limit,
-      });
-      const nextCursor = events.length === limit && events.length
-        ? Buffer.from(JSON.stringify({
-            after: events.at(-1)!.createdAt,
-            id: events.at(-1)!.id,
-          }), "utf8").toString("base64url")
-        : undefined;
-      return envelope({
-        request: value,
-        dataRevision: run.dataRevision,
-        result: { run_id: run.id, events, next_cursor: nextCursor, nextCursor },
-        dataQuality: { event_count: events.length, persistent: true },
-      });
-    },
-    export_run_manifest: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!run) throw serviceNotFound("run", runId);
-      const artifacts = await dependencies.artifacts.list(run.id);
-      const existing = await dependencies.runRepository.getManifest(runId, ownerSubject);
-      const capture = existing ?? await dependencies.runRepository.storeManifest(
-        runId,
-        ownerSubject,
-        runManifest(run, artifacts),
-      );
-      const manifest = recordValue(capture)?.finalized === true
-        ? capture
-        : await dependencies.runRepository.finalizeManifest(
-          runId,
-          ownerSubject,
-          finalizedRunManifest(capture, run, artifacts),
-        );
-      return envelope({
-        request: value,
-        dataRevision: run.dataRevision,
-        result: { run_id: run.id, manifest, immutable: true },
-        dataQuality: { manifest: "stored", immutable: true },
-      });
-    },
-    update_run: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      if (!mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject))) throw serviceNotFound("run", runId);
-      if (value.name !== undefined) await dependencies.runRepository.rename(runId, ownerSubject, String(value.name));
-      if (value.tags !== undefined) await dependencies.runRepository.setTags(runId, ownerSubject, value.tags as string[]);
-      if (value.archived !== undefined) {
-        if (value.archived) await dependencies.runRepository.archive(runId, ownerSubject);
-        else await dependencies.runRepository.unarchive(runId, ownerSubject);
-      }
-      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!run) throw serviceNotFound("run", runId);
-      return envelope({ request: value, dataRevision: run.dataRevision, result: { run }, dataQuality: { persistent: true } });
-    },
-    duplicate_run: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      const source = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!source) throw serviceNotFound("run", runId);
-      if (["queued", "running", "cancel_requested"].includes(source.status)) {
-        throw new ServiceError({ code: "RUN_NOT_TERMINAL", message: "진행 중인 run은 완료·실패·취소 후 복제할 수 있습니다.", retryable: false });
-      }
-      const clone = await dependencies.runRepository.create({
-        kind: source.kind,
-        ownerSubject,
-        requestHash: requestHash({ duplicate_of: source.id, nonce: randomUUID() }),
-        dataRevision: source.dataRevision,
-        engineVersion: source.engineVersion,
-        config: source.input,
-        totalCandidates: source.totalCandidates,
-        name: (value.name ? String(value.name) : `${source.name ?? source.kind} 복사본`).slice(0, 200),
-        tags: source.tags,
-        replayOf: source.id,
-        manifest: {
-          ...(recordValue(source.manifest) ?? runManifest(source, [])),
-          finalized: false,
-          duplicated_from: source.id,
-        },
-      });
-      if (!await dependencies.runRepository.markRunning(clone.id)) {
-        throw new ServiceError({ code: "RUN_DUPLICATE_FAILED", message: "run 복제 레코드를 준비하지 못했습니다.", retryable: true });
-      }
-      let optimizationCandidatesCopied = 0;
-      if (source.status === "completed") {
-        const descriptors = await dependencies.artifacts.list(source.id);
-        for (const descriptor of descriptors) {
-          const artifact = await dependencies.artifacts.get(source.id, descriptor.type);
-          if (artifact) await dependencies.artifacts.put({
-            runId: clone.id,
-            type: descriptor.type,
-            content: artifact.content,
-            rowCount: descriptor.rowCount,
-            dataRevision: source.dataRevision,
-          });
-        }
-        if (source.kind === "optimization") {
-          const settings = recordValue(source.input) ?? {};
-          const candidateCount = await dependencies.optimizationRepository.candidateCount(source.id);
-          const candidates = await dependencies.optimizationRepository.listCandidates(source.id, Math.max(1, candidateCount));
-          await dependencies.optimizationRepository.createRun({
-            runId: clone.id,
-            objective: String(settings.objective ?? "robust_score"),
-            seed: String(settings.seed ?? "unknown"),
-            candidateBudget: Number(settings.candidateBudget ?? candidates.length),
-            objectiveVersion: source.engineVersion,
-            settings,
-          });
-          await dependencies.optimizationRepository.putCandidates(candidates.map((candidate) => ({
-            runId: clone.id,
-            rank: candidate.rank,
-            weights: candidate.weights,
-            metrics: candidate.metrics,
-            score: candidate.score,
-            pareto: candidate.pareto,
-          })));
-          optimizationCandidatesCopied = candidates.length;
-        }
-        await dependencies.runRepository.complete(clone.id, source.summary, source.result, source.warnings);
-      } else if (source.status === "cancelled") {
-        await dependencies.runRepository.cancel(clone.id, source.summary, source.warnings);
-      } else {
-        await dependencies.runRepository.fail(clone.id, source.error, source.warnings);
-      }
-      await dependencies.runRepository.addEvent(clone.id, "duplicated_from", { run_id: source.id });
-      const stored = await dependencies.runRepository.get(clone.id, ownerSubject);
-      if (!stored) throw serviceNotFound("run", clone.id);
-      return envelope({
-        request: value,
-        dataRevision: stored.dataRevision,
-        result: { run: stored, duplicated_from: source.id },
-        dataQuality: {
-          artifacts_copied: source.status === "completed",
-          optimization_candidates_copied: optimizationCandidatesCopied,
-        },
-      });
-    },
-    delete_run: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      const run = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!run) throw serviceNotFound("run", runId);
-      const deleted = await dependencies.runRepository.softDelete(runId, ownerSubject);
-      if (!deleted) {
-        throw new ServiceError({ code: "RUN_NOT_TERMINAL", message: "진행 중인 run은 취소·종료 후 삭제할 수 있습니다.", retryable: false });
-      }
-      return envelope({ request: value, dataRevision: run.dataRevision, result: { run_id: runId, deleted: true }, dataQuality: { soft_delete: true } });
-    },
-    rerun_run: async (input, ownerSubject) => {
-      const value = object(input);
-      const runId = String(value.runId);
-      const source = mcpVisibleRun(await dependencies.runRepository.get(runId, ownerSubject));
-      if (!source) throw serviceNotFound("run", runId);
-      if (["queued", "running", "cancel_requested"].includes(source.status)) {
-        throw new ServiceError({ code: "RUN_ALREADY_ACTIVE", message: "진행 중인 run은 다시 실행할 수 없습니다.", retryable: false });
-      }
-      const storedInput = recordValue(source.input);
-      if (!storedInput) {
-        throw new ServiceError({ code: "RUN_INPUT_UNAVAILABLE", message: "재실행할 저장 입력이 없습니다.", retryable: false });
-      }
-      const replayTool = source.kind === "technical_strategy" && storedInput.mode === "signal_only"
-        ? "analyze_technical_signals"
-        : REPLAY_TOOL_BY_KIND[source.kind];
-      if (!replayTool) {
-        throw new ServiceError({
-          code: "RUN_REPLAY_UNSUPPORTED",
-          message: `${source.kind} run은 아직 저장된 실행 재실행을 지원하지 않습니다.`,
-          retryable: false,
-          details: { run_id: source.id, run_kind: source.kind },
-        });
-      }
-      const replayBase = source.kind === "technical_analysis"
-        ? (() => {
-            const {
-              cacheSchemaVersion: _cacheSchemaVersion,
-              indicator_engine_version: _indicatorEngineVersion,
-              _replayNonce: _previousReplayNonce,
-              _replayOf: _previousReplaySource,
-              ...technicalInput
-            } = storedInput;
-            return toolSchemas.analyze_technical_signals.parse({
-              ...technicalInput,
-              responseMode: "full_series",
-            });
-          })()
-        : source.kind === "technical_strategy"
-          ? (() => {
-              const {
-                cacheSchemaVersion: _cacheSchemaVersion,
-                indicator_engine_version: _indicatorEngineVersion,
-                mode: _mode,
-                _replayNonce: _previousReplayNonce,
-                _replayOf: _previousReplaySource,
-                ...strategyInput
-              } = storedInput;
-              return resolvedPresetExecutionSchemas[replayTool as "analyze_technical_signals" | "run_technical_strategy_backtest"].parse(strategyInput);
-            })()
-        : storedInput;
-      const replayInput = { ...replayBase, _replayNonce: randomUUID(), _replayOf: source.id };
-      const invoked = await handlers[replayTool](replayInput, ownerSubject);
-      const replayId = nestedRunId(invoked);
-      if (!replayId || replayId === source.id) {
-        throw new ServiceError({ code: "RUN_REPLAY_FAILED", message: "새 재실행 run을 만들지 못했습니다.", retryable: true });
-      }
-      if (source.name) await dependencies.runRepository.rename(replayId, ownerSubject, `${source.name} 재실행`);
-      if (source.tags.length) await dependencies.runRepository.setTags(replayId, ownerSubject, source.tags);
-      await dependencies.runRepository.linkReplay(replayId, ownerSubject, source.id);
-      const replay = await dependencies.runRepository.get(replayId, ownerSubject);
-      if (!replay) throw serviceNotFound("run", replayId);
-      return envelope({
-        request: value,
-        dataRevision: replay.dataRevision,
-        result: { run: replay, replay_of: source.id },
-        dataQuality: { fresh_execution: true },
-      });
-    },
-    list_portfolio_presets: async (input, ownerSubject) => {
-      const value = object(input);
-      const listed = await presetOperation(() => dependencies.presets.list({
-        ownerSubject,
-        ...(value.query ? { search: String(value.query) } : {}),
-        tags: value.tags as string[],
-        ...(value.cursor ? { cursor: String(value.cursor) } : {}),
-        limit: Number(value.limit),
-      }));
-      return envelope({
-        request: value,
-        dataRevision: "preset-library",
-        result: { items: listed.items, presets: listed.items, next_cursor: listed.nextCursor, nextCursor: listed.nextCursor },
-        dataQuality: { returned: listed.items.length, persistent: true },
-      });
-    },
-    get_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const presetId = String(value.presetId);
-      const preset = await presetOperation(() => dependencies.presets.get(presetId, ownerSubject));
-      if (!preset) throw serviceNotFound("preset", presetId);
-      const history = value.includeHistory
-        ? await presetOperation(() => dependencies.presets.history(presetId, ownerSubject))
-        : undefined;
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset, history }, dataQuality: { persistent: true, revision: preset.revision } });
-    },
-    create_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const resolved = await resolvedPresetConfig(dependencies, ownerSubject, value);
-      const preset = await presetOperation(() => dependencies.presets.create({
-        ownerSubject,
-        name: String(value.name),
-        description: String(value.description ?? ""),
-        config: resolved.config,
-        tags: value.tags as string[],
-        source: resolved.source,
-      }));
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset }, dataQuality: { persistent: true, revision: preset.revision } });
-    },
-    update_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const presetId = String(value.presetId);
-      const current = await presetOperation(() => dependencies.presets.get(presetId, ownerSubject));
-      if (!current) throw serviceNotFound("preset", presetId);
-      const needsConfig = value.config !== undefined || value.symbols !== undefined || value.source !== undefined;
-      const resolved = needsConfig
-        ? await resolvedPresetConfig(dependencies, ownerSubject, value, current.config)
-        : undefined;
-      const preset = await presetOperation(() => dependencies.presets.update({
-        id: presetId,
-        ownerSubject,
-        expectedRevision: Number(value.revision),
-        ...(value.name !== undefined ? { name: String(value.name) } : {}),
-        ...(value.description !== undefined ? { description: String(value.description) } : {}),
-        ...(resolved ? { config: resolved.config } : {}),
-        ...(value.tags !== undefined ? { tags: value.tags as string[] } : {}),
-        ...(value.source !== undefined && resolved ? { source: resolved.source } : {}),
-      }));
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset }, dataQuality: { persistent: true, revision: preset.revision } });
-    },
-    duplicate_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const presetId = String(value.presetId);
-      const source = await dependencies.presets.get(presetId, ownerSubject);
-      if (!source) throw serviceNotFound("preset", presetId);
-      const preset = await presetOperation(() => dependencies.presets.duplicate({
-        id: presetId,
-        ownerSubject,
-        name: (value.name ? String(value.name) : `${source.name} 복사본`).slice(0, 200),
-      }));
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset, duplicated_from: presetId }, dataQuality: { persistent: true } });
-    },
-    delete_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const presetId = String(value.presetId);
-      const deleted = await presetOperation(() => dependencies.presets.delete({ id: presetId, ownerSubject }));
-      if (!deleted) throw serviceNotFound("preset", presetId);
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset_id: presetId, deleted: true }, dataQuality: { soft_delete: true } });
-    },
-    import_portfolio_presets: async (input, ownerSubject) => {
-      const value = object(input);
-      const mode = String(value.conflictMode ?? "rename");
-      const imported = importDocument(value.document);
-      const matches = await presetOperation(() => dependencies.presets.list({ ownerSubject, search: imported.name, limit: 100 }));
-      const existing = matches.items.find((preset) => preset.name === imported.name);
-      let preset;
-      if (existing && mode === "skip") {
-        preset = existing;
-      } else if (existing && mode === "replace") {
-        preset = await presetOperation(() => dependencies.presets.update({
-          id: existing.id,
-          ownerSubject,
-          expectedRevision: existing.revision,
-          description: imported.description,
-          config: imported.config,
-          tags: imported.tags,
-          source: { type: "import", originalSource: imported.source },
-        }));
-      } else {
-        let renamed: string | undefined;
-        if (existing) {
-          const used = new Set(matches.items.map((preset) => preset.name));
-          renamed = `${imported.name} 가져오기`;
-          let suffix = 2;
-          while (used.has(renamed)) renamed = `${imported.name} 가져오기 ${suffix++}`;
-        }
-        preset = await presetOperation(() => dependencies.presets.importPreset({
-          ownerSubject,
-          payload: value.document,
-          ...(renamed ? { name: renamed } : {}),
-        }));
-      }
-      return envelope({
-        request: value,
-        dataRevision: "preset-library",
-        result: { preset, conflict_mode: mode, skipped: Boolean(existing && mode === "skip") },
-        dataQuality: { persistent: true, revision: preset.revision },
-      });
-    },
-    export_portfolio_preset: async (input, ownerSubject) => {
-      const value = object(input);
-      const presetId = String(value.presetId);
-      const document = await presetOperation(() => dependencies.presets.exportPreset(presetId, ownerSubject));
-      if (!document) throw serviceNotFound("preset", presetId);
-      return envelope({ request: value, dataRevision: "preset-library", result: { preset_id: presetId, document }, dataQuality: { portable_schema: PRESET_EXPORT_SCHEMA_VERSION } });
-    },
+    ...createRunManagementHandlers(
+      dependencies,
+      (name, input, ownerSubject) => handlers[name](input, ownerSubject),
+    ),
+    ...createPresetManagementHandlers(dependencies),
     generate_backtest_report: async (input, ownerSubject) => {
       const value = object(input);
       const run = mcpVisibleRun(await dependencies.runs.get(String(value.runId), ownerSubject));
@@ -2745,13 +1782,12 @@ export function createToolHandlers(dependencies: McpToolDependencies): Record<To
         return { document, content: dependencies.researchReports.render(document, format) };
       };
       if (value.executionMode === "async") {
-        const queued = await dependencies.runs.enqueue({
+        const queued = await dependencies.runs.enqueueOrchestration({
           ownerSubject,
           kind: "research_report",
           config: value,
           dataRevision: run.dataRevision,
           totalCandidates: 1,
-          allowInlineInExternal: true,
           task: async (context) => {
             const { document, content } = await buildReport(context.throwIfCancelled);
             await context.updateProgress(1, { completedCandidates: 1, totalCandidates: 1 });
@@ -2867,17 +1903,15 @@ async function enqueueSensitivity(
   }
   const preparedScenarios: Array<{ id: string; name: string; config: BacktestRunRequest; simulation: unknown }> = [];
   const preparationWarnings: string[] = [];
-  if (dependencies.runs.executionMode === "external" || dependencies.runs.executionMode === "rust_socket") {
-    for (let index = 0; index < scenarios.length; index += 1) {
-      const prepared = await dependencies.backtestEngine.prepare(scenarios[index]);
-      preparationWarnings.push(...prepared.responseContext.warnings);
-      preparedScenarios.push({
-        id: `s-${String(index + 1).padStart(4, "0")}`,
-        name: `${kind}-${index + 1}`,
-        config: scenarios[index],
-        simulation: prepared.simulation,
-      });
-    }
+  for (let index = 0; index < scenarios.length; index += 1) {
+    const prepared = await dependencies.backtestEngine.prepare(scenarios[index]);
+    preparationWarnings.push(...prepared.responseContext.warnings);
+    preparedScenarios.push({
+      id: `s-${String(index + 1).padStart(4, "0")}`,
+      name: `${kind}-${index + 1}`,
+      config: scenarios[index],
+      simulation: prepared.simulation,
+    });
   }
   const dataRevision = await dependencies.marketData.repository.dataRevision();
   const workerPayload = { scenarios: preparedScenarios, market_warnings: Array.from(new Set(preparationWarnings)) };
@@ -2890,49 +1924,18 @@ async function enqueueSensitivity(
       totalCandidates: scenarios.length,
       payload: workerPayload,
     })
-    : dependencies.runs.executionMode === "rust_socket"
-      ? await dependencies.runs.enqueue({
+    : await dependencies.runs.enqueue({
         ownerSubject,
         kind,
         config: value,
         dataRevision,
         totalCandidates: scenarios.length,
         task: async (context) => {
-          await context.throwIfCancelled();
+        await context.throwIfCancelled();
           const output = await requireRust(dependencies).compute(kind, workerPayload, { signal: context.signal });
           await context.updateProgress(1, { completedCandidates: scenarios.length, totalCandidates: scenarios.length });
           return rustTaskResult(output);
         },
-      })
-    : await dependencies.runs.enqueue({
-    ownerSubject,
-    kind,
-    config: value,
-    dataRevision,
-    totalCandidates: scenarios.length,
-    task: async (context) => {
-      const results = [];
-      for (let index = 0; index < scenarios.length; index += 1) {
-        await context.throwIfCancelled();
-        const result = await dependencies.backtestEngine.run(scenarios[index]);
-        results.push({
-          config: scenarios[index],
-          metrics: {
-            ...result.metrics,
-            cvar95Percent: result.advanced.tailRisk.expectedShortfall95Percent,
-          },
-          data_quality: result.dataQuality,
-        });
-        await context.updateProgress((index + 1) / scenarios.length, { completedCandidates: index + 1, totalCandidates: scenarios.length });
-      }
-      const distributions = metricDistributions(results);
-      const result = { scenarios: results, distributions, limitation: HISTORICAL_LIMITATION };
-      return {
-        summary: { scenario_count: results.length, distributions },
-        result,
-        artifacts: [{ type: "result", content: result, rowCount: results.length }],
-      };
-    },
-  });
+      });
   return runResultEnvelope(queued.run, value);
 }

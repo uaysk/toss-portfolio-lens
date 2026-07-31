@@ -118,7 +118,8 @@ function ArtifactPrompt({
 }
 
 const candidateMetricRows: Array<{ key: CandidateMetricKey; label: string; format: (value: unknown) => string }> = [
-  { key: "return", label: "수익률", format: decimalPercent },
+  { key: "cagr", label: "CAGR", format: decimalPercent },
+  { key: "totalReturn", label: "누적 수익률", format: decimalPercent },
   { key: "volatility", label: "변동성", format: decimalPercent },
   { key: "maxDrawdown", label: "MDD", format: decimalPercent },
   { key: "sharpe", label: "Sharpe", format: ratio },
@@ -200,7 +201,7 @@ export function OptimizationResearchResults({ result, run, onUnauthorized, objec
   const chart = chartCandidates(candidates).flatMap((candidate) => {
     const metrics = Object.keys(candidate.ledgerMetrics).length ? candidate.ledgerMetrics : candidate.screeningMetrics;
     const risk = candidateMetric(metrics, "volatility");
-    const reward = candidateMetric(metrics, "return");
+    const reward = candidateMetric(metrics, "cagr");
     if (risk === undefined || reward === undefined) return [];
     return [{
       id: candidate.id,

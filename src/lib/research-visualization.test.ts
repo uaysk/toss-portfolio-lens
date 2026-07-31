@@ -13,14 +13,14 @@ describe("research visualization normalization", () => {
     const candidates = normalizeOptimizationCandidates({
       candidates: [{
         weights: { B: 0.4, A: 0.6 },
-        metrics: { return: 0.1, robustScore: 0.3 },
+        metrics: { cagr: 0.1, totalReturn: 0.12, robustScore: 0.3 },
         screeningRank: 3,
         robustScoreDetail: { inSampleScore: 0.4, coverage: 0.5 },
       }],
       ledgerCandidates: [{
         weights: { A: 0.6, B: 0.4 },
-        screeningMetrics: { return: 0.1 },
-        ledgerMetrics: { return: 0.08, robustScore: 0.25 },
+        screeningMetrics: { cagr: 0.1, totalReturn: 0.12 },
+        ledgerMetrics: { cagr: 0.08, totalReturn: 0.09, robustScore: 0.25 },
         ledgerRank: 1,
         validationStatus: "completed",
       }],
@@ -28,7 +28,8 @@ describe("research visualization normalization", () => {
     });
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ pareto: true, screeningRank: 3, ledgerRank: 1, validationStatus: "completed" });
-    expect(candidateMetric(candidates[0].ledgerMetrics, "return")).toBe(0.08);
+    expect(candidateMetric(candidates[0].ledgerMetrics, "cagr")).toBe(0.08);
+    expect(candidateMetric(candidates[0].ledgerMetrics, "totalReturn")).toBe(0.09);
   });
 
   it("bounds scatter work while retaining Pareto points", () => {

@@ -294,6 +294,11 @@ fn aligned_returns(
 
 fn oos_metrics(returns: &[f64], turnover: f64, transaction_cost: f64) -> Value {
     let total = returns.iter().fold(1.0, |value, item| value * (1.0 + item)) - 1.0;
+    let cagr = if !returns.is_empty() && 1.0 + total > 0.0 {
+        Some((1.0 + total).powf(252.0 / returns.len() as f64) - 1.0)
+    } else {
+        None
+    };
     let mean = average(returns);
     let volatility = (returns.len() > 1).then(|| sample_std(returns) * 252.0_f64.sqrt());
     let sharpe = volatility
@@ -309,7 +314,8 @@ fn oos_metrics(returns: &[f64], turnover: f64, transaction_cost: f64) -> Value {
     }
     json!({
         "sampleCount": returns.len(),
-        "return": round(total, 10),
+        "cagr": cagr.map(|value| round(value, 10)),
+        "totalReturn": round(total, 10),
         "totalReturnPercent": round(total * 100.0, 6),
         "volatility": volatility.map(|value| round(value, 10)),
         "annualizedVolatilityPercent": volatility.map(|value| round(value * 100.0, 6)),
@@ -905,19 +911,19 @@ fn walk_forward(payload: &Value, control: Option<&dyn ComputeControl>) -> Result
         }));
         previous_weights = weights;
     }
-    let oos_returns = folds
+    let oos_total_returns = folds
         .iter()
-        .filter_map(|fold| fold.pointer("/oos/return").and_then(Value::as_f64))
+        .filter_map(|fold| fold.pointer("/oos/totalReturn").and_then(Value::as_f64))
         .collect::<Vec<_>>();
     let worst = folds
         .iter()
         .min_by(|left, right| {
-            left.pointer("/oos/return")
+            left.pointer("/oos/totalReturn")
                 .and_then(Value::as_f64)
                 .unwrap_or(f64::INFINITY)
                 .total_cmp(
                     &right
-                        .pointer("/oos/return")
+                        .pointer("/oos/totalReturn")
                         .and_then(Value::as_f64)
                         .unwrap_or(f64::INFINITY),
                 )
@@ -1013,10 +1019,10 @@ fn walk_forward(payload: &Value, control: Option<&dyn ComputeControl>) -> Result
         "seedStability": seed_stability,
         "selectionFrequency": selection_frequency,
         "oosSummary": {
-            "foldCount": oos_returns.len(),
-            "averageReturn": (!oos_returns.is_empty()).then(|| round(average(&oos_returns), 10)),
-            "worstReturn": oos_returns.iter().copied().min_by(f64::total_cmp).map(|value| round(value, 10)),
-            "bestReturn": oos_returns.iter().copied().max_by(f64::total_cmp).map(|value| round(value, 10)),
+            "foldCount": oos_total_returns.len(),
+            "averageTotalReturn": (!oos_total_returns.is_empty()).then(|| round(average(&oos_total_returns), 10)),
+            "worstTotalReturn": oos_total_returns.iter().copied().min_by(f64::total_cmp).map(|value| round(value, 10)),
+            "bestTotalReturn": oos_total_returns.iter().copied().max_by(f64::total_cmp).map(|value| round(value, 10)),
             "coverage": round(coverage, 10),
             "coveredObservationCount": stitched_returns.len(),
             "totalObservationCount": total_observations,
@@ -1228,6 +1234,9 @@ mod tests {
                 .iter()
                 .all(|fold| fold["oos"]["sampleCount"].as_u64().unwrap() > 0)
         );
+        assert!(folds.iter().all(|fold| {
+            fold["oos"]["totalReturn"].is_number() && fold["oos"].get("return").is_none()
+        }));
         assert!(folds[0]["oos"]["transactionCost"].as_f64().unwrap() > 0.0);
         assert!(folds.iter().all(|fold| {
             fold["selected"]["robustScoreDetail"]["outOfSampleScore"].is_number()
@@ -1238,6 +1247,10 @@ mod tests {
             first["oosSummary"]["foldCount"].as_u64().unwrap() as usize,
             folds.len()
         );
+        assert!(first["oosSummary"]["averageTotalReturn"].is_number());
+        assert!(first["oosSummary"]["worstTotalReturn"].is_number());
+        assert!(first["oosSummary"]["bestTotalReturn"].is_number());
+        assert!(first["oosSummary"].get("averageReturn").is_none());
     }
 
     #[test]

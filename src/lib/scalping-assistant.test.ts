@@ -249,7 +249,7 @@ describe("scalping assistant response normalization", () => {
     expect(normalizeScalpingForecasts({ forecast: { status: "unavailable" }, predictions: [] }).size).toBe(0);
     const forecasts = normalizeScalpingForecasts({
       forecast: {
-        model: { model_id: "NeoQuasar/Kronos-base", model_revision: "pinned", source_revision: "source", device: "unavailable", dtype: "float32" },
+        model: { model_id: "amazon/chronos-2", model_revision: "pinned", source_revision: "source", device: "unavailable", dtype: "float32" },
         generated_at: "2026-07-21T09:06:00+09:00",
       },
       predictions: [{

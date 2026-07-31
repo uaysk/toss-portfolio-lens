@@ -23,17 +23,11 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { AiSimulationChart } from "@/components/ai-simulation-chart";
-import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import {
   AiSimulationAssetClassControl,
   AiSimulationCryptoSetup,
   type AiSimulationAssetClass,
 } from "@/components/ai-simulation-crypto";
-import {
-  AiSimulationFuturesLedger,
-  AiSimulationModelComparisonPanel,
-} from "@/components/ai-simulation-futures";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -41,6 +35,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
+  AI_SIMULATION_PAIR_CATALOG,
   DEFAULT_AI_SIMULATION_REQUEST,
   DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   aiSimulationErrorMessage,
@@ -59,7 +54,6 @@ import {
   type AiSimulationCryptoRequest,
   type AiSimulationMarketCountry,
   type AiSimulationModelLane,
-  type AiSimulationModelPlanEntry,
   type AiSimulationPairCatalogItem,
   type AiSimulationPairId,
   type AiSimulationPreset,
@@ -90,6 +84,37 @@ import { cn } from "@/lib/utils";
 const AiSimulationHistory = lazy(() => import("@/components/ai-simulation-history").then((module) => ({
   default: module.AiSimulationHistory,
 })));
+const AiSimulationChart = lazy(() => (
+  import("@/components/ai-simulation-chart").then((module) => ({
+    default: module.AiSimulationChart,
+  }))
+));
+const AiSimulationComparisonPanel = lazy(() => (
+  import("@/components/ai-simulation-comparison-panel").then((module) => ({
+    default: module.AiSimulationComparisonPanel,
+  }))
+));
+const AiSimulationFuturesLedger = lazy(() => (
+  import("@/components/ai-simulation-futures").then((module) => ({
+    default: module.AiSimulationFuturesLedger,
+  }))
+));
+const AiSimulationModelComparisonPanel = lazy(() => (
+  import("@/components/ai-simulation-futures").then((module) => ({
+    default: module.AiSimulationModelComparisonPanel,
+  }))
+));
+
+function DeferredSimulationPanel({ label }: { label: string }) {
+  return (
+    <Card className="grid min-h-32 place-items-center bg-secondary p-5" role="status">
+      <div className="text-center text-xs font-bold text-muted-foreground">
+        <LoaderCircle className="mx-auto mb-3 size-5 animate-spin" aria-hidden="true" />
+        {label}
+      </div>
+    </Card>
+  );
+}
 
 type AiSimulationProps = {
   onUnauthorized: () => void;
@@ -199,9 +224,7 @@ function selectionModeLabel(request: AiSimulationRequest): string {
 }
 
 function stockModelLaneLabel(lane: AiSimulationModelLane): string {
-  return lane === "fincast"
-    ? "FinCast"
-    : lane === "chronos2" ? "Chronos-2" : "Kronos-base · Legacy";
+  return lane === "fincast" ? "FinCast" : "Chronos-2";
 }
 
 export function aiSimulationRequestWithStrategy(
@@ -209,25 +232,19 @@ export function aiSimulationRequestWithStrategy(
   strategy: { mode: "single" } | { mode: "pair"; pairId: AiSimulationPairId },
 ): AiSimulationRequest {
   if (strategy.mode === "single") return { ...current, strategy };
-  const switchingToUsDefaults = current.marketCountry === "KR"
-    && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
   const usingDefaultCosts = usesDefaultAiSimulationCosts(
     current.costs,
-    current.marketCountry,
+    current.market.country,
   );
   return {
     ...current,
-    marketCountry: "US",
-    initialCash: switchingToUsDefaults ? 100_000 : current.initialCash,
+    market: { kind: "stock", country: "US" },
     selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
     strategy: {
       mode: "pair",
       pairId: strategy.pairId,
       allowDegradedMode: false,
     },
-    modelLanes: current.simulationCase === "us_etf_pair"
-      ? ["chronos2", "fincast"]
-      : ["kronos_base"],
     costs: usingDefaultCosts ? defaultAiSimulationCosts("US") : current.costs,
   };
 }
@@ -314,11 +331,11 @@ export function UnifiedPolicyEvidencePanel({ snapshot }: { snapshot: AiSimulatio
     <Card className="bg-card p-5 sm:p-6" data-unified-policy-evidence>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">UNIFIED POLICY · V8</p>
-          <h3 className="mt-1 text-base font-black">{snapshot.simulationCase ?? "legacy history"}</h3>
+          <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">UNIFIED POLICY · V9</p>
+          <h3 className="mt-1 text-base font-black">{snapshot.simulationCase ?? "unavailable"}</h3>
         </div>
         <div className="flex flex-wrap gap-1.5">
-          {(snapshot.modelPlan ?? []).map((entry) => (
+          {(snapshot.resolvedModelPlan ?? []).map((entry) => (
             <span
               key={`${entry.symbol}-${entry.modelLane}-${entry.role}`}
               className="rounded-full bg-secondary px-2.5 py-1 text-[9px] font-black"
@@ -566,7 +583,7 @@ export function AiSimulationStrategySettings({
           <p className="mt-1 text-[9px] leading-4 text-muted-foreground">
             {etfOnly
               ? "Chronos-2가 기초 ETF를 예측하고 Rust 세션·유동성 gate와 causal PairReturnMapper가 실제 bull/bear ETF의 비용 후 분포를 판단합니다."
-              : "Kronos-base와 Rust 기술 지표를 같은 확정봉 origin에 맞추는 legacy 페어 비교입니다."}
+              : "Chronos-2와 Rust 기술 지표를 같은 확정봉 origin에 맞춘 페어 비교입니다."}
           </p>
         </div>
         <div
@@ -585,7 +602,7 @@ export function AiSimulationStrategySettings({
             disabled={disabled || etfOnly}
             onClick={() => onModeChange("single")}
           >
-            단일 · legacy
+            단일 종목
           </button>
           <button
             type="button"
@@ -646,7 +663,7 @@ export function AiSimulationStrategySettings({
           <p className="mt-3 rounded-xl bg-card p-3 text-[9px] leading-4 text-muted-foreground">
             {etfOnly
               ? "Model target과 execution leg는 분리됩니다. SOXX 반도체 target에는 SMH·QQQ가 보조 입력으로만 들어가며, rolling alpha/beta·시간대·regime·tracking residual은 origin 이전 자료로만 학습합니다."
-              : "시장은 미국으로 고정됩니다. Kronos-base, Rust 기술 지표 또는 실행 호가가 unavailable이면 거래하지 않고 cash로 닫습니다."}
+              : "시장은 미국으로 고정됩니다. Chronos-2, Rust 기술 지표 또는 실행 호가가 unavailable이면 거래하지 않고 cash로 닫습니다."}
           </p>
         </div>
       ) : null}
@@ -979,11 +996,17 @@ export function aiSimulationChartLayout(
   charts: AiSimulationSnapshot["charts"];
 } {
   const cryptoFutures = snapshot.market?.kind === "crypto_futures";
-  const primarySymbol = snapshot.strategy?.mode === "pair"
+  const pairStrategy = snapshot.strategy?.mode === "pair" ? snapshot.strategy : undefined;
+  const catalogModelTarget = pairStrategy
+    ? AI_SIMULATION_PAIR_CATALOG.find(({ id }) => id === pairStrategy.pairId)
+      ?.modelTargetSymbol
+    : undefined;
+  const primarySymbol = pairStrategy
     ? (
-      modelForecasts.find((forecast) => forecast.signalSymbol)?.signalSymbol
+      catalogModelTarget
+      ?? modelForecasts.find((forecast) => forecast.signalSymbol)?.signalSymbol
       ?? snapshot.decisions.find((decision) => decision.signalSymbol)?.signalSymbol
-      ?? snapshot.strategy.pairId.split("-")[0]
+      ?? pairStrategy.pairId.split("-")[0]
     )?.toUpperCase()
     : undefined;
   const charts = primarySymbol
@@ -1024,11 +1047,7 @@ function RunPanel({
   const pnl = snapshot.equity - snapshot.initialCash;
   const returnRatio = snapshot.initialCash > 0 ? pnl / snapshot.initialCash : undefined;
   const cryptoFutures = snapshot.market?.kind === "crypto_futures";
-  const modelForecasts = snapshot.modelForecasts
-    ?? snapshot.kronosForecasts.map((forecast) => ({
-      ...forecast,
-      lane: "kronos_base" as const,
-    }));
+  const modelForecasts = snapshot.modelForecasts;
   const chartLayout = aiSimulationChartLayout(snapshot, modelForecasts);
   const pairPrimarySymbol = chartLayout.primarySymbol;
   const orderedCharts = chartLayout.charts;
@@ -1120,19 +1139,23 @@ function RunPanel({
       </Card>
 
       {snapshot.strategyComparison ? (
-        <AiSimulationComparisonPanel
-          comparison={snapshot.strategyComparison}
-          currency={snapshot.currency}
-        />
+        <Suspense fallback={<DeferredSimulationPanel label="전략 비교 결과를 불러오는 중" />}>
+          <AiSimulationComparisonPanel
+            comparison={snapshot.strategyComparison}
+            currency={snapshot.currency}
+          />
+        </Suspense>
       ) : null}
 
       {cryptoFutures ? (
         <>
-          <AiSimulationModelComparisonPanel comparison={snapshot.modelComparison} />
-          <AiSimulationFuturesLedger
-            positions={snapshot.futuresPositions ?? []}
-            risk={snapshot.futuresRisk}
-          />
+          <Suspense fallback={<DeferredSimulationPanel label="선물 비교 원장을 불러오는 중" />}>
+            <AiSimulationModelComparisonPanel comparison={snapshot.modelComparison} />
+            <AiSimulationFuturesLedger
+              positions={snapshot.futuresPositions ?? []}
+              risk={snapshot.futuresRisk}
+            />
+          </Suspense>
           <SelectedSymbols snapshot={snapshot} />
         </>
       ) : (
@@ -1142,34 +1165,36 @@ function RunPanel({
         </div>
       )}
       {snapshot.charts.length ? (
-        <div
-          className={cn(
-            "grid gap-3",
-            !cryptoFutures && orderedCharts.length > 1 && "xl:grid-cols-2",
-          )}
-          data-simulation-charts
-          data-simulation-chart-layout={chartLayout.layout}
-        >
-          {orderedCharts.map((chart) => (
-            <AiSimulationChart
-              key={chart.symbol}
-              symbol={chart.symbol}
-              name={chart.name}
-              currency={chart.currency}
-              bars={chart.bars}
-              indicators={chart.indicators}
-              patterns={chart.patterns}
-              updatedAt={chart.updatedAt}
-              forecasts={modelForecastsBySymbol.get(chart.symbol.toUpperCase()) ?? []}
-              trades={chartTradesBySymbol.get(chart.symbol.toUpperCase()) ?? []}
-              className={cn(
-                pairPrimarySymbol
-                  && chart.symbol.toUpperCase() === pairPrimarySymbol
-                  && "xl:col-span-2",
-              )}
-            />
-          ))}
-        </div>
+        <Suspense fallback={<DeferredSimulationPanel label="시뮬레이션 차트를 불러오는 중" />}>
+          <div
+            className={cn(
+              "grid gap-3",
+              !cryptoFutures && orderedCharts.length > 1 && "xl:grid-cols-2",
+            )}
+            data-simulation-charts
+            data-simulation-chart-layout={chartLayout.layout}
+          >
+            {orderedCharts.map((chart) => (
+              <AiSimulationChart
+                key={chart.symbol}
+                symbol={chart.symbol}
+                name={chart.name}
+                currency={chart.currency}
+                bars={chart.bars}
+                indicators={chart.indicators}
+                patterns={chart.patterns}
+                updatedAt={chart.updatedAt}
+                forecasts={modelForecastsBySymbol.get(chart.symbol.toUpperCase()) ?? []}
+                trades={chartTradesBySymbol.get(chart.symbol.toUpperCase()) ?? []}
+                className={cn(
+                  pairPrimarySymbol
+                    && chart.symbol.toUpperCase() === pairPrimarySymbol
+                    && "xl:col-span-2",
+                )}
+              />
+            ))}
+          </div>
+        </Suspense>
       ) : null}
       <UnifiedPolicyEvidencePanel snapshot={snapshot} />
       <TradesAndDecisions snapshot={snapshot} />
@@ -1185,23 +1210,6 @@ function RunPanel({
   );
 }
 
-const BTC_ETH_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
-  { symbol: "BTCUSDT", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [30, 60, 15] },
-  { symbol: "BTCUSDT", modelLane: "fincast", role: "veto", required: true, preferredHorizonsMinutes: [30, 60, 15] },
-  { symbol: "ETHUSDT", modelLane: "fincast", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
-  { symbol: "ETHUSDT", modelLane: "chronos2", role: "shadow", required: false, preferredHorizonsMinutes: [15, 30, 60] },
-];
-
-const HIGH_VOL_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
-  { symbol: "*", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
-  { symbol: "*", modelLane: "fincast", role: "veto", required: true, preferredHorizonsMinutes: [15, 30, 60] },
-];
-
-const ETF_MODEL_PLAN: AiSimulationModelPlanEntry[] = [
-  { symbol: "*", modelLane: "chronos2", role: "primary", required: true, preferredHorizonsMinutes: [15, 30, 60] },
-  { symbol: "*", modelLane: "fincast", role: "shadow", required: false, preferredHorizonsMinutes: [15, 30, 60] },
-];
-
 export function cryptoRequestForCase(
   simulationCase: "btc_eth" | "high_vol_crypto",
   current: AiSimulationCryptoRequest = DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
@@ -1209,26 +1217,22 @@ export function cryptoRequestForCase(
   if (simulationCase === "btc_eth") {
     return {
       ...current,
-      contractVersion: "ai-paper-simulation/v8",
+      contractVersion: "ai-paper-simulation/v9",
       simulationCase,
       selection: current.simulationCase === "btc_eth" && current.selection.mode === "manual"
         ? current.selection
         : { mode: "manual", symbols: ["BTCUSDT", "ETHUSDT"] },
-      modelLanes: ["chronos2", "fincast"],
-      modelPlan: BTC_ETH_MODEL_PLAN,
       scanner: undefined,
       fincastCandleSeconds: 60,
     };
   }
   return {
     ...current,
-    contractVersion: "ai-paper-simulation/v8",
+    contractVersion: "ai-paper-simulation/v9",
     simulationCase,
     selection: current.simulationCase === "high_vol_crypto" && current.selection.mode === "auto"
       ? current.selection
       : { mode: "auto", criterion: "volatility", symbolCount: 1 },
-    modelLanes: ["chronos2", "fincast"],
-    modelPlan: HIGH_VOL_MODEL_PLAN,
     scanner: current.scanner ?? {
       symbolCount: 1,
       minimumListingDays: 90,
@@ -1255,19 +1259,13 @@ export function etfRequest(
     : "qqq-tqqq-sqqq";
   return {
     ...current,
-    contractVersion: "ai-paper-simulation/v8",
+    contractVersion: "ai-paper-simulation/v9",
     simulationCase: "us_etf_pair",
-    marketCountry: "US",
-    initialCash: current.marketCountry === "KR"
-      && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash
-      ? 100_000
-      : current.initialCash,
+    market: { kind: "stock", country: "US" },
     selection: { mode: "auto", criterion: "trading_amount", symbolCount: 1 },
     strategy: { mode: "pair", pairId: currentPair, allowDegradedMode: false },
-    modelLanes: ["chronos2", "fincast"],
-    modelPlan: ETF_MODEL_PLAN,
     fincastCandleSeconds: 60,
-    costs: usesDefaultAiSimulationCosts(current.costs, current.marketCountry)
+    costs: usesDefaultAiSimulationCosts(current.costs, current.market.country)
       ? defaultAiSimulationCosts("US")
       : current.costs,
   };
@@ -1373,7 +1371,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
       void searchTechnicalInstruments(query, { signal: controller.signal })
         .then((results) => {
           if (controller.signal.aborted) return;
-          const currency = request.marketCountry === "US" ? "USD" : "KRW";
+          const currency = request.market.country === "US" ? "USD" : "KRW";
           const selected = new Set(manualInstruments.map(({ symbol }) => symbol));
           setInstrumentResults(
             results
@@ -1402,7 +1400,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     instrumentQuery,
     manualInstruments,
     onUnauthorized,
-    request.marketCountry,
+    request.market.country,
     request.selection.mode,
     runActive,
   ]);
@@ -1690,29 +1688,18 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
   };
 
   const changeMarket = (marketCountry: AiSimulationMarketCountry) => {
+    if (marketCountry !== "US") return;
     setManualInstruments([]);
     setInstrumentQuery("");
     setInstrumentResults([]);
     setInstrumentError("");
     setRequest((current) => {
-      const switchingToUsDefaults = current.marketCountry === "KR" && marketCountry === "US"
-        && current.initialCash === DEFAULT_AI_SIMULATION_REQUEST.initialCash;
-      const switchingToKrDefaults = current.marketCountry === "US" && marketCountry === "KR"
-        && current.initialCash === 100_000;
-      const usingDefaultCosts = usesDefaultAiSimulationCosts(
-        current.costs,
-        current.marketCountry,
-      );
       return {
         ...current,
-        marketCountry,
+        market: { kind: "stock", country: "US" },
         selection: current.selection.mode === "manual"
           ? { mode: "manual", symbols: [] }
           : current.selection,
-        initialCash: switchingToUsDefaults ? 100_000 : switchingToKrDefaults ? DEFAULT_AI_SIMULATION_REQUEST.initialCash : current.initialCash,
-        costs: usingDefaultCosts
-          ? defaultAiSimulationCosts(marketCountry)
-          : current.costs,
       };
     });
   };
@@ -1749,8 +1736,8 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
     setRun(undefined);
   };
 
-  const currency = request.marketCountry === "US" ? "USD" : "KRW";
-  const costProfile = status?.costProfiles?.[request.marketCountry];
+  const currency = request.market.country === "US" ? "USD" : "KRW";
+  const costProfile = status?.costProfiles?.[request.market.country];
   const selectedPairId = request.strategy.mode === "pair" ? request.strategy.pairId : undefined;
   const selectedPair = selectedPairId
     ? pairCatalog.find((item) => item.id === selectedPairId)
@@ -1839,7 +1826,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             {request.strategy.mode === "pair"
               ? `페어 비교 · ${selectedPair?.label ?? request.strategy.pairId}`
               : `${selectionModeLabel(request)} · ${requestedSymbolCount(request)}종목`}
-            {" · "}{stockModelLaneLabel(request.modelLanes[0])}
+            {" · "}Chronos-2 primary · FinCast shadow
             {" · "}{request.durationMinutes}분 · {riskDispositionLabel(request.riskTolerance)} {request.riskTolerance} · {currency}
           </span>
         </div>
@@ -1848,7 +1835,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label className="min-w-0 rounded-2xl bg-secondary p-3">
               <span className="mb-2 block text-[10px] font-black text-muted-foreground">대상 시장</span>
-              <Select value={request.marketCountry} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive || request.strategy.mode === "pair"}>
+              <Select value={request.market.country} onValueChange={(value) => changeMarket(value as AiSimulationMarketCountry)} disabled={runActive || request.strategy.mode === "pair"}>
                 <SelectTrigger aria-label="시뮬레이션 대상 시장" className="w-full min-w-0 bg-card"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="KR">국내</SelectItem>
@@ -2076,7 +2063,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
                 type="number"
                 min={status?.limits.minimumInitialCash ?? 0.01}
                 max={status?.limits.maximumInitialCash}
-                step={request.marketCountry === "KR" ? 10_000 : 100}
+                step={100}
                 value={request.initialCash}
                 disabled={runActive}
                 onChange={(event) => setRequest((current) => ({ ...current, initialCash: Number(event.target.value) }))}
@@ -2103,24 +2090,17 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
             <summary className="cursor-pointer text-xs font-black">비용 가정 · bps</summary>
             <div
               className="mt-3 rounded-2xl bg-card p-3 text-[10px] leading-4 text-muted-foreground"
-              data-simulation-cost-profile={costProfile?.profileId ?? request.marketCountry}
+              data-simulation-cost-profile={costProfile?.profileId ?? request.market.country}
             >
               <p className="font-black text-foreground">
-                토스증권 {request.marketCountry === "KR" ? "국내 KRX 일반주식" : "미국 주식·ETF"} 기준
+                토스증권 미국 주식·ETF 기준
                 {costProfile?.verifiedAt ? ` · ${costProfile.verifiedAt} 확인` : ""}
               </p>
-              {request.marketCountry === "KR" ? (
-                <p className="mt-1">
-                  KRX 편도 0.015%, 일반 상장주식 매도세 0.20%를 기본 반영합니다.
-                  NXT 수수료는 0.014%이며, ETF·ETN·ELW는 상품별 과세가 달라 기본 매도세를 조정해야 합니다.
-                </p>
-              ) : (
-                <p className="mt-1">
-                  편도 0.1%를 적용하되 체결금액 USD 10 이하는 토스 수수료를 면제합니다.
-                  매도 시 SEC 0.206bps와 FINRA TAF USD 0.000195/주(건당 최대 USD 9.79)를 원장에서 별도 차감합니다.
-                  USD 원장이므로 환전 비용과 환율 스프레드는 포함하지 않습니다.
-                </p>
-              )}
+              <p className="mt-1">
+                편도 0.1%를 적용하되 체결금액 USD 10 이하는 토스 수수료를 면제합니다.
+                매도 시 SEC 0.206bps와 FINRA TAF USD 0.000195/주(건당 최대 USD 9.79)를 원장에서 별도 차감합니다.
+                USD 원장이므로 환전 비용과 환율 스프레드는 포함하지 않습니다.
+              </p>
               <p className="mt-1">
                 왕복 스프레드와 편도 슬리피지는 토스 고시 수수료가 아닌 체결 현실성 가정입니다.
                 아래 수수료·거래세 값을 바꾸면 사용자 override로 보존됩니다.

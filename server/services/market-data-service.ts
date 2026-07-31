@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { BacktestValidationError } from "../backtest-engine.js";
+import { BacktestValidationError } from "../contracts/backtest.js";
 import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "../history.js";
 import {
   MarketDataRepository,

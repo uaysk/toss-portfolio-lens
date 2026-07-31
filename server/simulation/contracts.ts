@@ -5,7 +5,7 @@ import {
 } from "../scalping/contracts.js";
 import { defaultSimulationCostsForMarket } from "./cost-profile.js";
 
-export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v8" as const;
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v9" as const;
 export const SIMULATION_RUN_EVENT_SCHEMA_VERSION = 1 as const;
 
 export const SimulationRunEventTypeSchema = z.enum([
@@ -73,10 +73,9 @@ export const DEFAULT_CRYPTO_FUTURES_MARKET: CryptoFuturesSimulationMarket = Obje
   contractType: "PERPETUAL",
 });
 
-export const SimulationModelLaneSchema = z.enum(["kronos_base", "fincast", "chronos2"]);
+export const SimulationModelLaneSchema = z.enum(["fincast", "chronos2"]);
 export type SimulationModelLane = z.infer<typeof SimulationModelLaneSchema>;
 export const MAIN_SIMULATION_MODEL_LANE = "fincast" as const satisfies SimulationModelLane;
-export const LEGACY_SIMULATION_MODEL_LANE = "kronos_base" as const satisfies SimulationModelLane;
 export const CHRONOS2_SIMULATION_MODEL_LANE = "chronos2" as const satisfies SimulationModelLane;
 export const FinCastCandleSecondsSchema = z.union([
   z.literal(15),
@@ -86,7 +85,7 @@ export const FinCastCandleSecondsSchema = z.union([
 export type FinCastCandleSeconds = z.infer<typeof FinCastCandleSecondsSchema>;
 export const SimulationModelLanesSchema = z.array(SimulationModelLaneSchema)
   .min(1)
-  .max(3)
+  .max(2)
   .superRefine((lanes, context) => {
     if (new Set(lanes).size !== lanes.length) {
       context.addIssue({
@@ -261,8 +260,8 @@ export const SimulationStrategySchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("pair"),
     pairId: SimulationPairIdSchema,
-    // Keep the legacy field shape for v4 false-valued requests, while v6
-    // cannot opt a degraded model into forward execution.
+    // Forward execution is always fail-closed; degraded-model opt-in is not
+    // part of the v9 public contract.
     allowDegradedMode: z.literal(false).default(false),
   }).strict(),
 ]);
@@ -270,26 +269,19 @@ export type SimulationStrategy = z.infer<typeof SimulationStrategySchema>;
 
 export type SimulationStartRequest = {
   contractVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
-  sourceContractVersion: "ai-paper-simulation/v7" | typeof AI_SIMULATION_CONTRACT_VERSION;
-  simulationCase?: SimulationCase;
+  simulationCase: SimulationCase;
   market: SimulationMarket;
-  /**
-   * Internal stock-v6 coordinator compatibility. This property is
-   * non-enumerable for crypto requests, so wire responses and artifacts only
-   * serialize the normalized `market` discriminated union.
-   */
-  marketCountry: z.infer<typeof MarketCountrySchema>;
   initialCash: number;
   durationMinutes: number;
   selection: SimulationSelection;
-  strategy?: SimulationStrategy;
+  strategy: SimulationStrategy;
   preset: SimulationPreset;
   riskTolerance: number;
   costs: SimulationCosts;
   riskLimits?: CryptoFuturesRiskLimits;
   scanner?: HighVolatilityScannerSettings;
   modelLanes: SimulationModelLanes;
-  modelPlan: SimulationModelPlanEntry[];
+  resolvedModelPlan: SimulationModelPlanEntry[];
   fincastCandleSeconds: FinCastCandleSeconds;
   execution: SimulationExecution;
 };
@@ -406,66 +398,29 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     throw new Error("Simulation maximum duration must be a positive safe integer.");
   }
   return z.object({
-    contractVersion: z.union([
-      z.literal("ai-paper-simulation/v7"),
-      z.literal(AI_SIMULATION_CONTRACT_VERSION),
-    ]).optional(),
-    simulationCase: SimulationCaseSchema.optional(),
-    market: SimulationMarketSchema.optional(),
-    // v6 compatibility input. Every v7 request is normalized to `market`.
-    marketCountry: MarketCountrySchema.optional(),
+    contractVersion: z.literal(AI_SIMULATION_CONTRACT_VERSION),
+    simulationCase: SimulationCaseSchema,
+    market: SimulationMarketSchema,
     initialCash: z.number().finite().min(100).max(10_000_000_000_000),
     durationMinutes: z.number().int().min(1).max(limits.maxDurationMinutes),
     selection: SimulationSelectionSchema,
-    // Optional on the wire so existing auto/manual requests remain valid.
-    // An omitted value has the exact semantics of `{ mode: "single" }`.
-    strategy: SimulationStrategySchema.optional(),
+    strategy: SimulationStrategySchema,
     preset: SimulationPresetSchema.default("risk_management"),
     riskTolerance: z.number().int().min(0).max(100).default(50),
     costs: SimulationCostOverridesSchema.optional(),
     riskLimits: CryptoFuturesRiskLimitsSchema.optional(),
     scanner: HighVolatilityScannerSettingsSchema.optional(),
-    modelLanes: SimulationModelLanesSchema.optional(),
-    modelPlan: z.array(SimulationModelPlanEntrySchema).min(1).max(8).optional(),
     fincastCandleSeconds: FinCastCandleSecondsSchema.default(60),
     execution: SimulationExecutionSchema,
   }).strict().superRefine((input, context) => {
-    const market = input.market
-      ?? { kind: "stock" as const, country: input.marketCountry ?? "KR" };
+    const market = input.market;
     const strategy = input.strategy;
     const inferredCase = inferSimulationCase({
       market,
       selection: input.selection,
       ...(strategy ? { strategy } : {}),
     });
-    const simulationCase = input.simulationCase ?? inferredCase;
-    if (input.modelPlan !== undefined) {
-      if (input.simulationCase === undefined) {
-        context.addIssue({
-          code: "custom",
-          path: ["modelPlan"],
-          message: "modelPlan은 simulationCase가 명시된 v8 요청에서만 사용할 수 있습니다.",
-        });
-      } else {
-        const canonicalModelPlan = defaultModelPlanForCase(simulationCase, input.selection);
-        if (JSON.stringify(input.modelPlan) !== JSON.stringify(canonicalModelPlan)) {
-          context.addIssue({
-            code: "custom",
-            path: ["modelPlan"],
-            message: "modelPlan이 선택한 simulationCase의 고정 모델 역할 정책과 일치하지 않습니다.",
-          });
-        }
-      }
-    }
-    if (input.market && input.marketCountry !== undefined) {
-      if (input.market.kind !== "stock" || input.market.country !== input.marketCountry) {
-        context.addIssue({
-          code: "custom",
-          path: ["marketCountry"],
-          message: "marketCountry와 market이 서로 일치해야 합니다.",
-        });
-      }
-    }
+    const simulationCase = input.simulationCase;
     if (strategy?.mode === "pair"
       && (market.kind !== "stock" || market.country !== "US")) {
       context.addIssue({
@@ -491,10 +446,6 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
       }
       if (
         input.fincastCandleSeconds < 60
-        && (
-          (input.modelLanes?.length ?? 1) !== 1
-          || (input.modelLanes?.[0] ?? "fincast") !== "fincast"
-        )
       ) {
         context.addIssue({
           code: "custom",
@@ -503,27 +454,6 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
         });
       }
     } else {
-      if (
-        simulationCase !== "us_etf_pair"
-        && (input.modelLanes?.length ?? 1) !== 1
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["modelLanes"],
-          message: "주식 시뮬레이션은 독립 원장을 보장하기 위해 한 번에 하나의 모델 lane만 지원합니다.",
-        });
-      }
-      if (
-        strategy?.mode === "pair"
-        && input.simulationCase === undefined
-        && (input.modelLanes?.[0] ?? "fincast") !== "kronos_base"
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["modelLanes"],
-          message: "주식 페어 전략은 현재 Kronos-base와 Rust 결합만 지원합니다.",
-        });
-      }
       if (input.initialCash < 100_000) {
         context.addIssue({
           code: "custom",
@@ -546,7 +476,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
         });
       }
     }
-    if (input.simulationCase !== undefined && input.simulationCase !== inferredCase) {
+    if (input.simulationCase !== inferredCase) {
       context.addIssue({
         code: "custom",
         path: ["simulationCase"],
@@ -576,7 +506,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
           message: "고변동성 케이스는 Binance USD-M 선물만 지원합니다.",
         });
       }
-      if (input.simulationCase !== undefined && input.selection.mode !== "auto") {
+      if (input.selection.mode !== "auto") {
         context.addIssue({
           code: "custom",
           path: ["selection"],
@@ -603,36 +533,17 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
       });
     }
   }).transform((input): SimulationStartRequest => {
-    const market = input.market
-      ?? { kind: "stock" as const, country: input.marketCountry ?? "KR" };
+    const market = input.market;
     const strategy = input.strategy;
-    const simulationCase = input.simulationCase ?? inferSimulationCase({
-      market,
-      selection: input.selection,
-      ...(strategy ? { strategy } : {}),
-    });
-    const defaultModelPlan = defaultModelPlanForCase(simulationCase, input.selection);
-    const modelLanes = input.simulationCase !== undefined
-      ? [...new Set(defaultModelPlan.map((entry) => entry.modelLane))]
-      : input.modelLanes ?? [MAIN_SIMULATION_MODEL_LANE];
-    const modelPlan = input.simulationCase !== undefined
-      ? defaultModelPlan
-      : modelLanes.map((modelLane) => ({
-          symbol: "*",
-          modelLane,
-          role: "primary" as const,
-          required: true,
-          preferredHorizonsMinutes: [15, 30, 60] as Array<15 | 30 | 60>,
-        }));
+    const simulationCase = input.simulationCase;
+    const resolvedModelPlan = defaultModelPlanForCase(simulationCase, input.selection);
+    const modelLanes = [...new Set(resolvedModelPlan.map((entry) => entry.modelLane))];
     const normalized = {
       ...input,
       contractVersion: AI_SIMULATION_CONTRACT_VERSION,
-      sourceContractVersion: input.contractVersion
-        ?? (input.simulationCase ? AI_SIMULATION_CONTRACT_VERSION : "ai-paper-simulation/v7"),
-      ...(simulationCase ? { simulationCase } : {}),
       market,
       modelLanes,
-      modelPlan,
+      resolvedModelPlan,
       costs: {
         ...(market.kind === "stock"
           ? defaultSimulationCostsForMarket(market.country)
@@ -654,16 +565,7 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
             : {}),
         }
         : {}),
-    } as Omit<SimulationStartRequest, "marketCountry">;
-    if (market.kind === "stock") {
-      return { ...normalized, marketCountry: market.country };
-    }
-    Object.defineProperty(normalized, "marketCountry", {
-      configurable: false,
-      enumerable: false,
-      writable: false,
-      value: "US",
-    });
-    return normalized as SimulationStartRequest;
+    } satisfies SimulationStartRequest;
+    return normalized;
   });
 }

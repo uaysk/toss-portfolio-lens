@@ -1,10 +1,10 @@
 import type { PairTradingCosts } from "./ensemble-policy.js";
 import type { PairDirection } from "./pair-catalog.js";
 
-export const PAIR_STRATEGY_COMPARISON_VERSION = "pair-strategy-comparison/v2" as const;
+export const PAIR_STRATEGY_COMPARISON_VERSION = "pair-strategy-comparison/v3" as const;
 
 export const PAIR_STRATEGY_LANES = [
-  "kronos",
+  "chronos2",
   "rust",
   "ensemble",
 ] as const;

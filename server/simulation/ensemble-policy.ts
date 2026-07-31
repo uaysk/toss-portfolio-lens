@@ -10,7 +10,7 @@ import {
   type PairSession,
 } from "./pair-catalog.js";
 
-export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v3" as const;
+export const PAIR_ENSEMBLE_POLICY_VERSION = "pair-ensemble-policy/v4" as const;
 
 export type PairRustTechnicalState =
   | "watch"
@@ -69,7 +69,7 @@ export type PairEnsemblePolicyProfile = {
   policyVersion: typeof PAIR_ENSEMBLE_POLICY_VERSION;
   profileId: string;
   weights: {
-    kronos: number;
+    chronos2: number;
     rust: number;
   };
   modelScoreWeights: {
@@ -93,9 +93,9 @@ export type PairEnsemblePolicyProfile = {
 export const DEFAULT_PAIR_ENSEMBLE_POLICY_PROFILE: Readonly<PairEnsemblePolicyProfile> =
   Object.freeze({
     policyVersion: PAIR_ENSEMBLE_POLICY_VERSION,
-    profileId: "aggressive-kronos-rust-v3",
+    profileId: "aggressive-chronos2-rust-v4",
     weights: Object.freeze({
-      kronos: 0.72,
+      chronos2: 0.72,
       rust: 0.28,
     }),
     modelScoreWeights: Object.freeze({
@@ -153,7 +153,7 @@ export type PairEnsembleDecision = {
   reasonCodes: string[];
   weights: PairEnsemblePolicyProfile["weights"];
   componentScores: {
-    kronos: PairModelDirectionScore;
+    chronos2: PairModelDirectionScore;
     rust: PairRustDirectionScore;
   };
   finalScores: {
@@ -212,7 +212,7 @@ export function validatePairEnsemblePolicyProfile(
     || !profile.profileId.trim()) {
     throw new Error("Pair ensemble policy profile identity is invalid.");
   }
-  const componentWeight = profile.weights.kronos + profile.weights.rust;
+  const componentWeight = profile.weights.chronos2 + profile.weights.rust;
   const scoreWeight = profile.modelScoreWeights.netExpectedReturn
     + profile.modelScoreWeights.directionProbability
     + profile.modelScoreWeights.uncertaintyPenalty;
@@ -426,7 +426,7 @@ function scoreRust(
 
 function latestEligibleAt(input: PairEnsembleInput, quote?: PairExecutionQuote): string {
   const candidates = [
-    input.models.kronos.generatedAt,
+    input.models.chronos2.generatedAt,
     input.rust.observedAt,
     input.rust.earliestEligibleAt,
     quote?.observedAt,
@@ -450,7 +450,7 @@ function cashDecision(
     policyVersion: PAIR_ENSEMBLE_POLICY_VERSION,
     profileId: profile.profileId,
     pairId: input.pair.pairId,
-    signalSymbol: input.pair.signalSymbol,
+    signalSymbol: input.pair.modelTargetSymbol,
     ...(origin ? { origin } : {}),
     decisionAt: new Date(Date.parse(input.decisionAt)).toISOString(),
     eligibleAfter: latestEligibleAt(input),
@@ -501,24 +501,24 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
       throw new RangeError(`${name} must be a finite non-negative number.`);
     }
   }
-  if (input.models.signalSymbol !== pair.signalSymbol) {
+  if (input.models.signalSymbol !== pair.modelTargetSymbol) {
     throw new Error("Normalized model signal symbol does not match the pair catalog.");
   }
-  const kronos = scoreModel(input.models.kronos, pair, input, profile);
+  const chronos2 = scoreModel(input.models.chronos2, pair, input, profile);
   const rust = scoreRust(input.rust, input.currentDirection);
-  const componentScores = { kronos, rust };
+  const componentScores = { chronos2, rust };
   const finalScores = {
     bull: rounded(
-      kronos.bull * profile.weights.kronos
+      chronos2.bull * profile.weights.chronos2
       + rust.bull * profile.weights.rust
     ),
     bear: rounded(
-      kronos.bear * profile.weights.kronos
+      chronos2.bear * profile.weights.chronos2
       + rust.bear * profile.weights.rust
     ),
     cash: rounded(Math.max(0, 1 - Math.max(
-      kronos.bull,
-      kronos.bear,
+      chronos2.bull,
+      chronos2.bear,
       rust.bull,
       rust.bear,
     ))),
@@ -529,7 +529,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     switchCostApplied: input.currentDirection !== "cash",
   };
   const reasons: string[] = [];
-  const model = input.models.kronos;
+  const model = input.models.chronos2;
   const degraded = model.status === "degraded";
   const origin = input.models.alignmentStatus === "aligned"
     ? input.models.alignedOrigin
@@ -576,11 +576,11 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
   if (!pair.allowedSessions.includes(input.market.session as PairSession)) {
     reasons.push("session_not_allowed");
   }
-  if (model.status === "unavailable") reasons.push("kronos_model_unavailable");
+  if (model.status === "unavailable") reasons.push("chronos2_model_unavailable");
   // A partially degraded base model is never promoted by reweighting Rust.
   // The aggressive profile changes thresholds only for a fully available,
   // aligned model; data/model degradation remains fail-closed.
-  if (model.status === "degraded") reasons.push("kronos_model_degraded");
+  if (model.status === "degraded") reasons.push("chronos2_model_degraded");
   if (profile.requireCalibration && model.calibration.status !== "good") {
     reasons.push("calibration_required");
   }
@@ -591,9 +591,9 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     reasons.push("rust_exit_candidate");
   }
   const currentNetReturns = input.currentDirection === "bull"
-    ? [kronos.bullNetExpectedReturn]
+    ? [chronos2.bullNetExpectedReturn]
     : input.currentDirection === "bear"
-      ? [kronos.bearNetExpectedReturn]
+      ? [chronos2.bearNetExpectedReturn]
       : [];
   if (currentNetReturns.length === 1 && currentNetReturns[0]! <= 0) {
     reasons.push("held_direction_net_expected_return_nonpositive");
@@ -602,7 +602,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     return cashDecision(input, profile, componentScores, finalScores, costs, reasons, degraded, origin);
   }
 
-  if (kronos.preferredDirection === "cash") {
+  if (chronos2.preferredDirection === "cash") {
     return cashDecision(
       input,
       profile,
@@ -614,7 +614,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
       origin,
     );
   }
-  const candidate = kronos.preferredDirection;
+  const candidate = chronos2.preferredDirection;
   if (rust.preferredDirection !== "cash" && rust.preferredDirection !== candidate) {
     return cashDecision(
       input,
@@ -746,7 +746,7 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     policyVersion: PAIR_ENSEMBLE_POLICY_VERSION,
     profileId: profile.profileId,
     pairId: pair.pairId,
-    signalSymbol: pair.signalSymbol,
+    signalSymbol: pair.modelTargetSymbol,
     origin,
     decisionAt,
     eligibleAfter: latestEligibleAt(input, quote),
@@ -758,9 +758,9 @@ export function evaluatePairEnsemble(input: PairEnsembleInput): PairEnsembleDeci
     degraded,
     exposureScale,
     reasonCodes: unique([
-      "kronos_direction_actionable",
+      "chronos2_direction_actionable",
       rustNeutral ? "rust_neutral_reduced_exposure" : "rust_direction_supports_ai",
-      "kronos_rust_ensemble_available",
+      "chronos2_rust_ensemble_available",
       "cost_and_uncertainty_adjusted_score_passed",
     ]),
     weights: { ...profile.weights },

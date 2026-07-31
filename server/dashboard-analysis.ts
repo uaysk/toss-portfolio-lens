@@ -3,7 +3,7 @@ import { toolSchemas, type ToolName } from "./mcp/schemas.js";
 import { createToolHandlers, type McpToolDependencies } from "./mcp/tools/handlers.js";
 import { ServiceError } from "./services/service-envelope.js";
 import { enforceToolRequestLimits } from "./services/tool-request-limits.js";
-import { BacktestValidationError } from "./backtest-engine.js";
+import { BacktestValidationError } from "./contracts/backtest.js";
 import { TossApiError } from "./toss.js";
 
 export const dashboardAnalysisOperations = {

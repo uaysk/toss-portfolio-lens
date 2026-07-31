@@ -230,7 +230,7 @@ function ScenarioResults({ result }: { result: unknown }) {
     const metrics = record(scenario.metrics ?? scenario.summary);
     return {
       name: String(scenario.name ?? scenario.label ?? `설정 ${index + 1}`).replace(/_sensitivity-/g, " "),
-      return: numeric(metrics.totalReturnPercent) ?? 0,
+      totalReturn: numeric(metrics.totalReturnPercent) ?? 0,
       cagr: numeric(metrics.cagrPercent) ?? 0,
       drawdown: numeric(metrics.maxDrawdownPercent) ?? 0,
     };
@@ -244,7 +244,7 @@ function ScenarioResults({ result }: { result: unknown }) {
             <XAxis dataKey="name" angle={-12} textAnchor="end" interval={0} height={58} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
             <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
             <Tooltip formatter={(value) => formatPercent(Number(value), true)} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-            <Bar dataKey="return" name="누적 수익률" fill="hsl(var(--foreground))" radius={[6, 6, 0, 0]} />
+            <Bar dataKey="totalReturn" name="누적 수익률" fill="hsl(var(--foreground))" radius={[6, 6, 0, 0]} />
             <Bar dataKey="drawdown" name="최대 낙폭" fill="hsl(var(--muted-foreground))" radius={[6, 6, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
@@ -272,7 +272,7 @@ function OptimizationResults({ result, objective, theme }: { result: unknown; ob
       <div className="rounded-[20px] bg-card p-5">
         <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">BEST CANDIDATE · {String(data.candidateCount ?? 0)}개 평가</p>
         <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-          {[['CAGR', percentDecimal(metrics.return)], ['변동성', percentDecimal(metrics.volatility)], ['MDD', percentDecimal(metrics.maxDrawdown)], ['Sharpe', ratio(metrics.sharpe)], ['CVaR', percentDecimal(metrics.cvar)], ['강건 점수', ratio(metrics.robustScore)]].map(([label, value]) => <div key={label} className="rounded-2xl bg-secondary p-3"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-1 font-black">{value}</p></div>)}
+          {[['CAGR', percentDecimal(metrics.cagr)], ['누적 수익률', percentDecimal(metrics.totalReturn)], ['변동성', percentDecimal(metrics.volatility)], ['MDD', percentDecimal(metrics.maxDrawdown)], ['Sharpe', ratio(metrics.sharpe)], ['CVaR', percentDecimal(metrics.cvar)], ['강건 점수', ratio(metrics.robustScore)]].map(([label, value]) => <div key={label} className="rounded-2xl bg-secondary p-3"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-1 font-black">{value}</p></div>)}
         </div>
         <p className="mt-4 text-[10px] text-muted-foreground">Pareto frontier {(numeric(data.paretoCount) ?? array(data.paretoFrontier).length).toLocaleString("ko-KR")}개 · seed {String(data.seed ?? "-")}</p>
       </div>
@@ -305,11 +305,11 @@ function WalkForwardResults({ result, run, onUnauthorized }: { result: unknown; 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {[['검증 fold', String(summary.foldCount ?? summary.fold_count ?? allFolds.length)], ['평균 OOS', percentDecimal(summary.averageReturn)], ['최악 OOS', percentDecimal(summary.worstReturn)], ['최고 OOS', percentDecimal(summary.bestReturn)]].map(([label, value]) => <div key={label} className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-2 text-sm font-black">{value}</p></div>)}
+        {[['검증 fold', String(summary.foldCount ?? summary.fold_count ?? allFolds.length)], ['평균 OOS', percentDecimal(summary.averageTotalReturn)], ['최악 OOS', percentDecimal(summary.worstTotalReturn)], ['최고 OOS', percentDecimal(summary.bestTotalReturn)]].map(([label, value]) => <div key={label} className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-2 text-sm font-black">{value}</p></div>)}
       </div>
       {data.foldsExternalized && loadedResult === undefined ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">대용량 fold 상세는 별도 artifact로 보관했습니다. 화면에는 최대 500개 fold를 표시합니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadFolds()} disabled={loading}>{loading ? <LoaderCircle className="animate-spin" /> : <Activity />}Walk-forward fold 불러오기</Button></div> : null}
       {error ? <p className="text-xs text-rose-500">{error}</p> : null}
-      {folds.length ? <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[700px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">Fold</th><th className="p-3">학습 구간</th><th className="p-3">검증 구간</th><th className="p-3">OOS 수익</th><th className="p-3">OOS MDD</th><th className="p-3">회전율</th></tr></thead><tbody>{folds.map((fold, index) => { const oos = record(fold.oos); return <tr key={index} className="border-t border-border"><td className="p-3 font-black">{index + 1}</td><td className="p-3">{String(fold.trainStart ?? fold.trainStartDate ?? fold.train_start_date ?? "-")}~{String(fold.trainEnd ?? fold.trainEndDate ?? fold.train_end_date ?? "-")}</td><td className="p-3">{String(fold.testStart ?? fold.testStartDate ?? fold.test_start_date ?? "-")}~{String(fold.testEnd ?? fold.testEndDate ?? fold.test_end_date ?? "-")}</td><td className="p-3">{percentDecimal(oos.return)}</td><td className="p-3">{percentDecimal(oos.maxDrawdown)}</td><td className="p-3">{percentDecimal(oos.turnover)}</td></tr>; })}</tbody></table>{allFolds.length > folds.length ? <p className="p-3 text-[10px] text-muted-foreground">전체 {allFolds.length.toLocaleString("ko-KR")}개 중 앞 500개를 표시합니다.</p> : null}</div> : null}
+      {folds.length ? <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[700px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">Fold</th><th className="p-3">학습 구간</th><th className="p-3">검증 구간</th><th className="p-3">OOS 누적 수익</th><th className="p-3">OOS MDD</th><th className="p-3">회전율</th></tr></thead><tbody>{folds.map((fold, index) => { const oos = record(fold.oos); return <tr key={index} className="border-t border-border"><td className="p-3 font-black">{index + 1}</td><td className="p-3">{String(fold.trainStart ?? fold.trainStartDate ?? fold.train_start_date ?? "-")}~{String(fold.trainEnd ?? fold.trainEndDate ?? fold.train_end_date ?? "-")}</td><td className="p-3">{String(fold.testStart ?? fold.testStartDate ?? fold.test_start_date ?? "-")}~{String(fold.testEnd ?? fold.testEndDate ?? fold.test_end_date ?? "-")}</td><td className="p-3">{percentDecimal(oos.totalReturn)}</td><td className="p-3">{percentDecimal(oos.maxDrawdown)}</td><td className="p-3">{percentDecimal(oos.turnover)}</td></tr>; })}</tbody></table>{allFolds.length > folds.length ? <p className="p-3 text-[10px] text-muted-foreground">전체 {allFolds.length.toLocaleString("ko-KR")}개 중 앞 500개를 표시합니다.</p> : null}</div> : null}
     </div>
   );
 }

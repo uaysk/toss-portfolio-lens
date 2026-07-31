@@ -149,11 +149,6 @@ const MODEL_FORECAST_STYLE: Readonly<Record<AiSimulationForecastLane, {
     stroke: "#c2410c",
     fill: "#f97316",
   },
-  kronos_base: {
-    label: "Kronos-base",
-    stroke: "#6d28d9",
-    fill: "#8b5cf6",
-  },
   fincast: {
     label: "FinCast",
     stroke: "#0f766e",
@@ -353,14 +348,8 @@ function currentModelForecasts(
       && latestFinalTime - inputOrigin <= 60_000
       && origin >= inputOrigin
       && Math.abs(origin - latestFinalTime) <= 60_000;
-    const legacyLiveFinCast = forecast.lane === "fincast"
-      && forecast.projectionPolicy === undefined
-      && finite(forecast.originPrice)
-      && forecast.originPrice > 0
-      && origin > latestFinalTime
-      && origin - latestFinalTime <= 60_000;
     return (
-      (origin === latestFinalTime || hasLiveOrigin || legacyLiveFinCast)
+      (origin === latestFinalTime || hasLiveOrigin)
       && forecast.points.length > 0
       && forecast.points.every((point) => (
         Date.parse(point.targetTimestamp) > origin
@@ -1104,7 +1093,7 @@ export function AiSimulationChart({
                     ?? Date.parse(point.timestamp)}
                   y={point.price}
                   ifOverflow="extendDomain"
-                  isFront
+
                   shape={<TradeMarkerShape currency={currency} point={point} />}
                 />
               ))}

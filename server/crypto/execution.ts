@@ -33,7 +33,7 @@ export type FuturesOrderRequest = {
   reduceOnly: boolean;
   marginMode: "isolated";
   positionSide: "BOTH";
-  modelLane: "kronos_base" | "fincast";
+  modelLane: "chronos2_base" | "fincast";
   /**
    * Required by the guarded Binance adapters for a new position. Paper
    * execution keeps this optional so the live-only field does not leak into
@@ -376,14 +376,14 @@ export type IpRestrictionQualification = TimedExecutionEvidence & {
 export type TestnetQualification = TimedExecutionEvidence & {
   succeeded: true;
   qualificationId: string;
-  modelLane: "kronos_base" | "fincast";
+  modelLane: "chronos2_base" | "fincast";
 };
 
 export type ExecutionGateConfig = {
   enabled: boolean;
   credentialsConfigured: boolean;
   signedReadSucceeded: boolean;
-  championModel?: "kronos_base" | "fincast";
+  championModel?: "chronos2_base" | "fincast";
   tradingPermissionEvidence?: TradingPermissionEvidence;
   ipRestrictionQualification?: IpRestrictionQualification;
   testnetQualification?: TestnetQualification;
@@ -394,11 +394,24 @@ export type ExecutionGateConfig = {
   modelFresh?: boolean;
   rateLimitHealthy?: boolean;
   dailyLossGateOpen?: boolean;
-  /** Deprecated booleans are retained for config parsing but never open live. */
-  tradingKeyEnabled?: boolean;
-  ipRestricted?: boolean;
-  testnetQualified?: boolean;
 };
+
+const EXECUTION_GATE_KEYS = new Set<keyof ExecutionGateConfig>([
+  "enabled",
+  "credentialsConfigured",
+  "signedReadSucceeded",
+  "championModel",
+  "tradingPermissionEvidence",
+  "ipRestrictionQualification",
+  "testnetQualification",
+  "accountOneWay",
+  "protectionOrdersHealthy",
+  "accountPositionMatched",
+  "streamSynchronized",
+  "modelFresh",
+  "rateLimitHealthy",
+  "dailyLossGateOpen",
+]);
 
 export type StoredExecutionIntent = {
   mode: "testnet" | "live";
@@ -410,7 +423,7 @@ export type StoredExecutionIntent = {
   leverage: number;
   reduceOnly: boolean;
   protectiveStopPrice?: number;
-  modelLane: "kronos_base" | "fincast";
+  modelLane: "chronos2_base" | "fincast";
   issuedAt: number;
   prePositionAmount?: number;
 };
@@ -663,6 +676,12 @@ abstract class GuardedBinanceExecution implements FuturesExecution {
     protected readonly gates: ExecutionGateConfig,
     dependencies: GuardedExecutionDependencies = {},
   ) {
+    const rawGates = gates as ExecutionGateConfig & Record<string, unknown>;
+    const unknown = Object.keys(rawGates)
+      .filter((key) => !EXECUTION_GATE_KEYS.has(key as keyof ExecutionGateConfig));
+    if (unknown.length) {
+      throw new Error(`Unknown execution gates are not accepted: ${unknown.join(", ")}`);
+    }
     this.reconciliationStore = dependencies.reconciliationStore
       ?? new InMemoryExecutionReconciliationStore();
     this.userDataEvidence = dependencies.userDataEvidence;

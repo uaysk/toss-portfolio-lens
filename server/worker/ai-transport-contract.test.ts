@@ -28,9 +28,9 @@ function request() {
 
 describe("scalping AI WebSocket transport contract", () => {
   it("버전, path와 subprotocol을 고정한다", () => {
-    expect(SCALPING_AI_TRANSPORT_VERSION).toBe("scalping-ai-ws/v1");
-    expect(SCALPING_AI_WEBSOCKET_PATH).toBe("/ws/scalping-ai/v1");
-    expect(SCALPING_AI_WEBSOCKET_SUBPROTOCOL).toBe("scalping-ai-ws.v1");
+    expect(SCALPING_AI_TRANSPORT_VERSION).toBe("scalping-ai-ws/v2");
+    expect(SCALPING_AI_WEBSOCKET_PATH).toBe("/ws/scalping-ai/v2");
+    expect(SCALPING_AI_WEBSOCKET_SUBPROTOCOL).toBe("scalping-ai-ws.v2");
   });
 
   it("request payload와 envelope identity가 일치해야 한다", () => {
@@ -69,8 +69,13 @@ describe("scalping AI WebSocket transport contract", () => {
         model: {
           loaded: true,
           device: "cuda",
-          model_id: "NeoQuasar/Kronos-base",
+          model_id: "amazon/chronos-2",
           model_revision: "pinned",
+          precision: "float32",
+          precision_validation: "not_required",
+          memory_status: "ok",
+          quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+          quantile_tail_policy: "native",
         },
         active_requests: 1,
         queued_requests: 0,

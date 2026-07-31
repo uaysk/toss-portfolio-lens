@@ -563,15 +563,15 @@ const optimizationFixture = {
   bestByObjective: {
     robust_score: {
       weights: Object.fromEntries(portfolioAssets.map((asset) => [asset.symbol, asset.weight / 100])),
-      metrics: { return: 0.124, volatility: 0.147, maxDrawdown: -0.128, sharpe: 0.84, cvar: -0.022, robustScore: 0.91 },
+      metrics: { cagr: 0.124, totalReturn: 0.31, volatility: 0.147, maxDrawdown: -0.128, sharpe: 0.84, cvar: -0.022, robustScore: 0.91 },
     },
   },
-  paretoFrontier: [{ weights: { "069500": 0.5, "379810": 0.5 }, metrics: { return: 0.13, volatility: 0.15, maxDrawdown: -0.12 } }],
+  paretoFrontier: [{ weights: { "069500": 0.5, "379810": 0.5 }, metrics: { cagr: 0.13, totalReturn: 0.33, volatility: 0.15, maxDrawdown: -0.12 } }],
 };
 
 const walkForwardFixture = {
-  folds: [{ trainStart: "2022-08-30", trainEnd: "2024-12-31", testStart: "2025-01-02", testEnd: "2025-03-31", oos: { return: 0.031, maxDrawdown: -0.021, turnover: 0.14 } }],
-  oosSummary: { foldCount: 1, averageReturn: 0.031, worstReturn: 0.031, bestReturn: 0.031 },
+  folds: [{ trainStart: "2022-08-30", trainEnd: "2024-12-31", testStart: "2025-01-02", testEnd: "2025-03-31", oos: { cagr: 0.132, totalReturn: 0.031, maxDrawdown: -0.021, turnover: 0.14 } }],
+  oosSummary: { foldCount: 1, averageTotalReturn: 0.031, worstTotalReturn: 0.031, bestTotalReturn: 0.031 },
 };
 
 function scenarioFixture(name) {
@@ -582,7 +582,7 @@ const researchFixtures = {
   "diversifying-assets": { base_portfolio_metrics: {}, candidates: [{ symbol: "GLD", correlation: 0.18, down_market_correlation: 0.12, beta: 0.2, expected_variance_effect: { volatility_reduction: 0.03 }, mixed_portfolio_metrics: { cagr: 0.118, max_drawdown: -0.105 } }], universe: "explicit", universe_size: 1 },
   "market-regimes": { thresholds: { return_median: 0.001, volatility_median: 0.012 }, regimes: [{ regime: "up_low_vol", observations: 320, average_return: 0.0012, annualized_volatility: 0.11 }], observations: [], observations_resource: { uri: `market://series/${marketResourceHash}`, row_count: 1, byte_count: 120 } },
   "return-contribution": { contributions: fixtures.backtest.contributions, risk_contributions: fixtures.backtest.advanced.riskContributions },
-  "pareto-frontier": { candidates: [{ id: "candidate-1", rank: 1, score: 0.91, weights: { "069500": 0.5, "379810": 0.5 }, metrics: { return: 0.13, volatility: 0.15, maxDrawdown: -0.12 }, pareto: true }] },
+  "pareto-frontier": { candidates: [{ id: "candidate-1", rank: 1, score: 0.91, weights: { "069500": 0.5, "379810": 0.5 }, metrics: { cagr: 0.13, totalReturn: 0.33, volatility: 0.15, maxDrawdown: -0.12 }, pareto: true }] },
   "redundant-assets": { redundant_pairs: [{ left: "379810", right: "426030", correlation: 0.96 }], pair_details: [{ left: "379810", right: "426030", correlation: 0.96, beta: 1.03, drawdown_path_correlation: 0.92, observations: 700, redundant: true }], removal_impact_by_asset: {} },
   "rebalance-plan": { changes: [{ symbol: "069500", current: 0.2, target: 0.25, change: 0.05, action: "buy", notional_change: 500000 }], turnover: 0.05, estimated_cost_rate: 0.00005, estimated_cost: 500, risk_change: { sharpe_ratio: 0.08 }, order_generated: false },
 };

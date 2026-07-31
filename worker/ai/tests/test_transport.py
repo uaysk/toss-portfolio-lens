@@ -36,7 +36,7 @@ def _port() -> int:
 def _payload(request_id: str) -> dict[str, object]:
     history = bars(80)
     return {
-        "schema_version": "scalping-ai/v1",
+        "schema_version": "scalping-ai/v2",
         "request_id": request_id,
         "mode": "forecast",
         "horizons_minutes": [5, 15, 30, 60],
@@ -123,7 +123,7 @@ def test_auth_token_is_generated_atomically_and_validated(tmp_path) -> None:
 def test_websocket_settings_are_bounded_and_tls_files_are_paired(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AI_WEBSOCKET_HOST", "0.0.0.0")
     monkeypatch.setenv("AI_WEBSOCKET_PORT", "9876")
-    monkeypatch.setenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v1")
+    monkeypatch.setenv("AI_WEBSOCKET_PATH", "/ws/scalping-ai/v2")
     monkeypatch.setenv("AI_WEBSOCKET_AUTH_TOKEN_FILE", str(tmp_path / "token"))
     monkeypatch.setenv("AI_WEBSOCKET_GENERATE_AUTH_TOKEN", "true")
     configured = AISettings.from_env()
@@ -145,7 +145,7 @@ def test_websocket_settings_are_bounded_and_tls_files_are_paired(monkeypatch, tm
 
     monkeypatch.setenv("AI_WEBSOCKET_MAX_IN_FLIGHT", "4")
     monkeypatch.setenv("AI_WEBSOCKET_PATH", "/unversioned")
-    with pytest.raises(ValueError, match="/ws/scalping-ai/v1"):
+    with pytest.raises(ValueError, match="/ws/scalping-ai/v2"):
         AISettings.from_env()
 
 
@@ -171,13 +171,13 @@ async def _round_trip(tmp_path) -> None:
                     "model": {
                         "loaded": True,
                         "device": "cpu",
-                        "model_id": "test/deterministic",
+                        "model_id": "amazon/chronos-2",
                         "model_revision": "test-only",
                         "precision": "float32",
                         "precision_validation": "not_required",
-                        "memory_status": "unavailable",
+                        "memory_status": "ok",
                         "quantile_tail_policy": "native",
-                        "quantile_monotonicity_policy": "native",
+                        "quantile_monotonicity_policy": "chronos2_fp32_monotone_rearrangement_v1",
                     },
                     "active_requests": 0,
                     "queued_requests": 0,
@@ -313,7 +313,7 @@ async def _protocol_and_payload_limits(tmp_path) -> None:
 
         async with connect(uri, additional_headers=headers, subprotocols=[SUBPROTOCOL], compression=None) as websocket:
             invalid = json.loads(_envelope("status", "status-version"))
-            invalid["transport_version"] = "scalping-ai-ws/v2"
+            invalid["transport_version"] = "scalping-ai-ws/v1"
             await websocket.send(json.dumps(invalid))
             with pytest.raises(ConnectionClosedError) as closed:
                 await websocket.recv()
@@ -346,11 +346,11 @@ def _validated_request(request_id: str, *, seed: int = 7):
 
 
 async def _compatible_microbatch(tmp_path) -> None:
-    adapter = DeterministicAdapter(provenance().model_copy(update={"model_id": "NeoQuasar/Kronos-base"}))
+    adapter = DeterministicAdapter(provenance().model_copy(update={"model_id": "amazon/chronos-2"}))
     service = AIService(
         settings(tmp_path, cross_request_microbatch=True, microbatch_size=4),
         adapter,
-        (ProductionModelBinding("kronos_base", "NeoQuasar/Kronos-base", adapter),),
+        (ProductionModelBinding("chronos_2", "amazon/chronos-2", adapter),),
     )
     scheduler = InferenceScheduler(service)
     scheduler.start()

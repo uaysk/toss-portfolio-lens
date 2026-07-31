@@ -11,7 +11,7 @@ import {
 } from "./contracts.js";
 
 const input = {
-  schema_version: "1.0" as const,
+  schema_version: "2.0" as const,
   engine_version: "portfolio-lens-test",
   run_id: "run-1",
   job_kind: "backtest" as const,
@@ -77,6 +77,33 @@ describe("worker contract", () => {
     ]));
   });
 
+  it("optimization 출력의 구 return metric을 거부하고 cagr와 totalReturn만 허용한다", () => {
+    const output = {
+      schema_version: "2.0",
+      engine_version: "portfolio-lens-test",
+      run_id: "run-optimization",
+      job_kind: "optimization",
+      status: "completed",
+      warnings: [],
+      result: {
+        candidates: [{
+          weights: { AAA: 1 },
+          metrics: { cagr: 0.1, totalReturn: 0.2 },
+        }],
+      },
+    };
+    expect(WorkerOutputSchema.safeParse(output).success).toBe(true);
+    expect(WorkerOutputSchema.safeParse({
+      ...output,
+      result: {
+        candidates: [{
+          weights: { AAA: 1 },
+          metrics: { cagr: 0.1, totalReturn: 0.2, return: 0.1 },
+        }],
+      },
+    }).success).toBe(false);
+  });
+
   it("external technical_analysis 완료 결과와 artifact를 영구 저장 전에 strict 검증한다", () => {
     const calculation = {
       instrument_key: "AAA",
@@ -94,7 +121,7 @@ describe("worker contract", () => {
     };
     const diagnostics = { validation: "passed" };
     const output = {
-      schema_version: "1.0",
+      schema_version: "2.0",
       engine_version: "portfolio-lens-rust-2026.07.5",
       run_id: "run-technical",
       job_kind: "technical_analysis",
@@ -202,7 +229,7 @@ describe("worker contract", () => {
       row_count: 1,
     };
     const output = {
-      schema_version: "1.0",
+      schema_version: "2.0",
       engine_version: "portfolio-lens-rust-2026.07.5",
       run_id: "run-strategy",
       job_kind: "technical_strategy",

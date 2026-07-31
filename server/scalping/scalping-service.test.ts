@@ -1499,7 +1499,7 @@ describe("ScalpingService", () => {
     expect(output.forecast).toEqual({ status: "available" });
   });
 
-  it("routes FinCast without fallback and preserves the Kronos canonical bars and origin", async () => {
+  it("routes FinCast without fallback and preserves the Chronos2 canonical bars and origin", async () => {
     const fincastAi = {
       forecast: vi.fn().mockResolvedValue({
         response: { status: "available", model: { model_id: "Vincent05R/FinCast" } },
@@ -1518,32 +1518,32 @@ describe("ScalpingService", () => {
 
     await subject.forecast(
       { symbols: ["005930"], interval: "1m" },
-      { modelLane: "kronos_base" },
+      { modelLane: "chronos2_base" },
     );
     await subject.forecast(
       { symbols: ["005930"], interval: "1m" },
       { modelLane: "fincast" },
     );
 
-    const kronosRequest = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
+    const chronos2Request = parts.ai.forecast.mock.calls[0]![0] as Record<string, any>;
     const fincastRequest = fincastAi.forecast.mock.calls[0]![0] as Record<string, any>;
     expect(parts.ai.forecast).toHaveBeenCalledTimes(1);
     expect(fincastAi.forecast).toHaveBeenCalledTimes(1);
     expect(fincastRequest.series[0].bars).toHaveLength(512);
     expect(fincastRequest.series[0]).toMatchObject({
-      instrument_key: kronosRequest.series[0].instrument_key,
-      timezone: kronosRequest.series[0].timezone,
-      input_end_at: kronosRequest.series[0].input_end_at,
-      future_timestamps: kronosRequest.series[0].future_timestamps,
-      target_stop: kronosRequest.series[0].target_stop,
+      instrument_key: chronos2Request.series[0].instrument_key,
+      timezone: chronos2Request.series[0].timezone,
+      input_end_at: chronos2Request.series[0].input_end_at,
+      future_timestamps: chronos2Request.series[0].future_timestamps,
+      target_stop: chronos2Request.series[0].target_stop,
       input_cadence: {
         candle_seconds: 60,
         gap_policy: "market_session_prevalidated",
       },
     });
-    expect(fincastRequest.series[0].bars.slice(-kronosRequest.series[0].bars.length))
-      .toEqual(kronosRequest.series[0].bars);
-    expect(kronosRequest.series[0]).not.toHaveProperty("input_cadence");
+    expect(fincastRequest.series[0].bars.slice(-chronos2Request.series[0].bars.length))
+      .toEqual(chronos2Request.series[0].bars);
+    expect(chronos2Request.series[0]).not.toHaveProperty("input_cadence");
 
     const withoutFinCast = dependencies();
     const unavailable = await service(withoutFinCast).forecast(

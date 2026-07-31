@@ -22,7 +22,6 @@ import type {
 } from "../scalping/api-contracts.js";
 import type { ScalpingService } from "../scalping/scalping-service.js";
 import type {
-  SimulationMarket,
   SimulationCosts,
   SimulationModelLane,
   SimulationPreset,
@@ -83,6 +82,10 @@ import {
   type PairDecisionProvenance,
 } from "./decision-provenance.js";
 import {
+  projectUnifiedEtfPairDecision,
+  type UnifiedEtfPairDecisionContext,
+} from "./unified-etf-pair-decision.js";
+import {
   AI_PAPER_POLICY_VERSION,
   createPaperLedger,
   decidePaperActions,
@@ -101,7 +104,6 @@ import {
   scoreRustIndicatorEvidence,
 } from "./technical-indicator-evidence.js";
 import {
-  applyEtfSessionGate,
   evaluateEtfSessionGate,
   fitPairReturnMapper,
   selectEtfPairDirection,
@@ -135,9 +137,31 @@ import {
 } from "./checkpoint-store.js";
 import type {
   SimulationCheckpointEventTypeV2,
-  SimulationCheckpointPatchOperationV2,
-  SimulationCheckpointPathSegmentV2,
 } from "./checkpoint-contracts.js";
+import {
+  checkpointScalarState,
+  createSimulationCheckpointCursor,
+  createSimulationCheckpointPatch,
+  type SimulationCheckpointCursor,
+  type SimulationCheckpointProjection,
+  type SimulationCheckpointScalarState,
+} from "./checkpoint-projection.js";
+import {
+  SIMULATION_REPORT_LIMITS,
+  boundedCharts,
+  boundedSnapshot,
+  countFromArtifact,
+  historyItem,
+  modelProvenance,
+  normalizeStockSnapshot,
+  performanceView,
+  reportLimit,
+  runSnapshot,
+  runStockMarket,
+  runView,
+  simulationConfiguration,
+  stringValues,
+} from "./query-report-projection.js";
 
 const MINUTE_MS = 60_000;
 const DECISION_ARTIFACT_CHECKPOINT_MS = 60_000;
@@ -147,14 +171,7 @@ const MAX_EQUITY_POINTS = 5_000;
 const MAX_MARK_HISTORY_PER_SYMBOL = 4_096;
 const MAX_HISTORY_PAGE_SIZE = 50;
 const DEFAULT_HISTORY_PAGE_SIZE = 20;
-const MAX_REPORT_DECISIONS = 500;
-const MAX_REPORT_TRADES = 500;
-const MAX_REPORT_EQUITY_POINTS = 1_000;
-const MAX_REPORT_CHARTS = 3;
-const MAX_REPORT_CHART_BARS = 180;
-const MAX_REPORT_CHART_PATTERNS = 120;
-const MAX_REPORT_CHART_INDICATORS = 50;
-const MAX_REPORT_MODEL_PROVENANCE = 16;
+const MAX_REPORT_DECISIONS = SIMULATION_REPORT_LIMITS.decisions;
 
 const SIMULATION_ARTIFACT_TYPES = [
   "simulation-selection",
@@ -174,60 +191,10 @@ export type SimulationHistoryListInput = {
 
 type UnknownRecord = Record<string, unknown>;
 
-type SimulationCheckpointScalarState = {
-  schemaVersion?: string;
-  phase?: string;
-  createdAt?: string;
-  startedAt?: string;
-  expiresAt?: string;
-  market?: string;
-  marketCountry?: string;
-  currency?: string;
-  initialCash?: number;
-  cash?: number;
-  equity?: number;
-  invested?: number;
-  realizedPnl?: number;
-  totalCosts?: number;
-  progress?: number;
-  decisionCount: number;
-  tradeCount: number;
-};
-
 function record(value: unknown): UnknownRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as UnknownRecord
     : undefined;
-}
-
-function checkpointScalarState(snapshot: UnknownRecord): SimulationCheckpointScalarState {
-  const stringValue = (key: string): string | undefined => (
-    typeof snapshot[key] === "string" ? snapshot[key] : undefined
-  );
-  const numberValue = (key: string): number | undefined => (
-    typeof snapshot[key] === "number" && Number.isFinite(snapshot[key])
-      ? snapshot[key] as number
-      : undefined
-  );
-  return {
-    ...(stringValue("schemaVersion") ? { schemaVersion: stringValue("schemaVersion") } : {}),
-    ...(stringValue("phase") ? { phase: stringValue("phase") } : {}),
-    ...(stringValue("createdAt") ? { createdAt: stringValue("createdAt") } : {}),
-    ...(stringValue("startedAt") ? { startedAt: stringValue("startedAt") } : {}),
-    ...(stringValue("expiresAt") ? { expiresAt: stringValue("expiresAt") } : {}),
-    ...(stringValue("market") ? { market: stringValue("market") } : {}),
-    ...(stringValue("marketCountry") ? { marketCountry: stringValue("marketCountry") } : {}),
-    ...(stringValue("currency") ? { currency: stringValue("currency") } : {}),
-    ...(numberValue("initialCash") !== undefined ? { initialCash: numberValue("initialCash") } : {}),
-    ...(numberValue("cash") !== undefined ? { cash: numberValue("cash") } : {}),
-    ...(numberValue("equity") !== undefined ? { equity: numberValue("equity") } : {}),
-    ...(numberValue("invested") !== undefined ? { invested: numberValue("invested") } : {}),
-    ...(numberValue("realizedPnl") !== undefined ? { realizedPnl: numberValue("realizedPnl") } : {}),
-    ...(numberValue("totalCosts") !== undefined ? { totalCosts: numberValue("totalCosts") } : {}),
-    ...(numberValue("progress") !== undefined ? { progress: numberValue("progress") } : {}),
-    decisionCount: Array.isArray(snapshot.decisions) ? snapshot.decisions.length : 0,
-    tradeCount: Array.isArray(snapshot.trades) ? snapshot.trades.length : 0,
-  };
 }
 
 function finite(value: unknown): number | undefined {
@@ -500,22 +467,13 @@ function manuallySelectedSymbols(request: SimulationStartRequest): string[] {
 
 function simulationModelPlan(
   request: SimulationStartRequest,
-): SimulationStartRequest["modelPlan"] {
-  if (Array.isArray(request.modelPlan) && request.modelPlan.length > 0) {
-    return request.modelPlan;
-  }
-  return request.modelLanes.map((modelLane) => ({
-    symbol: "*",
-    modelLane,
-    role: "primary" as const,
-    required: true,
-    preferredHorizonsMinutes: [15, 30, 60],
-  }));
+): SimulationStartRequest["resolvedModelPlan"] {
+  return request.resolvedModelPlan;
 }
 
 function usesUnifiedEtfPolicy(request: SimulationStartRequest): boolean {
-  return request.sourceContractVersion === AI_SIMULATION_CONTRACT_VERSION
-    && request.simulationCase === "us_etf_pair";
+  return request.simulationCase === "us_etf_pair"
+    && simulationStrategy(request).mode === "pair";
 }
 
 function stockModelLane(request: SimulationStartRequest): SimulationModelLane {
@@ -844,7 +802,7 @@ function pairExecutionMarketInput(
 }
 
 function pairActionModel(models: NormalizedPairModelSet): AiPaperForecastCandidate["model"] {
-  const provenance = models.kronos.provenance;
+  const provenance = models.chronos2.provenance;
   const device = provenance.device === "cuda" || provenance.device === "cpu"
     || provenance.device === "unavailable"
     ? provenance.device
@@ -874,20 +832,20 @@ function pairModelAverage(
   models: NormalizedPairModelSet,
   key: "medianReturn" | "q10Return" | "q90Return" | "upProbability",
 ): number {
-  const value = models.kronos[key];
+  const value = models.chronos2[key];
   return value !== undefined && Number.isFinite(value) ? value : 0;
 }
 
 function pairCommonTargetTimestamp(
   models: NormalizedPairModelSet,
 ): string | undefined {
-  return models.kronos.status !== "unavailable"
-    ? models.kronos.targetTimestamp
+  return models.chronos2.status !== "unavailable"
+    ? models.chronos2.targetTimestamp
     : undefined;
 }
 
 function pairProvenanceStrings(models: NormalizedPairModelSet): string[] {
-  return [models.kronos].flatMap((model) => {
+  return [models.chronos2].flatMap((model) => {
     const provenance = model.provenance;
     return [
       `${model.component}:${model.status}`,
@@ -971,63 +929,10 @@ type ActiveSession = SimulationRuntimeHandles & {
   persistenceTail: Promise<void>;
   checkpoint?: SimulationCheckpointSession<unknown, SimulationCheckpointScalarState>;
   checkpointCursor?: SimulationCheckpointCursor;
-  legacyArtifactsInitialized?: boolean;
-  legacyArtifactsTerminalPhase?: "completed" | "cancelled" | "failed";
+  projectionArtifactsInitialized?: boolean;
+  projectionArtifactsTerminalPhase?: "completed" | "cancelled" | "failed";
   finalizationTask?: Promise<void>;
 };
-
-type SimulationCheckpointCursor = {
-  decisionAppendCount: number;
-  decisionLength: number;
-  tradeAppendCount: number;
-  tradeLength: number;
-  equityAppendCount: number;
-  equityLength: number;
-  provenanceAppendCount: number;
-  provenanceLength: number;
-  chartRevision: number;
-  comparisonRevision: number;
-  snapshotKeys: Set<string>;
-  snapshotValues: Map<string, unknown>;
-};
-
-function appendRollingArrayPatch(
-  operations: SimulationCheckpointPatchOperationV2[],
-  path: SimulationCheckpointPathSegmentV2[],
-  values: readonly unknown[],
-  appendCount: number,
-  cursorAppendCount: number,
-  cursorLength: number,
-): void {
-  const appended = appendCount - cursorAppendCount;
-  const removed = cursorLength + appended - values.length;
-  if (!Number.isSafeInteger(appended)
-    || appended < 0
-    || appended > values.length
-    || !Number.isSafeInteger(removed)
-    || removed < 0
-    || removed > cursorLength) {
-    throw new Error(`simulation checkpoint append cursor가 어긋났습니다: ${path.join(".")}`);
-  }
-  if (removed) {
-    operations.push({
-      op: "splice",
-      path,
-      index: 0,
-      deleteCount: removed,
-      values: [],
-    });
-  }
-  if (appended) {
-    operations.push({
-      op: "splice",
-      path,
-      index: cursorLength - removed,
-      deleteCount: 0,
-      values: values.slice(values.length - appended),
-    });
-  }
-}
 
 function applyPhaseTransition(session: ActiveSession, event: SimulationPhaseEvent): boolean {
   const transition = transitionSimulationPhase(session.phase, event);
@@ -1037,7 +942,7 @@ function applyPhaseTransition(session: ActiveSession, event: SimulationPhaseEven
 }
 
 function selectedSymbols(session: ActiveSession): string[] {
-  if (session.pair) return [session.pair.catalog.signalSymbol];
+  if (session.pair) return [session.pair.catalog.modelTargetSymbol];
   return session.selection?.status === "available"
     ? session.selection.selected.map(({ symbol }) => symbol)
     : [];
@@ -1254,7 +1159,7 @@ function pairSignalPositionContext(session: ActiveSession) {
   return {
     mode: "isolated" as const,
     positions: [{
-      symbol: session.pair.catalog.signalSymbol,
+      symbol: session.pair.catalog.modelTargetSymbol,
       quantity: 1,
       averagePrice: session.pair.signalPosition.averagePrice,
       asOf: session.pair.signalPosition.asOf,
@@ -1385,7 +1290,7 @@ function firstObservedMarkAtOrAfter(
 function pairModelComparisonLane(
   pair: PairCatalogEntry,
   model: NormalizedPairModelOutput,
-  score: PairEnsembleDecision["componentScores"]["kronos"],
+  score: PairEnsembleDecision["componentScores"]["chronos2"],
 ): PairStrategyLaneObservation {
   if (model.status === "unavailable") {
     return {
@@ -1467,7 +1372,7 @@ function pairEnsembleComparisonLane(
 
 function pairComparisonReasons(
   session: ActiveSession,
-  lane: "kronos" | "rust" | "ensemble",
+  lane: "chronos2" | "rust" | "ensemble",
 ): UnknownRecord[] {
   return session.decisions.flatMap((decision) => {
     if (!decision.ensemble || !decision.modelOutputs || !decision.rustSignal) return [];
@@ -1528,7 +1433,7 @@ function buildPairStrategyComparison(session: ActiveSession): unknown {
     initialCapital: session.request.initialCash,
     costs: pairTradingCosts(
       session.request.costs,
-      session.request.marketCountry,
+      requestStockMarket(session.request).country,
       session.request.initialCash,
     ),
     executionPolicyId: "strict-next-observed-after-common-eligibility/v1",
@@ -1551,7 +1456,7 @@ function buildPairStrategyComparison(session: ActiveSession): unknown {
       latencyMs: metrics.averageLatencyMs,
       decisionReasons: pairComparisonReasons(
         session,
-        id as "kronos" | "rust" | "ensemble",
+        id as "chronos2" | "rust" | "ensemble",
       ),
       ...(metrics.status === "unavailable" ? {
         unavailableReason: pending
@@ -1595,23 +1500,6 @@ function markToMarket(session: ActiveSession, asOf?: string): {
   };
 }
 
-function runView(run: PortfolioRunRecord) {
-  const market = runStockMarket(run, runSnapshot(run));
-  return {
-    schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
-    runId: run.id,
-    kind: run.kind,
-    market,
-    status: run.status,
-    progress: run.progress,
-    ...(run.error !== undefined ? { error: run.error } : {}),
-    warnings: run.warnings,
-    createdAt: new Date(run.createdAt).toISOString(),
-    ...(run.startedAt ? { startedAt: new Date(run.startedAt).toISOString() } : {}),
-    ...(run.finishedAt ? { finishedAt: new Date(run.finishedAt).toISOString() } : {}),
-  };
-}
-
 function values(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
@@ -1624,411 +1512,15 @@ function firstDefined(source: UnknownRecord | undefined, ...keys: string[]): unk
   return undefined;
 }
 
-function stringValues(value: unknown): string[] {
-  return values(value).flatMap((item) => {
-    const text = nonempty(item, 1_000);
-    return text ? [text] : [];
-  });
-}
-
-function simulationMarket(value: unknown): SimulationMarket | undefined {
-  const source = record(value);
-  const kind = nonempty(source?.kind, 32);
-  if (kind === "stock") {
-    const country = nonempty(source?.country, 8);
-    if (country === "KR" || country === "US") {
-      return { kind, country };
-    }
-    return undefined;
-  }
-  if (kind === "crypto_futures"
-    && source?.venue === "BINANCE_USDM"
-    && source.quoteAsset === "USDT"
-    && source.contractType === "PERPETUAL") {
-    return {
-      kind,
-      venue: "BINANCE_USDM",
-      quoteAsset: "USDT",
-      contractType: "PERPETUAL",
-    };
-  }
-  return undefined;
-}
-
-function legacyStockCountry(value: unknown): MarketCountry | undefined {
-  const source = record(value);
-  const country = nonempty(firstDefined(source, "marketCountry", "market_country"), 8);
-  return country === "KR" || country === "US" ? country : undefined;
-}
-
-function normalizedStockMarket(
-  ...sources: readonly unknown[]
-): StockSimulationMarket {
-  for (const value of sources) {
-    const direct = simulationMarket(firstDefined(record(value), "market"));
-    if (direct?.kind === "stock") return direct;
-  }
-  for (const value of sources) {
-    const country = legacyStockCountry(value);
-    if (country) return { kind: "stock", country };
-  }
-  // This service owns the legacy stock lane. Runs predating market_country
-  // used KR as the repository and policy default, so normalize those records
-  // deterministically instead of emitting an incomplete v7 shape.
-  return { kind: "stock", country: "KR" };
-}
-
 function requestStockMarket(request: SimulationStartRequest): StockSimulationMarket {
-  // `marketCountry` remains the internal compatibility field used throughout
-  // the stock runtime. The v7 parser guarantees it agrees with `market`; using
-  // it here also keeps direct, pre-v7 service callers normalized.
-  return { kind: "stock", country: request.marketCountry };
-}
-
-function runStockMarket(
-  run: PortfolioRunRecord,
-  snapshot?: UnknownRecord,
-): StockSimulationMarket {
-  return normalizedStockMarket(
-    snapshot,
-    record(run.result),
-    record(run.summary),
-    record(run.input),
-  );
-}
-
-function normalizeStockSnapshot(
-  value: unknown,
-  market: StockSimulationMarket,
-): UnknownRecord | undefined {
-  const source = record(value);
-  return source ? { ...source, market } : undefined;
-}
-
-function runSnapshot(run: PortfolioRunRecord): UnknownRecord | undefined {
-  return record(record(run.result)?.snapshot) ?? record(record(run.summary)?.snapshot);
-}
-
-function simulationConfiguration(
-  run: PortfolioRunRecord,
-  snapshot: UnknownRecord | undefined,
-) {
-  const input = record(run.input);
-  const market = runStockMarket(run, snapshot);
-  const schemaVersion = nonempty(
-    firstDefined(input, "schemaVersion", "schema_version")
-      ?? firstDefined(snapshot, "schemaVersion", "schema_version"),
-    128,
-  );
-  const policyVersion = nonempty(
-    firstDefined(input, "policyVersion", "policy_version")
-      ?? firstDefined(snapshot, "policyVersion", "policy_version"),
-    128,
-  );
-  const marketCountry = market.country;
-  const initialCash = finite(
-    firstDefined(snapshot, "initialCash", "initial_cash")
-      ?? firstDefined(input, "initialCash", "initial_cash"),
-  );
-  const durationMinutes = finite(firstDefined(input, "durationMinutes", "duration_minutes"));
-  const preset = nonempty(
-    firstDefined(snapshot, "preset") ?? firstDefined(input, "preset"),
-    64,
-  );
-  const riskTolerance = finite(
-    firstDefined(snapshot, "riskTolerance", "risk_tolerance")
-      ?? firstDefined(input, "riskTolerance", "risk_tolerance"),
-  );
-  const selection = firstDefined(snapshot, "selection") ?? firstDefined(input, "selection");
-  const strategy = firstDefined(snapshot, "strategy") ?? firstDefined(input, "strategy");
-  const costs = firstDefined(input, "costs");
-  const policyProfile = firstDefined(snapshot, "policyProfile", "policy_profile")
-    ?? firstDefined(input, "resolvedPolicyProfile", "resolved_policy_profile");
-  const decisionCadence = firstDefined(input, "decisionCadence", "decision_cadence");
-  return {
-    ...(schemaVersion ? { schemaVersion } : {}),
-    ...(policyVersion ? { policyVersion } : {}),
-    market,
-    marketCountry,
-    ...(initialCash !== undefined ? { initialCash } : {}),
-    ...(durationMinutes !== undefined ? { durationMinutes } : {}),
-    ...(selection !== undefined ? { selection } : {}),
-    ...(strategy !== undefined ? { strategy } : {}),
-    ...(preset ? { preset } : {}),
-    ...(riskTolerance !== undefined ? { riskTolerance } : {}),
-    ...(costs !== undefined ? { costs } : {}),
-    ...(policyProfile !== undefined ? { policyProfile } : {}),
-    ...(decisionCadence !== undefined ? { decisionCadence } : {}),
-  };
-}
-
-function modelView(value: unknown): UnknownRecord | undefined {
-  const source = record(value);
-  const direct = nonempty(value, 256);
-  if (!source && !direct) return undefined;
-  const modelId = direct ?? nonempty(firstDefined(source, "modelId", "model_id", "id", "name"), 256);
-  const modelRevision = nonempty(
-    firstDefined(source, "modelRevision", "model_revision", "revision"),
-    256,
-  );
-  const tokenizerId = nonempty(firstDefined(source, "tokenizerId", "tokenizer_id"), 256);
-  const tokenizerRevision = nonempty(
-    firstDefined(source, "tokenizerRevision", "tokenizer_revision"),
-    256,
-  );
-  const sourceRevision = nonempty(
-    firstDefined(source, "sourceRevision", "source_revision"),
-    256,
-  );
-  const loaderVersion = nonempty(
-    firstDefined(source, "loaderVersion", "loader_version"),
-    256,
-  );
-  const license = nonempty(firstDefined(source, "license"), 128);
-  const device = nonempty(firstDefined(source, "device"), 64);
-  const dtype = nonempty(firstDefined(source, "dtype"), 64);
-  const attentionBackend = nonempty(
-    firstDefined(source, "attentionBackend", "attention_backend"),
-    64,
-  );
-  const loaded = firstDefined(source, "loaded");
-  if (!modelId && !modelRevision && !device && typeof loaded !== "boolean") return undefined;
-  return {
-    ...(modelId ? { modelId } : {}),
-    ...(modelRevision ? { modelRevision } : {}),
-    ...(tokenizerId ? { tokenizerId } : {}),
-    ...(tokenizerRevision ? { tokenizerRevision } : {}),
-    ...(sourceRevision ? { sourceRevision } : {}),
-    ...(loaderVersion ? { loaderVersion } : {}),
-    ...(license ? { license } : {}),
-    ...(device ? { device } : {}),
-    ...(dtype ? { dtype } : {}),
-    ...(attentionBackend ? { attentionBackend } : {}),
-    ...(typeof loaded === "boolean" ? { loaded } : {}),
-  };
-}
-
-function modelProvenance(
-  selected: readonly unknown[],
-  decisions: readonly unknown[],
-): UnknownRecord[] {
-  const models = new Map<string, UnknownRecord & { symbols: string[] }>();
-  for (const entry of [...selected, ...decisions]) {
-    const item = record(entry);
-    const model = modelView(item?.model);
-    if (!model) continue;
-    const key = JSON.stringify(model);
-    const symbol = nonempty(item?.symbol, 32);
-    const previous = models.get(key);
-    if (previous) {
-      if (symbol && !previous.symbols.includes(symbol)) previous.symbols.push(symbol);
-      continue;
-    }
-    models.set(key, {
-      ...model,
-      symbols: symbol ? [symbol] : [],
-    });
-    if (models.size >= MAX_REPORT_MODEL_PROVENANCE) break;
+  if (request.market.kind !== "stock") {
+    throw new Error("The stock simulation service requires market.kind=stock.");
   }
-  return [...models.values()];
+  return request.market;
 }
 
-function boundedChart(value: unknown): UnknownRecord | undefined {
-  const source = record(value);
-  const symbol = nonempty(source?.symbol, 32);
-  if (!source || !symbol) return undefined;
-  return {
-    symbol,
-    ...(nonempty(source.name, 256) ? { name: nonempty(source.name, 256) } : {}),
-    ...(nonempty(source.currency, 8) ? { currency: nonempty(source.currency, 8) } : {}),
-    bars: values(source.bars).slice(-MAX_REPORT_CHART_BARS),
-    indicators: values(source.indicators).slice(-MAX_REPORT_CHART_INDICATORS),
-    patterns: values(source.patterns).slice(-MAX_REPORT_CHART_PATTERNS),
-    ...(timestamp(source.updatedAt) ? { updatedAt: timestamp(source.updatedAt) } : {}),
-  };
-}
-
-function boundedCharts(value: unknown): UnknownRecord[] {
-  return values(value)
-    .slice(0, MAX_REPORT_CHARTS)
-    .map(boundedChart)
-    .filter((item): item is UnknownRecord => item !== undefined);
-}
-
-function boundedSnapshot(input: {
-  source: UnknownRecord;
-  selected: unknown[];
-  positions: unknown[];
-  charts: UnknownRecord[];
-  trades: unknown[];
-  decisions: unknown[];
-  warnings: string[];
-}) {
-  const source = input.source;
-  return {
-    ...(firstDefined(source, "schemaVersion", "schema_version") !== undefined
-      ? { schemaVersion: firstDefined(source, "schemaVersion", "schema_version") } : {}),
-    ...(firstDefined(source, "policyVersion", "policy_version") !== undefined
-      ? { policyVersion: firstDefined(source, "policyVersion", "policy_version") } : {}),
-    ...(source.phase !== undefined ? { phase: source.phase } : {}),
-    ...(source.createdAt !== undefined ? { createdAt: source.createdAt } : {}),
-    ...(source.startedAt !== undefined ? { startedAt: source.startedAt } : {}),
-    ...(source.expiresAt !== undefined ? { expiresAt: source.expiresAt } : {}),
-    ...(source.market !== undefined ? { market: source.market } : {}),
-    ...(source.marketCountry !== undefined ? { marketCountry: source.marketCountry } : {}),
-    ...(source.currency !== undefined ? { currency: source.currency } : {}),
-    ...(source.selection !== undefined ? { selection: source.selection } : {}),
-    ...(source.strategy !== undefined ? { strategy: source.strategy } : {}),
-    ...(source.pairStrategy !== undefined ? { pairStrategy: source.pairStrategy } : {}),
-    ...(source.pairState !== undefined ? { pairState: source.pairState } : {}),
-    ...(source.strategyComparison !== undefined
-      ? { strategyComparison: source.strategyComparison } : {}),
-    ...(source.criterion !== undefined ? { criterion: source.criterion } : {}),
-    ...(source.preset !== undefined ? { preset: source.preset } : {}),
-    ...(source.riskTolerance !== undefined ? { riskTolerance: source.riskTolerance } : {}),
-    ...(source.policyProfile !== undefined ? { policyProfile: source.policyProfile } : {}),
-    ...(source.initialCash !== undefined ? { initialCash: source.initialCash } : {}),
-    ...(source.cash !== undefined ? { cash: source.cash } : {}),
-    ...(source.equity !== undefined ? { equity: source.equity } : {}),
-    ...(source.invested !== undefined ? { invested: source.invested } : {}),
-    ...(source.realizedPnl !== undefined ? { realizedPnl: source.realizedPnl } : {}),
-    ...(source.totalCosts !== undefined ? { totalCosts: source.totalCosts } : {}),
-    ...(source.progress !== undefined ? { progress: source.progress } : {}),
-    ...(source.decisionCadence !== undefined ? { decisionCadence: source.decisionCadence } : {}),
-    selected: input.selected,
-    positions: input.positions,
-    pendingActions: values(source.pendingActions).slice(-10),
-    charts: input.charts,
-    trades: input.trades,
-    decisions: input.decisions,
-    warnings: input.warnings,
-    ...(source.capabilities !== undefined ? { capabilities: source.capabilities } : {}),
-  };
-}
-
-function countFromArtifact(
-  artifacts: ReadonlyMap<ArtifactType, ArtifactDescriptor>,
-  type: ArtifactType,
-  fallback: number,
-): number {
-  const value = artifacts.get(type)?.rowCount;
-  return Number.isSafeInteger(value) && Number(value) >= 0
-    ? Math.max(Number(value), fallback)
-    : fallback;
-}
-
-function reportLimit(total: number, returned: number, maximum: number) {
-  return {
-    total,
-    returned,
-    maximum,
-    truncated: total > returned,
-    window: "latest" as const,
-  };
-}
-
-function performanceView(input: {
-  run: PortfolioRunRecord;
-  snapshot: UnknownRecord;
-  positions: readonly unknown[];
-  tradeCount: number;
-  decisionCount: number;
-}) {
-  const summary = record(input.run.summary);
-  const configuration = simulationConfiguration(input.run, input.snapshot);
-  const initialCash = finite(
-    firstDefined(input.snapshot, "initialCash", "initial_cash")
-      ?? firstDefined(summary, "initialCash", "initial_cash")
-      ?? configuration.initialCash,
-  );
-  const finalEquity = finite(
-    firstDefined(input.snapshot, "equity", "finalEquity", "final_equity")
-      ?? firstDefined(summary, "finalEquity", "final_equity"),
-  );
-  const cash = finite(firstDefined(input.snapshot, "cash"));
-  const realizedPnl = finite(
-    firstDefined(input.snapshot, "realizedPnl", "realized_pnl"),
-  ) ?? 0;
-  const unrealizedPnl = input.positions.reduce<number>((total, value) => (
-    total + (finite(firstDefined(record(value), "unrealizedPnl", "unrealized_pnl")) ?? 0)
-  ), 0);
-  const totalCosts = finite(
-    firstDefined(input.snapshot, "totalCosts", "total_costs")
-      ?? firstDefined(summary, "totalCosts", "total_costs"),
-  ) ?? 0;
-  const returnRatio = finite(
-    firstDefined(summary, "returnRatio", "return_ratio"),
-  ) ?? (
-    initialCash !== undefined && initialCash > 0 && finalEquity !== undefined
-      ? finalEquity / initialCash - 1
-      : undefined
-  );
-  const netProfitLoss = finite(
-    firstDefined(summary, "netProfitLoss", "net_profit_loss"),
-  ) ?? (
-    initialCash !== undefined && finalEquity !== undefined
-      ? finalEquity - initialCash
-      : undefined
-  );
-  return {
-    ...(initialCash !== undefined ? { initialCash } : {}),
-    ...(finalEquity !== undefined ? { finalEquity } : {}),
-    ...(cash !== undefined ? { cash } : {}),
-    ...(netProfitLoss !== undefined ? { netProfitLoss } : {}),
-    ...(returnRatio !== undefined ? { returnRatio } : {}),
-    realizedPnl,
-    unrealizedPnl,
-    totalCosts,
-    tradeCount: input.tradeCount,
-    decisionCount: input.decisionCount,
-    positionCount: input.positions.length,
-  };
-}
-
-function historyItem(run: PortfolioRunRecord) {
-  const snapshot = runSnapshot(run) ?? {};
-  const summary = record(run.summary);
-  const configuration = simulationConfiguration(run, snapshot);
-  const selected = values(snapshot.selected).slice(0, 2);
-  const positions = values(snapshot.positions).slice(0, 2);
-  const trades = values(snapshot.trades);
-  const decisions = values(snapshot.decisions);
-  const tradeCount = finite(firstDefined(summary, "tradeCount", "trade_count")) ?? trades.length;
-  const decisionCount = finite(firstDefined(summary, "decisionCount", "decision_count"))
-    ?? decisions.length;
-  const performance = performanceView({
-    run,
-    snapshot,
-    positions,
-    tradeCount,
-    decisionCount,
-  });
-  const firstModel = modelView(record(selected[0])?.model);
-  return {
-    schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
-    runId: run.id,
-    status: run.status,
-    progress: run.progress,
-    createdAt: new Date(run.createdAt).toISOString(),
-    ...(run.startedAt !== undefined ? { startedAt: new Date(run.startedAt).toISOString() } : {}),
-    ...(run.finishedAt !== undefined ? { finishedAt: new Date(run.finishedAt).toISOString() } : {}),
-    market: configuration.market,
-    marketCountry: configuration.marketCountry,
-    ...(configuration.preset ? { preset: configuration.preset } : {}),
-    ...(configuration.riskTolerance !== undefined
-      ? { riskTolerance: configuration.riskTolerance } : {}),
-    ...(configuration.selection !== undefined ? { selection: configuration.selection } : {}),
-    ...(configuration.strategy !== undefined ? { strategy: configuration.strategy } : {}),
-    selected,
-    ...(nonempty(snapshot.currency, 8) ? { currency: nonempty(snapshot.currency, 8) } : {}),
-    ...performance,
-    ...(firstModel ? { model: firstModel } : {}),
-    decisionCadence: firstDefined(snapshot, "decisionCadence", "decision_cadence") ?? null,
-    ...(snapshot.strategyComparison !== undefined
-      ? { strategyComparison: snapshot.strategyComparison } : {}),
-    warnings: uniqueWarnings([...run.warnings, ...stringValues(snapshot.warnings)]).slice(-20),
-    ...(run.error !== undefined ? { error: run.error } : {}),
-  };
+function sessionStockCountry(session: Pick<ActiveSession, "request">): MarketCountry {
+  return requestStockMarket(session.request).country;
 }
 
 export class AiTradingSimulationService {
@@ -2109,11 +1601,11 @@ export class AiTradingSimulationService {
         deterministicChartPatterns: true,
         eventDrivenDecisions: true,
         gpuForecastWorker: "provenance_reported_per_run",
-        stockModelLanes: "kronos_base,fincast,chronos2",
-        stockModelLaneConcurrency: "role_routed_for_v8_etf",
+        stockModelLanes: "fincast,chronos2",
+        stockModelLaneConcurrency: "server_resolved_for_v9",
         nextObservedExecutionOnly: true,
         pairStrategy: true,
-        kronosRustEnsemble: true,
+        chronos2RustEnsemble: true,
         marketCountries: "KR,US",
       },
       pairStrategy: {
@@ -2125,11 +1617,9 @@ export class AiTradingSimulationService {
         models: {
           primary: "amazon/chronos-2",
           shadow: "FinCast",
-          legacy: "NeoQuasar/Kronos-base",
         },
         pairs: [...DEFAULT_PAIR_CATALOG.values()].map((pair) => ({
           pairId: pair.pairId,
-          signalSymbol: pair.signalSymbol,
           displaySignalSymbol: pair.displaySignalSymbol,
           modelTargetSymbol: pair.modelTargetSymbol,
           auxiliarySymbols: pair.auxiliarySymbols,
@@ -2164,8 +1654,8 @@ export class AiTradingSimulationService {
         "진행 중인 봉을 미래정보처럼 사용하지 않고 최신 확정 분봉과 해당 시점의 실시간 체결·호가 snapshot만 사용합니다.",
         "판단 생성 이전 또는 같은 시각의 체결을 사용하지 않습니다.",
         "페어 전략은 기초자산 신호와 실행 ETF를 분리하며 bull·bear·cash 중 하나만 활성화합니다.",
-        "주식 단일 종목 전략은 Kronos-base 또는 FinCast 중 정확히 한 lane을 실행하며 다른 모델로 대체하지 않습니다.",
-        "주식 페어 전략은 독립 FinCast 원장이 추가되기 전까지 Kronos-base와 Rust 결합만 허용합니다.",
+        "주식 전략은 서버가 결정한 FinCast 또는 Chronos-2 lane을 실행하며 다른 모델로 대체하지 않습니다.",
+        "주식 페어 전략은 Chronos-2와 Rust의 동일 시점 증거를 결합합니다.",
         "선택한 모델 또는 Rust 입력이 정렬되지 않거나 필수 데이터가 unavailable이면 cash로 닫힙니다.",
         "기간 종료 시 다음 유효 체결이 없으면 보유분은 마지막 관측가로 평가하고 매도를 만들지 않습니다.",
         "미국 데이마켓 호가는 unavailable이며 체결 피드와 확정 분봉만 사용할 수 있습니다.",
@@ -2209,7 +1699,7 @@ export class AiTradingSimulationService {
     const pairCatalog = strategy.mode === "pair"
       ? getPairCatalogEntry(strategy.pairId)
       : undefined;
-    if (pairCatalog && input.marketCountry !== pairCatalog.marketCountry) {
+    if (pairCatalog && market.country !== pairCatalog.marketCountry) {
       throw new Error(
         `페어 catalog 시장이 요청과 일치하지 않습니다: ${pairCatalog.marketCountry}`,
       );
@@ -2232,7 +1722,7 @@ export class AiTradingSimulationService {
         : AI_PAPER_POLICY_VERSION,
       mode: "forward_paper_session",
       market,
-      market_country: input.marketCountry,
+      market_country: market.country,
       selection: input.selection,
       strategy,
       ...(pairCatalog ? {
@@ -2257,7 +1747,7 @@ export class AiTradingSimulationService {
       real_order_api: false,
       mcp: false,
     };
-    const dataRevision = `live-paper:${input.marketCountry}:${createdAtMs}`;
+    const dataRevision = `live-paper:${market.country}:${createdAtMs}`;
     const run = await this.runs.create({
       ownerSubject,
       kind: "ai_trading_simulation",
@@ -2272,12 +1762,12 @@ export class AiTradingSimulationService {
       await this.repository.addEvent(run.id, "simulation_selecting", {
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         market,
-        market_country: input.marketCountry,
+        market_country: market.country,
         selection_mode: input.selection.mode,
         requested_symbol_count: symbolCount,
         requested_symbols: pairCatalog
           ? [
-              pairCatalog.signalSymbol,
+              pairCatalog.modelTargetSymbol,
               ...pairCatalog.auxiliarySymbols,
               pairCatalog.bull.executionSymbol,
               pairCatalog.bear.executionSymbol,
@@ -2607,8 +2097,8 @@ export class AiTradingSimulationService {
       ? values(artifactContent.get("simulation-equity"))
       : [];
     const decisions = allDecisions.slice(-MAX_REPORT_DECISIONS);
-    const trades = allTrades.slice(-MAX_REPORT_TRADES);
-    const equity = allEquity.slice(-MAX_REPORT_EQUITY_POINTS);
+    const trades = allTrades.slice(-SIMULATION_REPORT_LIMITS.trades);
+    const equity = allEquity.slice(-SIMULATION_REPORT_LIMITS.equityPoints);
     const charts = boundedCharts(sourceSnapshot.charts);
     const warnings = uniqueWarnings([
       ...run.warnings,
@@ -2687,16 +2177,24 @@ export class AiTradingSimulationService {
         warnings,
         limits: {
           decisions: reportLimit(decisionCount, decisions.length, MAX_REPORT_DECISIONS),
-          trades: reportLimit(tradeCount, trades.length, MAX_REPORT_TRADES),
-          equity: reportLimit(equityPointCount, equity.length, MAX_REPORT_EQUITY_POINTS),
+          trades: reportLimit(
+            tradeCount,
+            trades.length,
+            SIMULATION_REPORT_LIMITS.trades,
+          ),
+          equity: reportLimit(
+            equityPointCount,
+            equity.length,
+            SIMULATION_REPORT_LIMITS.equityPoints,
+          ),
           charts: {
-            maximum: MAX_REPORT_CHARTS,
-            barsPerChart: MAX_REPORT_CHART_BARS,
-            patternsPerChart: MAX_REPORT_CHART_PATTERNS,
-            indicatorsPerChart: MAX_REPORT_CHART_INDICATORS,
+            maximum: SIMULATION_REPORT_LIMITS.charts,
+            barsPerChart: SIMULATION_REPORT_LIMITS.barsPerChart,
+            patternsPerChart: SIMULATION_REPORT_LIMITS.patternsPerChart,
+            indicatorsPerChart: SIMULATION_REPORT_LIMITS.indicatorsPerChart,
           },
           modelProvenance: {
-            maximum: MAX_REPORT_MODEL_PROVENANCE,
+            maximum: SIMULATION_REPORT_LIMITS.modelProvenance,
             returned: provenance.length,
           },
         },
@@ -2764,7 +2262,7 @@ export class AiTradingSimulationService {
     for (let attempt = 1; attempt <= this.selectionMaximumAttempts; attempt += 1) {
       scanAttempts = attempt;
       const workspaceResult = await this.market.workspace({
-        marketCountry: session.request.marketCountry,
+        marketCountry: sessionStockCountry(session),
         criterion,
         topCount: this.config.candidatePoolSize,
         interval: "1m",
@@ -2776,7 +2274,7 @@ export class AiTradingSimulationService {
       });
       if (session.phase !== "selecting") return;
       const scannedCandidates = workspaceCandidates(workspaceResult).slice(0, this.config.candidatePoolSize);
-      const eligibleCandidates = session.request.marketCountry === "US"
+      const eligibleCandidates = sessionStockCountry(session) === "US"
         ? scannedCandidates.filter(({ exchange }) => exchange !== undefined)
         : scannedCandidates;
       candidates = manualSymbols.length
@@ -2794,7 +2292,7 @@ export class AiTradingSimulationService {
       if (attempt >= this.selectionMaximumAttempts) {
         throw new Error(
           `${manualSymbols.length ? "직접 선택한 종목을 검증하지 못했습니다" : "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다"}: `
-          + `market=${session.request.marketCountry}, requested=${symbolCount}, `
+          + `market=${sessionStockCountry(session)}, requested=${symbolCount}, `
           + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
           + `attempts=${scanAttempts}`,
         );
@@ -2802,7 +2300,7 @@ export class AiTradingSimulationService {
       this.warn(
         session,
         `${manualSymbols.length ? "직접 선택한 종목 검증" : "유효 스캔 후보"}이 부족해 공급자 데이터를 제한 재조회합니다 `
-        + `(${attempt}/${this.selectionMaximumAttempts}; market=${session.request.marketCountry}, `
+        + `(${attempt}/${this.selectionMaximumAttempts}; market=${sessionStockCountry(session)}, `
         + `requested=${symbolCount}, scanned=${scannedCandidateCount}, `
         + `exchangeEligible=${exchangeEligibleCount}).`,
       );
@@ -2812,7 +2310,7 @@ export class AiTradingSimulationService {
     if (candidates.length < symbolCount) {
       throw new Error(
         `${manualSymbols.length ? "직접 선택한 종목을 검증하지 못했습니다" : "AI가 선택할 수 있는 유효 스캔 후보가 부족합니다"}: `
-        + `market=${session.request.marketCountry}, requested=${symbolCount}, `
+        + `market=${sessionStockCountry(session)}, requested=${symbolCount}, `
         + `scanned=${scannedCandidateCount}, exchangeEligible=${exchangeEligibleCount}, `
         + `attempts=${scanAttempts}`,
       );
@@ -2827,8 +2325,8 @@ export class AiTradingSimulationService {
     )));
     const releaseCandidates = await this.live.retain(
       candidateSymbols,
-      session.request.marketCountry,
-      session.request.marketCountry === "US" ? candidateExchanges : undefined,
+      sessionStockCountry(session),
+      sessionStockCountry(session) === "US" ? candidateExchanges : undefined,
     );
     if (session.phase !== "selecting") {
       releaseCandidates();
@@ -2840,7 +2338,7 @@ export class AiTradingSimulationService {
       await this.live.waitForIdle();
       if (session.phase !== "selecting") return;
       const forecastResult = await this.market.forecast({
-        marketCountry: session.request.marketCountry,
+        marketCountry: sessionStockCountry(session),
         symbols: candidateSymbols,
         interval: "1m",
       }, {
@@ -2852,7 +2350,7 @@ export class AiTradingSimulationService {
         symbolCount,
         roundTripCostRate: roundTripCostRate(
           session.request.costs,
-          session.request.marketCountry,
+          sessionStockCountry(session),
         ),
         riskPenalty: resolvePaperPolicyProfile(
           session.request.preset,
@@ -2898,13 +2396,13 @@ export class AiTradingSimulationService {
       const exchange = session.metadata.get(symbol)?.exchange;
       return exchange ? [[symbol, exchange] as const] : [];
     }));
-    if (session.request.marketCountry === "US" && Object.keys(exchanges).length !== symbols.length) {
+    if (sessionStockCountry(session) === "US" && Object.keys(exchanges).length !== symbols.length) {
       throw new Error("미국 실시간 구독에 필요한 거래소 정보가 부족합니다.");
     }
     const releaseSelected = await this.live.retain(
       symbols,
-      session.request.marketCountry,
-      session.request.marketCountry === "US" ? exchanges : undefined,
+      sessionStockCountry(session),
+      sessionStockCountry(session) === "US" ? exchanges : undefined,
     );
     if (session.phase !== "selecting") {
       releaseSelected();
@@ -2912,7 +2410,7 @@ export class AiTradingSimulationService {
     }
     const retainedSymbols = this.live.state?.symbols;
     if (retainedSymbols && symbols.some((symbol) => !retainedSymbols.some((retained) => (
-      retained.marketCountry === session.request.marketCountry && retained.symbol === symbol
+      retained.marketCountry === sessionStockCountry(session) && retained.symbol === symbol
     )))) {
       releaseSelected();
       throw new Error("선정 종목의 실시간 체결 구독을 확보하지 못했습니다.");
@@ -2925,7 +2423,7 @@ export class AiTradingSimulationService {
     }
     await this.live.waitForIdle();
     const chartWorkspace = await this.market.workspace({
-      marketCountry: session.request.marketCountry,
+      marketCountry: sessionStockCountry(session),
       criterion,
       topCount: this.config.candidatePoolSize,
       symbols,
@@ -2948,7 +2446,7 @@ export class AiTradingSimulationService {
       throw new Error("선정된 모델 예측의 입력 origin이 종목 간 일치하지 않습니다.");
     }
     const initialTechnical = await this.market.realtimeAnalysis({
-      marketCountry: session.request.marketCountry,
+      marketCountry: sessionStockCountry(session),
       symbols,
       interval: "1m",
       preset: session.request.preset,
@@ -3050,7 +2548,7 @@ export class AiTradingSimulationService {
   }
 
   private async initializePair(session: ActiveSession): Promise<void> {
-    if (!session.pair || session.request.marketCountry !== "US") {
+    if (!session.pair || sessionStockCountry(session) !== "US") {
       throw new Error("페어 전략은 검증된 미국 catalog 세션에서만 시작할 수 있습니다.");
     }
     const pair = session.pair.catalog;
@@ -3144,8 +2642,8 @@ export class AiTradingSimulationService {
       );
     }
     const signal = session.decisionAbort.signal;
-    const signalSymbols = [pair.signalSymbol];
-    const maximumInputEndAt = latestFinalChartOrigin(session, pair.signalSymbol);
+    const signalSymbols = [pair.modelTargetSymbol];
+    const maximumInputEndAt = latestFinalChartOrigin(session, pair.modelTargetSymbol);
     // Forecast refreshes and persists the captured final bar. Run retained Rust
     // analysis afterward so both components consume that exact origin.
     const forecastResult = await this.market.forecast({
@@ -3178,7 +2676,7 @@ export class AiTradingSimulationService {
       symbolCount: 1,
       roundTripCostRate: roundTripCostRate(
         session.request.costs,
-        session.request.marketCountry,
+        sessionStockCountry(session),
       ),
       riskPenalty: resolvePaperPolicyProfile(
         session.request.preset,
@@ -3188,7 +2686,7 @@ export class AiTradingSimulationService {
       modelLane: stockModelLane(session.request),
     });
     if (displaySelection.status === "available"
-      && displaySelection.selected.every(({ symbol }) => symbol === pair.signalSymbol)) {
+      && displaySelection.selected.every(({ symbol }) => symbol === pair.modelTargetSymbol)) {
       session.selection = displaySelection;
     }
     const startedAtMs = this.now();
@@ -3205,7 +2703,7 @@ export class AiTradingSimulationService {
     const decisionRecord = this.recordPairDecision(
       session,
       forecastResult.forecast,
-      states[pair.signalSymbol],
+      states[pair.modelTargetSymbol],
       maximumInputEndAt,
     );
     session.lastDecisionFinishedAt = decisionRecord.recordedAt;
@@ -3214,11 +2712,11 @@ export class AiTradingSimulationService {
       await this.repository.addEvent(session.id, "simulation_ready", {
         strategy: "pair",
         pair_id: pair.pairId,
-        signal_symbol: pair.signalSymbol,
+        signal_symbol: pair.modelTargetSymbol,
         execution_symbols: executionSymbols(session),
         direction: session.pair?.lastDecision?.direction ?? "cash",
         model_ids: [
-          session.pair?.lastModels?.kronos.provenance.modelId,
+          session.pair?.lastModels?.chronos2.provenance.modelId,
         ].filter(Boolean),
         expires_at: session.expiresAt,
         real_order_api: false,
@@ -3443,7 +2941,7 @@ export class AiTradingSimulationService {
     }
     const observedSignal = observedMarkAt(
       session,
-      session.pair.catalog.signalSymbol,
+      session.pair.catalog.modelTargetSymbol,
       decision.origin,
     );
     const signalAtOrigin = observedSignal
@@ -3451,7 +2949,7 @@ export class AiTradingSimulationService {
       ? observedSignal
       : finalizedChartMarkAt(
           session,
-          session.pair.catalog.signalSymbol,
+          session.pair.catalog.modelTargetSymbol,
           decision.origin,
         );
     session.pair.comparisonPending.push({
@@ -3461,10 +2959,10 @@ export class AiTradingSimulationService {
       targetTimestamp,
       ...(signalAtOrigin ? { signalOriginPrice: signalAtOrigin.price } : {}),
       lanes: {
-        kronos: pairModelComparisonLane(
+        chronos2: pairModelComparisonLane(
           session.pair.catalog,
-          models.kronos,
-          decision.componentScores.kronos,
+          models.chronos2,
+          decision.componentScores.chronos2,
         ),
         rust: pairRustComparisonLane(
           session.pair.catalog,
@@ -3495,7 +2993,7 @@ export class AiTradingSimulationService {
     for (const pending of session.pair.comparisonPending) {
       const signalAtOrBeforeOrigin = observedMarkAt(
         session,
-        session.pair.catalog.signalSymbol,
+        session.pair.catalog.modelTargetSymbol,
         pending.origin,
       );
       const signalAtOrigin = signalAtOrBeforeOrigin
@@ -3506,7 +3004,7 @@ export class AiTradingSimulationService {
           : undefined;
       const signalAtTarget = firstObservedMarkAtOrAfter(
         session,
-        session.pair.catalog.signalSymbol,
+        session.pair.catalog.modelTargetSymbol,
         pending.targetTimestamp,
       );
       const bullSymbol = session.pair.catalog.bull.executionSymbol;
@@ -3587,7 +3085,7 @@ export class AiTradingSimulationService {
         executableOutcomes,
         pairTradingCosts(
           session.request.costs,
-          session.request.marketCountry,
+          sessionStockCountry(session),
           session.request.initialCash,
         ),
       );
@@ -3630,6 +3128,9 @@ export class AiTradingSimulationService {
     const updated = createPairDecisionProvenance({
       ensembleInput: previous.replayInput,
       decision: previous.decision,
+      ...(previous.replayContext
+        ? { replayContext: previous.replayContext }
+        : {}),
       sizing,
     });
     const verified = verifyPairDecisionReplay(updated);
@@ -3692,7 +3193,7 @@ export class AiTradingSimulationService {
     const normalizedCandidates = preferredHorizons.map((horizonMinutes) => ({
       horizonMinutes,
       models: normalizePairModelOutputs(forecast, {
-        signalSymbol: session.pair!.catalog.signalSymbol,
+        signalSymbol: session.pair!.catalog.modelTargetSymbol,
         ...(expectedOrigin ? { expectedOrigin } : {}),
         now: decisionAt,
         horizonMinutes,
@@ -3703,7 +3204,7 @@ export class AiTradingSimulationService {
       }),
     }));
     const originForMapping = expectedOrigin
-      ?? normalizedCandidates[0]?.models.kronos.inputEndAt
+      ?? normalizedCandidates[0]?.models.chronos2.inputEndAt
       ?? decisionAt;
     const mappingHistory = isUnifiedEtf
       ? pairReturnHistory(session, originForMapping)
@@ -3715,7 +3216,7 @@ export class AiTradingSimulationService {
     }).format(new Date(originForMapping));
     const volatilityRegime = mappingHistory.at(-1)?.volatilityRegime ?? "normal";
     const mappedCandidates = normalizedCandidates.map((candidate) => {
-      const model = candidate.models.kronos;
+      const model = candidate.models.chronos2;
       const mapping = isUnifiedEtf
         && model.q10Return !== undefined
         && model.medianReturn !== undefined
@@ -3773,31 +3274,30 @@ export class AiTradingSimulationService {
       riskTolerance: session.request.riskTolerance,
       costs: pairTradingCosts(
         session.request.costs,
-        session.request.marketCountry,
+        sessionStockCountry(session),
         Math.max(session.ledger.cash, session.request.initialCash * 0.1),
       ),
       market: pairExecutionMarketInput(session, decisionAt),
       ...(session.pair.cooldownUntil ? { cooldownUntil: session.pair.cooldownUntil } : {}),
       profile,
     };
-    const legacyDecision = evaluatePairEnsemble(ensembleInput);
+    const baseEnsembleDecision = evaluatePairEnsemble(ensembleInput);
     let etfSessionGate: EtfSessionGate | undefined;
-    let decision = legacyDecision;
+    let unifiedEtfReplayContext: UnifiedEtfPairDecisionContext | undefined;
+    let decision = baseEnsembleDecision;
     if (isUnifiedEtf) {
-      const directionSelection = selectEtfPairDirection({
+      const sessionMinutes = newYorkSessionMinutes(decisionAt);
+      const proposedDirection = selectEtfPairDirection({
         mapping: pairMapping,
-        primaryAvailable: models.kronos.status === "available",
+        primaryAvailable: models.chronos2.status === "available",
         rustDataQuality: rust.dataQuality === "good"
           ? "good"
           : rust.dataQuality === "unavailable" ? "unavailable" : "degraded",
         rustTechnicalSignal: rust.technicalSignal ?? 0,
-      });
-      const { pNetBull, pNetBear } = directionSelection;
-      let direction: PairDirection = directionSelection.direction;
-      const sessionMinutes = newYorkSessionMinutes(decisionAt);
-      const quoteSymbol = direction === "cash"
+      }).direction;
+      const quoteSymbol = proposedDirection === "cash"
         ? session.pair.catalog.bull.executionSymbol
-        : session.pair.catalog[direction].executionSymbol;
+        : session.pair.catalog[proposedDirection].executionSymbol;
       const quote = session.pair.quotes[quoteSymbol];
       etfSessionGate = evaluateEtfSessionGate({
         originAt: decisionAt,
@@ -3810,71 +3310,16 @@ export class AiTradingSimulationService {
         maximumSpreadBps: session.pair.catalog.maxSpreadBps,
         flattenBeforeClose: true,
       });
-      const sessionSelection = applyEtfSessionGate({
-        proposedDirection: direction,
-        currentDirection: session.pair.direction,
-        gate: etfSessionGate,
-      });
-      direction = sessionSelection.direction;
-      const executionSymbol = direction === "cash"
-        ? null
-        : session.pair.catalog[direction].executionSymbol;
-      const mappingLeg = direction === "cash" ? undefined : pairMapping?.[direction];
-      const decisionKind: PairEnsembleDecision["decisionKind"] = direction === "cash"
-        ? session.pair.direction === "cash" ? "cash" : "exit"
-        : session.pair.direction === "cash" ? "enter"
-          : session.pair.direction === direction ? "hold" : "switch";
-      const mappingReasons = pairMapping?.status === "ready"
-        ? [
-            "pair_return_mapper_ready",
-            `selected_horizon_${selectedCandidate.horizonMinutes}m`,
-            `pnet_bull_${pNetBull.toFixed(4)}`,
-            `pnet_bear_${pNetBear.toFixed(4)}`,
-          ]
-        : ["pair_return_mapper_warming_up"];
-      decision = {
-        ...legacyDecision,
-        direction,
-        executionSymbol,
-        leverageMultiplier: direction === "cash"
-          ? 0
-          : session.pair.catalog[direction].leverageMultiplier,
-        decisionKind,
-        degraded: models.kronos.status !== "available" || pairMapping?.status !== "ready",
-        exposureScale: direction === "cash" ? 0 : legacyDecision.exposureScale,
-        reasonCodes: uniqueWarnings([
-          ...mappingReasons,
-          ...directionSelection.reasons,
-          ...sessionSelection.reasons,
-        ]),
-        componentScores: {
-          ...legacyDecision.componentScores,
-          kronos: {
-            ...legacyDecision.componentScores.kronos,
-            bull: pNetBull,
-            bear: pNetBear,
-            bullNetExpectedReturn: pairMapping?.bull?.expectedNetReturn ?? 0,
-            bearNetExpectedReturn: pairMapping?.bear?.expectedNetReturn ?? 0,
-            bullProbability: pNetBull,
-            bearProbability: pNetBear,
-            leveragedUncertainty: mappingLeg
-              ? mappingLeg.q90Return - mappingLeg.q10Return
-              : 0,
-            preferredDirection: direction,
-          },
-        },
-        finalScores: {
-          bull: pNetBull,
-          bear: pNetBear,
-          cash: direction === "cash" ? 1 : 0,
-        },
-        scoreMargin: Math.abs(pNetBull - pNetBear),
-        costs: {
-          bullRoundTripRate: (pairMapping?.bull?.totalCostBps ?? 0) / 10_000,
-          bearRoundTripRate: (pairMapping?.bear?.totalCostBps ?? 0) / 10_000,
-          switchCostApplied: decisionKind === "switch",
-        },
+      unifiedEtfReplayContext = {
+        pairMapping: pairMapping!,
+        selectedHorizonMinutes: selectedCandidate.horizonMinutes,
+        sessionGate: etfSessionGate,
       };
+      decision = projectUnifiedEtfPairDecision(
+        ensembleInput,
+        baseEnsembleDecision,
+        unifiedEtfReplayContext,
+      );
       session.pair.lastPairMapping = pairMapping;
       session.pair.lastEtfSessionGate = etfSessionGate;
     }
@@ -3923,19 +3368,19 @@ export class AiTradingSimulationService {
         : "watch";
     const actionSymbol = command?.executionSymbol
       ?? decision.executionSymbol
-      ?? session.pair.catalog.signalSymbol;
+      ?? session.pair.catalog.modelTargetSymbol;
     const decisionReasons = uniqueWarnings([
       ...decision.reasonCodes,
       ...stateTransition.reasonCodes,
     ]);
     const forecastGeneratedAt = latestTimestamp([
-      models.kronos.generatedAt,
+      models.chronos2.generatedAt,
       decisionAt,
     ]) ?? decisionAt;
     const model = pairActionModel(models);
     const predictedVolatility = Math.max(
       0,
-      ...[models.kronos]
+      ...[models.chronos2]
         .filter((output) => output.status !== "unavailable")
         .map((output) => (
         output.expectedVolatility ?? (output.uncertaintyWidth ?? 0) / 2
@@ -3983,6 +3428,9 @@ export class AiTradingSimulationService {
     const provenanceRecord = createPairDecisionProvenance({
       ensembleInput,
       decision,
+      ...(unifiedEtfReplayContext
+        ? { replayContext: unifiedEtfReplayContext }
+        : {}),
       sizing: {
         status: "pending_execution_price",
         inputs: baseAction.pairSizing,
@@ -4006,8 +3454,8 @@ export class AiTradingSimulationService {
       );
     }
     const components = {
-      kronosBull: decision.componentScores.kronos.bull,
-      kronosBear: decision.componentScores.kronos.bear,
+      chronos2Bull: decision.componentScores.chronos2.bull,
+      chronos2Bear: decision.componentScores.chronos2.bear,
       rustBull: decision.componentScores.rust.bull,
       rustBear: decision.componentScores.rust.bear,
     };
@@ -4030,7 +3478,7 @@ export class AiTradingSimulationService {
       chartPatternBias: rust.chartPatternBias ?? null,
       chartPatterns: [...(rust.chartPatterns ?? [])],
       model,
-      signalSymbol: session.pair.catalog.signalSymbol,
+      signalSymbol: session.pair.catalog.modelTargetSymbol,
       executionSymbol: decision.executionSymbol,
       direction: decision.direction,
       decisionKind: decision.decisionKind,
@@ -4126,7 +3574,7 @@ export class AiTradingSimulationService {
     if (!event.symbol || !event.marketCountry) return;
     const sessions = [...this.active.values()].filter((session) => (
       session.phase === "running"
-      && session.request.marketCountry === event.marketCountry
+      && sessionStockCountry(session) === event.marketCountry
       && retainedSymbols(session).includes(event.symbol!)
     ));
     if (!sessions.length) return;
@@ -4200,7 +3648,7 @@ export class AiTradingSimulationService {
         }
         if (chartChanged
           && session.phase === "running"
-          && (!session.pair || event.symbol === session.pair.catalog.signalSymbol)) {
+          && (!session.pair || event.symbol === session.pair.catalog.modelTargetSymbol)) {
           this.queueAnalysis(session, this.now());
         } else if (chart && !chartChanged) {
           session.decisionDuplicateEvents += 1;
@@ -4269,7 +3717,7 @@ export class AiTradingSimulationService {
     // Forecast first so the captured finalized bar is persisted for retained
     // Rust analysis. Both calls are bounded to the same causal origin.
     const forecastResult = await this.market.forecast({
-      marketCountry: session.request.marketCountry,
+      marketCountry: sessionStockCountry(session),
       symbols,
       interval: "1m",
     }, {
@@ -4279,7 +3727,7 @@ export class AiTradingSimulationService {
     });
     if (signal.aborted || session.phase !== "running") return;
     const technical = await this.market.realtimeAnalysis({
-      marketCountry: session.request.marketCountry,
+      marketCountry: sessionStockCountry(session),
       symbols,
       interval: "1m",
       preset: session.request.preset,
@@ -4307,7 +3755,7 @@ export class AiTradingSimulationService {
       symbolCount: selectionSymbolCount(session.request),
       roundTripCostRate: roundTripCostRate(
         session.request.costs,
-        session.request.marketCountry,
+        sessionStockCountry(session),
       ),
       riskPenalty: profile.riskPenalty,
       notBeforeMs: this.now(),
@@ -4350,7 +3798,7 @@ export class AiTradingSimulationService {
     const signal = session.decisionAbort.signal;
     if (signal.aborted) return;
     const ledgerRevision = session.ledgerRevision;
-    const signalSymbol = session.pair.catalog.signalSymbol;
+    const signalSymbol = session.pair.catalog.modelTargetSymbol;
     await this.live.waitForIdle();
     if (signal.aborted || session.phase !== "running") return;
     const maximumInputEndAt = latestFinalChartOrigin(session, signalSymbol);
@@ -4400,7 +3848,7 @@ export class AiTradingSimulationService {
       symbolCount: 1,
       roundTripCostRate: roundTripCostRate(
         session.request.costs,
-        session.request.marketCountry,
+        sessionStockCountry(session),
       ),
       riskPenalty: resolvePaperPolicyProfile(
         session.request.preset,
@@ -4516,7 +3964,7 @@ export class AiTradingSimulationService {
       if (action.action === "buy") {
         pairEntrySignalMark = observedMarkAt(
           session,
-          session.pair.catalog.signalSymbol,
+          session.pair.catalog.modelTargetSymbol,
           executedAt,
         );
         if (!pairEntrySignalMark
@@ -4635,7 +4083,7 @@ export class AiTradingSimulationService {
             action.effectiveSpreadBpsRoundTrip ?? session.request.costs.spreadBpsRoundTrip
           ) + (action.switchCostBps ?? 0) * 2,
           slippageBpsPerSide: session.request.costs.slippageBpsPerSide,
-          marketCostProfile: getTossSimulationCostProfile(session.request.marketCountry),
+          marketCostProfile: getTossSimulationCostProfile(sessionStockCountry(session)),
         },
         markPrices: session.marks,
         allocationEquity: valuation.equity,
@@ -4848,21 +4296,21 @@ export class AiTradingSimulationService {
       ...(session.startedAt ? { startedAt: session.startedAt } : {}),
       ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       market,
-      marketCountry: session.request.marketCountry,
+      marketCountry: sessionStockCountry(session),
       simulationCase: session.request.simulationCase,
-      modelPlan: simulationModelPlan(session.request),
+      resolvedModelPlan: simulationModelPlan(session.request),
       modelLanes: [...session.request.modelLanes],
       executionMode: session.request.execution.mode,
-      currency: session.request.marketCountry === "US" ? "USD" : "KRW",
+      currency: sessionStockCountry(session) === "US" ? "USD" : "KRW",
       costs: session.request.costs,
-      costProfile: getTossSimulationCostProfile(session.request.marketCountry),
+      costProfile: getTossSimulationCostProfile(sessionStockCountry(session)),
       selection: session.request.selection,
       strategy: simulationStrategy(session.request),
       ...(session.pair ? {
         pairStrategy: {
           catalogVersion: session.pair.catalog.catalogVersion,
           pairId: session.pair.catalog.pairId,
-          signalSymbol: session.pair.catalog.signalSymbol,
+          signalSymbol: session.pair.catalog.modelTargetSymbol,
           bull: session.pair.catalog.bull,
           bear: session.pair.catalog.bear,
           allowedSessions: session.pair.catalog.allowedSessions,
@@ -5005,129 +4453,55 @@ export class AiTradingSimulationService {
       strategy: simulationStrategy(session.request),
       simulationCase: session.request.simulationCase,
       normalizedRequest: session.request,
-      modelPlan: simulationModelPlan(session.request),
+      resolvedModelPlan: simulationModelPlan(session.request),
       modelLanes: [...session.request.modelLanes],
       ...(session.pair ? { pair: session.pair.catalog } : {}),
       metadata: selectedSymbols(session).map((symbol) => session.metadata.get(symbol)),
     };
   }
 
-  private checkpointSnapshotValues(
+  private checkpointProjection(
+    session: ActiveSession,
     snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
-  ): Map<string, unknown> {
-    return new Map(Object.entries(snapshot as unknown as UnknownRecord));
+  ): SimulationCheckpointProjection {
+    return {
+      snapshot: snapshot as unknown as UnknownRecord,
+      decisions: session.decisions,
+      decisionAppendCount: session.decisionAppendCount,
+      trades: session.trades,
+      tradeAppendCount: session.tradeAppendCount,
+      equity: session.equity,
+      equityAppendCount: session.equityAppendCount,
+      ...(session.pair ? { provenance: session.pair.provenanceRecords } : {}),
+      provenanceAppendCount: session.provenanceAppendCount,
+      charts: session.charts,
+      chartRevision: session.chartRevision,
+      ...(session.pair?.strategyComparison !== undefined
+        ? { comparison: session.pair.strategyComparison } : {}),
+      comparisonRevision: session.comparisonRevision,
+      dirtyDecisionIndexes: session.checkpointDirtyDecisionIndexes,
+      dirtyProvenanceIndexes: session.checkpointDirtyProvenanceIndexes,
+      selection: this.checkpointSelection(session),
+    };
   }
 
   private checkpointCursor(
     session: ActiveSession,
     snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
   ): SimulationCheckpointCursor {
-    const snapshotValues = this.checkpointSnapshotValues(snapshot);
-    return {
-      decisionAppendCount: session.decisionAppendCount,
-      decisionLength: session.decisions.length,
-      tradeAppendCount: session.tradeAppendCount,
-      tradeLength: session.trades.length,
-      equityAppendCount: session.equityAppendCount,
-      equityLength: session.equity.length,
-      provenanceAppendCount: session.provenanceAppendCount,
-      provenanceLength: session.pair?.provenanceRecords.length ?? 0,
-      chartRevision: session.chartRevision,
-      comparisonRevision: session.comparisonRevision,
-      snapshotKeys: new Set(snapshotValues.keys()),
-      snapshotValues,
-    };
+    return createSimulationCheckpointCursor(this.checkpointProjection(session, snapshot));
   }
 
   private checkpointPatch(
     session: ActiveSession,
     snapshot: ReturnType<AiTradingSimulationService["snapshot"]>,
-  ): {
-    operations: SimulationCheckpointPatchOperationV2[];
-    nextCursor: SimulationCheckpointCursor;
-  } {
+  ) {
     const cursor = session.checkpointCursor;
     if (!cursor) throw new Error("simulation checkpoint cursor가 없습니다.");
-    const operations: SimulationCheckpointPatchOperationV2[] = [];
-    const snapshotValues = this.checkpointSnapshotValues(snapshot);
-    const cumulativeKeys = new Set(["decisions", "trades", "charts", "strategyComparison"]);
-    for (const [key, value] of snapshotValues) {
-      if (cumulativeKeys.has(key) || Object.is(cursor.snapshotValues.get(key), value)) continue;
-      operations.push({ op: "set", path: ["snapshot", key], value });
-    }
-    for (const key of cursor.snapshotKeys) {
-      if (cumulativeKeys.has(key) || snapshotValues.has(key)) continue;
-      operations.push({ op: "delete", path: ["snapshot", key] });
-    }
-    if (session.chartRevision !== cursor.chartRevision) {
-      operations.push({ op: "set", path: ["snapshot", "charts"], value: session.charts });
-    }
-    if (session.comparisonRevision !== cursor.comparisonRevision) {
-      if (session.pair?.strategyComparison === undefined) {
-        operations.push(
-          { op: "delete", path: ["snapshot", "strategyComparison"] },
-          { op: "delete", path: ["comparison"] },
-        );
-      } else {
-        operations.push(
-          {
-            op: "set",
-            path: ["snapshot", "strategyComparison"],
-            value: session.pair.strategyComparison,
-          },
-          { op: "set", path: ["comparison"], value: session.pair.strategyComparison },
-        );
-      }
-    }
-    appendRollingArrayPatch(
-      operations,
-      ["snapshot", "decisions"],
-      session.decisions,
-      session.decisionAppendCount,
-      cursor.decisionAppendCount,
-      cursor.decisionLength,
+    return createSimulationCheckpointPatch(
+      this.checkpointProjection(session, snapshot),
+      cursor,
     );
-    appendRollingArrayPatch(
-      operations,
-      ["snapshot", "trades"],
-      session.trades,
-      session.tradeAppendCount,
-      cursor.tradeAppendCount,
-      cursor.tradeLength,
-    );
-    appendRollingArrayPatch(
-      operations,
-      ["equity"],
-      session.equity,
-      session.equityAppendCount,
-      cursor.equityAppendCount,
-      cursor.equityLength,
-    );
-    if (session.pair) {
-      appendRollingArrayPatch(
-        operations,
-        ["provenance"],
-        session.pair.provenanceRecords,
-        session.provenanceAppendCount,
-        cursor.provenanceAppendCount,
-        cursor.provenanceLength,
-      );
-    }
-    for (const index of session.checkpointDirtyDecisionIndexes) {
-      const value = session.decisions[index];
-      if (value !== undefined) {
-        operations.push({ op: "set", path: ["snapshot", "decisions", index], value });
-      }
-    }
-    for (const index of session.checkpointDirtyProvenanceIndexes) {
-      const value = session.pair?.provenanceRecords[index];
-      if (value !== undefined) operations.push({ op: "set", path: ["provenance", index], value });
-    }
-    operations.push({ op: "set", path: ["selection"], value: this.checkpointSelection(session) });
-    return {
-      operations,
-      nextCursor: this.checkpointCursor(session, snapshot),
-    };
   }
 
   private async ensureCheckpointSession(
@@ -5213,8 +4587,8 @@ export class AiTradingSimulationService {
       { snapshot },
     );
     if (checkpointCaptured
-      && session.legacyArtifactsInitialized
-      && (!terminal || session.legacyArtifactsTerminalPhase === session.phase)) return;
+      && session.projectionArtifactsInitialized
+      && (!terminal || session.projectionArtifactsTerminalPhase === session.phase)) return;
     await Promise.all([
       this.artifacts.put({
         runId: session.id,
@@ -5292,7 +4666,7 @@ export class AiTradingSimulationService {
           ...(session.pair ? {
             pair_catalog_version: session.pair.catalog.catalogVersion,
             pair_id: session.pair.catalog.pairId,
-            signal_symbol: session.pair.catalog.signalSymbol,
+            signal_symbol: session.pair.catalog.modelTargetSymbol,
             execution_symbols: executionSymbols(session),
             active_direction: session.pair.direction,
             pair_mapping: session.pair.lastPairMapping,
@@ -5325,9 +4699,9 @@ export class AiTradingSimulationService {
       }),
     ]);
     if (checkpointCaptured) {
-      session.legacyArtifactsInitialized = true;
+      session.projectionArtifactsInitialized = true;
       if (terminal) {
-        session.legacyArtifactsTerminalPhase = session.phase as
+        session.projectionArtifactsTerminalPhase = session.phase as
           | "completed"
           | "cancelled"
           | "failed";
@@ -5434,7 +4808,7 @@ export class AiTradingSimulationService {
             schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
             phase,
             market,
-            market_country: session.request.marketCountry,
+            market_country: sessionStockCountry(session),
             selection_mode: session.request.selection.mode,
             preset: session.request.preset,
             risk_tolerance: session.request.riskTolerance,

@@ -248,12 +248,15 @@ try {
     "cash-flows",
     "cash-ledger",
     "correlation",
+    "data-quality",
+    "dividends",
     "drawdown",
     "equity",
     "holdings",
     "monthly-returns",
     "risk-contribution",
     "rolling",
+    "target-weight-schedule",
     "trades",
   ]);
   const backtestOutput = await verifyDurableOutputIdentity(backtest.run);
@@ -422,7 +425,7 @@ try {
     backtest: {
       status: backtest.run.status,
       points: backtestResult.points.length,
-      publicArtifacts: 10,
+      publicArtifacts: 13,
       checksum: backtestOutput.artifact.checksum,
     },
     optimization: {

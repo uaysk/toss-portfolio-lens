@@ -6,8 +6,12 @@ import {
 } from "./ensemble-policy.js";
 import { PAIR_CATALOG_VERSION } from "./pair-catalog.js";
 import { PAIR_MODEL_NORMALIZATION_VERSION } from "./model-output-normalization.js";
+import {
+  projectUnifiedEtfPairDecision,
+  type UnifiedEtfPairDecisionContext,
+} from "./unified-etf-pair-decision.js";
 
-export const PAIR_DECISION_PROVENANCE_VERSION = "pair-decision-provenance/v2" as const;
+export const PAIR_DECISION_PROVENANCE_VERSION = "pair-decision-provenance/v3" as const;
 
 export type PairDecisionProvenance = {
   schemaVersion: typeof PAIR_DECISION_PROVENANCE_VERSION;
@@ -31,12 +35,13 @@ export type PairDecisionProvenance = {
   reasons: string[];
   provenance: string[];
   rawInputs: {
-    kronos: unknown;
+    chronos2: unknown;
     rust: unknown;
     market: unknown;
   };
   decision: PairEnsembleDecision;
   replayInput: PairEnsembleInput;
+  replayContext?: UnifiedEtfPairDecisionContext;
   sizing?: unknown;
   integrity: {
     algorithm: "sha256";
@@ -105,7 +110,7 @@ function decisionComparable(value: PairEnsembleDecision) {
     reasonCodes: [...value.reasonCodes],
     weights: { ...value.weights },
     componentScores: {
-      kronos: { ...value.componentScores.kronos },
+      chronos2: { ...value.componentScores.chronos2 },
       rust: { ...value.componentScores.rust },
     },
     finalScores: { ...value.finalScores },
@@ -113,7 +118,7 @@ function decisionComparable(value: PairEnsembleDecision) {
   };
 }
 
-function modelLabel(input: PairEnsembleInput, component: "kronos"): string {
+function modelLabel(input: PairEnsembleInput, component: "chronos2"): string {
   const model = input.models[component].provenance;
   return `${model.modelId ?? component}@${model.modelRevision ?? "unavailable"}`
     + `:${input.models[component].status}`;
@@ -121,26 +126,43 @@ function modelLabel(input: PairEnsembleInput, component: "kronos"): string {
 
 function flatComponents(decision: PairEnsembleDecision): Record<string, number> {
   return {
-    kronosBull: decision.componentScores.kronos.bull,
-    kronosBear: decision.componentScores.kronos.bear,
+    chronos2Bull: decision.componentScores.chronos2.bull,
+    chronos2Bear: decision.componentScores.chronos2.bear,
     rustBull: decision.componentScores.rust.bull,
     rustBear: decision.componentScores.rust.bear,
   };
 }
 
+function replayDecision(
+  ensembleInput: PairEnsembleInput,
+  replayContext?: UnifiedEtfPairDecisionContext,
+): PairEnsembleDecision {
+  const baseDecision = evaluatePairEnsemble(ensembleInput);
+  return replayContext
+    ? projectUnifiedEtfPairDecision(ensembleInput, baseDecision, replayContext)
+    : baseDecision;
+}
+
 export function createPairDecisionProvenance(input: {
   ensembleInput: PairEnsembleInput;
   decision: PairEnsembleDecision;
+  replayContext?: UnifiedEtfPairDecisionContext;
   sizing?: unknown;
 }): PairDecisionProvenance {
-  const replayed = evaluatePairEnsemble(input.ensembleInput);
+  const replayed = replayDecision(input.ensembleInput, input.replayContext);
   if (canonicalPairDecisionJson(decisionComparable(replayed))
     !== canonicalPairDecisionJson(decisionComparable(input.decision))) {
     throw new Error("Decision does not reproduce from the supplied ensemble input.");
   }
   const replayInput = clone(input.ensembleInput);
+  const replayContext = input.replayContext === undefined
+    ? undefined
+    : clone(input.replayContext);
   const decision = clone(input.decision);
-  const inputDigest = digest(replayInput);
+  const inputDigest = digest({
+    ensembleInput: replayInput,
+    replayContext: replayContext ?? null,
+  });
   const decisionDigest = digest(decisionComparable(decision));
   const decisionId = `pair-decision:${decisionDigest}`;
   const sizing = input.sizing === undefined ? undefined : clone(input.sizing);
@@ -165,16 +187,17 @@ export function createPairDecisionProvenance(input: {
     finalScores: { ...decision.finalScores },
     reasons: [...decision.reasonCodes],
     provenance: [
-      modelLabel(replayInput, "kronos"),
+      modelLabel(replayInput, "chronos2"),
       `rust:${replayInput.rust.status ?? "unavailable"}`,
     ],
     rawInputs: {
-      kronos: clone(replayInput.models.kronos.rawOutput),
+      chronos2: clone(replayInput.models.chronos2.rawOutput),
       rust: clone(replayInput.rust.rawOutput ?? replayInput.rust),
       market: clone(replayInput.market),
     },
     decision,
     replayInput,
+    ...(replayContext ? { replayContext } : {}),
     ...(sizing !== undefined ? { sizing } : {}),
     integrity: {
       algorithm: "sha256",
@@ -197,7 +220,10 @@ export function verifyPairDecisionReplay(
   }
   let replayedDecision: PairEnsembleDecision | undefined;
   try {
-    const inputDigest = digest(provenance.replayInput);
+    const inputDigest = digest({
+      ensembleInput: provenance.replayInput,
+      replayContext: provenance.replayContext ?? null,
+    });
     if (inputDigest !== provenance.integrity.inputDigest) {
       reasonCodes.push("input_digest_mismatch");
     }
@@ -212,7 +238,10 @@ export function verifyPairDecisionReplay(
       && digest(provenance.sizing) !== provenance.integrity.sizingDigest) {
       reasonCodes.push("sizing_digest_mismatch");
     }
-    replayedDecision = evaluatePairEnsemble(provenance.replayInput);
+    replayedDecision = replayDecision(
+      provenance.replayInput,
+      provenance.replayContext,
+    );
     if (canonicalPairDecisionJson(decisionComparable(replayedDecision))
       !== canonicalPairDecisionJson(decisionComparable(provenance.decision))) {
       reasonCodes.push("policy_replay_mismatch");

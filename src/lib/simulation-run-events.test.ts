@@ -50,7 +50,7 @@ const current: AiSimulationRunResponse = {
     }],
     trades: [],
     decisions: [],
-    kronosForecasts: [],
+    modelForecasts: [],
     warnings: [],
     capabilities: {},
     futuresPositions: [],

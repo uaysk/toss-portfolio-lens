@@ -148,7 +148,6 @@ type RecordPreflightFailureInput = CreateRunInput & {
 
 type EnqueueRunInput = ExecuteRunInput & {
   totalCandidates?: number;
-  allowInlineInExternal?: boolean;
 };
 
 type EnqueueExternalRunInput = {
@@ -193,7 +192,7 @@ export class RunService {
     private readonly options: {
       maxQueuedRuns?: number;
       runDeadlineMs?: number;
-      executionMode?: "inline" | "rust_socket" | "external";
+      executionMode?: "rust_socket" | "external";
       jobRepository?: RunJobRepository;
       resultPollMs?: number;
       resultDeadlineMs?: number;
@@ -217,8 +216,8 @@ export class RunService {
     return recoveredInline + recoveredJobs.requeued + recoveredJobs.failed + recoveredJobs.cancelled;
   }
 
-  get executionMode(): "inline" | "rust_socket" | "external" {
-    return this.options.executionMode ?? "inline";
+  get executionMode(): "rust_socket" | "external" {
+    return this.options.executionMode ?? "rust_socket";
   }
 
   async waitForIdle(): Promise<void> {
@@ -382,6 +381,17 @@ export class RunService {
 
   async enqueue(input: EnqueueRunInput): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
     this.assertAccepting();
+    if (this.executionMode === "external") {
+      throw new Error("external 실행은 serializable worker payload로 enqueueExternal을 호출해야 합니다.");
+    }
+    const task = this.enqueueAccepted(input);
+    return await this.trackTask(this.admissionTasks, task);
+  }
+
+  async enqueueOrchestration(
+    input: EnqueueRunInput,
+  ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
+    this.assertAccepting();
     const task = this.enqueueAccepted(input);
     return await this.trackTask(this.admissionTasks, task);
   }
@@ -389,9 +399,6 @@ export class RunService {
   private async enqueueAccepted(
     input: EnqueueRunInput,
   ): Promise<{ run: PortfolioRunRecord; reused: boolean }> {
-    if (this.executionMode === "external" && !input.allowInlineInExternal) {
-      throw new Error("external 실행은 serializable worker payload로 enqueueExternal을 호출해야 합니다.");
-    }
     let run = await this.create(input);
     if (run.status === "failed" || run.status === "cancelled") {
       const retried = await this.repository.retryTerminal({
@@ -406,12 +413,6 @@ export class RunService {
       run = current;
     }
     if (run.status !== "queued") return { run, reused: true };
-    if (this.executionMode === "external") {
-      await this.repository.addEvent(run.id, "external_inline_fallback", {
-        kind: input.kind,
-        reason: "worker_job_kind_not_yet_supported",
-      });
-    }
     const activeForOwner = await this.repository.activeCount(input.ownerSubject);
     if (activeForOwner > this.maxRunsPerSubject) {
       await this.repository.fail(run.id, {

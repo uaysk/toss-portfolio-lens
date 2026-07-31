@@ -11,13 +11,11 @@ const composeFiles = [
 ];
 const safeEnvironment = {
   PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-  AI_COMPUTE_URL: "ws://172.30.1.14:18766/ws/scalping-ai/v1",
-  AI_KRONOS_COMPUTE_URL: "ws://172.30.1.14:18765/ws/scalping-ai/v1",
-  AI_FINCAST_COMPUTE_URL: "ws://172.30.1.14:18766/ws/scalping-ai/v1",
-  AI_CHRONOS2_COMPUTE_URL: "ws://172.30.1.14:18767/ws/scalping-ai/v1",
-  AI_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: "true",
+  AI_FINCAST_COMPUTE_URL: "ws://172.30.1.14:18766/ws/scalping-ai/v2",
+  AI_CHRONOS2_COMPUTE_URL: "ws://172.30.1.14:18767/ws/scalping-ai/v2",
+  AI_FINCAST_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: "true",
+  AI_CHRONOS2_COMPUTE_ALLOW_INSECURE_PRIVATE_WS: "true",
   AI_REMOTE_BIND_ADDRESS: "172.30.1.14",
-  AI_AUTH_SECRET_SOURCE: "/tmp/compose-profile-test/kronos-auth",
   AI_FINCAST_AUTH_SECRET_SOURCE: "/tmp/compose-profile-test/fincast-auth",
   AI_CHRONOS2_AUTH_SECRET_SOURCE: "/tmp/compose-profile-test/chronos2-auth",
   AI_CHRONOS2_MODEL_CACHE_SOURCE: "/tmp/compose-profile-test/chronos2-model-cache",
@@ -62,10 +60,6 @@ assert(
   "local default stack must activate the FinCast main worker",
 );
 assert(
-  !localDefaultServices.has("ai-worker"),
-  "local default stack must keep the Kronos worker behind the legacy-kronos profile",
-);
-assert(
   !localDefaultServices.has("chronos2-worker"),
   "local default stack must keep Chronos-2 behind its explicit qualification profile",
 );
@@ -78,7 +72,7 @@ const rendered = JSON.parse(compose([
   "--format",
   "json",
 ]));
-for (const service of ["ai-worker", "fincast-worker", "chronos2-worker"]) {
+for (const service of ["fincast-worker", "chronos2-worker"]) {
   const profiles = rendered.services?.[service]?.profiles;
   assert(
     JSON.stringify(profiles) === JSON.stringify(["local-ai-disabled"]),
@@ -89,15 +83,6 @@ assert(
   JSON.stringify(rendered.services?.["fincast-worker"]?.healthcheck?.test)
     === JSON.stringify(["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]),
   "FinCast runtime healthcheck must execute the installed offline worker directly",
-);
-assert(
-  JSON.stringify(rendered.services?.["ai-worker"]?.healthcheck?.test)
-    === JSON.stringify(["CMD", "/app/.venv/bin/portfolio-ai-worker", "healthcheck"]),
-  "Kronos runtime healthcheck must execute the installed offline worker directly",
-);
-assert(
-  rendered.services?.["ai-worker"]?.environment?.AI_KRONOS_KV_CACHE_ENABLED === "false",
-  "Experimental Kronos K/V cache must remain disabled by default",
 );
 assert(
   rendered.services?.["fincast-worker"]?.environment?.AI_MICROBATCH_SIZE === "4",
@@ -113,22 +98,6 @@ for (const cadence of [15, 30, 60]) {
     `FinCast raw generation cadence ${cadence}s must retain the qualified batch size of 48`,
   );
 }
-
-const legacyProfileServices = new Set(compose([
-  "--profile",
-  "legacy-kronos",
-  "config",
-  "--no-env-resolution",
-  "--services",
-]).trim().split(/\r?\n/).filter(Boolean));
-assert(
-  !legacyProfileServices.has("ai-worker"),
-  "remote-main must not activate the local Kronos worker under --profile legacy-kronos",
-);
-assert(
-  !legacyProfileServices.has("fincast-worker"),
-  "remote-main must not activate the local FinCast worker under --profile legacy-kronos",
-);
 
 const chronos2Rendered = JSON.parse(composeWithFiles([composeFiles[0]], [
   "--profile",

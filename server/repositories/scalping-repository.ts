@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
 import { applyPortfolioMigrations } from "../migrations.js";
+import {
+  postgresUnnestParameters,
+  postgresWriteBatches,
+} from "../postgres-batch.js";
 import { canonicalJson } from "../worker/contracts.js";
 import type {
   MarketCountry,
@@ -12,14 +16,9 @@ import type {
 } from "../scalping/contracts.js";
 
 export const SCALPING_INTERVALS = [1, 5, 15, 30, 60] as const;
-const INTRADAY_BAR_COLUMNS = 18;
 const SCALPING_TRADE_COLUMNS = 21;
 const SCALPING_ORDERBOOK_COLUMNS = 20;
 const SCALPING_RECORDING_EVENT_COLUMNS = 8;
-// Keep every statement comfortably below PostgreSQL's 65,535 bind parameter
-// ceiling as well as the lower limits used by some SQLite builds/proxies.
-const INTRADAY_BAR_UPSERT_BATCH_SIZE = 500;
-const RAW_MARKET_DATA_INSERT_BATCH_SIZE = 500;
 const RAW_MARKET_DATA_INPUT_LIMIT = 100_000;
 const RECORDING_EVENT_DETAILS_MAX_BYTES = 64 * 1_024;
 export type ScalpingInterval = typeof SCALPING_INTERVALS[number];
@@ -499,31 +498,31 @@ async function insertAppendOnlyRows(
     columns: readonly string[];
     conflictColumns: readonly string[];
     columnCount: number;
+    columnTypes: readonly (
+      | "text"
+      | "integer"
+      | "bigint"
+      | "float8"
+      | "boolean"
+    )[];
     rows: readonly unknown[][];
   },
 ): Promise<void> {
   if (input.columns.length !== input.columnCount
+    || input.columnTypes.length !== input.columnCount
     || input.rows.some((row) => row.length !== input.columnCount)) {
     throw new Error(`${input.table} insert column count가 일치하지 않습니다.`);
   }
-  const batches: unknown[][][] = [];
-  for (let index = 0; index < input.rows.length; index += RAW_MARKET_DATA_INSERT_BATCH_SIZE) {
-    batches.push(input.rows.slice(index, index + RAW_MARKET_DATA_INSERT_BATCH_SIZE));
-  }
+  const batches = postgresWriteBatches(input.rows);
   const write = async (target: RelationalDatabase): Promise<void> => {
     for (const rows of batches) {
-      const placeholders = rows
-        .map(() => `(${Array.from({ length: input.columnCount }, () => "?").join(", ")})`)
-        .join(", ");
-      const insert = target.dialect === "mysql" ? "INSERT IGNORE" : "INSERT";
-      const conflict = target.dialect === "mysql"
-        ? ""
-        : `ON CONFLICT(${input.conflictColumns.join(", ")}) DO NOTHING`;
       await target.run(`
-        ${insert} INTO ${input.table} (${input.columns.join(", ")})
-        VALUES ${placeholders}
-        ${conflict}
-      `, rows.flat());
+        INSERT INTO ${input.table} (${input.columns.join(", ")})
+        SELECT * FROM UNNEST(
+          ${input.columnTypes.map((type) => `?::${type}[]`).join(", ")}
+        ) AS input(${input.columns.join(", ")})
+        ON CONFLICT(${input.conflictColumns.join(", ")}) DO NOTHING
+      `, postgresUnnestParameters(rows, input.columnCount));
     }
   };
   if (batches.length === 1) {
@@ -654,26 +653,6 @@ export class ScalpingRepository {
   async putBars(input: readonly StoredIntradayBarRecord[]): Promise<void> {
     if (input.length > 100_000) throw new Error("한 번에 저장할 분봉은 100,000개 이하여야 합니다.");
     if (!input.length) return;
-    const mysqlPreferred = `(
-      CASE VALUES(bar_state) WHEN 'final' THEN 1 ELSE 0 END > CASE bar_state WHEN 'final' THEN 1 ELSE 0 END
-      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        > CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END)
-      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        AND CASE VALUES(source_kind)
-        WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
-        WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
-        WHEN 'recovered' THEN 2 ELSE 1 END
-        > CASE source_kind WHEN 'binance_ws' THEN 5 WHEN 'kis_ws' THEN 4
-          WHEN 'binance_rest' THEN 3 WHEN 'kis_rest' THEN 3
-          WHEN 'recovered' THEN 2 ELSE 1 END)
-      OR (VALUES(bar_state) = bar_state AND CASE VALUES(quality_status)
-        WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        = CASE quality_status WHEN 'recovered' THEN 3 WHEN 'complete' THEN 2 WHEN 'partial' THEN 1 ELSE 0 END
-        AND VALUES(source_kind) = source_kind AND VALUES(updated_at) >= updated_at)
-    )`;
     const conflictPreferred = `(
       CASE EXCLUDED.bar_state WHEN 'final' THEN 1 ELSE 0 END
         > CASE portfolio_intraday_bars.bar_state WHEN 'final' THEN 1 ELSE 0 END
@@ -728,66 +707,32 @@ export class ScalpingRepository {
         normalizedMarketCountry, normalizedSymbol, item.intervalMinutes, openTime, closeTime,
         date(item.sessionDate), normalizedSource, item.state,
         open, high, low, close, item.volume ?? 0,
-        this.database.dialect === "postgres" ? item.volume !== undefined : item.volume === undefined ? 0 : 1,
+        item.volume !== undefined,
         item.turnover, item.tradeCount, item.quality, item.updatedAt,
       ];
     });
-    const batches: unknown[][][] = [];
-    let batch: unknown[][] = [];
-    let keys = new Set<string>();
-    for (const values of normalized) {
-      // PostgreSQL rejects an INSERT that affects the same conflict key twice.
-      // Flush before a repeated revision so database priority semantics and the
-      // original input order remain identical on every supported dialect.
-      const key = `${values[0]}\0${values[1]}\0${values[2]}\0${values[3]}`;
-      if (batch.length >= INTRADAY_BAR_UPSERT_BATCH_SIZE || keys.has(key)) {
-        batches.push(batch);
-        batch = [];
-        keys = new Set();
-      }
-      batch.push(values);
-      keys.add(key);
-    }
-    if (batch.length) batches.push(batch);
+    const batches = postgresWriteBatches(
+      normalized,
+      (values) => `${values[0]}\0${values[1]}\0${values[2]}\0${values[3]}`,
+    );
 
     const writeBatches = async (database: RelationalDatabase): Promise<void> => {
       for (const values of batches) {
-        const placeholders = values
-          .map(() => `(${Array.from({ length: INTRADAY_BAR_COLUMNS }, () => "?").join(", ")})`)
-          .join(", ");
-        const parameters = values.flat();
-        if (database.dialect === "mysql") {
-        // MySQL evaluates assignments left-to-right. Keep the fields used by the
-        // priority predicate until last so every accepted value changes together.
-          await database.run(`
+        await database.run(`
           INSERT INTO portfolio_intraday_bars (
             market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES ${placeholders}
-          ON DUPLICATE KEY UPDATE
-            close_time = IF(${mysqlPreferred}, VALUES(close_time), close_time),
-            session_date = IF(${mysqlPreferred}, VALUES(session_date), session_date),
-            open_price = IF(${mysqlPreferred}, VALUES(open_price), open_price),
-            high_price = IF(${mysqlPreferred}, VALUES(high_price), high_price),
-            low_price = IF(${mysqlPreferred}, VALUES(low_price), low_price),
-            close_price = IF(${mysqlPreferred}, VALUES(close_price), close_price),
-            volume = IF(${mysqlPreferred}, IF(VALUES(volume_available), VALUES(volume), volume), volume),
-            volume_available = IF(${mysqlPreferred}, GREATEST(VALUES(volume_available), volume_available), volume_available),
-            turnover = IF(${mysqlPreferred}, COALESCE(VALUES(turnover), turnover), turnover),
-            trade_count = IF(${mysqlPreferred}, COALESCE(VALUES(trade_count), trade_count), trade_count),
-            updated_at = IF(${mysqlPreferred}, VALUES(updated_at), updated_at),
-            source_kind = IF(${mysqlPreferred}, VALUES(source_kind), source_kind),
-            quality_status = IF(${mysqlPreferred}, VALUES(quality_status), quality_status),
-            bar_state = IF(${mysqlPreferred}, VALUES(bar_state), bar_state)
-          `, parameters);
-        } else {
-          await database.run(`
-          INSERT INTO portfolio_intraday_bars (
+          )
+          SELECT * FROM UNNEST(
+            ?::text[], ?::text[], ?::integer[], ?::text[], ?::text[], ?::text[], ?::text[], ?::text[],
+            ?::float8[], ?::float8[], ?::float8[], ?::float8[], ?::float8[], ?::boolean[],
+            ?::float8[], ?::integer[], ?::text[], ?::bigint[]
+          ) AS input(
             market_country, symbol, interval_minutes, open_time, close_time, session_date, source_kind, bar_state,
             open_price, high_price, low_price, close_price, volume, volume_available, turnover, trade_count,
             quality_status, updated_at
-          ) VALUES ${placeholders}
+          )
           ON CONFLICT(market_country, symbol, interval_minutes, open_time) DO UPDATE SET
             close_time = EXCLUDED.close_time,
             session_date = EXCLUDED.session_date,
@@ -805,8 +750,7 @@ export class ScalpingRepository {
             quality_status = EXCLUDED.quality_status,
             updated_at = EXCLUDED.updated_at
           WHERE ${conflictPreferred}
-          `, parameters);
-        }
+          `, postgresUnnestParameters(values, 18));
       }
     };
     if (batches.length === 1) {
@@ -933,6 +877,11 @@ export class ScalpingRepository {
       ],
       conflictColumns: ["market_country", "symbol", "event_id"],
       columnCount: SCALPING_TRADE_COLUMNS,
+      columnTypes: [
+        "text", "text", "text", "text", "text", "text", "text", "text", "text", "text",
+        "float8", "float8", "float8", "text", "float8", "float8", "float8", "text",
+        "float8", "float8", "bigint",
+      ],
       rows,
     });
   }
@@ -1039,6 +988,11 @@ export class ScalpingRepository {
       ],
       conflictColumns: ["snapshot_id"],
       columnCount: SCALPING_ORDERBOOK_COLUMNS,
+      columnTypes: [
+        "text", "text", "text", "text", "text", "text", "text", "text", "text", "text",
+        "text", "text", "text", "float8", "float8", "float8", "float8", "float8", "float8",
+        "bigint",
+      ],
       rows,
     });
   }
@@ -1101,6 +1055,9 @@ export class ScalpingRepository {
       ],
       conflictColumns: ["event_id"],
       columnCount: SCALPING_RECORDING_EVENT_COLUMNS,
+      columnTypes: [
+        "text", "text", "text", "text", "text", "text", "text", "bigint",
+      ],
       rows,
     });
   }
@@ -1178,7 +1135,7 @@ export class ScalpingRepository {
     `, [
       id, normalizedMarketCountry, normalizedSymbol, modelName, modelVersion, inputEndedAt, generatedAt,
       input.status, input.dataQuality,
-      this.database.dialect === "postgres" ? input.retrospective : input.retrospective ? 1 : 0,
+      input.retrospective,
       payload, createdAt,
     ]);
     const stored = await this.getPrediction(id);
@@ -1218,7 +1175,7 @@ export class ScalpingRepository {
     `, [
       normalizedMarketCountry,
       ...normalized,
-      this.database.dialect === "postgres" ? retrospective : retrospective ? 1 : 0,
+      retrospective,
     ]);
     return rows.map(predictionFromRow);
   }

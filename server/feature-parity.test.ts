@@ -4,7 +4,10 @@ import { dashboardAnalysisOperations } from "./dashboard-analysis.js";
 import { toolSchemas, type ToolName } from "./mcp/schemas.js";
 import { toolMetadata } from "./mcp/tools/metadata.js";
 
-const bootstrapSource = readFileSync(new URL("./bootstrap.ts", import.meta.url), "utf8");
+const runtimeSource = readFileSync(
+  new URL("./application-runtime.ts", import.meta.url),
+  "utf8",
+);
 const dashboardRouteSource = readFileSync(
   new URL("./routes/dashboard-tools.ts", import.meta.url),
   "utf8",
@@ -63,8 +66,8 @@ describe("UI / HTTP API / MCP feature parity", () => {
   });
 
   it("every MCP tool is reachable through the schema-validated generic HTTP API", () => {
-    expect(bootstrapSource).toContain("createDashboardToolsRouter({");
-    expect(bootstrapSource).toContain("(application) => application.use(dashboardToolsRouter)");
+    expect(runtimeSource).toContain("createDashboardToolsRouter({");
+    expect(runtimeSource).toContain("(application) => application.use(dashboardToolsRouter)");
     expect(dashboardRouteSource).toContain('router.post("/api/portfolio/tools/:toolName"');
     expect(dashboardRouteSource).toContain("toolSchemas[name].parse(input)");
     expect(dashboardRouteSource).toContain("managementHandlers[name](parsed, ownerSubject)");

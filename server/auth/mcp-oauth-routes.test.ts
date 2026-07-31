@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import type { Server } from "node:http";
 import express from "express";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { createMcpOAuthRuntime, type McpOAuthRuntime } from "./mcp-oauth-routes.js";
 
 function form(values: Record<string, string>): URLSearchParams {
@@ -22,7 +22,7 @@ function authorizationSession(html: string): string {
 }
 
 describe("MCP OAuth HTTP routes", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
   let runtime: McpOAuthRuntime | undefined;
   let server: Server | undefined;
 
@@ -38,7 +38,7 @@ describe("MCP OAuth HTTP routes", () => {
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
       publicKeyEncoding: { type: "spki", format: "pem" },
     });
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const resource = "http://127.0.0.1/mcp";
     const issuer = "http://127.0.0.1";
     const redirectUri = "https://chatgpt.example/oauth/callback";

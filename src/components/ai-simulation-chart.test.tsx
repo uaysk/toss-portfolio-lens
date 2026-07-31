@@ -43,12 +43,13 @@ const bars: AiSimulationChartBar[] = [
 ];
 
 const modelForecasts: AiSimulationModelForecast[] = [{
-  lane: "kronos_base",
+  lane: "chronos2",
   signalSymbol: "SOXL",
   status: "available",
+  projectionPolicy: "native_input_origin",
   origin: "2026-07-24T09:02:00+09:00",
   generatedAt: "2026-07-24T00:02:00.250Z",
-  modelId: "NeoQuasar/Kronos-base",
+  modelId: "amazon/chronos-2",
   points: [{
     horizonMinutes: 5,
     targetTimestamp: "2026-07-24T09:07:00+09:00",
@@ -57,23 +58,10 @@ const modelForecasts: AiSimulationModelForecast[] = [{
     q90Price: 106,
   }],
 }, {
-  lane: "chronos2",
-  signalSymbol: "SOXL",
-  status: "available",
-  origin: "2026-07-24T09:02:00+09:00",
-  generatedAt: "2026-07-24T00:02:00.275Z",
-  modelId: "amazon/chronos-2",
-  points: [{
-    horizonMinutes: 30,
-    targetTimestamp: "2026-07-24T09:32:00+09:00",
-    q10Price: 97,
-    medianPrice: 105,
-    q90Price: 110,
-  }],
-}, {
   lane: "fincast",
   signalSymbol: "SOXL",
   status: "available",
+  projectionPolicy: "native_input_origin",
   origin: "2026-07-24T09:02:00+09:00",
   generatedAt: "2026-07-24T00:02:00.300Z",
   modelId: "Vincent05R/FinCast",
@@ -187,40 +175,36 @@ describe("AiSimulationChart", () => {
     expect(aiSimulationTradeMarkerColor("sell")).toBe("var(--candle-fall)");
   });
 
-  it("appends independent Chronos-2, Kronos-base, and FinCast targets on the numeric candle timeline", () => {
+  it("appends independent Chronos-2 and FinCast targets on the numeric candle timeline", () => {
     const rows = aiSimulationCombinedChartRows(bars, modelForecasts);
     const originTime = Date.parse("2026-07-24T09:02:00+09:00");
-    const kronosTargetTime = Date.parse("2026-07-24T09:07:00+09:00");
+    const chronos2TargetTime = Date.parse("2026-07-24T09:07:00+09:00");
     const fincastTargetTime = Date.parse("2026-07-24T09:17:00+09:00");
-    const chronos2TargetTime = Date.parse("2026-07-24T09:32:00+09:00");
     const origin = rows.find((row) => row.time === originTime);
-    const kronosTarget = rows.find((row) => row.time === kronosTargetTime);
+    const chronos2Target = rows.find((row) => row.time === chronos2TargetTime);
     const fincastTarget = rows.find((row) => row.time === fincastTargetTime);
 
     expect(rows.map((row) => row.time)).toEqual([
       Date.parse("2026-07-24T09:01:00+09:00"),
       originTime,
       Date.parse("2026-07-24T09:03:00+09:00"),
-      kronosTargetTime,
-      fincastTargetTime,
       chronos2TargetTime,
+      fincastTargetTime,
     ]);
     expect(rows.every((row) => Number.isFinite(row.time))).toBe(true);
     expect(origin).toMatchObject({
       close: 101,
-      "forecast:kronos_base:range": [101, 101],
-      "forecast:kronos_base:median": 101,
       "forecast:chronos2:range": [101, 101],
       "forecast:chronos2:median": 101,
       "forecast:fincast:range": [101, 101],
       "forecast:fincast:median": 101,
     });
-    expect(kronosTarget).toMatchObject({
+    expect(chronos2Target).toMatchObject({
       timestamp: "2026-07-24T00:07:00.000Z",
-      "forecast:kronos_base:range": [99, 106],
-      "forecast:kronos_base:median": 103,
+      "forecast:chronos2:range": [99, 106],
+      "forecast:chronos2:median": 103,
     });
-    expect(kronosTarget).not.toHaveProperty("candleRange");
+    expect(chronos2Target).not.toHaveProperty("candleRange");
     expect(fincastTarget).toMatchObject({
       timestamp: "2026-07-24T00:17:00.000Z",
       "forecast:fincast:range": [98, 108],
@@ -228,7 +212,7 @@ describe("AiSimulationChart", () => {
     });
     expect(rows.some((row) => (
       row.time > originTime
-      && row.time < kronosTargetTime
+      && row.time < chronos2TargetTime
       && row.time !== Date.parse("2026-07-24T09:03:00+09:00")
     ))).toBe(false);
   });
@@ -238,7 +222,9 @@ describe("AiSimulationChart", () => {
       lane: "fincast",
       signalSymbol: "BTCUSDT",
       status: "available",
+      projectionPolicy: "live_price_rebase/v1",
       origin: "2026-07-24T09:02:29.999+09:00",
+      inputOrigin: "2026-07-24T09:02:00+09:00",
       originPrice: 101.5,
       points: [{
         horizonMinutes: 5,
@@ -388,11 +374,11 @@ describe("AiSimulationChart", () => {
       (row) => row.time === Date.parse("2026-07-24T09:08:00+09:00"),
     );
 
-    expect(formingOrigin).not.toHaveProperty("forecast:kronos_base:range");
-    expect(formingOrigin).not.toHaveProperty("forecast:kronos_base:median");
+    expect(formingOrigin).not.toHaveProperty("forecast:chronos2:range");
+    expect(formingOrigin).not.toHaveProperty("forecast:chronos2:median");
     expect(target).toMatchObject({
-      "forecast:kronos_base:range": [100, 109],
-      "forecast:kronos_base:median": 105,
+      "forecast:chronos2:range": [100, 109],
+      "forecast:chronos2:median": 105,
     });
     expect(rows).toHaveLength(bars.length + 1);
   });
@@ -412,8 +398,8 @@ describe("AiSimulationChart", () => {
     );
 
     expect(origin).toMatchObject({
-      "forecast:chronos2:range": [101.75, 101.75],
-      "forecast:chronos2:median": 101.75,
+      "forecast:fincast:range": [101.75, 101.75],
+      "forecast:fincast:median": 101.75,
     });
     expect(aiSimulationCurrentModelForecasts(bars, [liveForecast]))
       .toEqual([liveForecast]);
@@ -511,7 +497,7 @@ describe("AiSimulationChart", () => {
     expect(markup).toContain('data-ai-simulation-price-chart="true"');
     expect(markup).toContain('data-ai-simulation-model-forecast-overlay="true"');
     expect(markup).toContain('data-ai-simulation-model-forecast="chronos2"');
-    expect(markup).toContain('data-ai-simulation-model-forecast="kronos_base"');
+    expect(markup).toContain('data-ai-simulation-model-forecast="chronos2"');
     expect(markup).toContain('data-ai-simulation-model-forecast="fincast"');
     expect(markup).toContain('data-ai-simulation-model-forecast-origin="exact-final"');
     expect(markup).toContain("분봉 뒤에 이어진 모델 예측");

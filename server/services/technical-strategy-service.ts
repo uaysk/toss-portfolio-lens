@@ -469,9 +469,6 @@ export class TechnicalStrategyService {
     mode: "signal_only" | "backtest";
     cacheNonce?: string;
   }): Promise<ReturnType<typeof envelope>> {
-    if (this.runs.executionMode === "inline") {
-      throw new ServiceError({ code: "RUST_COMPUTE_REQUIRED", message: "기술 신호 전략은 Rust compute 실행 모드에서만 사용할 수 있습니다.", retryable: false });
-    }
     if (this.runs.executionMode === "rust_socket" && !this.rustCompute) {
       throw new ServiceError({ code: "RUST_COMPUTE_UNAVAILABLE", message: "기술 신호 전략 Rust compute client가 초기화되지 않았습니다.", retryable: true });
     }

@@ -11,8 +11,8 @@ import {
   AiEvaluateRequestSchema,
   AiForecastRequestSchema,
   AiResponseSchema,
+  CHRONOS_2_MODEL_ID,
   FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
   type AiEvaluateRequest,
   type AiForecastRequest,
   type AiResponse,
@@ -24,7 +24,7 @@ export const SCALPING_AI_SERVICE_VERSION = "scalping-ai-service/v1";
 
 type AiClient = Pick<AiComputeClient, "request">;
 type PredictionStore = Pick<ScalpingRepository, "putPrediction">;
-type RunScheduler = Pick<RunService, "enqueue">;
+type RunScheduler = Pick<RunService, "enqueueOrchestration">;
 
 function dataRevision(request: AiEvaluateRequest, marketCountry: MarketCountry): string {
   const source = request.series.map((series) => ({
@@ -115,7 +115,7 @@ export class ScalpingAiService {
     ownerSubject = "owner",
     marketCountry: MarketCountry = "KR",
   ): Promise<{
-    run: Awaited<ReturnType<RunScheduler["enqueue"]>>["run"];
+    run: Awaited<ReturnType<RunScheduler["enqueueOrchestration"]>>["run"];
     reused: boolean;
   }> {
     const request = AiEvaluateRequestSchema.parse(input);
@@ -131,12 +131,12 @@ export class ScalpingAiService {
     }
     const modelLane = fincastSeriesCount === request.series.length
       ? "fincast"
-      : "kronos_base";
+      : "chronos2";
     const expectedModelId = modelLane === "fincast"
       ? FINCAST_MODEL_ID
-      : KRONOS_BASE_MODEL_ID;
+      : CHRONOS_2_MODEL_ID;
     const revision = dataRevision(request, marketCountry);
-    const queued = await this.runs.enqueue({
+    const queued = await this.runs.enqueueOrchestration({
       ownerSubject,
       kind: "scalping_prediction_evaluation",
       config: {
@@ -160,7 +160,6 @@ export class ScalpingAiService {
       },
       dataRevision: revision,
       totalCandidates: totalOrigins,
-      allowInlineInExternal: true,
       task: async (context) => {
         await context.throwIfCancelled();
         const response = AiResponseSchema.parse(

@@ -121,7 +121,6 @@ pub(super) fn ledger_metrics(
         json!({
             "cagr": cagr,
             "totalReturn": total_return,
-            "return": cagr,
             "sharpe": comparable.sharpe_ratio,
             "sortino": comparable.sortino_ratio,
             "calmar": comparable.calmar_ratio,
@@ -152,7 +151,6 @@ fn metric_delta(screening: &Value, ledger: &Value) -> Value {
     let keys = [
         "cagr",
         "totalReturn",
-        "return",
         "sharpe",
         "sortino",
         "calmar",

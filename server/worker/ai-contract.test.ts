@@ -11,24 +11,31 @@ import {
 } from "./ai-contract.js";
 
 const evaluatedResponse: AiResponse = {
-  schema_version: "scalping-ai/v1",
+  schema_version: "scalping-ai/v2",
   request_id: "evaluation-1",
   mode: "evaluate",
   status: "available",
   model: {
-    model_id: "NeoQuasar/Kronos-base",
-    model_revision: "kronos-base-pinned-revision",
-    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
-    tokenizer_revision: "0e0117387f39004a9016484a186a908917e22426",
-    source_revision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
-    loader_version: "kronos-source-67b630e",
-    license: "MIT",
+    model_id: "amazon/chronos-2",
+    model_revision: "254b5357164a84326913b0695216f690752ac55d",
+    tokenizer_id: null,
+    tokenizer_revision: null,
+    source_revision: "v2.3.1",
+    loader_version: "chronos-forecasting-2.3.1-derivatives_calendar",
+    license: "Apache-2.0",
     device: "cuda",
     device_name: "Tesla P40",
     cuda_capability: "6.1",
     dtype: "float32",
     attention_backend: "math",
     loaded: true,
+    precision_validation: "not_required",
+    memory_status: "ok",
+    quantile_monotonicity_policy: "chronos2_fp32_monotone_rearrangement_v1",
+    fp32_quantile_observations: null,
+    mixed_quantile_observations: null,
+    quantile_tail_policy: "native",
+    precision_failure_reasons: [],
   },
   generated_at: "2026-07-21T01:30:00.000Z",
   series: [{
@@ -102,9 +109,9 @@ const evaluatedResponse: AiResponse = {
   },
 };
 
-function kronosForecastResponse(): unknown {
+function baseChronos2ForecastResponse(): unknown {
   const rawSeries = structuredClone(evaluatedResponse.series);
-  const kronosModel = structuredClone(evaluatedResponse.model);
+  const chronos2Model = structuredClone(evaluatedResponse.model);
   const inputOrigins = [{
     instrument_key: rawSeries[0]!.instrument_key,
     context_start_at: "2026-07-21T00:30:00.000Z",
@@ -113,19 +120,19 @@ function kronosForecastResponse(): unknown {
     input_digest: "a".repeat(64),
   }];
   return {
-    schema_version: "scalping-ai/v1",
-    request_id: "kronos-base-forecast",
+    schema_version: "scalping-ai/v2",
+    request_id: "chronos2-forecast",
     mode: "forecast",
     status: "unavailable",
-    model: kronosModel,
+    model: chronos2Model,
     generated_at: "2026-07-21T01:30:02.000Z",
     series: rawSeries,
     model_runs: [
       {
-        role: "kronos_base",
-        expected_model_id: "NeoQuasar/Kronos-base",
+        role: "chronos_2",
+        expected_model_id: "amazon/chronos-2",
         status: "unavailable",
-        model: kronosModel,
+        model: chronos2Model,
         generated_at: "2026-07-21T01:30:02.000Z",
         latency_ms: 20.25,
         degraded: false,
@@ -155,7 +162,7 @@ function quantileObservations(overrides: Record<string, unknown> = {}) {
 }
 
 function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed_float16"): unknown {
-  const response = structuredClone(kronosForecastResponse()) as {
+  const response = structuredClone(baseChronos2ForecastResponse()) as {
     model: Record<string, unknown>;
     model_runs: Array<{
       role: string;
@@ -197,7 +204,7 @@ function fincastForecastResponse(precision: "mixed_float16" | "float32" = "mixed
 }
 
 function chronos2ForecastResponse(): unknown {
-  const response = structuredClone(kronosForecastResponse()) as {
+  const response = structuredClone(baseChronos2ForecastResponse()) as {
     model: Record<string, unknown>;
     model_runs: Array<{
       role: string;
@@ -570,11 +577,11 @@ describe("AI worker response contract", () => {
     expect(() => AiResponseSchema.parse(input)).toThrow(/without series or evaluation/);
   });
 
-  it("Kronos-base 단일 origin run과 latency provenance를 검증한다", () => {
-    const parsed = AiResponseSchema.parse(kronosForecastResponse());
-    expect(parsed.model_runs?.map((run) => run.role)).toEqual(["kronos_base"]);
+  it("Chronos-2 단일 origin run과 latency provenance를 검증한다", () => {
+    const parsed = AiResponseSchema.parse(baseChronos2ForecastResponse());
+    expect(parsed.model_runs?.map((run) => run.role)).toEqual(["chronos_2"]);
     expect(parsed.model_runs?.map((run) => run.expected_model_id)).toEqual([
-      "NeoQuasar/Kronos-base",
+      "amazon/chronos-2",
     ]);
     expect(parsed.model_runs?.every((run) => run.input_end_aligned && run.latency_ms >= 0)).toBe(true);
     expect(parsed.model_runs?.[0]?.input_origins[0]).toMatchObject({
@@ -588,22 +595,22 @@ describe("AI worker response contract", () => {
     });
   });
 
-  it("Kronos-base origin/result 정렬과 top-level mirror 위변조를 거부한다", () => {
-    const originDrift = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+  it("Chronos-2 origin/result 정렬과 top-level mirror 위변조를 거부한다", () => {
+    const originDrift = structuredClone(AiResponseSchema.parse(baseChronos2ForecastResponse()));
     originDrift.model_runs![0]!.input_origins[0]!.input_end_at = "2026-07-21T01:28:00.000Z";
     expect(() => AiResponseSchema.parse(originDrift)).toThrow(/align exactly/);
 
-    const mirrorDrift = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    const mirrorDrift = structuredClone(AiResponseSchema.parse(baseChronos2ForecastResponse()));
     mirrorDrift.series[0]!.unavailable!.code = "FORGED";
     expect(() => AiResponseSchema.parse(mirrorDrift)).toThrow(/top-level response fields/);
   });
 
-  it("Kronos-base run의 degraded·fallback 및 다른 모델 ID를 거부한다", () => {
-    const response = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+  it("Chronos-2 run의 degraded·fallback 및 다른 모델 ID를 거부한다", () => {
+    const response = structuredClone(AiResponseSchema.parse(baseChronos2ForecastResponse()));
     response.model_runs![0]!.degraded = true;
     expect(() => AiResponseSchema.parse(response)).toThrow(/cannot contain degraded or model fallback/);
 
-    const fallback = structuredClone(AiResponseSchema.parse(kronosForecastResponse()));
+    const fallback = structuredClone(AiResponseSchema.parse(baseChronos2ForecastResponse()));
     fallback.model_runs![0]!.fallback_used = true;
     fallback.model_runs![0]!.fallback_reason = "unexpected fallback";
     expect(() => AiResponseSchema.parse(fallback)).toThrow(/cannot contain degraded or model fallback/);
@@ -663,19 +670,19 @@ describe("AI worker response contract", () => {
     const identityDrift = structuredClone(fincastForecastResponse()) as {
       model_runs: Array<{ expected_model_id: string }>;
     };
-    identityDrift.model_runs[0]!.expected_model_id = "NeoQuasar/Kronos-base";
+    identityDrift.model_runs[0]!.expected_model_id = "amazon/chronos-2";
     expect(() => AiResponseSchema.parse(identityDrift)).toThrow(/role and expected model identity/);
 
     const modelFallback = structuredClone(fincastForecastResponse()) as {
       model: { fallback_from?: string };
       model_runs: Array<{ model: { fallback_from?: string } }>;
     };
-    modelFallback.model.fallback_from = "NeoQuasar/Kronos-base";
-    modelFallback.model_runs[0]!.model.fallback_from = "NeoQuasar/Kronos-base";
+    modelFallback.model.fallback_from = "amazon/chronos-2";
+    modelFallback.model_runs[0]!.model.fallback_from = "amazon/chronos-2";
     expect(() => AiResponseSchema.parse(modelFallback)).toThrow(/cannot contain model fallback provenance/);
   });
 
-  it("mixed FP16 검증 누락과 Kronos precision 위장을 거부한다", () => {
+  it("mixed FP16 검증 누락과 Chronos-2 precision 위장을 거부한다", () => {
     const unvalidated = structuredClone(fincastForecastResponse()) as {
       model: { precision_validation: string };
       model_runs: Array<{ model: { precision_validation: string } }>;
@@ -684,15 +691,15 @@ describe("AI worker response contract", () => {
     unvalidated.model_runs[0]!.model.precision_validation = "fallback_fp32";
     expect(() => AiResponseSchema.parse(unvalidated)).toThrow(/requires passed precision validation/);
 
-    const disguisedKronos = structuredClone(kronosForecastResponse()) as {
+    const disguisedChronos2 = structuredClone(baseChronos2ForecastResponse()) as {
       model: { dtype: string; precision_validation?: string };
       model_runs: Array<{ model: { dtype: string; precision_validation?: string } }>;
     };
-    disguisedKronos.model.dtype = "mixed_float16";
-    disguisedKronos.model.precision_validation = "passed";
-    disguisedKronos.model_runs[0]!.model.dtype = "mixed_float16";
-    disguisedKronos.model_runs[0]!.model.precision_validation = "passed";
-    expect(() => AiResponseSchema.parse(disguisedKronos)).toThrow(/native float32 provenance/);
+    disguisedChronos2.model.dtype = "mixed_float16";
+    disguisedChronos2.model.precision_validation = "passed";
+    disguisedChronos2.model_runs[0]!.model.dtype = "mixed_float16";
+    disguisedChronos2.model_runs[0]!.model.precision_validation = "passed";
+    expect(() => AiResponseSchema.parse(disguisedChronos2)).toThrow(/native float32 provenance/);
   });
 
   it("FinCast quantile monotonicity policy 누락이나 native 위장을 거부한다", () => {

@@ -45,30 +45,6 @@ export class ReportRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
   async initialize(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_report_links (
-          report_id VARCHAR(64) PRIMARY KEY,
-          run_id VARCHAR(64) NOT NULL,
-          owner_subject VARCHAR(128) NOT NULL,
-          request_hash VARCHAR(128) NOT NULL,
-          data_revision VARCHAR(128) NOT NULL,
-          engine_version VARCHAR(64) NOT NULL,
-          report_schema_version VARCHAR(64) NOT NULL,
-          report_config_hash VARCHAR(128) NOT NULL,
-          model_name VARCHAR(255) NULL,
-          created_at VARCHAR(40) NOT NULL,
-          UNIQUE KEY uq_portfolio_report_reuse (
-            owner_subject, request_hash, data_revision, engine_version,
-            report_schema_version, report_config_hash
-          ),
-          KEY idx_portfolio_report_run (run_id),
-          CONSTRAINT fk_portfolio_report_run FOREIGN KEY (run_id)
-            REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      return;
-    }
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_report_links (
         report_id TEXT PRIMARY KEY,
@@ -122,23 +98,13 @@ export class ReportRepository {
       input.model,
       input.createdAt,
     ];
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        INSERT INTO portfolio_report_links (
-          report_id, run_id, owner_subject, request_hash, data_revision, engine_version,
-          report_schema_version, report_config_hash, model_name, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE report_id = report_id
-      `, values);
-    } else {
-      await this.database.run(`
-        INSERT INTO portfolio_report_links (
-          report_id, run_id, owner_subject, request_hash, data_revision, engine_version,
-          report_schema_version, report_config_hash, model_name, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT DO NOTHING
-      `, values);
-    }
+    await this.database.run(`
+      INSERT INTO portfolio_report_links (
+        report_id, run_id, owner_subject, request_hash, data_revision, engine_version,
+        report_schema_version, report_config_hash, model_name, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT DO NOTHING
+    `, values);
     return (await this.findReusable(input)) ?? input;
   }
 

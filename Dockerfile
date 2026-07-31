@@ -7,12 +7,15 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 FROM deps AS source
-COPY tsconfig.json tsconfig.server.json vite.config.ts tailwind.config.ts postcss.config.js index.html ./
+COPY tsconfig.json tsconfig.base.json tsconfig.app.json tsconfig.server.json tsconfig.scripts.json tsconfig.tests.json ./
+COPY vite.config.ts tailwind.config.ts postcss.config.js index.html ./
 COPY src ./src
 COPY server ./server
+COPY test-support ./test-support
 COPY contracts ./contracts
 COPY public ./public
 COPY docs/mcp-chatgpt.md ./docs/mcp-chatgpt.md
+COPY scripts/run-vitest-batches.mjs ./scripts/run-vitest-batches.mjs
 COPY scripts/verify-runtime-modules.mjs ./scripts/verify-runtime-modules.mjs
 
 FROM source AS verify

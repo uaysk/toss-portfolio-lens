@@ -1,5 +1,4 @@
 node_modules
-worker/python/.venv
 worker/ai/.venv
 worker/ai/.ruff_cache
 worker/ai/.mypy_cache

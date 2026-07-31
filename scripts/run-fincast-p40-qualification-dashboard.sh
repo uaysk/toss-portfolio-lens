@@ -51,7 +51,5 @@ exec env \
   VITE_PORT="${DASHBOARD_VITE_PORT}" \
   NODE_ENV=development \
   PUBLIC_APP_URL="${PUBLIC_URL}" \
-  DB_PROVIDER=sqlite \
-  DATABASE_PATH="${RUNTIME_DIRECTORY}/fincast-fp32-3week-dashboard.sqlite" \
   AI_QUALIFICATION_RUN_ROOT="${RUN_ROOT}" \
-  "${NPM_BIN}" run dev:legacy
+  "${NPM_BIN}" run dev

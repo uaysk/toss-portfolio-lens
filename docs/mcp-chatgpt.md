@@ -185,7 +185,7 @@ MCP `tools/call`은 별도 DB 테이블 `mcp_tool_audit_log`에 기록합니다.
 
 ## 검증
 
-OAuth 승인 화면과 합성 보고서 페이지를 데스크톱·모바일 viewport에서 렌더링하고 콘솔 오류, 요청 실패, 전체 페이지 가로 overflow를 확인하려면 production build 후 다음을 실행합니다. 이 검증은 임시 SQLite와 합성 데이터만 사용하고 스크린샷이나 secret을 남기지 않습니다.
+OAuth 승인 화면과 합성 보고서 페이지를 데스크톱·모바일 viewport에서 렌더링하고 콘솔 오류, 요청 실패, 전체 페이지 가로 overflow를 확인하려면 production build 후 다음을 실행합니다. 이 검증은 test-only PGlite와 합성 데이터만 사용하고 스크린샷이나 secret을 남기지 않습니다.
 
 ```bash
 npm run build

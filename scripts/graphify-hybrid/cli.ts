@@ -9,7 +9,7 @@ import {
   loadGraph,
   rerank,
   reciprocalRankFusion,
-  synthesizeWithTerra,
+  synthesizeWithModel,
   type RankedNode,
 } from "./core.js";
 
@@ -39,7 +39,7 @@ async function runIndex(): Promise<void> {
     root: option("root", "."),
     project: option("project", "toss-portfolio-lens"),
     graphSha: option("sha") || await gitSha(),
-    batchSize: Number(option("batch-size", "32")),
+    batchSize: Number(option("batch-size", "64")),
     concurrency: Number(option("concurrency", "4")),
     onProgress(done, total, reused) {
       if (done === total || done % 256 === 0) {
@@ -63,9 +63,9 @@ async function runQuery(): Promise<void> {
     contextFilters: (option("context", "") || "").split(",").filter(Boolean),
     useReranker: !flag("no-reranker"),
   });
-  const result = flag("no-terra")
+  const result = flag("no-synthesis")
     ? retrieval
-    : { ...retrieval, synthesis: await synthesizeWithTerra(retrieval) };
+    : { ...retrieval, synthesis: await synthesizeWithModel(retrieval) };
   console.log(JSON.stringify(result, null, 2));
 }
 
@@ -75,13 +75,13 @@ const BENCHMARK_CASES: BenchmarkCase[] = [
   { question: "RunRepository", expected: ["server_repositories_run_repository_runrepository"], kind: "exact" },
   { question: "TechnicalAnalysisService", expected: ["server_services_technical_analysis_service_technicalanalysisservice"], kind: "exact" },
   { question: "createToolHandlers", expected: ["server_mcp_tools_handlers_createtoolhandlers"], kind: "exact" },
-  { question: "simulateBacktest", expected: ["server_backtest_engine_simulatebacktest"], kind: "exact" },
+  { question: "PortfolioBacktestService.prepare", expected: ["server_backtest_portfoliobacktestservice_prepare"], kind: "exact" },
   { question: "KisWebSocketClient", expected: ["server_scalping_kis_websocket_client_kiswebsocketclient"], kind: "exact" },
   { question: "포트폴리오 실행 기록을 저장하고 조회하는 저장소", expected: ["server_repositories_run_repository_runrepository"], kind: "semantic" },
   { question: "과거 포트폴리오 스냅샷을 관리하는 저장소", expected: ["server_history_portfoliohistorystore"], kind: "semantic" },
   { question: "수익률 시계열을 만드는 서비스", expected: ["server_services_return_series_service_returnseriesservice"], kind: "semantic" },
   { question: "미국 종목 단타 후보 순위를 다시 매기는 함수", expected: ["server_scalping_scalping_service_rerankuskisrankings"], kind: "semantic" },
-  { question: "포트폴리오 가중치를 최적화하는 함수", expected: ["server_services_optimization_service_optimizeportfolio"], kind: "semantic" },
+  { question: "포트폴리오 가중치를 최적화하는 Rust 함수", expected: ["worker_rust_src_optimization_optimize_with_control"], kind: "semantic" },
   { question: "OAuth 데이터를 영구 저장하는 repository", expected: ["server_repositories_oauth_repository_oauthrepository"], kind: "semantic" },
   { question: "실제 주문 없이 암호화폐 모의 실행을 담당하는 클래스", expected: ["server_crypto_execution_paperexecution"], kind: "semantic" },
 ];

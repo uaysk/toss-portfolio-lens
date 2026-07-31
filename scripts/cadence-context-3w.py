@@ -1370,7 +1370,7 @@ def request_payload_batch(
         f"{tasks[0].origin_ms}"
     )
     return {
-        "schema_version": "scalping-ai/v1",
+        "schema_version": "scalping-ai/v2",
         "request_id": request_id,
         "mode": "forecast",
         "forecast_profile": "full",

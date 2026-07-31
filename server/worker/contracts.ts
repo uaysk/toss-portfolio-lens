@@ -11,7 +11,7 @@ import { canonicalJson } from "./canonical-json.js";
 
 export { canonicalJson } from "./canonical-json.js";
 
-export const WORKER_PAYLOAD_SCHEMA_VERSION = "1.0";
+export const WORKER_PAYLOAD_SCHEMA_VERSION = "2.0";
 export const WORKER_ARTIFACT_FORMAT = "application/json";
 export const WORKER_ARTIFACT_ENCODING = "gzip";
 export const WORKER_ARTIFACT_MAX_BYTES = 128 * 1024 * 1024;
@@ -77,9 +77,39 @@ const WorkerOutputBaseSchema = z.object({
   payload_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 
+function deprecatedReturnMetricPath(value: unknown, path: Array<string | number> = []): Array<string | number> | undefined {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const found = deprecatedReturnMetricPath(value[index], [...path, index]);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "return") return [...path, key];
+    const found = deprecatedReturnMetricPath(item, [...path, key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 export const WorkerOutputSchema = WorkerOutputBaseSchema.superRefine((output, context) => {
   if (output.status !== "completed") return;
   if (output.projection === "summary") return;
+  if (["optimization", "walk_forward", "outlook"].includes(output.job_kind)) {
+    const resultPath = deprecatedReturnMetricPath(output.result, ["result"]);
+    const artifactPath = deprecatedReturnMetricPath(output.artifacts, ["artifacts"]);
+    const path = resultPath ?? artifactPath;
+    if (path) {
+      context.addIssue({
+        code: "custom",
+        path,
+        message: "optimization return metric은 지원하지 않습니다. cagr 또는 totalReturn을 사용하세요.",
+      });
+      return;
+    }
+  }
   if (output.job_kind === "technical_analysis") {
     const parsed = TechnicalAnalysisWorkerResultSchema.safeParse(output.result);
     if (!parsed.success) {

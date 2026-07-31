@@ -3,28 +3,18 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
-from zoneinfo import ZoneInfo
-
 from .contracts import (
     CHRONOS_2_MODEL_ID,
     FINCAST_MODEL_ID,
-    KRONOS_BASE_MODEL_ID,
     ModelProvenance,
     PriceBar,
     QuantileRearrangementObservations,
     SeriesCadence,
-)
-from .kronos_kv_cache import (
-    KRONOS_BASE_LOADER_VERSION,
-    KRONOS_KV_CACHE_LOADER_VERSION,
-    KRONOS_SOURCE_REVISION,
-    install_kronos_kv_cache,
 )
 from .settings import AISettings
 
@@ -232,19 +222,16 @@ def _inside(root: Path, path: Path) -> Path:
     return resolved
 
 
-def _snapshot(root: Path, folder: str, revision: str, *, source: bool = False) -> Path:
+def _snapshot(root: Path, folder: str, revision: str) -> Path:
     path = _inside(root, root / folder)
-    revision_file = path / (".source-revision" if source else ".revision")
+    revision_file = path / ".revision"
     try:
         actual_revision = revision_file.read_text(encoding="utf-8").strip()
     except OSError as error:
         raise AdapterLoadError(f"offline snapshot {folder} is missing its revision marker") from error
     if actual_revision != revision:
         raise AdapterLoadError(f"offline snapshot {folder} revision does not match the pinned manifest")
-    if source:
-        required = (path / "model" / "kronos.py", path / "model" / "module.py", path / "LICENSE")
-    else:
-        required = (path / "config.json", path / "model.safetensors")
+    required = (path / "config.json", path / "model.safetensors")
     for item in required:
         _inside(root, item)
         if not item.is_file():
@@ -325,138 +312,6 @@ def _safe_unavailable_manifest_model(candidate: object, fallback_name: str) -> d
     }
 
 
-class KronosAdapter:
-    def __init__(
-        self,
-        settings: AISettings,
-        manifest_model: dict[str, Any],
-        source_revision: str,
-        runtime: RuntimeDevice,
-    ) -> None:
-        root = settings.model_cache_dir
-        source = _snapshot(root, "kronos-source", source_revision, source=True)
-        model_path = _snapshot(root, "kronos-base", str(manifest_model["revision"]))
-        tokenizer_path = _snapshot(root, "kronos-tokenizer-base", str(manifest_model["tokenizer_revision"]))
-        source_text = str(source)
-        if source_text not in sys.path:
-            sys.path.insert(0, source_text)
-        try:
-            module = importlib.import_module("model.kronos")
-            module_path = Path(module.__file__ or "").resolve()
-            if not module_path.is_relative_to(source):
-                raise AdapterLoadError("Kronos source import resolved outside the pinned cache")
-            model = module.Kronos.from_pretrained(str(model_path), local_files_only=True)
-            tokenizer = module.KronosTokenizer.from_pretrained(str(tokenizer_path), local_files_only=True)
-            model.eval()
-            tokenizer.eval()
-            if settings.kronos_kv_cache_enabled:
-                install_kronos_kv_cache(
-                    module,
-                    model,
-                    source_revision=source_revision,
-                )
-            self._predictor = module.KronosPredictor(
-                model=model,
-                tokenizer=tokenizer,
-                device=runtime.name,
-                max_context=settings.max_context_bars,
-            )
-        except AdapterLoadError:
-            raise
-        except Exception as error:
-            raise AdapterLoadError(f"failed to load pinned Kronos snapshots: {type(error).__name__}") from error
-        self._runtime = runtime
-        self._sample_count = settings.sample_count
-        provenance_model = (
-            {**manifest_model, "loader_version": KRONOS_KV_CACHE_LOADER_VERSION}
-            if settings.kronos_kv_cache_enabled
-            else manifest_model
-        )
-        self._provenance = _provenance(
-            provenance_model,
-            source_revision=source_revision,
-            device=runtime.name,
-            device_name=runtime.device_name,
-            cuda_capability=runtime.cuda_capability,
-            loaded=True,
-        )
-
-    @property
-    def provenance(self) -> ModelProvenance:
-        return self._provenance
-
-    def predict_batch(self, series: Sequence[InferenceSeries], *, seed: int) -> list[RawPrediction]:
-        if not series:
-            return []
-        torch = self._runtime.torch
-        numpy = importlib.import_module("numpy")
-        pandas = importlib.import_module("pandas")
-        torch.manual_seed(seed)
-        if self._runtime.name == "cuda":
-            torch.cuda.manual_seed_all(seed)
-        frames: list[Any] = []
-        x_timestamps: list[Any] = []
-        y_timestamps: list[Any] = []
-        owners: list[str] = []
-        for item in series:
-            # Kronos derives calendar covariates from these timestamps. Preserve
-            # each instant while presenting it in the exchange-local timezone
-            # declared by the request (UTC remains unchanged for crypto).
-            local_timezone = ZoneInfo(item.timezone)
-            include_volume = all(bar.volume is not None for bar in item.bars)
-            include_amount = all(bar.amount is not None for bar in item.bars)
-            frame = pandas.DataFrame(
-                [
-                    {
-                        "open": bar.open,
-                        "high": bar.high,
-                        "low": bar.low,
-                        "close": bar.close,
-                        **({"volume": bar.volume} if include_volume else {}),
-                        **({"amount": bar.amount} if include_amount else {}),
-                    }
-                    for bar in item.bars
-                ]
-            )
-            for _ in range(self._sample_count):
-                frames.append(frame)
-                x_timestamps.append(pandas.Series([bar.timestamp.astimezone(local_timezone) for bar in item.bars]))
-                y_timestamps.append(
-                    pandas.Series([timestamp.astimezone(local_timezone) for timestamp in item.future_timestamps])
-                )
-                owners.append(item.instrument_key)
-        with math_sdpa(torch), torch.inference_mode():
-            predicted = self._predictor.predict_batch(
-                df_list=frames,
-                x_timestamp_list=x_timestamps,
-                y_timestamp_list=y_timestamps,
-                pred_len=len(series[0].future_timestamps),
-                sample_count=1,
-                verbose=False,
-            )
-        grouped: dict[str, list[tuple[PredictedBar, ...]]] = {item.instrument_key: [] for item in series}
-        for owner, frame in zip(owners, predicted, strict=True):
-            rows: list[PredictedBar] = []
-            for _, row in frame.iterrows():
-                volume = row.get("volume")
-                amount = row.get("amount")
-                rows.append(
-                    PredictedBar(
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=float(volume) if volume is not None and numpy.isfinite(volume) else None,
-                        amount=float(amount) if amount is not None and numpy.isfinite(amount) else None,
-                    )
-                )
-            grouped[owner].append(tuple(rows))
-        return [
-            RawPrediction(instrument_key=item.instrument_key, paths=tuple(grouped[item.instrument_key]))
-            for item in series
-        ]
-
-
 def _try_load(
     name: str,
     settings: AISettings,
@@ -465,7 +320,6 @@ def _try_load(
 ) -> ModelAdapter:
     models = manifest.get("models")
     source_key = {
-        "kronos-base": "kronos_source",
         "fincast": "fincast_source",
         "chronos-2": "chronos2_source",
     }.get(name)
@@ -475,26 +329,6 @@ def _try_load(
     if not isinstance(models, dict) or not isinstance(source, dict) or name not in models:
         raise AdapterLoadError("model manifest is incomplete")
     model = models[name]
-    if name == "kronos-base":
-        if (
-            not isinstance(model, dict)
-            or model.get("model_id") != KRONOS_BASE_MODEL_ID
-            or model.get("tokenizer_id") != "NeoQuasar/Kronos-Tokenizer-base"
-            or not isinstance(model.get("revision"), str)
-            or not model["revision"]
-            or not isinstance(model.get("tokenizer_revision"), str)
-            or not model["tokenizer_revision"]
-            or model.get("loader_version") != KRONOS_BASE_LOADER_VERSION
-            or not isinstance(source.get("revision"), str)
-            or source.get("revision") != KRONOS_SOURCE_REVISION
-        ):
-            raise AdapterLoadError("Kronos-base manifest identity or revisions are invalid")
-        return KronosAdapter(
-            settings,
-            model,
-            str(source["revision"]),
-            runtime,
-        )
     if name == "fincast":
         if (
             not isinstance(model, dict)
@@ -525,9 +359,7 @@ def _enable_offline_runtime() -> None:
 
 def _expected_model_id(name: str) -> str:
     return (
-        KRONOS_BASE_MODEL_ID
-        if name == "kronos-base"
-        else FINCAST_MODEL_ID
+        FINCAST_MODEL_ID
         if name == "fincast"
         else CHRONOS_2_MODEL_ID
         if name == "chronos-2"
@@ -552,7 +384,6 @@ def _unavailable_adapter(
             # never erase the identity of the model the role expected.
             model_manifest["model_id"] = expected_model_id
         source_key = {
-            "kronos-base": "kronos_source",
             "fincast": "fincast_source",
             "chronos-2": "chronos2_source",
         }.get(name)
@@ -600,11 +431,6 @@ def _load_named_adapter(
     return _unavailable_adapter(name, manifest, primary_error)
 
 
-def load_production_adapter(settings: AISettings) -> ModelAdapter:
-    """Load the legacy pinned Kronos-base adapter for compatibility callers."""
-    return _load_named_adapter(settings, "kronos-base", require_cuda=True)
-
-
 @dataclass(frozen=True, slots=True)
 class ProductionModelBinding:
     role: str
@@ -627,6 +453,5 @@ def load_production_model_suite(settings: AISettings) -> ProductionModelSuite:
         adapter = _load_named_adapter(settings, "chronos-2", require_cuda=True)
         runs = (ProductionModelBinding("chronos_2", CHRONOS_2_MODEL_ID, adapter),)
     else:
-        adapter = _load_named_adapter(settings, "kronos-base", require_cuda=True)
-        runs = (ProductionModelBinding("kronos_base", KRONOS_BASE_MODEL_ID, adapter),)
+        raise AdapterLoadError("unsupported production model lane")
     return ProductionModelSuite(primary=adapter, runs=runs)

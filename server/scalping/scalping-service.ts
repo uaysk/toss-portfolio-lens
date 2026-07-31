@@ -626,7 +626,7 @@ type ScalpingComputationOptions = {
   maximumInputEndAt?: string;
 };
 
-export type ScalpingForecastModelLane = "kronos_base" | "fincast" | "chronos2";
+export type ScalpingForecastModelLane = "chronos2_base" | "fincast" | "chronos2";
 
 type ScalpingForecastOptions = ScalpingComputationOptions & {
   /**
@@ -781,7 +781,7 @@ export class ScalpingService {
     private readonly config: ScalpingServiceConfig,
     candidateUniverse?: CandidateUniverseSelector,
     private readonly fincastAi?: AiService,
-    private readonly defaultModelLane: ScalpingForecastModelLane = "kronos_base",
+    private readonly defaultModelLane: ScalpingForecastModelLane = "chronos2_base",
     private readonly chronos2Ai?: AiService,
   ) {
     if (!Number.isInteger(config.maximumSubscriptions)

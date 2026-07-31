@@ -12,7 +12,8 @@ inclusion: always
 - Tailwind CSS 3 + shadcn/ui/Radix UI 구성 패턴
 - Recharts 기반 Area, Pie, Line, Composed/Candlestick 시각화
 - Vitest 단위·통합 테스트
-- SQLite 기본 저장소와 `mysql2` 기반 MySQL 호환 저장소
+- PostgreSQL 단일 저장소와 migration 기반 schema 관리
+- Rust UDS 또는 PostgreSQL durable queue 기반 전용 계산 worker
 - AWS SDK for JavaScript v3의 S3 client
 - 멀티스테이지 Dockerfile, 비루트 런타임 사용자
 - Docker Compose에서 `0.0.0.0:3200` 노출
@@ -24,7 +25,7 @@ inclusion: always
 - 토스증권 Open API: 서버 간 OAuth 및 GET 조회만 사용
 - OpenAI Responses API 호환 엔드포인트: `OPENAI_API_ENDPOINT`, `OPENAI_API_KEY`, 선택적 `OPENAI_MODEL`
 - S3 또는 S3 호환 저장소: 보고서 JSON 전용
-- MySQL 8 계열: AWS에서는 RDS MySQL을 목표로 한다.
+- PostgreSQL 17: 운영에서는 CloudNativePG primary service를 사용한다.
 
 ## 시간·통화 규칙
 
@@ -41,12 +42,10 @@ inclusion: always
 - UI 데이터 요청은 언마운트·계좌 변경 시 취소하고 오래된 응답이 새 상태를 덮어쓰지 않게 한다.
 - Docker build 단계에서 타입 검사, 테스트, 프로덕션 빌드를 모두 수행한다.
 
-## AWS 배포 기술
+## 운영 배포 기술
 
-- AWS CLI v2, Terraform 1.10 이상, AWS Provider의 구현 시점 안정 메이저
-- 기본 리전 `ap-northeast-2`
-- ECR private repository → ECS Fargate → Application Load Balancer
-- RDS MySQL `db.t4g.small`, Single-AZ
-- 비공개 S3 보고서 버킷, Secrets Manager, CloudWatch Logs
-- S3 remote state + native `.tflock`; DynamoDB state lock은 사용하지 않는다.
-- 로컬 Docker build는 `linux/amd64`로 고정해 ECS 런타임 아키텍처와 일치시킨다.
+- 비공개 Harbor의 digest-pinned 이미지를 Docker Compose pull-only overlay로 배포한다.
+- web과 Rust worker는 동일한 전체 Git SHA를 OCI revision label로 보존한다.
+- 운영 데이터는 CloudNativePG PostgreSQL에 저장하고 migration 실패 시 시작을 중단한다.
+- FinCast와 Chronos-2 worker는 독립 이미지·token·endpoint를 사용한다.
+- 선택적 S3/Bedrock 보고서 기능은 애플리케이션 배포와 분리해 유지한다.

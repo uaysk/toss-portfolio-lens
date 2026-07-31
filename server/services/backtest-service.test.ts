@@ -28,7 +28,7 @@ const calculated = {
   dataQuality: { commonObservations: 1 },
 };
 
-function setup(reportGenerate = vi.fn(), executionMode: "inline" | "external" = "inline") {
+function setup(reportGenerate = vi.fn(), executionMode: "rust_socket" | "external" = "rust_socket") {
   const prepared = {
     simulation: { assets: [], prices: new Map(), requestedStartDate: "2024-01-01", endDate: "2024-01-03" },
     responseContext: { effective_requested_start: "2024-01-01", warnings: [] },
@@ -42,7 +42,10 @@ function setup(reportGenerate = vi.fn(), executionMode: "inline" | "external" = 
     executionMode,
     findReusable: vi.fn().mockResolvedValue(undefined),
     execute: vi.fn().mockImplementation(async ({ task }) => {
-      await task();
+      await task({
+        signal: new AbortController().signal,
+        throwIfCancelled: vi.fn(),
+      });
       return {
         reused: false,
         run: {
@@ -69,14 +72,23 @@ function setup(reportGenerate = vi.fn(), executionMode: "inline" | "external" = 
   };
   const artifacts = { list: vi.fn().mockResolvedValue([]) };
   const reports = { generateBacktest: reportGenerate };
+  const rustCompute = {
+    compute: vi.fn().mockResolvedValue({
+      summary: calculated.metrics,
+      result: calculated,
+      warnings: calculated.warnings,
+      artifacts: [],
+    }),
+  };
   const service = new BacktestService(
     engine as never,
     marketData as never,
     runs as never,
     artifacts as never,
     reports as never,
+    rustCompute as never,
   );
-  return { service, engine, runs, reportGenerate };
+  return { service, engine, runs, reportGenerate, rustCompute };
 }
 
 describe("BacktestService report option", () => {

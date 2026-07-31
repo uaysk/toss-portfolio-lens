@@ -16,4 +16,4 @@ pub mod stats;
 pub mod technical_strategy;
 
 pub const ENGINE_VERSION: &str = "portfolio-lens-rust-2026.07.5";
-pub const WORKER_SCHEMA_VERSION: &str = "1.0";
+pub const WORKER_SCHEMA_VERSION: &str = "2.0";

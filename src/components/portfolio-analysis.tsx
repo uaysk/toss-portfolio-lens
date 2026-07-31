@@ -123,8 +123,8 @@ function CandleShape(input: unknown) {
 
 type TooltipContentProps = {
   active?: boolean;
-  label?: string;
-  payload?: Array<{ payload?: AnalysisChartPoint }>;
+  label?: string | number;
+  payload?: ReadonlyArray<{ payload?: AnalysisChartPoint }>;
   selectedBenchmarks: ReadonlySet<BenchmarkKey>;
 };
 

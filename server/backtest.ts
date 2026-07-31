@@ -1,6 +1,5 @@
 import {
   BacktestValidationError,
-  simulateBacktest,
   type BacktestAssetDefinition,
   type BacktestPricePoint,
   type BacktestRebalanceFrequency,
@@ -10,7 +9,7 @@ import {
   type BacktestSimulationResult,
   type BacktestRealismPolicy,
   type BacktestTargetWeightScheduleEntry,
-} from "./backtest-engine.js";
+} from "./contracts/backtest.js";
 import { isHistoryDate, kstDateString, type PortfolioHistoryStore } from "./history.js";
 import type { InstrumentInfo, TossClient } from "./toss.js";
 import { MarketDataService, type CurrencyMode } from "./services/market-data-service.js";
@@ -655,10 +654,6 @@ export class PortfolioBacktestService {
     };
   }
 
-  simulatePrepared(prepared: PreparedBacktestRun): BacktestSimulationResult {
-    return simulateBacktest(prepared.simulation);
-  }
-
   finalizePrepared(
     prepared: PreparedBacktestRun,
     result: BacktestSimulationResult,
@@ -689,8 +684,6 @@ export class PortfolioBacktestService {
     };
   }
 
-  async run(request: BacktestRunRequest) {
-    const prepared = await this.prepare(request);
-    return this.finalizePrepared(prepared, this.simulatePrepared(prepared));
-  }
 }
+
+export type BacktestRunResult = ReturnType<PortfolioBacktestService["finalizePrepared"]>;

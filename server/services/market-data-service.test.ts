@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PortfolioHistoryStore } from "../history.js";
+import { openTestHistoryStore } from "../../test-support/history-store.js";
 import { TossApiError, type DailyCandle, type TossClient } from "../toss.js";
 import type { KisExchangeRateProvider } from "../kis-exchange-rate.js";
 import { MarketDataService } from "./market-data-service.js";
@@ -47,7 +48,7 @@ describe("MarketDataService", () => {
         })),
       })),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const service = new MarketDataService(toss, store);
 
@@ -126,7 +127,7 @@ describe("MarketDataService", () => {
         ],
       }),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
 
     const service = new MarketDataService(toss, store);
@@ -157,7 +158,7 @@ describe("MarketDataService", () => {
   });
 
   it("기존 OHLC cache에 volume이 없으면 거래량 지표 요청에서 provider 값을 보강한다", async () => {
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     await store.upsertMarketCandles("stock", "005930", "1d", true, [
       candle("2024-01-02", 100, 110, 90, 105),
@@ -225,7 +226,7 @@ describe("MarketDataService", () => {
         ],
       }),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const result = await new MarketDataService(toss, store).getPriceSeries({
       symbol: "PLTR", fromDate: "2021-04-15", toDate: "2021-04-16",
@@ -255,7 +256,7 @@ describe("MarketDataService", () => {
         new TossApiError("환율정보가 존재하지 않아요", 404, "exchange-rate-not-found", "fx-request-id"),
       ),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const service = new MarketDataService(toss, store);
 
@@ -305,7 +306,7 @@ describe("MarketDataService", () => {
         { date: "2022-08-04", rate: 1_315, timestamp: "2022-08-04T15:30:00+09:00" },
       ]),
     } satisfies KisExchangeRateProvider;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
 
     const result = await new MarketDataService(toss, store, fallback).getPriceSeries({
@@ -344,7 +345,7 @@ describe("MarketDataService", () => {
         throw new TossApiError("환율정보가 존재하지 않아요", 404, "exchange-rate-not-found");
       }),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
     const result = await new MarketDataService(toss, store).getPriceSeries({
       symbol: "NVDA", fromDate: "2024-01-02", toDate: lastDate,
@@ -377,7 +378,7 @@ describe("MarketDataService", () => {
         throw new TossApiError("환율정보가 존재하지 않아요", 404, "exchange-rate-not-found");
       }),
     } as unknown as TossClient;
-    const store = await PortfolioHistoryStore.openSqlite(":memory:");
+    const store = await openTestHistoryStore();
     stores.push(store);
 
     await expect(new MarketDataService(toss, store).getPriceSeries({

@@ -1,181 +1,61 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "./env.js";
-import type { PortfolioHistoryStore } from "./history.js";
+
+const mocks = vi.hoisted(() => ({
+  openPostgresDatabase: vi.fn(),
+  openHistoryStore: vi.fn(),
+}));
+
+vi.mock("./database.js", () => ({
+  openPostgresDatabase: mocks.openPostgresDatabase,
+}));
+
+vi.mock("./history.js", () => ({
+  PortfolioHistoryStore: {
+    open: mocks.openHistoryStore,
+  },
+}));
+
 import { openConfiguredHistoryStore } from "./storage.js";
 
-type StorageConfigOverrides = Pick<Partial<AppConfig>, "dbProvider" | "mysql" | "postgres">;
+const postgres = {
+  host: "postgres",
+  port: 5432,
+  user: "portfolio",
+  password: "password",
+  database: "portfolio",
+  connectTimeoutMs: 3_000,
+};
 
-function config(overrides: StorageConfigOverrides = {}): AppConfig {
-  return {
-    tossApiAuthMode: "oauth_client_credentials",
-    clientId: "client-id",
-    clientSecret: "client-secret",
-    dashboardPassword: "dashboard-password-long",
-    readOnlyApiToken: "read-only-api-token",
-    readOnlyApiTokenSource: "READ_ONLY_API_TOKEN",
-    sessionSecret: "session-secret-with-at-least-32-characters",
-    host: "127.0.0.1",
-    port: 3200,
-    trustProxy: [],
-    gracefulShutdownTimeoutMs: 30_000,
-    tossApiBaseUrl: "https://example.invalid",
-    dbProvider: "sqlite",
-    databasePath: ":memory:",
-    candleCacheLatestTtlMs: 300_000,
-    snapshotRefreshHours: 6,
-    nodeEnv: "test",
-    publicAppUrl: "http://localhost:3200",
-    reportStorage: { kind: "local", directory: "/tmp/reports" },
-    compute: {
-      executionMode: "inline",
-      resultPollMs: 250,
-      resultDeadlineMs: 300_000,
-      rustSocketPath: "/tmp/toss-portfolio-lens-compute.sock",
-      rustSocketPoolSize: 2,
-      rustSocketTimeoutMs: 300_000,
-      rustComputeMaxQueued: 32,
-      rustComputeQueueTimeoutMs: 30_000,
-    },
-    mcp: {
-      enabled: false,
-      authMode: "oauth",
-      allowedOrigins: [],
-      maxRequestsPerMinute: 60,
-      maxConcurrentRuns: 1,
-      maxRunsPerSubject: 2,
-      maxQueuedRuns: 4,
-      runDeadlineMs: 120_000,
-      maxAssets: 20,
-      maxCandidateBudget: 2_000,
-      maxDateRangeYears: 20,
-      inlineResultMaxRows: 1_000,
-      inlineResultMaxBytes: 204_800,
-      auditRetentionDays: 90,
-    },
-    scalping: {
-      enabled: false,
-      minimumTopCount: 5,
-      maximumTopCount: 50,
-      ai: {
-        url: "ws://127.0.0.1:8765/ws/scalping-ai/v1",
-        authTokenFile: "/tmp/toss-portfolio-lens-ai-token",
-        timeoutMs: 120_000,
-        connectTimeoutMs: 10_000,
-        reconnectBaseMs: 250,
-        reconnectMaxMs: 10_000,
-        maximumInFlight: 4,
-        maximumBatchSize: 50,
-        maximumRequestBytes: 64 * 1024 * 1024,
-        maximumResponseBytes: 128 * 1024 * 1024,
-      },
-      simulation: {
-        maximumDurationMinutes: 390,
-        maximumActiveSessions: 2,
-        selectionMaximumAttempts: 3,
-        selectionRetryDelayMs: 15_000,
-      },
-      recorder: { enabled: false },
-    },
-    cryptoAi: {
-      fincast: {
-        url: "ws://127.0.0.1:18766/ws/scalping-ai/v1",
-        authTokenFile: "/tmp/toss-portfolio-lens-fincast-token",
-        timeoutMs: 120_000,
-        connectTimeoutMs: 10_000,
-        reconnectBaseMs: 250,
-        reconnectMaxMs: 10_000,
-        maximumInFlight: 1,
-        maximumRequestBytes: 64 * 1024 * 1024,
-        maximumResponseBytes: 128 * 1024 * 1024,
-      },
-      kronos: {
-        url: "ws://127.0.0.1:18765/ws/scalping-ai/v1",
-        authTokenFile: "/tmp/toss-portfolio-lens-kronos-token",
-        timeoutMs: 120_000,
-        connectTimeoutMs: 10_000,
-        reconnectBaseMs: 250,
-        reconnectMaxMs: 10_000,
-        maximumInFlight: 1,
-        maximumRequestBytes: 64 * 1024 * 1024,
-        maximumResponseBytes: 128 * 1024 * 1024,
-      },
-      sequentialDeadlineMs: 240_000,
-      circuitBreaker: {
-        failureThreshold: 3,
-        cooldownMs: 60_000,
-      },
-    },
-    cryptoSimulation: {
-      maximumActiveSessions: 1,
-    },
-    ...overrides,
-  };
-}
-
-describe("configured history storage", () => {
-  const stores: PortfolioHistoryStore[] = [];
-
-  afterEach(async () => {
-    await Promise.all(stores.splice(0).map((store) => store.close()));
-    vi.restoreAllMocks();
+describe("configured PostgreSQL history storage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it("DB_PROVIDER=sqlite이면 SQLite를 연다", async () => {
-    vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const store = await openConfiguredHistoryStore(config());
-    stores.push(store);
-    expect(store.backend).toBe("sqlite");
+  it("opens exactly the required PostgreSQL adapter and runs store migrations", async () => {
+    const database = { kind: "postgres-database" };
+    const store = { kind: "history-store" };
+    mocks.openPostgresDatabase.mockResolvedValue(database);
+    mocks.openHistoryStore.mockResolvedValue(store);
+
+    await expect(openConfiguredHistoryStore({ postgres } as AppConfig)).resolves.toBe(store);
+    expect(mocks.openPostgresDatabase).toHaveBeenCalledOnce();
+    expect(mocks.openPostgresDatabase).toHaveBeenCalledWith(postgres);
+    expect(mocks.openHistoryStore).toHaveBeenCalledWith(database);
   });
 
-  it("DB_PROVIDER=mysql이면 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(openConfiguredHistoryStore(config({
-      dbProvider: "mysql",
-      mysql: {
-        host: "127.0.0.1",
-        port: 1,
-        user: "unavailable",
-        password: "unavailable",
-        database: "portfolio_lens",
-        connectTimeoutMs: 500,
-      },
-    }))).rejects.toThrow();
-  });
+  it("propagates connection and migration failures without fallback", async () => {
+    const connectionFailure = new Error("postgres unavailable");
+    mocks.openPostgresDatabase.mockRejectedValue(connectionFailure);
+    await expect(openConfiguredHistoryStore({ postgres } as AppConfig))
+      .rejects.toBe(connectionFailure);
+    expect(mocks.openHistoryStore).not.toHaveBeenCalled();
 
-  it("DB_PROVIDER=postgresql이면 연결 실패 시 SQLite로 fallback하지 않는다", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(openConfiguredHistoryStore(config({
-      dbProvider: "postgresql",
-      postgres: {
-        host: "127.0.0.1",
-        port: 1,
-        user: "unavailable",
-        password: "unavailable",
-        database: "portfolio_lens",
-        connectTimeoutMs: 500,
-      },
-    }))).rejects.toThrow();
-  });
-
-  it("선택한 외부 DB 설정이 없으면 시작하지 않는다", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(openConfiguredHistoryStore(config({ dbProvider: "postgresql" })))
-      .rejects.toThrow("DB_PROVIDER=postgresql 연결 설정이 없습니다");
-  });
-
-  it("DB_PROVIDER=sqlite이면 외부 DB 설정이 있어도 SQLite만 사용한다", async () => {
-    vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const store = await openConfiguredHistoryStore(config({
-      mysql: {
-        host: "127.0.0.1",
-        port: 1,
-        user: "unavailable",
-        password: "unavailable",
-        database: "portfolio_lens",
-        connectTimeoutMs: 500,
-      },
-    }));
-    stores.push(store);
-    expect(store.backend).toBe("sqlite");
+    const database = { kind: "postgres-database" };
+    const migrationFailure = new Error("migration checksum mismatch");
+    mocks.openPostgresDatabase.mockResolvedValue(database);
+    mocks.openHistoryStore.mockRejectedValue(migrationFailure);
+    await expect(openConfiguredHistoryStore({ postgres } as AppConfig))
+      .rejects.toBe(migrationFailure);
   });
 });

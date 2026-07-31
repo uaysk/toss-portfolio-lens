@@ -36,7 +36,7 @@ def valid_series(key: str = "KRX:005930") -> ForecastSeries:
 
 def test_versioned_request_round_trips_through_strict_json_contract() -> None:
     request = ForecastRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id="contract-1",
         mode="forecast",
         series=(valid_series(),),
@@ -53,7 +53,7 @@ def test_realtime_forecast_profile_is_explicit_and_bounded_to_fifteen_minutes() 
         update={"future_timestamps": future(full.input_end_at, 15)}
     )
     request = ForecastRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id="contract-realtime",
         mode="forecast",
         forecast_profile="realtime_5_15",
@@ -69,7 +69,7 @@ def test_realtime_forecast_profile_is_explicit_and_bounded_to_fifteen_minutes() 
 
     with pytest.raises(ValidationError, match="requires exactly 15"):
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="contract-realtime-full-data",
             mode="forecast",
             forecast_profile="realtime_5_15",
@@ -78,7 +78,7 @@ def test_realtime_forecast_profile_is_explicit_and_bounded_to_fifteen_minutes() 
         )
     with pytest.raises(ValidationError, match="requires horizons_minutes"):
         ForecastRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="contract-realtime-full-horizons",
             mode="forecast",
             forecast_profile="realtime_5_15",
@@ -96,7 +96,7 @@ def test_stock_fincast_cadence_round_trips_as_explicit_prevalidated_policy() -> 
         }
     )
     request = ForecastRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id="stock-fincast-cadence",
         mode="forecast",
         series=(series,),
@@ -125,12 +125,12 @@ def test_five_second_continuous_cadence_is_supported() -> None:
     [
         ("horizons_minutes", (1, 5, 15, 30)),
         ("quantiles", (0.1, 0.5, 0.9)),
-        ("schema_version", "scalping-ai/v2"),
+        ("schema_version", "scalping-ai/v1"),
     ],
 )
 def test_fixed_contract_fields_reject_drift(field: str, value: object) -> None:
     values = {
-        "schema_version": "scalping-ai/v1",
+        "schema_version": "scalping-ai/v2",
         "request_id": "contract-invalid",
         "mode": "forecast",
         "series": (valid_series(),),
@@ -165,7 +165,7 @@ def test_bars_must_be_aware_sorted_complete_and_end_at_input_boundary() -> None:
 
 def test_unknown_wire_fields_are_rejected() -> None:
     request = ForecastRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id="contract-extra",
         mode="forecast",
         series=(valid_series(),),
@@ -175,17 +175,21 @@ def test_unknown_wire_fields_are_rejected() -> None:
         AI_REQUEST_ADAPTER.validate_json(payload)
 
 
-def test_cuda_device_provenance_is_optional_for_legacy_but_atomic_when_present() -> None:
+def test_cuda_device_provenance_is_atomic_for_chronos2() -> None:
     common = {
-        "model_id": "NeoQuasar/Kronos-base",
+        "model_id": "amazon/chronos-2",
         "model_revision": "pinned",
         "source_revision": "pinned-loader",
-        "loader_version": "kronos-source-test",
-        "license": "MIT",
+        "loader_version": "chronos2-source-test",
+        "license": "Apache-2.0",
         "device": "cuda",
         "dtype": "float32",
         "attention_backend": "math",
         "loaded": True,
+        "precision_validation": "not_required",
+        "memory_status": "ok",
+        "quantile_tail_policy": "native",
+        "quantile_monotonicity_policy": "chronos2_fp32_monotone_rearrangement_v1",
     }
     assert ModelProvenance(**common).device_name is None
     observed = ModelProvenance(
@@ -272,15 +276,17 @@ def test_fincast_provenance_carries_strict_bounded_rearrangement_observations() 
     with pytest.raises(ValidationError, match="mixed quantile observations"):
         ModelProvenance(**mixed_without_observations)
 
-    kronos_with_observations = {
+    chronos2_with_observations = {
         **common,
-        "model_id": "NeoQuasar/Kronos-base",
+        "model_id": "amazon/chronos-2",
+        "precision_validation": "not_required",
+        "memory_status": "ok",
         "quantile_tail_policy": "native",
-        "quantile_monotonicity_policy": "native",
+        "quantile_monotonicity_policy": "chronos2_fp32_monotone_rearrangement_v1",
         "fp32_quantile_observations": observations,
     }
     with pytest.raises(ValidationError, match="only for loaded FinCast"):
-        ModelProvenance(**kronos_with_observations)
+        ModelProvenance(**chronos2_with_observations)
 
 
 def test_naive_input_end_is_rejected() -> None:
@@ -414,7 +420,7 @@ def test_evaluation_target_stop_is_anchored_to_origin_close() -> None:
     future_timestamps = tuple(bar.timestamp for bar in history[80:140])
     with pytest.raises(ValidationError, match="origin close"):
         EvaluateRequest(
-            schema_version="scalping-ai/v1",
+            schema_version="scalping-ai/v2",
             request_id="tampered-target-stop",
             mode="evaluate",
             series=(

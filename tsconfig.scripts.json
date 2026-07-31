@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".cache/types/scripts",
+    "rootDir": ".",
+    "tsBuildInfoFile": ".cache/tsbuildinfo/scripts.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts", "test-support/**/*.ts", "vite.config.ts"],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "./tsconfig.server.json"
+    }
+  ]
+}

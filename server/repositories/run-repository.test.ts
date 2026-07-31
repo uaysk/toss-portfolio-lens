@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { RunRepository } from "./run-repository.js";
 
 describe("RunRepository management", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -11,7 +11,7 @@ describe("RunRepository management", () => {
   });
 
   async function setup() {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const repository = new RunRepository(database);
     await repository.initialize();
     return repository;
@@ -191,5 +191,50 @@ describe("RunRepository management", () => {
     expect(await repository.get(target.id, "owner-a")).toMatchObject({ replayOf: source.id });
     expect((await repository.getEvents(target.id, "owner-a"))
       .filter((event) => event.type === "replayed_from")).toHaveLength(1);
+  });
+
+  it("soft archive된 역사 run은 terminal retry와 replay 양쪽에서 제외한다", async () => {
+    const repository = await setup();
+    const create = (hash: string, now: number) => repository.create({
+      kind: "backtest" as const,
+      ownerSubject: "owner-a",
+      requestHash: hash.repeat(64),
+      dataRevision: "revision-a",
+      engineVersion: "engine-a",
+      config: { hash },
+      now,
+    });
+    const archivedRetry = await create("4", 100);
+    await repository.fail(archivedRetry.id, { code: "FAILED" }, [], 110);
+    await repository.archive(archivedRetry.id, "owner-a", 120);
+
+    expect(await repository.retryTerminal({
+      runId: archivedRetry.id,
+      ownerSubject: "owner-a",
+      expectedStatus: "failed",
+      now: 130,
+    })).toBe(false);
+    expect(await repository.get(archivedRetry.id, "owner-a")).toMatchObject({
+      status: "failed",
+      archivedAt: 120,
+    });
+    expect((await repository.getEvents(archivedRetry.id, "owner-a"))
+      .filter((event) => event.type === "retry_requested")).toEqual([]);
+
+    const source = await create("5", 200);
+    const archivedSource = await create("6", 201);
+    const activeTarget = await create("7", 202);
+    const archivedTarget = await create("8", 203);
+    await repository.complete(archivedSource.id, {}, {}, [], 210);
+    await repository.archive(archivedSource.id, "owner-a", 211);
+    await repository.complete(archivedTarget.id, {}, {}, [], 212);
+    await repository.archive(archivedTarget.id, "owner-a", 213);
+
+    expect(await repository.linkReplay(activeTarget.id, "owner-a", archivedSource.id, 220)).toBe(false);
+    expect(await repository.linkReplay(archivedTarget.id, "owner-a", source.id, 221)).toBe(false);
+    expect((await repository.getEvents(activeTarget.id, "owner-a"))
+      .filter((event) => event.type === "replayed_from")).toEqual([]);
+    expect((await repository.getEvents(archivedTarget.id, "owner-a"))
+      .filter((event) => event.type === "replayed_from")).toEqual([]);
   });
 });

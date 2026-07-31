@@ -115,6 +115,8 @@ const twoSymbolScannerSnapshot: BinanceScannerSnapshot = {
 
 function request(): SimulationStartRequest {
   return createSimulationStartRequestSchema({ maxDurationMinutes: 390 }).parse({
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase: "high_vol_crypto",
     market: {
       kind: "crypto_futures",
       venue: "BINANCE_USDM",
@@ -124,13 +126,20 @@ function request(): SimulationStartRequest {
     initialCash: 10_000,
     durationMinutes: 120,
     selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
-    modelLanes: ["kronos_base", "fincast"],
+    strategy: { mode: "single" },
     execution: { mode: "paper" },
   });
 }
 
 function requestForSelection(selection: unknown): SimulationStartRequest {
+  const simulationCase = (
+    typeof selection === "object"
+    && selection !== null
+    && (selection as { mode?: unknown }).mode === "manual"
+  ) ? "btc_eth" : "high_vol_crypto";
   return createSimulationStartRequestSchema({ maxDurationMinutes: 390 }).parse({
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase,
     market: {
       kind: "crypto_futures",
       venue: "BINANCE_USDM",
@@ -140,7 +149,7 @@ function requestForSelection(selection: unknown): SimulationStartRequest {
     initialCash: 10_000,
     durationMinutes: 120,
     selection,
-    modelLanes: ["kronos_base", "fincast"],
+    strategy: { mode: "single" },
     execution: { mode: "paper" },
   });
 }
@@ -369,7 +378,7 @@ function harness(input: {
   runtime: CryptoSimulationRuntime;
   maximumActiveSessions?: number;
   scannerSelection?: Promise<{ snapshot: BinanceScannerSnapshot; selected: BinanceScannerCandidate }>;
-  workers?: () => Partial<Record<"kronos_base" | "fincast", CryptoWorkerPublicState>>;
+  workers?: () => Partial<Record<"chronos2_base" | "fincast", CryptoWorkerPublicState>>;
   maintenanceMarginState?: () => {
     configured: boolean;
     ready: boolean;
@@ -383,6 +392,29 @@ function harness(input: {
     ?? Promise.resolve({ snapshot: scannerSnapshot, selected });
   const scanner = {
     selectionSnapshot: vi.fn(() => scannerSelection),
+    highVolatilitySelectionSnapshot: vi.fn(async (settings: {
+      symbolCount: number;
+    }) => {
+      const { snapshot } = await scannerSelection;
+      const selectedCandidates = snapshot.candidates
+        .filter((candidate) => candidate.dataQuality.status === "available")
+        .slice(0, settings.symbolCount);
+      return {
+        snapshot,
+        selected: selectedCandidates,
+        highVolatility: {
+          schemaVersion: "high-vol-scanner/v1",
+          scannedAt: snapshot.generatedAt,
+          originAt: snapshot.generatedAt,
+          settings,
+          totalCandidateCount: snapshot.candidates.length,
+          eligibleCandidateCount: selectedCandidates.length,
+          selectedSymbols: selectedCandidates.map((candidate) => candidate.symbol),
+          candidates: [],
+          dataFreshnessMs: 0,
+        },
+      };
+    }),
     candidates: vi.fn().mockResolvedValue(scannerSnapshot),
   };
   const runService = {
@@ -481,7 +513,7 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
     await expect(test.coordinator.start(request(), "owner-a")).rejects.toThrow(
       "signed bracket refresh unavailable",
     );
-    expect(test.scanner.selectionSnapshot).toHaveBeenCalledTimes(1);
+    expect(test.scanner.highVolatilitySelectionSnapshot).toHaveBeenCalledTimes(1);
     expect(test.repository.runs.size).toBe(0);
     expect(test.runService.create).not.toHaveBeenCalled();
   });
@@ -551,8 +583,14 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       };
       const expectedSymbols = expectedSelected.map((candidate) => candidate.symbol);
 
-      expect(test.scanner.selectionSnapshot).toHaveBeenCalledTimes(1);
-      expect(test.scanner.selectionSnapshot).toHaveBeenCalledWith("volatility");
+      if (selection.mode === "auto") {
+        expect(test.scanner.highVolatilitySelectionSnapshot).toHaveBeenCalledTimes(1);
+        expect(test.scanner.selectionSnapshot).not.toHaveBeenCalled();
+      } else {
+        expect(test.scanner.selectionSnapshot).toHaveBeenCalledTimes(1);
+        expect(test.scanner.selectionSnapshot).toHaveBeenCalledWith("volatility");
+        expect(test.scanner.highVolatilitySelectionSnapshot).not.toHaveBeenCalled();
+      }
       expect(prepareRiskData.mock.calls).toEqual(
         expectedSymbols.map((symbol) => [symbol, 15_000]),
       );
@@ -588,8 +626,8 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
 
   it("persists create → running → complete, artifacts/report, ownership, progress, and status gates", async () => {
     const completion = deferred<Awaited<ReturnType<CryptoSimulationRuntime["run"]>>>();
-    let workerState: Partial<Record<"kronos_base" | "fincast", CryptoWorkerPublicState>> = {
-      kronos_base: { status: "healthy", precision: "fp32" },
+    let workerState: Partial<Record<"chronos2_base" | "fincast", CryptoWorkerPublicState>> = {
+      chronos2_base: { status: "healthy", precision: "fp32" },
       fincast: { status: "memory_pressure", precision: "fp16" },
     };
     const runtime: CryptoSimulationRuntime = {
@@ -608,7 +646,7 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       credentials: { configured: true, signedReadSucceeded: true },
       executionGates: { paper: true, testnet: false, live: false, realOrder: false },
       workers: {
-        kronos_base: { status: "healthy", precision: "fp32" },
+        chronos2_base: { status: "healthy", precision: "fp32" },
         fincast: { status: "memory_pressure", precision: "fp16" },
       },
       capabilities: { paper: true, realOrder: false },
@@ -673,10 +711,10 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
     ]);
 
     workerState = {
-      kronos_base: { status: "degraded", precision: "fp32" },
+      chronos2_base: { status: "degraded", precision: "fp32" },
     };
     expect(test.coordinator.status().workers).toMatchObject({
-      kronos_base: { status: "degraded" },
+      chronos2_base: { status: "degraded" },
       fincast: { status: "unavailable", precision: "unknown" },
     });
   });
@@ -721,7 +759,7 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       settlementComplete: false,
       terminalSettlement: {
         status: "unsettled_fail_closed",
-        lanes: [{ lane: "kronos_base", status: "unsettled_fail_closed" }],
+        lanes: [{ lane: "chronos2_base", status: "unsettled_fail_closed" }],
       },
     };
     const runtime: CryptoSimulationRuntime = {
@@ -849,7 +887,9 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       scannerSelection: scan.promise,
     });
     const start = closing.coordinator.start(request(), "owner-a");
-    await eventually(() => closing.scanner.selectionSnapshot.mock.calls.length === 1);
+    await eventually(
+      () => closing.scanner.highVolatilitySelectionSnapshot.mock.calls.length === 1,
+    );
     await closing.coordinator.close();
     scan.resolve({ snapshot: scannerSnapshot, selected });
     await expect(start).rejects.toThrow("coordinator is closed");
@@ -911,7 +951,7 @@ describe("SimulationServiceMultiplexer crypto/stock routing", () => {
     expect(await multiplexer.current("owner-a")).toEqual(stockCurrent);
   });
 
-  it("replaces stock-shaped crypto duplicates with normalized v7 history and preserves stock rows", async () => {
+  it("replaces stock-shaped crypto duplicates with normalized v9 history and preserves stock rows", async () => {
     const test = harness({ runtime: abortingRuntime() });
     const cryptoRun = test.repository.admit("owner-a", {
       market: {
@@ -926,7 +966,7 @@ describe("SimulationServiceMultiplexer crypto/stock routing", () => {
       riskTolerance: 25,
       selection: { mode: "auto", criterion: "volatility", symbolCount: 1 },
       strategy: { mode: "single" },
-      modelLanes: ["kronos_base", "fincast"],
+      modelLanes: ["chronos2_base", "fincast"],
       execution: { mode: "paper" },
       selectedSymbol: "BTCUSDT",
     }, "binance-usdm:test");
@@ -991,7 +1031,7 @@ describe("SimulationServiceMultiplexer crypto/stock routing", () => {
       page: { limit: number; returned: number };
     };
     expect(listed).toMatchObject({
-      schemaVersion: "ai-paper-simulation/v8",
+      schemaVersion: "ai-paper-simulation/v9",
       nextCursor: "stock-cursor",
       page: { limit: 20, returned: 2 },
     });
@@ -1010,7 +1050,7 @@ describe("SimulationServiceMultiplexer crypto/stock routing", () => {
       returnRatio: 0.025,
       configuration: {
         market: { kind: "crypto_futures" },
-        modelLanes: ["kronos_base", "fincast"],
+        modelLanes: ["chronos2_base", "fincast"],
         execution: { mode: "paper" },
       },
       performance: {

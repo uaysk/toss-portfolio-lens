@@ -106,7 +106,7 @@ export type BacktestAdvancedAnalytics = {
     netEstimatedReturnPercent: number;
     netReturnPercent: number;
     costsDeductedFromPath: boolean;
-    method: "actual_path_deduction" | "legacy_estimate_only";
+    method: "actual_path_deduction";
     averageTradeAmount: number | null;
     buySellAmountRatio: number | null;
     tradeCount: number;
@@ -522,10 +522,11 @@ function costAnalytics({
   const totalSellAmount = trades.filter((trade) => trade.side === "SELL").reduce((sum, trade) => sum + trade.amount, 0);
   const averageValue = average(balances.map((point) => point.value));
   const estimatedTotalCost = totalTradedAmount * transactionCostBps / 10_000;
+  if (trades.some((trade) => trade.transactionCost === undefined)) {
+    throw new Error("Backtest trades must include path-deducted transactionCost values.");
+  }
   const actualTotalCost = trades.reduce((sum, trade) => sum + (trade.transactionCost ?? 0), 0);
-  const costsDeductedFromPath = trades.some((trade) => trade.transactionCost !== undefined);
-  const appliedCost = costsDeductedFromPath ? actualTotalCost : estimatedTotalCost;
-  const costDragPercent = averageValue > 0 ? (appliedCost / averageValue) * 100 : null;
+  const costDragPercent = averageValue > 0 ? (actualTotalCost / averageValue) * 100 : null;
   const valuesByMonth = new Map<string, number[]>();
   for (const point of balances) {
     const month = point.date.slice(0, 7);
@@ -562,13 +563,11 @@ function costAnalytics({
     costDragPercent: costDragPercent === null ? null : round(costDragPercent),
     grossReturnPercent: costDragPercent === null
       ? null
-      : round(costsDeductedFromPath ? grossReturnPercent + costDragPercent : grossReturnPercent),
-    netEstimatedReturnPercent: round(
-      costsDeductedFromPath || costDragPercent === null ? grossReturnPercent : grossReturnPercent - costDragPercent,
-    ),
+      : round(grossReturnPercent + costDragPercent),
+    netEstimatedReturnPercent: round(grossReturnPercent),
     netReturnPercent: round(grossReturnPercent),
-    costsDeductedFromPath,
-    method: costsDeductedFromPath ? "actual_path_deduction" : "legacy_estimate_only",
+    costsDeductedFromPath: true,
+    method: "actual_path_deduction",
     averageTradeAmount: trades.length ? round(totalTradedAmount / trades.length, 2) : null,
     buySellAmountRatio: totalSellAmount > 0 ? round(totalBuyAmount / totalSellAmount) : null,
     tradeCount: trades.length,

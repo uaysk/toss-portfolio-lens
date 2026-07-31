@@ -31,7 +31,7 @@ def _request(
     origin_bar = history[79]
     future_timestamps = tuple(bar.timestamp for bar in history[80:140])
     return EvaluateRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id=request_id,
         mode="evaluate",
         series=(
@@ -72,7 +72,7 @@ def _native_request(
     origin_index = 511
     origin = history[origin_index]
     return EvaluateRequest(
-        schema_version="scalping-ai/v1",
+        schema_version="scalping-ai/v2",
         request_id=request_id,
         mode="evaluate",
         series=(

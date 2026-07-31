@@ -351,9 +351,7 @@ function deterministicEvidence(
         const center = primaryLike ? 0.006 : 0.003;
         const laneIdentity = plan.modelLane === "chronos2"
           ? { modelId: CHRONOS2_ID, modelRevision: CHRONOS2_REVISION }
-          : plan.modelLane === "fincast"
-            ? { modelId: FINCAST_ID, modelRevision: FINCAST_REVISION }
-            : { modelId: "NeoQuasar/Kronos-base", modelRevision: "legacy" };
+          : { modelId: FINCAST_ID, modelRevision: FINCAST_REVISION };
         return normalizeModelEvidence({
           modelLane: plan.modelLane,
           ...laneIdentity,
@@ -1434,10 +1432,10 @@ async function main(): Promise<void> {
       latestWorkingTreeDigest: currentWorkingTreeDigest,
     },
     contracts: {
-      request: "ai-paper-simulation/v8",
+      request: "ai-paper-simulation/v9",
       historicalBacktest: "historical-simulation-backtest/v1",
       modelEvidence: "simulation-model-evidence/v1",
-      pairCatalog: "scalping-pair-catalog/v3",
+      pairCatalog: "scalping-pair-catalog/v4",
       rustMarketEvidence: "rust-market-evidence/v2",
       strategyPolicy: "simulation-strategy-policy/v2",
       scanner: "high-vol-scanner/v1",
@@ -1452,7 +1450,6 @@ async function main(): Promise<void> {
         runtimeDownloadAllowed: false,
       },
       fincast: { modelId: FINCAST_ID, revision: FINCAST_REVISION },
-      kronosBase: { role: "legacy_comparison_only" },
     },
     predictionCache: {
       directory: cache.directory,

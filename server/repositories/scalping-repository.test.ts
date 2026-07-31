@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type RelationalDatabase, SqliteDatabase } from "../database.js";
+import type { RelationalDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import {
   ScalpingRepository,
   type ScalpingOrderbookRecord,
@@ -8,7 +9,7 @@ import {
 } from "./scalping-repository.js";
 
 describe("ScalpingRepository", () => {
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await database?.close();
@@ -16,7 +17,7 @@ describe("ScalpingRepository", () => {
   });
 
   async function setup(): Promise<ScalpingRepository> {
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const repository = new ScalpingRepository(database);
     await repository.initialize();
     return repository;
@@ -202,7 +203,6 @@ describe("ScalpingRepository", () => {
   it("NXT RVOL 이력에 필요한 4,200개 분봉 조회를 저장소에서 자르지 않는다", async () => {
     const query = vi.fn().mockResolvedValue([]);
     const relational = {
-      dialect: "sqlite" as const,
       run: vi.fn(),
       query,
       transaction: vi.fn(),
@@ -220,9 +220,8 @@ describe("ScalpingRepository", () => {
   });
 
   it("4,200개 NXT RVOL 분봉을 행별 쿼리 대신 제한된 batch upsert로 저장한다", async () => {
-    const run = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
+    const run = vi.fn().mockResolvedValue({ affectedRows: 1_000 });
     const transactionDatabase = {
-      dialect: "sqlite" as const,
       run,
       query: vi.fn(),
       transaction: vi.fn(),
@@ -232,7 +231,6 @@ describe("ScalpingRepository", () => {
       work(transactionDatabase)
     ));
     const relational = {
-      dialect: "sqlite" as const,
       run: vi.fn(),
       query: vi.fn(),
       transaction,
@@ -261,10 +259,16 @@ describe("ScalpingRepository", () => {
 
     expect(transaction).toHaveBeenCalledOnce();
     expect(relational.run).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledTimes(9);
-    expect(run.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 9_000)).toBe(true);
-    expect(run.mock.calls.reduce((total, [, parameters]) => total + (parameters as unknown[]).length, 0))
-      .toBe(4_200 * 18);
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(run.mock.calls.every(([, parameters]) => (parameters as unknown[]).length === 18)).toBe(true);
+    expect(run.mock.calls.every(([, parameters]) => (
+      (parameters as unknown[][]).every((column) => column.length <= 1_000)
+    ))).toBe(true);
+    expect(run.mock.calls.reduce(
+      (total, [, parameters]) => total + (parameters as unknown[][])[0]!.length,
+      0,
+    )).toBe(4_200);
+    expect(String(run.mock.calls[0]?.[0])).toContain("SELECT * FROM UNNEST");
   });
 
   it("한 batch의 같은 분봉 revision도 입력 순서와 확정 우선순위를 유지한다", async () => {
@@ -284,16 +288,15 @@ describe("ScalpingRepository", () => {
       .toMatchObject([{ state: "final", close: 102, updatedAt: 300 }]);
   });
 
-  it("MySQL upsert는 우선순위 predicate 의존 필드를 안전한 순서로 마지막에 갱신한다", async () => {
-    const run = vi.fn().mockResolvedValue({ affectedRows: 1, insertId: 0 });
-    const mysql = {
-      dialect: "mysql" as const,
+  it("PostgreSQL upsert는 제한된 UNNEST와 명시적 revision 우선순위를 사용한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 1 });
+    const postgres = {
       run,
       query: vi.fn(),
       transaction: vi.fn(),
       close: vi.fn(),
     } as unknown as RelationalDatabase;
-    await new ScalpingRepository(mysql).putBars([{
+    await new ScalpingRepository(postgres).putBars([{
       marketCountry: "US",
       symbol: "AAPL",
       intervalMinutes: 1,
@@ -311,14 +314,10 @@ describe("ScalpingRepository", () => {
       updatedAt: 1,
     }]);
     const sql = String(run.mock.calls[0]?.[0]);
-    const updateAt = sql.lastIndexOf("updated_at = IF");
-    const sourceKind = sql.lastIndexOf("source_kind = IF");
-    const qualityStatus = sql.lastIndexOf("quality_status = IF");
-    const barState = sql.lastIndexOf("bar_state = IF");
-    expect(updateAt).toBeGreaterThan(0);
-    expect(updateAt).toBeLessThan(sourceKind);
-    expect(sourceKind).toBeLessThan(qualityStatus);
-    expect(qualityStatus).toBeLessThan(barState);
+    expect(sql).toContain("SELECT * FROM UNNEST");
+    expect(sql).toContain("ON CONFLICT(market_country, symbol, interval_minutes, open_time) DO UPDATE");
+    expect(sql).toContain("CASE EXCLUDED.bar_state");
+    expect(run.mock.calls[0]?.[1]).toHaveLength(18);
   });
 
   it("잘못된 OHLC와 지원하지 않는 분봉은 저장하지 않는다", async () => {
@@ -602,10 +601,9 @@ describe("ScalpingRepository", () => {
       .rejects.toThrow("64KiB");
   });
 
-  it("원본 체결을 500행 단위로 제한하고 MySQL/PostgreSQL 중복 무시 구문을 사용한다", async () => {
-    const postgresRun = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
+  it("원본 체결을 1,000행 이하 UNNEST로 제한하고 PostgreSQL 중복을 무시한다", async () => {
+    const postgresRun = vi.fn().mockResolvedValue({ affectedRows: 1_000 });
     const postgresTransactionDatabase = {
-      dialect: "postgres" as const,
       run: postgresRun,
       query: vi.fn(),
       transaction: vi.fn(),
@@ -615,7 +613,6 @@ describe("ScalpingRepository", () => {
       async (work: (target: RelationalDatabase) => Promise<unknown>) => work(postgresTransactionDatabase),
     );
     const postgres = {
-      dialect: "postgres" as const,
       run: vi.fn(),
       query: vi.fn(),
       transaction: postgresTransaction,
@@ -627,42 +624,23 @@ describe("ScalpingRepository", () => {
     })));
 
     expect(postgresTransaction).toHaveBeenCalledOnce();
-    expect(postgresRun).toHaveBeenCalledTimes(3);
-    expect(postgresRun.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 10_500))
-      .toBe(true);
+    expect(postgresRun).toHaveBeenCalledTimes(2);
+    expect(postgresRun.mock.calls.every(([, parameters]) => (parameters as unknown[]).length === 21)).toBe(true);
+    expect(postgresRun.mock.calls.every(([, parameters]) => (
+      (parameters as unknown[][]).every((column) => column.length <= 1_000)
+    ))).toBe(true);
+    expect(String(postgresRun.mock.calls[0]?.[0])).toContain("SELECT * FROM UNNEST");
     expect(String(postgresRun.mock.calls[0]?.[0])).toContain(
       "ON CONFLICT(market_country, symbol, event_id) DO NOTHING",
     );
-
-    const mysqlRun = vi.fn().mockResolvedValue({ affectedRows: 1, insertId: 0 });
-    const mysql = {
-      dialect: "mysql" as const,
-      run: mysqlRun,
-      query: vi.fn(),
-      transaction: vi.fn(),
-      close: vi.fn(),
-    } as unknown as RelationalDatabase;
-    await new ScalpingRepository(mysql).putTrades([trade()]);
-    expect(String(mysqlRun.mock.calls[0]?.[0])).toContain("INSERT IGNORE INTO portfolio_scalping_trades");
   });
 
-  it("운영 이벤트도 500행 단위 batch와 PostgreSQL 중복 무시를 사용한다", async () => {
-    const run = vi.fn().mockResolvedValue({ affectedRows: 500, insertId: 0 });
-    const transactionDatabase = {
-      dialect: "postgres" as const,
+  it("운영 이벤트도 1,000행 이하 UNNEST와 PostgreSQL 중복 무시를 사용한다", async () => {
+    const run = vi.fn().mockResolvedValue({ affectedRows: 501 });
+    const postgres = {
       run,
       query: vi.fn(),
       transaction: vi.fn(),
-      close: vi.fn(),
-    } as unknown as RelationalDatabase;
-    const transaction = vi.fn(
-      async (work: (target: RelationalDatabase) => Promise<unknown>) => work(transactionDatabase),
-    );
-    const postgres = {
-      dialect: "postgres" as const,
-      run: vi.fn(),
-      query: vi.fn(),
-      transaction,
       close: vi.fn(),
     } as unknown as RelationalDatabase;
     await new ScalpingRepository(postgres).putRecordingEvents(
@@ -672,9 +650,11 @@ describe("ScalpingRepository", () => {
       })),
     );
 
-    expect(transaction).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledTimes(2);
-    expect(run.mock.calls.every(([, parameters]) => (parameters as unknown[]).length <= 4_000)).toBe(true);
+    expect(postgres.transaction).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledOnce();
+    expect(run.mock.calls[0]?.[1]).toHaveLength(8);
+    expect((run.mock.calls[0]?.[1] as unknown[][]).every((column) => column.length === 501)).toBe(true);
+    expect(String(run.mock.calls[0]?.[0])).toContain("SELECT * FROM UNNEST");
     expect(String(run.mock.calls[0]?.[0])).toContain("INTO portfolio_scalping_recording_events");
     expect(String(run.mock.calls[0]?.[0])).toContain("ON CONFLICT(event_id) DO NOTHING");
   });
@@ -683,7 +663,7 @@ describe("ScalpingRepository", () => {
     const repository = await setup();
     const input = {
       symbol: "005930",
-      modelName: "NeoQuasar/Kronos-base",
+      modelName: "amazon/chronos-2",
       modelVersion: "revision-a",
       inputEndedAt: "2026-07-21T09:30:00+09:00",
       generatedAt: "2026-07-21T09:30:01+09:00",
@@ -701,7 +681,7 @@ describe("ScalpingRepository", () => {
 
     expect(await repository.latestPredictions(["005930"])).toMatchObject([{
       retrospective: false,
-      modelName: "NeoQuasar/Kronos-base",
+      modelName: "amazon/chronos-2",
       modelVersion: "revision-a",
       status: "available",
     }]);

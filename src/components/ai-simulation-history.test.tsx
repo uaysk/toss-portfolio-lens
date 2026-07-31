@@ -20,7 +20,7 @@ const strategyComparison: AiSimulationStrategyComparison = {
   incompleteCount: 1,
   lanes: [
     {
-      id: "kronos",
+      id: "chronos2",
       status: "unavailable",
       analyticalOnly: true,
       unavailableReason: "model unavailable",
@@ -86,7 +86,7 @@ describe("AI simulation history", () => {
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain("변동성 자동 선정 · 2종목");
     expect(markup).toContain("동일 조건 3전략 비교");
-    expect(markup).toContain("Kronos-base");
+    expect(markup).toContain("Chronos-2");
     expect(markup).toContain("Rust 기술 지표");
     expect(markup).toContain("최종 전략");
     expect(markup).toContain("forward 실행 정책");
@@ -114,7 +114,7 @@ describe("AI simulation history", () => {
         name: "NVIDIA",
         upProbability: 0.67,
         predictedMedianReturn: 0.005,
-        model: "NeoQuasar/Kronos-base · pinned · CUDA",
+        model: "amazon/chronos-2 · pinned · CUDA",
       }],
       performance: {
         currency: "USD",
@@ -157,8 +157,8 @@ describe("AI simulation history", () => {
         cash: 10_100,
       }],
       charts: [],
-      modelProvenance: ["NeoQuasar/Kronos-base · pinned · CUDA"],
-      kronosForecasts: [],
+      modelProvenance: ["amazon/chronos-2 · pinned · CUDA"],
+      modelForecasts: [],
       decisionProvenance: [{
         decisionId: "pair-decision-1",
         pairId: "tsla-tsll-tslq",
@@ -170,10 +170,10 @@ describe("AI simulation history", () => {
         degraded: true,
         models: [
           {
-            component: "kronos",
+            component: "chronos2",
             status: "degraded",
-            modelId: "NeoQuasar/Kronos-base",
-            modelRevision: "kronos-revision",
+            modelId: "amazon/chronos-2",
+            modelRevision: "chronos2-revision",
             origin: "2026-07-24T01:01:00.000Z",
             generatedAt: "2026-07-24T01:01:00.400Z",
             device: "cuda:0",
@@ -195,12 +195,12 @@ describe("AI simulation history", () => {
     expect(markup).toContain("돌파 가속");
     expect(markup).toContain("변동성 자동 선정 · 2종목");
     expect(markup).toContain("NVIDIA");
-    expect(markup).toContain("NeoQuasar/Kronos-base · pinned · CUDA");
+    expect(markup).toContain("amazon/chronos-2 · pinned · CUDA");
     expect(markup).toContain('data-simulation-report-decision-provenance="true"');
-    expect(markup).toContain('data-simulation-model-provenance="kronos"');
+    expect(markup).toContain('data-simulation-model-provenance="chronos2"');
     expect(markup).toContain("판단 provenance 1건");
-    expect(markup).toContain("NeoQuasar/Kronos-base");
-    expect(markup).toContain("kronos-revision");
+    expect(markup).toContain("amazon/chronos-2");
+    expect(markup).toContain("chronos2-revision");
     expect(markup).toContain("Tesla P40");
     expect(markup).toContain("456ms");
     expect(markup).toContain("최대 공격 · 100");
@@ -213,8 +213,8 @@ describe("AI simulation history", () => {
     expect(markup).toContain("동일 원천");
     expect(markup).toContain("model unavailable");
     expect(markup).toContain("costs_passed");
-    expect(markup).not.toContain("Chronos");
-    expect(markup).not.toContain("Kronos-small");
+    expect(markup).not.toContain("Kronos-base");
+    expect(markup).not.toContain("NeoQuasar");
 
     const cryptoMarkup = renderToStaticMarkup(
       <SimulationRunReportView
@@ -271,7 +271,7 @@ describe("AI simulation history", () => {
     expect(fincastOnlyMarkup).toContain("FinCast · Main lane·판단 주기");
     expect(fincastOnlyMarkup).toContain("판단 provenance 1건 · FinCast · Main");
     expect(fincastOnlyMarkup).toContain('data-simulation-model-provenance="fincast"');
-    expect(fincastOnlyMarkup).not.toContain("Kronos-base · FinCast lane");
+    expect(fincastOnlyMarkup).not.toContain("Chronos2-base · FinCast lane");
 
     const chronos2Markup = renderToStaticMarkup(
       <SimulationRunReportView

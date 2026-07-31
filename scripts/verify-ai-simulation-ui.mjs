@@ -40,7 +40,7 @@ function portfolio() {
   };
 }
 
-function kronosBaseForecastOutput(symbol, origin, basePrice) {
+function chronos2ForecastOutput(symbol, origin, basePrice) {
   const quantiles = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95];
   const offsets = [-0.012, -0.008, -0.003, 0.004, 0.009, 0.015, 0.02];
   return {
@@ -49,17 +49,17 @@ function kronosBaseForecastOutput(symbol, origin, basePrice) {
     inputEndAt: origin,
     generatedAt: new Date(Date.parse(origin) + 320).toISOString(),
     provenance: {
-      modelId: "NeoQuasar/Kronos-base",
+      modelId: "amazon/chronos-2",
       modelRevision: "ui-fixture",
       device: "cuda:0",
       deviceName: "Tesla P40",
     },
     rawOutput: {
-      role: "kronos_base",
-      expected_model_id: "NeoQuasar/Kronos-base",
+      role: "chronos2",
+      expected_model_id: "amazon/chronos-2",
       status: "available",
       model: {
-        model_id: "NeoQuasar/Kronos-base",
+        model_id: "amazon/chronos-2",
         model_revision: "ui-fixture",
         device: "cuda:0",
         device_name: "Tesla P40",
@@ -98,15 +98,6 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
       latencyMs: 138,
       peakVramMb: 5_120,
     },
-    kronos_base: {
-      modelId: "NeoQuasar/Kronos-base",
-      modelRevision: "kronos-ui-revision",
-      sourceRevision: "kronos-source-revision",
-      loaderVersion: "kronos-loader-v1",
-      precision: "fp32",
-      latencyMs: 86,
-      peakVramMb: 3_860,
-    },
     fincast: {
       modelId: "Vincent05R/FinCast",
       modelRevision: "fincast-ui-revision",
@@ -117,6 +108,48 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
       peakVramMb: 4_920,
     },
   };
+  const resolvedModelPlan = request.simulationCase === "btc_eth"
+    ? symbols.flatMap((symbol) => symbol === "ETHUSDT"
+      ? [{
+          symbol,
+          modelLane: "fincast",
+          role: "primary",
+          required: true,
+          preferredHorizonsMinutes: [15, 30, 60],
+        }, {
+          symbol,
+          modelLane: "chronos2",
+          role: "shadow",
+          required: false,
+          preferredHorizonsMinutes: [15, 30, 60],
+        }]
+      : [{
+          symbol,
+          modelLane: "chronos2",
+          role: "primary",
+          required: true,
+          preferredHorizonsMinutes: [30, 60, 15],
+        }, {
+          symbol,
+          modelLane: "fincast",
+          role: "veto",
+          required: true,
+          preferredHorizonsMinutes: [30, 60, 15],
+        }])
+    : [{
+        symbol: "*",
+        modelLane: "chronos2",
+        role: "primary",
+        required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }, {
+        symbol: "*",
+        modelLane: "fincast",
+        role: "veto",
+        required: true,
+        preferredHorizonsMinutes: [15, 30, 60],
+      }];
+  const modelLanes = [...new Set(resolvedModelPlan.map(({ modelLane }) => modelLane))];
   const barsBySymbol = new Map(symbols.map((symbol, symbolIndex) => {
     const basePrice = symbol === "ETHUSDT" ? 3_470 : 67_000;
     const priceStep = symbol === "ETHUSDT" ? 1.8 : 18;
@@ -142,7 +175,9 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     return [symbol, bars];
   }));
   const selected = symbols.map((symbol, index) => {
-    const lane = request.modelLanes[index % request.modelLanes.length];
+    const lane = resolvedModelPlan.find((entry) => (
+      entry.symbol === symbol && entry.role === "primary"
+    ))?.modelLane ?? "chronos2";
     const model = modelIdentity[lane];
     const bars = barsBySymbol.get(symbol);
     return {
@@ -253,7 +288,9 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
   });
   const decisions = symbols.map((symbol, index) => ({
     id: `crypto-decision-${index + 1}`,
-    lane: request.modelLanes[index % request.modelLanes.length],
+    lane: resolvedModelPlan.find((entry) => (
+      entry.symbol === symbol && entry.role === "primary"
+    ))?.modelLane ?? "chronos2",
     symbol,
     originAt: "2026-07-24T00:10:00.000Z",
     decisionAt: "2026-07-24T00:10:00.250Z",
@@ -275,7 +312,7 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     const bars = barsBySymbol.get(symbol);
     const origin = bars.at(-1).timestamp;
     const originPrice = bars.at(-1).close;
-    return request.modelLanes.map((lane, laneIndex) => {
+    return modelLanes.map((lane, laneIndex) => {
       const model = modelIdentity[lane];
       const direction = symbolIndex === 0 ? 1 : -1;
       return {
@@ -283,6 +320,10 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
         signalSymbol: symbol,
         status: "available",
         origin,
+        inputOrigin: origin,
+        originPrice,
+        priceObservedAt: origin,
+        projectionPolicy: "native_input_origin",
         generatedAt: new Date(Date.parse(origin) + model.latencyMs).toISOString(),
         modelId: model.modelId,
         modelRevision: model.modelRevision,
@@ -301,9 +342,9 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     });
   });
   return {
-    schemaVersion: "ai-paper-simulation/v8",
+    schemaVersion: "ai-paper-simulation/v9",
     simulationCase: request.simulationCase,
-    modelPlan: request.modelPlan,
+    resolvedModelPlan,
     phase,
     startedAt: "2026-07-24T00:20:00.000Z",
     expiresAt: "2026-07-24T02:20:00.000Z",
@@ -348,7 +389,7 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
     modelForecasts: hasResults ? modelForecasts : [],
     warnings: ["UI fixture · realOrder false"],
     capabilities: { realOrder: false, nextValidFillOnly: true },
-    modelLanes: request.modelLanes,
+    modelLanes,
     executionMode: "paper",
     modelComparison: {
       comparisonId: "ui-crypto-comparison",
@@ -358,7 +399,7 @@ function cryptoSnapshot({ phase, request, cancelled = false }) {
       sameCosts: true,
       sameFillBarrier: true,
       symbol: symbols.join(","),
-      lanes: request.modelLanes.map((id) => ({
+      lanes: modelLanes.map((id) => ({
         id,
         status: "completed",
         precision: modelIdentity[id].precision,
@@ -422,6 +463,19 @@ function snapshot({
           { length: request.selection.symbolCount },
           (_, index) => index === 0 ? "SIM1" : "SIM2",
         );
+  const resolvedModelPlan = [{
+    symbol: "*",
+    modelLane: "chronos2",
+    role: "primary",
+    required: true,
+    preferredHorizonsMinutes: [15, 30, 60],
+  }, {
+    symbol: "*",
+    modelLane: "fincast",
+    role: "shadow",
+    required: false,
+    preferredHorizonsMinutes: [15, 30, 60],
+  }];
   const selected = symbols.map((symbol, index) => ({
     symbol,
     name: index === 0 ? "가상 성장주" : "가상 모멘텀주",
@@ -431,7 +485,7 @@ function snapshot({
     currentPrice: 50_600 + index * 100,
     priceObservedAt: "2026-07-24T00:23:12.345Z",
     model: {
-      modelId: "NeoQuasar/Kronos-base",
+      modelId: "amazon/chronos-2",
       modelRevision: "ui-fixture",
       device: "cuda",
     },
@@ -472,11 +526,11 @@ function snapshot({
       upProbability: 0.64,
       chartPatternBias: index % 3 === 0 ? "bullish" : "neutral",
       chartPatterns: index % 3 === 0 ? ["bullish_engulfing"] : ["inside_bar"],
-      model: "NeoQuasar/Kronos-base · ui-fixture",
+      model: "amazon/chronos-2 · ui-fixture",
       ...(index === 0 ? {
         signalSymbol: decisionSymbol,
         modelOutputs: {
-          kronos: kronosBaseForecastOutput(
+          chronos2: chronos2ForecastOutput(
             decisionSymbol,
             "2026-07-24T00:22:00.000Z",
             50_220,
@@ -566,15 +620,47 @@ function snapshot({
     }],
     updatedAt: "2026-07-24T00:23:00.000Z",
   }));
+  const modelForecasts = phase === "selecting" ? [] : charts.map((chart, index) => {
+    const originBar = chart.bars.findLast((bar) => bar.status === "final");
+    const origin = originBar.timestamp;
+    const originPrice = originBar.close;
+    return {
+      lane: "chronos2",
+      signalSymbol: chart.symbol,
+      status: "available",
+      origin,
+      inputOrigin: origin,
+      originPrice,
+      priceObservedAt: origin,
+      projectionPolicy: "native_input_origin",
+      generatedAt: new Date(Date.parse(origin) + 320 + index).toISOString(),
+      modelId: "amazon/chronos-2",
+      modelRevision: "ui-fixture",
+      points: [5, 15, 30, 60].map((horizonMinutes, horizonIndex) => ({
+        horizonMinutes,
+        targetTimestamp: new Date(
+          Date.parse(origin) + horizonMinutes * 60_000,
+        ).toISOString(),
+        q10Price: originPrice * (1 - 0.006 + horizonIndex * 0.001),
+        medianPrice: originPrice * (1 + 0.002 + horizonIndex * 0.001),
+        q90Price: originPrice * (1 + 0.008 + horizonIndex * 0.001),
+        upProbability: 0.61 + horizonIndex * 0.02,
+      })),
+    };
+  });
   return {
+    schemaVersion: "ai-paper-simulation/v9",
+    simulationCase: request.simulationCase,
+    market: request.market,
+    modelLanes: ["chronos2", "fincast"],
+    resolvedModelPlan,
     phase,
     startedAt: "2026-07-24T00:20:00.000Z",
     expiresAt: "2026-07-24T01:05:00.000Z",
-    marketCountry: "KR",
-    currency: "KRW",
-    initialCash: 2_500_000,
-    cash: 1_482_000,
-    equity: cancelled ? 2_525_000 : 2_536_000,
+    currency: "USD",
+    initialCash: request.initialCash,
+    cash: request.initialCash - 1_018_000,
+    equity: cancelled ? request.initialCash + 25_000 : request.initialCash + 36_000,
     progress: cancelled ? 1 : phase === "selecting" ? 0.05 : 0.42,
     selection: request.selection,
     strategy: request.strategy,
@@ -608,6 +694,7 @@ function snapshot({
     charts: phase === "selecting" ? [] : charts,
     trades,
     decisions,
+    modelForecasts,
     warnings: ["UI fixture는 실제 주문을 생성하지 않습니다."],
     capabilities: {
       realOrder: false,
@@ -620,9 +707,12 @@ function snapshot({
 
 export async function routeSimulationUiApi(page) {
   const archivedRequest = {
-    marketCountry: "KR",
+    contractVersion: "ai-paper-simulation/v9",
+    simulationCase: "us_etf_pair",
+    market: { kind: "stock", country: "US" },
     initialCash: 2_500_000,
     durationMinutes: 45,
+    strategy: { mode: "pair", pairId: "qqq-tqqq-sqqq", allowDegradedMode: false },
     preset: "breakout",
     riskTolerance: 91,
     selection: {
@@ -636,6 +726,8 @@ export async function routeSimulationUiApi(page) {
       spreadBpsRoundTrip: 5,
       slippageBpsPerSide: 2,
     },
+    fincastCandleSeconds: 60,
+    execution: { mode: "paper" },
   };
   const archivedRuns = Array.from({ length: 22 }, (_, index) => ({
     runId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
@@ -695,50 +787,35 @@ export async function routeSimulationUiApi(page) {
             deterministicChartPatterns: true,
             eventDrivenDecisions: true,
             pairStrategy: true,
-            kronosRustEnsemble: true,
+            chronos2RustEnsemble: true,
             cryptoFutures: true,
           },
           cryptoFutures: {
-            credentialsConfigured: true,
-            signedReadSucceeded: true,
+            schemaVersion: "ai-paper-simulation/v9",
+            credentials: {
+              configured: true,
+              signedReadSucceeded: true,
+            },
             executionGates: { paper: true, testnet: false, live: false },
             workers: {
               chronos2: {
-                lane: "chronos2",
-                status: "ready",
-                available: true,
-                modelId: "amazon/chronos-2",
-                modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+                status: "healthy",
                 precision: "fp32",
-                latencyMs: 138,
-              },
-              kronos_base: {
-                lane: "kronos_base",
-                status: "ready",
-                available: true,
-                modelId: "NeoQuasar/Kronos-base",
-                precision: "fp32",
-                latencyMs: 86,
               },
               fincast: {
-                lane: "fincast",
-                status: "ready",
-                available: true,
-                modelId: "Vincent05R/FinCast",
+                status: "healthy",
                 precision: "fp16",
-                latencyMs: 112,
               },
             },
           },
           pairStrategy: {
             enabled: true,
-            catalogVersion: "scalping-pair-catalog/v3",
+            catalogVersion: "scalping-pair-catalog/v4",
             pairs: [{
               pairId: "qqq-tqqq-sqqq",
               displaySignalSymbol: "QQQ",
               modelTargetSymbol: "QQQ",
               auxiliarySymbols: [],
-              signalSymbol: "QQQ",
               bull: { executionSymbol: "TQQQ", leverageMultiplier: 3 },
               bear: { executionSymbol: "SQQQ", leverageMultiplier: -3 },
             }, {
@@ -746,7 +823,6 @@ export async function routeSimulationUiApi(page) {
               displaySignalSymbol: "SMH",
               modelTargetSymbol: "SOXX",
               auxiliarySymbols: ["SMH", "QQQ"],
-              signalSymbol: "SOXX",
               bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
               bear: { executionSymbol: "SOXS", leverageMultiplier: -3 },
             }, {
@@ -754,7 +830,6 @@ export async function routeSimulationUiApi(page) {
               displaySignalSymbol: "SPY",
               modelTargetSymbol: "SPY",
               auxiliarySymbols: [],
-              signalSymbol: "SPY",
               bull: { executionSymbol: "SPXL", leverageMultiplier: 3 },
               bear: { executionSymbol: "SPXS", leverageMultiplier: -3 },
             }],
@@ -822,7 +897,7 @@ export async function routeSimulationUiApi(page) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          schemaVersion: "ai-paper-simulation/v7",
+          schemaVersion: "ai-paper-simulation/v9",
           snapshotId: "crypto-ui-snapshot-001",
           scannerSnapshotId: "crypto-ui-snapshot-001",
           generatedAt: "2026-07-24T00:24:00.000Z",
@@ -1312,7 +1387,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     await historyPanel.getByText("캔들·지표·패턴 근거", { exact: true }).waitFor();
     await historyPanel.locator("[data-ai-simulation-model-forecast-overlay]").first().waitFor();
     await historyPanel.locator(
-      '[data-ai-simulation-model-forecast="kronos_base"][data-ai-simulation-model-forecast-origin="exact-final"]',
+      '[data-ai-simulation-model-forecast="chronos2"][data-ai-simulation-model-forecast-origin="exact-final"]',
     ).first().waitFor();
     const historyScroll = historyPanel.locator("[data-simulation-history-scroll]");
     const historyScrollMetrics = await historyScroll.evaluate((element) => ({
@@ -1351,10 +1426,7 @@ async function verify(browser, baseUrl, viewport, theme) {
     await page.getByRole("radiogroup", { name: "BTC ETH 실행 종목" }).waitFor();
     await page.getByRole("combobox", { name: "암호화폐 판단 프리셋" }).waitFor();
     await page.getByRole("slider", { name: "암호화폐 공격 방어 성향" }).waitFor();
-    await page.locator('[data-model-role="primary"][data-model-lane="chronos2"]').waitFor();
-    await page.locator('[data-model-role="veto"][data-model-lane="fincast"]').waitFor();
-    await page.locator('[data-model-role="primary"][data-model-lane="fincast"]').waitFor();
-    await page.locator('[data-model-role="shadow"][data-model-lane="chronos2"]').waitFor();
+    await page.getByText("서버가 v9 canonical plan을 확정합니다", { exact: true }).waitFor();
     const cryptoRiskLabels = [
       "암호화폐 거래당 위험",
       "암호화폐 UTC 일손실 중단선",
@@ -1426,7 +1498,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       }),
       "암호화폐 v8 market union이 요청 body에 보존되지 않았습니다.",
     );
-    check(cryptoRequest?.contractVersion === "ai-paper-simulation/v8", "암호화폐 요청이 v8이 아닙니다.");
+    check(cryptoRequest?.contractVersion === "ai-paper-simulation/v9", "암호화폐 요청이 v9이 아닙니다.");
     check(cryptoRequest?.simulationCase === "btc_eth", "BTC·ETH simulationCase가 누락됐습니다.");
     check(!("marketCountry" in cryptoRequest), "암호화폐 요청에 legacy marketCountry가 포함됐습니다.");
     check(cryptoRequest?.initialCash === 10_000, "암호화폐 시작 USDT가 요청 body에 보존되지 않았습니다.");
@@ -1438,23 +1510,8 @@ async function verify(browser, baseUrl, viewport, theme) {
       }),
       "BTC·ETH 2계약 직접 선택 설정이 요청 body에 보존되지 않았습니다.",
     );
-    check(
-      JSON.stringify(cryptoRequest?.modelLanes) === JSON.stringify(["chronos2", "fincast"]),
-      "암호화폐 역할 모델 lane 선택이 요청 body에 보존되지 않았습니다.",
-    );
-    check(
-      cryptoRequest?.modelPlan?.some((entry) => (
-        entry.symbol === "BTCUSDT"
-        && entry.modelLane === "chronos2"
-        && entry.role === "primary"
-      ))
-      && cryptoRequest?.modelPlan?.some((entry) => (
-        entry.symbol === "ETHUSDT"
-        && entry.modelLane === "chronos2"
-        && entry.role === "shadow"
-      )),
-      "BTC·ETH 종목별 primary/shadow modelPlan이 요청 body에 없습니다.",
-    );
+    check(!("modelLanes" in cryptoRequest), "암호화폐 요청에 서버 소유 modelLanes가 포함됐습니다.");
+    check(!("modelPlan" in cryptoRequest), "암호화폐 요청에 서버 소유 modelPlan이 포함됐습니다.");
     check(cryptoRequest?.execution?.mode === "paper", "암호화폐 실행 mode가 paper가 아닙니다.");
     check(
       JSON.stringify(cryptoRequest?.riskLimits) === JSON.stringify({
@@ -1474,6 +1531,7 @@ async function verify(browser, baseUrl, viewport, theme) {
       await cryptoRunPanel.locator("[data-simulation-selected] article").count() === 2,
       "암호화폐 실행 결과에 BTC·ETH 2계약이 표시되지 않았습니다.",
     );
+    await cryptoRunPanel.locator("[data-futures-position]").first().waitFor();
     check(
       await cryptoRunPanel.locator("[data-futures-position]").count() === 2,
       "암호화폐 실행 결과에 롱·숏 선물 포지션 2개가 표시되지 않았습니다.",
@@ -1879,11 +1937,11 @@ async function verify(browser, baseUrl, viewport, theme) {
     const liveForecastOverlays = chartGrid.locator("[data-ai-simulation-model-forecast-overlay]");
     await liveForecastOverlays.first().waitFor();
     await chartGrid.locator(
-      '[data-ai-simulation-model-forecast="kronos_base"][data-ai-simulation-model-forecast-origin="exact-final"]',
+      '[data-ai-simulation-model-forecast="chronos2"][data-ai-simulation-model-forecast-origin="exact-final"]',
     ).first().waitFor();
     for (const horizon of [5, 15, 30, 60]) {
       await chartGrid.locator(
-        `[data-ai-simulation-model-forecast-horizon="kronos_base:${horizon}"]`,
+        `[data-ai-simulation-model-forecast-horizon="chronos2:${horizon}"]`,
       ).waitFor();
     }
     const liveForecastCount = await liveForecastOverlays.count();
@@ -1989,22 +2047,11 @@ async function verify(browser, baseUrl, viewport, theme) {
       .waitFor({ timeout: 10_000 });
     check(state.starts.length === startsBeforeEtf + 1, "ETF 시작이 정확히 한 run을 만들지 않았습니다.");
     const etfRequest = state.starts.at(-1);
-    check(etfRequest?.contractVersion === "ai-paper-simulation/v8", "ETF 요청이 v8이 아닙니다.");
+    check(etfRequest?.contractVersion === "ai-paper-simulation/v9", "ETF 요청이 v9이 아닙니다.");
     check(etfRequest?.simulationCase === "us_etf_pair", "ETF simulationCase가 누락됐습니다.");
     check(etfRequest?.strategy?.pairId === "spy-spxl-spxs", "SPY 페어 선택이 payload에 없습니다.");
-    check(
-      JSON.stringify(etfRequest?.modelLanes) === JSON.stringify(["chronos2", "fincast"]),
-      "ETF Chronos-2 primary/FinCast shadow lane이 payload에 없습니다.",
-    );
-    check(
-      etfRequest?.modelPlan?.some((entry) => (
-        entry.modelLane === "chronos2" && entry.role === "primary"
-      ))
-      && etfRequest?.modelPlan?.some((entry) => (
-        entry.modelLane === "fincast" && entry.role === "shadow"
-      )),
-      "ETF 역할 modelPlan이 payload에 없습니다.",
-    );
+    check(!("modelLanes" in etfRequest), "ETF 요청에 서버 소유 modelLanes가 포함됐습니다.");
+    check(!("modelPlan" in etfRequest), "ETF 요청에 서버 소유 modelPlan이 포함됐습니다.");
     const pairChartGrid = page.locator(
       '[data-simulation-charts][data-simulation-chart-layout="pair-primary-full-width"]',
     );
@@ -2013,11 +2060,12 @@ async function verify(browser, baseUrl, viewport, theme) {
     chartCount = await pairCharts.count();
     selectedCount = await page.locator("[data-simulation-selected] article").count();
     check(chartCount === 3, "SPY 페어 차트가 3개가 아닙니다.");
+    const pairChartSymbols = await pairCharts.evaluateAll((charts) => charts.map(
+      (chart) => chart.getAttribute("data-ai-simulation-chart"),
+    ));
     check(
-      JSON.stringify(await pairCharts.evaluateAll((charts) => charts.map(
-        (chart) => chart.getAttribute("data-ai-simulation-chart"),
-      ))) === JSON.stringify(["SPY", "SPXL", "SPXS"]),
-      "SPY model target과 execution leg 차트 순서가 다릅니다.",
+      JSON.stringify(pairChartSymbols) === JSON.stringify(["SPY", "SPXL", "SPXS"]),
+      `SPY model target과 execution leg 차트 순서가 다릅니다: ${JSON.stringify(pairChartSymbols)}`,
     );
     pairLayoutScreenshot = path.join(
       screenshotDirectory,

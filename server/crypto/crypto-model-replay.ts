@@ -3,9 +3,9 @@ import {
   AiCostAssumptionsSchema,
   AiEvaluateRequestSchema,
   AiResponseSchema,
+  CHRONOS_2_MODEL_ID,
   FINCAST_QUALIFICATION_QUANTILE_ROWS,
   FINCAST_MODEL_ID,
-  KRONOS_BASE_MODEL_ID,
   QuantileRearrangementObservationsSchema,
   SCALPING_AI_HORIZONS,
   SCALPING_AI_QUANTILES,
@@ -49,8 +49,7 @@ const PRECISION_FAILURE_REASONS = [
 const PINNED_GPU_DEVICE_NAME = "Tesla P40";
 const PINNED_GPU_CUDA_CAPABILITY = "6.1";
 
-export type CryptoReplayLane = "kronos_base" | "fincast";
-export type KronosReplayLoaderProfile = "base" | "kv_cache_v1";
+export type CryptoReplayLane = "chronos2" | "fincast";
 type PrecisionFailureReason = typeof PRECISION_FAILURE_REASONS[number];
 type ReplayPrecision = "fp16" | "fp32";
 type ReplayPrecisionValidation = "not_required" | "passed" | "fallback_fp32";
@@ -67,7 +66,7 @@ export type CryptoReplayQuantileObservations = {
 };
 
 export type CryptoReplayModelProvenance = {
-  modelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
+  modelId: typeof CHRONOS_2_MODEL_ID | typeof FINCAST_MODEL_ID;
   modelRevision: string;
   sourceRevision: string;
   loaderVersion: string;
@@ -85,7 +84,9 @@ export type CryptoReplayModelProvenance = {
   peakVramBytes: number | null;
   peakVramMeasurement: "cuda_allocated_or_reserved" | null;
   memoryStatus: "ok";
-  quantileMonotonicityPolicy: "native" | "fp32_monotone_rearrangement_v1";
+  quantileMonotonicityPolicy:
+    | "chronos2_fp32_monotone_rearrangement_v1"
+    | "fp32_monotone_rearrangement_v1";
   fp32QuantileObservations: CryptoReplayQuantileObservations | null;
   mixedQuantileObservations: CryptoReplayQuantileObservations | null;
   quantileTailPolicy: "native" | "tail_clamped_q10_q90";
@@ -118,7 +119,6 @@ export type CryptoModelReplayInput = {
   deadlineMs?: number;
   durationHours?: number;
   endExclusive?: number;
-  kronosLoaderProfile?: KronosReplayLoaderProfile;
 };
 
 export type CryptoReplayRawContextRow = {
@@ -163,7 +163,7 @@ export type CryptoReplayHorizonMetrics = {
 
 export type CryptoReplayLaneResult = {
   lane: CryptoReplayLane;
-  expectedModelId: typeof KRONOS_BASE_MODEL_ID | typeof FINCAST_MODEL_ID;
+  expectedModelId: typeof CHRONOS_2_MODEL_ID | typeof FINCAST_MODEL_ID;
   observedModelId?: string;
   availability: "available" | "partial" | "unavailable";
   identityVerified: boolean;
@@ -283,19 +283,19 @@ class LaneReplayValidationError extends Error {
 }
 
 const expectedModelId = {
-  kronos_base: KRONOS_BASE_MODEL_ID,
+  chronos2: CHRONOS_2_MODEL_ID,
   fincast: FINCAST_MODEL_ID,
 } as const satisfies Record<CryptoReplayLane, string>;
 
 const pinnedModelProvenance = {
-  kronos_base: {
-    modelId: KRONOS_BASE_MODEL_ID,
-    modelRevision: "2b554741eca47781b64468546e77fef3e85130e6",
-    sourceRevision: "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
-    loaderVersion: "kronos-source-67b630e",
-    license: "MIT",
-    tokenizerId: "NeoQuasar/Kronos-Tokenizer-base",
-    tokenizerRevision: "0e0117387f39004a9016484a186a908917e22426",
+  chronos2: {
+    modelId: CHRONOS_2_MODEL_ID,
+    modelRevision: "254b5357164a84326913b0695216f690752ac55d",
+    sourceRevision: "v2.3.1",
+    loaderVersion: "chronos-forecasting-2.3.1",
+    license: "Apache-2.0",
+    tokenizerId: null,
+    tokenizerRevision: null,
   },
   fincast: {
     modelId: FINCAST_MODEL_ID,
@@ -315,11 +315,6 @@ const pinnedModelProvenance = {
   tokenizerId: string | null;
   tokenizerRevision: string | null;
 }>;
-
-const kronosLoaderVersion = {
-  base: "kronos-source-67b630e",
-  kv_cache_v1: "kronos-source-67b630e-kv-cache-v1",
-} as const satisfies Record<KronosReplayLoaderProfile, string>;
 
 function normalizedPrecisionFailureReasons(
   value: unknown,
@@ -361,16 +356,12 @@ function replayQuantileObservations(
 function validatePinnedProvenance(
   role: CryptoReplayLane,
   model: AiResponse["model"],
-  kronosLoaderProfile: KronosReplayLoaderProfile,
 ): CryptoReplayModelProvenance {
   const pinned = pinnedModelProvenance[role];
-  const expectedLoaderVersion = role === "kronos_base"
-    ? kronosLoaderVersion[kronosLoaderProfile]
-    : pinned.loaderVersion;
   if (model.model_id !== pinned.modelId
     || model.model_revision !== pinned.modelRevision
     || model.source_revision !== pinned.sourceRevision
-    || model.loader_version !== expectedLoaderVersion
+    || model.loader_version !== pinned.loaderVersion
     || model.license !== pinned.license) {
     throw new LaneReplayValidationError(
       "MODEL_PROVENANCE_MISMATCH",
@@ -414,25 +405,13 @@ function validatePinnedProvenance(
   const precision: ReplayPrecision | undefined = model.dtype === "mixed_float16"
     ? "fp16"
     : model.dtype === "float32" ? "fp32" : undefined;
-  const precisionValidation = rawPrecisionValidation === undefined && role === "kronos_base"
-    ? "not_required"
-    : rawPrecisionValidation;
-  const memoryStatus = rawMemoryStatus === undefined && role === "kronos_base"
-    ? "ok"
-    : rawMemoryStatus;
-  const quantileMonotonicityPolicy = (
-    rawQuantileMonotonicityPolicy === undefined && role === "kronos_base"
-  )
-    ? "native"
-    : rawQuantileMonotonicityPolicy;
-  const quantileTailPolicy = rawQuantileTailPolicy === undefined && role === "kronos_base"
-    ? "native"
-    : rawQuantileTailPolicy;
-  const precisionFailureReasons = (
-    rawPrecisionFailureReasons === undefined && role === "kronos_base"
-  )
-    ? []
-    : normalizedPrecisionFailureReasons(rawPrecisionFailureReasons);
+  const precisionValidation = rawPrecisionValidation;
+  const memoryStatus = rawMemoryStatus;
+  const quantileMonotonicityPolicy = rawQuantileMonotonicityPolicy;
+  const quantileTailPolicy = rawQuantileTailPolicy;
+  const precisionFailureReasons = normalizedPrecisionFailureReasons(
+    rawPrecisionFailureReasons ?? [],
+  );
   if (!precisionFailureReasons) {
     throw new LaneReplayValidationError(
       "MODEL_PRECISION_FAILURE_REASONS_INVALID",
@@ -461,18 +440,18 @@ function validatePinnedProvenance(
     );
   }
 
-  if (role === "kronos_base") {
+  if (role === "chronos2") {
     if (precision !== "fp32"
       || precisionValidation !== "not_required"
       || memoryStatus !== "ok"
-      || quantileMonotonicityPolicy !== "native"
+      || quantileMonotonicityPolicy !== "chronos2_fp32_monotone_rearrangement_v1"
       || (fp32QuantileObservations !== undefined && fp32QuantileObservations !== null)
       || (mixedQuantileObservations !== undefined && mixedQuantileObservations !== null)
       || quantileTailPolicy !== "native"
       || precisionFailureReasons.length > 0) {
       throw new LaneReplayValidationError(
         "MODEL_PRECISION_PROVENANCE_INVALID",
-        "The Kronos lane did not report native FP32 provenance.",
+        "The Chronos-2 lane did not report monotone-rearranged FP32 provenance.",
         model.model_id,
       );
     }
@@ -528,7 +507,7 @@ function validatePinnedProvenance(
     modelId: pinned.modelId,
     modelRevision: pinned.modelRevision,
     sourceRevision: pinned.sourceRevision,
-    loaderVersion: expectedLoaderVersion,
+    loaderVersion: pinned.loaderVersion,
     license: pinned.license,
     tokenizerId: model.tokenizer_id ?? null,
     tokenizerRevision: model.tokenizer_revision ?? null,
@@ -1014,7 +993,6 @@ function validateAndMeasure(
   request: AiEvaluateRequest,
   expected: ReadonlyMap<string, ExpectedRecord>,
   contextBars: number,
-  kronosLoaderProfile: KronosReplayLoaderProfile,
 ): ValidatedLane {
   const response = AiResponseSchema.parse(raw);
   if (response.request_id !== request.request_id || response.mode !== "evaluate") {
@@ -1031,7 +1009,7 @@ function validateAndMeasure(
       response.model.model_id,
     );
   }
-  const provenance = validatePinnedProvenance(role, response.model, kronosLoaderProfile);
+  const provenance = validatePinnedProvenance(role, response.model);
   if (response.error || !response.evaluation) {
     throw new LaneReplayValidationError(
       "EVALUATION_UNAVAILABLE",
@@ -1304,7 +1282,6 @@ export class CryptoModelComparisonReplay {
       "Replay durationHours",
     );
     const evaluationBarCount = durationHours * 60;
-    const kronosLoaderProfile = input.kronosLoaderProfile ?? "base";
     const authoritativeNow = this.clock.now();
     const window = replayWindow(
       authoritativeNow,
@@ -1348,7 +1325,7 @@ export class CryptoModelComparisonReplay {
       const expected = expectedRecords(request);
       const invocations = {} as Record<CryptoReplayLane, LaneInvocation>;
 
-      for (const lane of ["kronos_base", "fincast"] as const) {
+      for (const lane of ["chronos2", "fincast"] as const) {
         if (controller.signal.aborted) throw abortReason(controller.signal);
         const startedAt = this.clock.now();
         try {
@@ -1362,7 +1339,6 @@ export class CryptoModelComparisonReplay {
             request,
             expected,
             this.contextBars,
-            kronosLoaderProfile,
           );
           const latencyMs = Math.max(0, this.clock.now() - startedAt);
           invocations[lane] = {
@@ -1397,30 +1373,30 @@ export class CryptoModelComparisonReplay {
         }
       }
 
-      const kronos = invocations.kronos_base;
+      const chronos2 = invocations.chronos2;
       const fincast = invocations.fincast;
-      const bothValidated = Boolean(kronos.validated && fincast.validated);
+      const bothValidated = Boolean(chronos2.validated && fincast.validated);
       const identitiesVerified = bothValidated
-        && kronos.result.identityVerified
+        && chronos2.result.identityVerified
         && fincast.result.identityVerified;
       const sameInputDigest = bothValidated
-        && kronos.result.inputDigest === fincast.result.inputDigest
-        && kronos.result.inputDigest === inputDigest;
+        && chronos2.result.inputDigest === fincast.result.inputDigest
+        && chronos2.result.inputDigest === inputDigest;
       const sameRecords = bothValidated
-        && kronos.result.recordDigest === fincast.result.recordDigest;
+        && chronos2.result.recordDigest === fincast.result.recordDigest;
       const sameEffectiveContext = bothValidated
-        && kronos.result.effectiveContextBars === this.contextBars
+        && chronos2.result.effectiveContextBars === this.contextBars
         && fincast.result.effectiveContextBars === this.contextBars
-        && kronos.result.effectiveContextDigest === fincast.result.effectiveContextDigest;
+        && chronos2.result.effectiveContextDigest === fincast.result.effectiveContextDigest;
       const sameCosts = bothValidated
-        && JSON.stringify(kronos.validated!.response.evaluation!.cost_assumptions)
+        && JSON.stringify(chronos2.validated!.response.evaluation!.cost_assumptions)
           === JSON.stringify(fincast.validated!.response.evaluation!.cost_assumptions)
-        && JSON.stringify(kronos.validated!.response.evaluation!.cost_assumptions)
+        && JSON.stringify(chronos2.validated!.response.evaluation!.cost_assumptions)
           === JSON.stringify(request.cost_assumptions);
       const sameOrigin = sameRecords;
       const sameContext = sameInputDigest && sameEffectiveContext;
       const sameFillBarrier = sameRecords;
-      const fullyAvailable = kronos.result.availability === "available"
+      const fullyAvailable = chronos2.result.availability === "available"
         && fincast.result.availability === "available";
       const comparable = identitiesVerified
         && sameInputDigest
@@ -1458,7 +1434,7 @@ export class CryptoModelComparisonReplay {
         inputDigest,
         costAssumptions: request.cost_assumptions,
         lanes: {
-          kronos_base: kronos.result,
+          chronos2: chronos2.result,
           fincast: fincast.result,
         },
         comparison: {

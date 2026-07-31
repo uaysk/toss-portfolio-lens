@@ -22,7 +22,7 @@ describe("pair catalog", () => {
       "tsla-tsll-tsls",
     ]);
     expect(getPairCatalogEntry(" SOXX-SOXL-SOXS ")).toMatchObject({
-      signalSymbol: "SOXX",
+      displaySignalSymbol: "SOXX",
       modelTargetSymbol: "SOXX",
       auxiliarySymbols: [],
       bull: { executionSymbol: "SOXL", leverageMultiplier: 3 },
@@ -41,7 +41,8 @@ describe("pair catalog", () => {
     expect(getPairCatalogEntry("tsla-tsll-tsls").bear.leverageMultiplier).toBe(-1);
     expect(getPairCatalogEntry("tsla-tsll-tslq").bear.leverageMultiplier).toBe(-2);
     expect(getPairCatalogEntry("sndk-snxx-sndq")).toMatchObject({
-      signalSymbol: "SNDK",
+      displaySignalSymbol: "SNDK",
+      modelTargetSymbol: "SNDK",
       bull: { executionSymbol: "SNXX", leverageMultiplier: 2 },
       bear: { executionSymbol: "SNDQ", leverageMultiplier: -2 },
       selectionProvenance: {
@@ -57,7 +58,7 @@ describe("pair catalog", () => {
     const pair = getPairCatalogEntry("qqq-tqqq-sqqq");
     expect(mapPairDirection(pair, "bull")).toEqual({
       pairId: pair.pairId,
-      signalSymbol: "QQQ",
+      displaySignalSymbol: "QQQ",
       modelTargetSymbol: "QQQ",
       auxiliarySymbols: [],
       direction: "bull",
@@ -66,7 +67,7 @@ describe("pair catalog", () => {
     });
     expect(mapPairDirection(pair, "cash")).toEqual({
       pairId: pair.pairId,
-      signalSymbol: "QQQ",
+      displaySignalSymbol: "QQQ",
       modelTargetSymbol: "QQQ",
       auxiliarySymbols: [],
       direction: "cash",
@@ -77,11 +78,13 @@ describe("pair catalog", () => {
 
   it("strictly rejects malformed, ambiguous, and duplicate entries", () => {
     const valid = {
-      catalogVersion: "scalping-pair-catalog/v2",
+      catalogVersion: PAIR_CATALOG_VERSION,
       pairId: "abc-bull-bear",
       marketCountry: "US",
       currency: "USD",
-      signalSymbol: " abc ",
+      displaySignalSymbol: " abc ",
+      modelTargetSymbol: " abc ",
+      auxiliarySymbols: [],
       bull: { executionSymbol: " bull ", leverageMultiplier: 2 },
       bear: { executionSymbol: "bear", leverageMultiplier: -2 },
       allowedSessions: ["regular"],
@@ -92,9 +95,16 @@ describe("pair catalog", () => {
       displaySignalSymbol: "ABC",
       modelTargetSymbol: "ABC",
       auxiliarySymbols: [],
-      signalSymbol: "ABC",
       bull: { executionSymbol: "BULL" },
     });
+    expect(() => validatePairCatalogEntry({
+      ...valid,
+      catalogVersion: "scalping-pair-catalog/v2",
+    })).toThrow();
+    expect(() => validatePairCatalogEntry({
+      ...valid,
+      signalSymbol: "ABC",
+    })).toThrow();
     expect(() => validatePairCatalogEntry({ ...valid, unexpected: true })).toThrow();
     expect(() => validatePairCatalogEntry({
       ...valid,

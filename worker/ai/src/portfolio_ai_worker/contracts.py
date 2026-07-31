@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-SCHEMA_VERSION = "scalping-ai/v1"
+SCHEMA_VERSION = "scalping-ai/v2"
 FIXED_HORIZONS = (5, 15, 30, 60)
 REALTIME_HORIZONS = (5, 15)
 FIXED_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
@@ -19,7 +19,6 @@ FORECAST_HORIZONS_BY_STEPS = {
     FORECAST_STEPS: FIXED_HORIZONS,
 }
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-KRONOS_BASE_MODEL_ID = "NeoQuasar/Kronos-base"
 FINCAST_MODEL_ID = "Vincent05R/FinCast"
 CHRONOS_2_MODEL_ID = "amazon/chronos-2"
 FINCAST_QUALIFICATION_CONTEXT_COUNT = 128
@@ -152,7 +151,7 @@ class SeriesCadence(StrictModel):
 
 
 class RequestBase(StrictModel):
-    schema_version: Literal["scalping-ai/v1"]
+    schema_version: Literal["scalping-ai/v2"]
     request_id: str
     horizons_minutes: tuple[int, ...] = FIXED_HORIZONS
     quantiles: tuple[float, ...] = FIXED_QUANTILES
@@ -704,9 +703,8 @@ class ModelRunInputOrigin(StrictModel):
 
 
 class ModelRun(StrictModel):
-    role: Literal["kronos_base", "fincast", "chronos_2"]
+    role: Literal["fincast", "chronos_2"]
     expected_model_id: Literal[
-        "NeoQuasar/Kronos-base",
         "Vincent05R/FinCast",
         "amazon/chronos-2",
     ]
@@ -729,7 +727,6 @@ class ModelRun(StrictModel):
     @model_validator(mode="after")
     def validate_run(self) -> "ModelRun":
         expected_by_role = {
-            "kronos_base": KRONOS_BASE_MODEL_ID,
             "fincast": FINCAST_MODEL_ID,
             "chronos_2": CHRONOS_2_MODEL_ID,
         }
@@ -915,7 +912,7 @@ class EvaluationResult(StrictModel):
 
 
 class AIResponse(StrictModel):
-    schema_version: Literal["scalping-ai/v1"]
+    schema_version: Literal["scalping-ai/v2"]
     request_id: str = Field(min_length=1, max_length=128)
     mode: Literal["forecast", "evaluate"]
     status: Literal["available", "partial", "unavailable"]

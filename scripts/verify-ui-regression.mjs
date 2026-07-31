@@ -353,57 +353,107 @@ async function verifyScreen(browser, baseUrl, screen, matrix) {
     reducedMotion: "reduce",
     deviceScaleFactor: 1,
   });
-  await context.addInitScript(({ selectedTheme }) => {
+  await context.addInitScript(({ selectedTheme, useRoutedEventSource }) => {
     window.localStorage.setItem("portfolio-theme", selectedTheme);
     window.localStorage.removeItem("portfolio-hidden-stocks");
     history.scrollRestoration = "manual";
-    class StaticEventSource {
+    class RoutedEventSource extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
       static CLOSED = 2;
-      CONNECTING = 0;
-      OPEN = 1;
-      CLOSED = 2;
-      readyState = 0;
-      url;
-      withCredentials = false;
-      onopen = null;
-      onmessage = null;
-      onerror = null;
-      listeners = new Map();
+
       constructor(url) {
+        super();
         this.url = String(url);
-        setTimeout(() => {
-          this.readyState = this.OPEN;
-          this.onopen?.(new Event("open"));
-        }, 0);
+        this.withCredentials = false;
+        this.readyState = RoutedEventSource.CONNECTING;
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        this.controller = new AbortController();
+        void this.connect();
       }
-      addEventListener(type, listener) {
-        const listeners = this.listeners.get(type) ?? new Set();
-        listeners.add(listener);
-        this.listeners.set(type, listeners);
-      }
-      removeEventListener(type, listener) {
-        this.listeners.get(type)?.delete(listener);
-      }
-      dispatchEvent(event) {
-        for (const listener of this.listeners.get(event.type) ?? []) {
-          if (typeof listener === "function") listener.call(this, event);
-          else listener.handleEvent?.(event);
+
+      async connect() {
+        try {
+          const response = await fetch(this.url, {
+            headers: { Accept: "text/event-stream" },
+            signal: this.controller.signal,
+          });
+          if (!response.ok) throw new Error(`fixture EventSource HTTP ${response.status}`);
+          const body = await response.text();
+          if (this.readyState === RoutedEventSource.CLOSED) return;
+          this.readyState = RoutedEventSource.OPEN;
+          const openEvent = new Event("open");
+          this.dispatchEvent(openEvent);
+          this.onopen?.call(this, openEvent);
+          for (const block of body.trim().split(/\n\n+/)) {
+            let type = "message";
+            let lastEventId = "";
+            const data = [];
+            for (const line of block.split(/\n/)) {
+              if (line.startsWith("event:")) type = line.slice(6).trim();
+              else if (line.startsWith("id:")) lastEventId = line.slice(3).trim();
+              else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+            }
+            const message = new MessageEvent(type, {
+              data: data.join("\n"),
+              lastEventId,
+              origin: window.location.origin,
+            });
+            this.dispatchEvent(message);
+            if (type === "message") this.onmessage?.call(this, message);
+          }
+        } catch {
+          if (this.readyState === RoutedEventSource.CLOSED) return;
+          const errorEvent = new Event("error");
+          this.dispatchEvent(errorEvent);
+          this.onerror?.call(this, errorEvent);
         }
-        return true;
       }
+
       close() {
-        this.readyState = this.CLOSED;
+        if (this.readyState === RoutedEventSource.CLOSED) return;
+        this.readyState = RoutedEventSource.CLOSED;
+        this.controller.abort();
       }
     }
-    window.EventSource = StaticEventSource;
+    class StaticEventSource extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+
+      constructor(url) {
+        super();
+        this.url = String(url);
+        this.withCredentials = false;
+        this.readyState = StaticEventSource.CONNECTING;
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        setTimeout(() => {
+          if (this.readyState === StaticEventSource.CLOSED) return;
+          this.readyState = StaticEventSource.OPEN;
+          const openEvent = new Event("open");
+          this.dispatchEvent(openEvent);
+          this.onopen?.call(this, openEvent);
+        }, 0);
+      }
+
+      close() {
+        this.readyState = StaticEventSource.CLOSED;
+      }
+    }
+    window.EventSource = useRoutedEventSource ? RoutedEventSource : StaticEventSource;
     document.addEventListener("DOMContentLoaded", () => {
       const style = document.createElement("style");
       style.textContent = "*,*::before,*::after{animation-duration:0s!important;transition-duration:0s!important;caret-color:transparent!important}html{scroll-behavior:auto!important}";
       document.head.append(style);
     }, { once: true });
-  }, { selectedTheme: theme });
+  }, {
+    selectedTheme: theme,
+    useRoutedEventSource: screen.key === "ai-simulation",
+  });
 
   const page = await context.newPage();
   const failures = observePage(page);

@@ -39,9 +39,9 @@ function request(requestId = "request-1"): AiRequest {
 
 function unavailableResponse(requestId = "request-1") {
   const model = {
-    model_id: "NeoQuasar/Kronos-base",
+    model_id: "amazon/chronos-2",
     model_revision: "pinned",
-    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_id: "amazon/chronos-2",
     tokenizer_revision: "tokenizer-pinned",
     source_revision: "source-pinned",
     loader_version: "portfolio-ai-loader/v1",
@@ -71,7 +71,7 @@ function unavailableResponse(requestId = "request-1") {
     unavailable: { code: "model-unavailable", message: "model cache missing" },
   }];
   return {
-    schema_version: "scalping-ai/v1",
+    schema_version: "scalping-ai/v2",
     request_id: requestId,
     mode: "forecast",
     status: "unavailable",
@@ -79,8 +79,8 @@ function unavailableResponse(requestId = "request-1") {
     generated_at: "2026-07-21T00:00:01.000Z",
     series,
     model_runs: [{
-      role: "kronos_base",
-      expected_model_id: "NeoQuasar/Kronos-base",
+      role: "chronos_2",
+      expected_model_id: "amazon/chronos-2",
       status: "unavailable",
       model,
       generated_at: "2026-07-21T00:00:01.000Z",
@@ -154,7 +154,7 @@ class FakeWebSocket extends EventEmitter implements AiWebSocketLike {
 
 function config(overrides: Partial<AiComputeClientConfig> = {}): AiComputeClientConfig {
   return {
-    url: "ws://ai-worker:8765/ws/scalping-ai/v1",
+    url: "ws://ai-worker:8765/ws/scalping-ai/v2",
     authTokenFile: "/run/ai-auth/token",
     timeoutMs: 2_000,
     connectTimeoutMs: 500,
@@ -203,8 +203,13 @@ function answerStatus(socket: FakeWebSocket): void {
       model: {
         loaded: false,
         device: "unavailable",
-        model_id: "NeoQuasar/Kronos-base",
+        model_id: "amazon/chronos-2",
         model_revision: "pinned",
+        precision: "float32",
+        precision_validation: "unavailable",
+        memory_status: "unavailable",
+        quantile_monotonicity_policy: "unavailable",
+        quantile_tail_policy: "unavailable",
       },
       active_requests: 0,
       queued_requests: 0,
@@ -256,8 +261,8 @@ describe("AiComputeClient WebSocket transport", () => {
     const invalid = structuredClone(request()) as unknown as { series: Array<{ bars: Array<{ complete: boolean }> }> };
     invalid.series[0]!.bars[0]!.complete = false;
     expect(() => harness().client.request(invalid as never)).toThrow();
-    expect(() => new AiComputeClient(config({ url: "https://ai.example/ws/scalping-ai/v1" }))).toThrow("ws:// 또는 wss://");
-    expect(() => new AiComputeClient(config({ url: "wss://ai.example/other" }))).toThrow("/ws/scalping-ai/v1");
+    expect(() => new AiComputeClient(config({ url: "https://ai.example/ws/scalping-ai/v2" }))).toThrow("ws:// 또는 wss://");
+    expect(() => new AiComputeClient(config({ url: "wss://ai.example/other" }))).toThrow("/ws/scalping-ai/v2");
     expect(() => new AiComputeClient(config({ authTokenFile: "relative-token" }))).toThrow("절대 경로");
     expect(() => new AiComputeClient(config({
       authTokenMustDifferFromFile: "relative-peer-token",
@@ -274,7 +279,7 @@ describe("AiComputeClient WebSocket transport", () => {
 
   it("wss custom CA를 handshake에만 전달하고 oversized response를 protocol 오류로 종료한다", async () => {
     const tls = harness({
-      config: { url: "wss://gpu.example.test:8765/ws/scalping-ai/v1", tlsCa: "test-ca" },
+      config: { url: "wss://gpu.example.test:8765/ws/scalping-ai/v2", tlsCa: "test-ca" },
     });
     const tlsPending = tls.client.request(request("tls-request"));
     expect(tls.connectionOptions[0]).toMatchObject({ ca: "test-ca", perMessageDeflate: false });

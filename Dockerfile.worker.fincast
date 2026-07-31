@@ -36,7 +36,7 @@ ENV \
     AI_WEBSOCKET_MAX_IN_FLIGHT=1 \
     AI_WEBSOCKET_HOST=0.0.0.0 \
     AI_WEBSOCKET_PORT=8766 \
-    AI_WEBSOCKET_PATH=/ws/scalping-ai/v1 \
+    AI_WEBSOCKET_PATH=/ws/scalping-ai/v2 \
     AI_WEBSOCKET_AUTH_TOKEN_FILE=/app/fincast-auth/token \
     AI_DEVICE=cuda \
     AI_ALLOW_CPU_FALLBACK=false \

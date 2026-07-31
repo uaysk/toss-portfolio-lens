@@ -202,72 +202,6 @@ export class OAuthRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
   async ensureSchema(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS mcp_oauth_authorization_codes (
-          code_hash VARCHAR(64) PRIMARY KEY,
-          client_id VARCHAR(128) NOT NULL,
-          subject VARCHAR(128) NOT NULL,
-          redirect_uri VARCHAR(2048) NOT NULL,
-          scope VARCHAR(512) NOT NULL,
-          code_challenge VARCHAR(128) NOT NULL,
-          code_challenge_method VARCHAR(16) NOT NULL,
-          resource VARCHAR(2048) NOT NULL,
-          expires_at BIGINT NOT NULL,
-          created_at BIGINT NOT NULL,
-          used_at BIGINT NULL,
-          KEY idx_mcp_oauth_authorization_codes_expires_at (expires_at),
-          KEY idx_mcp_oauth_authorization_codes_client_subject (client_id, subject)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS mcp_oauth_refresh_tokens (
-          token_hash VARCHAR(64) PRIMARY KEY,
-          family_id VARCHAR(64) NOT NULL,
-          client_id VARCHAR(128) NOT NULL,
-          subject VARCHAR(128) NOT NULL,
-          scope VARCHAR(512) NOT NULL,
-          resource VARCHAR(2048) NOT NULL,
-          issued_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL,
-          previous_token_hash VARCHAR(64) NULL,
-          replaced_by_hash VARCHAR(64) NULL,
-          revoked_at BIGINT NULL,
-          KEY idx_mcp_oauth_refresh_tokens_family_id (family_id),
-          KEY idx_mcp_oauth_refresh_tokens_subject (subject),
-          KEY idx_mcp_oauth_refresh_tokens_expires_at (expires_at),
-          KEY idx_mcp_oauth_refresh_tokens_revoked_at (revoked_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS mcp_oauth_revocations (
-          revocation_type VARCHAR(32) NOT NULL,
-          identifier VARCHAR(128) NOT NULL,
-          client_id VARCHAR(128) NOT NULL,
-          subject VARCHAR(128) NULL,
-          family_id VARCHAR(64) NULL,
-          reason VARCHAR(255) NULL,
-          revoked_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL,
-          PRIMARY KEY (revocation_type, identifier),
-          KEY idx_mcp_oauth_revocations_expires_at (expires_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS mcp_oauth_consents (
-          client_id VARCHAR(128) NOT NULL,
-          subject VARCHAR(128) NOT NULL,
-          scope VARCHAR(512) NOT NULL,
-          granted_at BIGINT NOT NULL,
-          expires_at BIGINT NOT NULL,
-          PRIMARY KEY (client_id, subject),
-          KEY idx_mcp_oauth_consents_expires_at (expires_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.ensureRefreshResourceColumn();
-      return;
-    }
-    const integer = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS mcp_oauth_authorization_codes (
         code_hash TEXT NOT NULL PRIMARY KEY,
@@ -278,9 +212,9 @@ export class OAuthRepository {
         code_challenge TEXT NOT NULL,
         code_challenge_method TEXT NOT NULL,
         resource TEXT NOT NULL,
-        expires_at ${integer} NOT NULL,
-        created_at ${integer} NOT NULL,
-        used_at ${integer}
+        expires_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        used_at BIGINT
       )
     `);
     await this.database.run("CREATE INDEX IF NOT EXISTS idx_mcp_oauth_authorization_codes_expires_at ON mcp_oauth_authorization_codes(expires_at)");
@@ -294,11 +228,11 @@ export class OAuthRepository {
         subject TEXT NOT NULL,
         scope TEXT NOT NULL,
         resource TEXT NOT NULL,
-        issued_at ${integer} NOT NULL,
-        expires_at ${integer} NOT NULL,
+        issued_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
         previous_token_hash TEXT,
         replaced_by_hash TEXT,
-        revoked_at ${integer}
+        revoked_at BIGINT
       )
     `);
     await this.database.run("CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_tokens_family_id ON mcp_oauth_refresh_tokens(family_id)");
@@ -314,8 +248,8 @@ export class OAuthRepository {
         subject TEXT,
         family_id TEXT,
         reason TEXT,
-        revoked_at ${integer} NOT NULL,
-        expires_at ${integer} NOT NULL,
+        revoked_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
         PRIMARY KEY (revocation_type, identifier)
       )
     `);
@@ -326,8 +260,8 @@ export class OAuthRepository {
         client_id TEXT NOT NULL,
         subject TEXT NOT NULL,
         scope TEXT NOT NULL,
-        granted_at ${integer} NOT NULL,
-        expires_at ${integer} NOT NULL,
+        granted_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
         PRIMARY KEY (client_id, subject)
       )
     `);
@@ -339,8 +273,9 @@ export class OAuthRepository {
     try {
       await this.database.query("SELECT resource FROM mcp_oauth_refresh_tokens LIMIT 0");
     } catch {
-      const column = this.database.dialect === "mysql" ? "VARCHAR(2048) NULL" : "TEXT";
-      await this.database.run(`ALTER TABLE mcp_oauth_refresh_tokens ADD COLUMN resource ${column}`);
+      await this.database.run(
+        "ALTER TABLE mcp_oauth_refresh_tokens ADD COLUMN resource TEXT",
+      );
     }
   }
 
@@ -704,27 +639,15 @@ export class OAuthRepository {
     };
 
     return this.database.transaction(async (database) => {
-      if (database.dialect === "postgres") {
-        await database.run(`
-          INSERT INTO mcp_oauth_consents (client_id, subject, scope, granted_at, expires_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT (client_id, subject)
-          DO UPDATE SET scope = EXCLUDED.scope, granted_at = EXCLUDED.granted_at, expires_at = EXCLUDED.expires_at
-        `, [input.clientId, input.subject, input.scope, grantedAt, input.expiresAt]);
-      } else if (database.dialect === "mysql") {
-        await database.run(`
-          INSERT INTO mcp_oauth_consents (client_id, subject, scope, granted_at, expires_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON DUPLICATE KEY UPDATE scope = VALUES(scope), granted_at = VALUES(granted_at), expires_at = VALUES(expires_at)
-        `, [input.clientId, input.subject, input.scope, grantedAt, input.expiresAt]);
-      } else {
-        await database.run(`
-          INSERT INTO mcp_oauth_consents (client_id, subject, scope, granted_at, expires_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(client_id, subject) DO UPDATE
-          SET scope = excluded.scope, granted_at = excluded.granted_at, expires_at = excluded.expires_at
-        `, [input.clientId, input.subject, input.scope, grantedAt, input.expiresAt]);
-      }
+      await database.run(`
+        INSERT INTO mcp_oauth_consents (client_id, subject, scope, granted_at, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (client_id, subject)
+        DO UPDATE SET
+          scope = EXCLUDED.scope,
+          granted_at = EXCLUDED.granted_at,
+          expires_at = EXCLUDED.expires_at
+      `, [input.clientId, input.subject, input.scope, grantedAt, input.expiresAt]);
 
       const consent = await database.query<AnyRow>(`
         SELECT client_id, subject, scope, granted_at, expires_at
@@ -805,71 +728,19 @@ export class OAuthRepository {
     const revokedAt = input.revokedAt ?? nowSeconds();
     const expiresAt = input.expiresAt ?? revokedAt + 900;
 
-    if (database.dialect === "postgres") {
-      await database.run(`
-        INSERT INTO mcp_oauth_revocations (
-          revocation_type, identifier, client_id, subject, family_id, reason, revoked_at, expires_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (revocation_type, identifier)
-        DO UPDATE SET
-          client_id = EXCLUDED.client_id,
-          subject = EXCLUDED.subject,
-          family_id = EXCLUDED.family_id,
-          reason = EXCLUDED.reason,
-          revoked_at = EXCLUDED.revoked_at,
-          expires_at = GREATEST(mcp_oauth_revocations.expires_at, EXCLUDED.expires_at)
-      `, [
-        input.type,
-        input.identifier,
-        input.clientId,
-        input.subject,
-        input.familyId,
-        input.reason,
-        revokedAt,
-        expiresAt,
-      ]);
-      return;
-    }
-
-    if (database.dialect === "mysql") {
-      await database.run(`
-        INSERT INTO mcp_oauth_revocations (
-          revocation_type, identifier, client_id, subject, family_id, reason, revoked_at, expires_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          client_id = VALUES(client_id),
-          subject = VALUES(subject),
-          family_id = VALUES(family_id),
-          reason = VALUES(reason),
-          revoked_at = VALUES(revoked_at),
-          expires_at = GREATEST(expires_at, VALUES(expires_at))
-      `, [
-        input.type,
-        input.identifier,
-        input.clientId,
-        input.subject,
-        input.familyId,
-        input.reason,
-        revokedAt,
-        expiresAt,
-      ]);
-      return;
-    }
-
     await database.run(`
       INSERT INTO mcp_oauth_revocations (
         revocation_type, identifier, client_id, subject, family_id, reason, revoked_at, expires_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(revocation_type, identifier) DO UPDATE SET
-        client_id = excluded.client_id,
-        subject = excluded.subject,
-        family_id = excluded.family_id,
-        reason = excluded.reason,
-        revoked_at = excluded.revoked_at,
-        expires_at = MAX(expires_at, excluded.expires_at)
+      ON CONFLICT (revocation_type, identifier)
+      DO UPDATE SET
+        client_id = EXCLUDED.client_id,
+        subject = EXCLUDED.subject,
+        family_id = EXCLUDED.family_id,
+        reason = EXCLUDED.reason,
+        revoked_at = EXCLUDED.revoked_at,
+        expires_at = GREATEST(mcp_oauth_revocations.expires_at, EXCLUDED.expires_at)
     `, [
       input.type,
       input.identifier,

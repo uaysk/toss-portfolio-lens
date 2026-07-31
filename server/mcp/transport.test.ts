@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMcpServer } from "./server.js";
 import { createMcpHttpRuntime, type McpHttpRuntime } from "./transport.js";
 import type { McpToolDependencies } from "./tools/handlers.js";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { McpAuditRepository } from "../repositories/mcp-audit-repository.js";
 
 const generatedContract = JSON.parse(readFileSync(
@@ -23,7 +23,7 @@ function parseResponse(text: string, contentType: string | null): unknown {
 describe("MCP Streamable HTTP transport", () => {
   let server: Server | undefined;
   let runtime: McpHttpRuntime | undefined;
-  let database: SqliteDatabase | undefined;
+  let database: PGliteDatabase | undefined;
 
   afterEach(async () => {
     await runtime?.close();
@@ -40,7 +40,7 @@ describe("MCP Streamable HTTP transport", () => {
       maxAssets: 20,
       maxDateRangeYears: 20,
     } as unknown as McpToolDependencies;
-    database = new SqliteDatabase(":memory:");
+    database = new PGliteDatabase();
     const audit = new McpAuditRepository(database);
     await audit.initialize();
     runtime = createMcpHttpRuntime({

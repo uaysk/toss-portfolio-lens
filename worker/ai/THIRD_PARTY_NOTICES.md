@@ -4,9 +4,6 @@ No model weights or upstream source snapshots are included in this repository.
 The production worker accepts only explicitly provisioned, revision-marked local
 snapshots.
 
-- Kronos source, Kronos-base, and Kronos-Tokenizer-base: MIT License.
-  Copyright remains with the upstream Kronos authors and contributors.
-  Source: https://github.com/shiyu-coder/Kronos
 - FinCast source and model: Apache License 2.0.
   Copyright remains with the upstream FinCast authors and contributors.
   Source: https://github.com/vincent05r/FinCast-fts

@@ -510,77 +510,36 @@ export class SimulationCheckpointStore {
   }
 
   async initialize(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_simulation_checkpoint_manifests (
-          run_id VARCHAR(64) PRIMARY KEY,
-          schema_version VARCHAR(64) NOT NULL,
-          manifest_seq BIGINT NOT NULL,
-          revision BIGINT NOT NULL,
-          base_json LONGTEXT NOT NULL,
-          base_byte_count BIGINT NOT NULL,
-          base_checksum VARCHAR(64) NOT NULL,
-          scalar_json LONGTEXT NOT NULL,
-          previous_checksum VARCHAR(64) NULL,
-          checksum VARCHAR(64) NOT NULL,
-          chunk_refs_json LONGTEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          updated_at BIGINT NOT NULL,
-          CONSTRAINT fk_simulation_checkpoint_manifest_run FOREIGN KEY (run_id)
-            REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_simulation_checkpoint_chunks (
-          run_id VARCHAR(64) NOT NULL,
-          chunk_seq BIGINT NOT NULL,
-          first_revision BIGINT NOT NULL,
-          last_revision BIGINT NOT NULL,
-          event_count INT NOT NULL,
-          byte_count BIGINT NOT NULL,
-          previous_checksum VARCHAR(64) NULL,
-          checksum VARCHAR(64) NOT NULL,
-          events_json LONGTEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          PRIMARY KEY (run_id, chunk_seq),
-          KEY idx_simulation_checkpoint_revision (run_id, last_revision),
-          CONSTRAINT fk_simulation_checkpoint_chunk_manifest FOREIGN KEY (run_id)
-            REFERENCES portfolio_simulation_checkpoint_manifests(run_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      return;
-    }
-    const integerType = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_simulation_checkpoint_manifests (
         run_id TEXT PRIMARY KEY REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE,
         schema_version TEXT NOT NULL,
-        manifest_seq ${integerType} NOT NULL,
-        revision ${integerType} NOT NULL,
+        manifest_seq BIGINT NOT NULL,
+        revision BIGINT NOT NULL,
         base_json TEXT NOT NULL,
-        base_byte_count ${integerType} NOT NULL,
+        base_byte_count BIGINT NOT NULL,
         base_checksum TEXT NOT NULL,
         scalar_json TEXT NOT NULL,
         previous_checksum TEXT,
         checksum TEXT NOT NULL,
         chunk_refs_json TEXT NOT NULL,
-        created_at ${integerType} NOT NULL,
-        updated_at ${integerType} NOT NULL
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
       )
     `);
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_simulation_checkpoint_chunks (
         run_id TEXT NOT NULL REFERENCES portfolio_simulation_checkpoint_manifests(run_id)
           ON DELETE CASCADE,
-        chunk_seq ${integerType} NOT NULL,
-        first_revision ${integerType} NOT NULL,
-        last_revision ${integerType} NOT NULL,
+        chunk_seq BIGINT NOT NULL,
+        first_revision BIGINT NOT NULL,
+        last_revision BIGINT NOT NULL,
         event_count INTEGER NOT NULL,
-        byte_count ${integerType} NOT NULL,
+        byte_count BIGINT NOT NULL,
         previous_checksum TEXT,
         checksum TEXT NOT NULL,
         events_json TEXT NOT NULL,
-        created_at ${integerType} NOT NULL,
+        created_at BIGINT NOT NULL,
         PRIMARY KEY (run_id, chunk_seq)
       )
     `);
@@ -784,7 +743,6 @@ export class SimulationCheckpointStore {
       checksum: manifestChecksum(content),
     };
     await this.database.transaction(async (database) => {
-      const lock = database.dialect === "sqlite" ? "" : " FOR UPDATE";
       const [stored] = await database.query<{
         manifest_seq: number;
         revision: number;
@@ -792,7 +750,7 @@ export class SimulationCheckpointStore {
       }>(`
         SELECT manifest_seq, revision, checksum
         FROM portfolio_simulation_checkpoint_manifests
-        WHERE run_id = ?${lock}
+        WHERE run_id = ? FOR UPDATE
       `, [input.manifest.runId]);
       if (!stored
         || Number(stored.manifest_seq) !== input.manifest.seq

@@ -419,7 +419,7 @@ describe("scalping session-only router", () => {
   });
 
   it("is mounted separately from MCP and generic tool execution", () => {
-    const server = readFileSync("server/bootstrap.ts", "utf8");
+    const server = readFileSync("server/application-runtime.ts", "utf8");
     const schemas = readFileSync("server/mcp/schemas.ts", "utf8");
     const docs = readFileSync("docs/mcp-chatgpt.md", "utf8");
     expect(server).toContain("const scalpingRouter = createScalpingRouter");

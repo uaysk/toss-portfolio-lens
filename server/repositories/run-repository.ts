@@ -205,55 +205,6 @@ export class RunRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
   async initialize(): Promise<void> {
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_backtest_runs (
-          run_id VARCHAR(64) PRIMARY KEY,
-          run_kind VARCHAR(40) NOT NULL,
-          owner_subject VARCHAR(128) NOT NULL,
-          request_hash VARCHAR(128) NOT NULL,
-          data_revision VARCHAR(128) NOT NULL,
-          engine_version VARCHAR(64) NOT NULL,
-          status VARCHAR(32) NOT NULL,
-          progress DOUBLE NOT NULL DEFAULT 0,
-          completed_candidates INT NOT NULL DEFAULT 0,
-          total_candidates INT NOT NULL DEFAULT 0,
-          current_validation_window VARCHAR(128) NULL,
-          input_json LONGTEXT NOT NULL,
-          summary_json LONGTEXT NULL,
-          result_json LONGTEXT NULL,
-          error_json LONGTEXT NULL,
-          warnings_json LONGTEXT NOT NULL,
-          name VARCHAR(200) NULL,
-          tags_json LONGTEXT NOT NULL,
-          archived_at BIGINT NULL,
-          deleted_at BIGINT NULL,
-          replay_of VARCHAR(64) NULL,
-          manifest_json LONGTEXT NULL,
-          created_at BIGINT NOT NULL,
-          started_at BIGINT NULL,
-          finished_at BIGINT NULL,
-          updated_at BIGINT NOT NULL,
-          UNIQUE KEY uq_portfolio_run_request (owner_subject, run_kind, request_hash, data_revision),
-          KEY idx_portfolio_run_status (owner_subject, status, updated_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await this.database.run(`
-        CREATE TABLE IF NOT EXISTS portfolio_run_events (
-          event_id VARCHAR(64) PRIMARY KEY,
-          run_id VARCHAR(64) NOT NULL,
-          event_type VARCHAR(64) NOT NULL,
-          event_json LONGTEXT NOT NULL,
-          created_at BIGINT NOT NULL,
-          KEY idx_portfolio_run_events (run_id, created_at),
-          CONSTRAINT fk_portfolio_run_events_run FOREIGN KEY (run_id)
-            REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      await applyPortfolioMigrations(this.database);
-      return;
-    }
-    const timestampType = this.database.dialect === "postgres" ? "BIGINT" : "INTEGER";
     await this.database.run(`
       CREATE TABLE IF NOT EXISTS portfolio_backtest_runs (
         run_id TEXT PRIMARY KEY,
@@ -274,14 +225,14 @@ export class RunRepository {
         warnings_json TEXT NOT NULL,
         name TEXT,
         tags_json TEXT NOT NULL DEFAULT '[]',
-        archived_at ${timestampType},
-        deleted_at ${timestampType},
+        archived_at BIGINT,
+        deleted_at BIGINT,
         replay_of TEXT,
         manifest_json TEXT,
-        created_at ${timestampType} NOT NULL,
-        started_at ${timestampType},
-        finished_at ${timestampType},
-        updated_at ${timestampType} NOT NULL,
+        created_at BIGINT NOT NULL,
+        started_at BIGINT,
+        finished_at BIGINT,
+        updated_at BIGINT NOT NULL,
         UNIQUE(owner_subject, run_kind, request_hash, data_revision)
       )
     `);
@@ -295,7 +246,7 @@ export class RunRepository {
         run_id TEXT NOT NULL REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE,
         event_type TEXT NOT NULL,
         event_json TEXT NOT NULL,
-        created_at ${timestampType} NOT NULL
+        created_at BIGINT NOT NULL
       )
     `);
     await this.database.run(`
@@ -344,24 +295,14 @@ export class RunRepository {
       now,
       now,
     ];
-    if (this.database.dialect === "mysql") {
-      await this.database.run(`
-        INSERT IGNORE INTO portfolio_backtest_runs (
-          run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
-          status, progress, completed_candidates, total_candidates, input_json,
-          warnings_json, name, tags_json, replay_of, manifest_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, values);
-    } else {
-      await this.database.run(`
-        INSERT INTO portfolio_backtest_runs (
-          run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
-          status, progress, completed_candidates, total_candidates, input_json,
-          warnings_json, name, tags_json, replay_of, manifest_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(owner_subject, run_kind, request_hash, data_revision) DO NOTHING
-      `, values);
-    }
+    await this.database.run(`
+      INSERT INTO portfolio_backtest_runs (
+        run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
+        status, progress, completed_candidates, total_candidates, input_json,
+        warnings_json, name, tags_json, replay_of, manifest_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(owner_subject, run_kind, request_hash, data_revision) DO NOTHING
+    `, values);
     let existing = await this.findByRequest(
       input.ownerSubject,
       input.kind,
@@ -435,22 +376,14 @@ export class RunRepository {
       now,
     ];
     return this.database.transaction(async (database) => {
-      const inserted = database.dialect === "mysql"
-        ? await database.run(`
-            INSERT IGNORE INTO portfolio_backtest_runs (
-              run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
-              status, progress, completed_candidates, total_candidates, input_json,
-              error_json, warnings_json, tags_json, manifest_json, created_at, finished_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, values)
-        : await database.run(`
-            INSERT INTO portfolio_backtest_runs (
-              run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
-              status, progress, completed_candidates, total_candidates, input_json,
-              error_json, warnings_json, tags_json, manifest_json, created_at, finished_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(owner_subject, run_kind, request_hash, data_revision) DO NOTHING
-          `, values);
+      const inserted = await database.run(`
+        INSERT INTO portfolio_backtest_runs (
+          run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
+          status, progress, completed_candidates, total_candidates, input_json,
+          error_json, warnings_json, tags_json, manifest_json, created_at, finished_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(owner_subject, run_kind, request_hash, data_revision) DO NOTHING
+      `, values);
       const created = inserted.affectedRows === 1;
       if (created) {
         await this.insertEvent(database, id, "created", {
@@ -659,10 +592,9 @@ export class RunRepository {
    * is never overwritten, including by later exports or deployments. */
   async finalizeManifest(runId: string, ownerSubject: string, manifest: unknown, now = Date.now()): Promise<unknown> {
     return this.database.transaction(async (database) => {
-      const lock = database.dialect === "sqlite" ? "" : " FOR UPDATE";
       const [row] = await database.query<{ manifest_json: string | null }>(`
         SELECT manifest_json FROM portfolio_backtest_runs
-        WHERE run_id = ? AND owner_subject = ? AND deleted_at IS NULL${lock}
+        WHERE run_id = ? AND owner_subject = ? AND deleted_at IS NULL FOR UPDATE
       `, [runId, ownerSubject]);
       if (!row) throw new Error("run을 찾을 수 없습니다.");
       const existing = parseJson(row.manifest_json);
@@ -688,12 +620,14 @@ export class RunRepository {
         WHERE run_id = ?
           AND owner_subject = ?
           AND deleted_at IS NULL
+          AND archived_at IS NULL
           AND replay_of IS NULL
           AND EXISTS (
             SELECT 1 FROM portfolio_backtest_runs source
             WHERE source.run_id = ?
               AND source.owner_subject = ?
               AND source.deleted_at IS NULL
+              AND source.archived_at IS NULL
           )
       `, [sourceRunId, now, runId, ownerSubject, sourceRunId, ownerSubject]);
       if (updated.affectedRows === 1) {
@@ -762,6 +696,7 @@ export class RunRepository {
             summary_json = NULL, result_json = NULL, error_json = NULL, warnings_json = '[]',
             started_at = NULL, finished_at = NULL, updated_at = ?
         WHERE run_id = ? AND owner_subject = ? AND status = ?
+          AND archived_at IS NULL
       `, [input.totalCandidates, now, input.runId, input.ownerSubject, input.expectedStatus]);
       if (updated.affectedRows !== 1) return false;
       await database.run(`

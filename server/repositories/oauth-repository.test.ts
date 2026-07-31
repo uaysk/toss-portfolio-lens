@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteDatabase } from "../database.js";
+import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { OAuthRepository, OAuthRepositoryError } from "./oauth-repository.js";
 
 function challenge(verifier: string): string {
@@ -8,14 +8,14 @@ function challenge(verifier: string): string {
 }
 
 describe("OAuthRepository", () => {
-  const databases: SqliteDatabase[] = [];
+  const databases: PGliteDatabase[] = [];
 
   afterEach(async () => {
     await Promise.all(databases.splice(0).map((database) => database.close()));
   });
 
   async function createRepository() {
-    const database = new SqliteDatabase(":memory:");
+    const database = new PGliteDatabase();
     databases.push(database);
     const repository = new OAuthRepository(database);
     await repository.ensureSchema();

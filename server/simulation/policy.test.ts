@@ -29,12 +29,12 @@ const presets: readonly SimulationPreset[] = [
 
 function model(loaded = true) {
   return {
-    model_id: "NeoQuasar/Kronos-base",
+    model_id: "amazon/chronos-2",
     model_revision: "revision-a",
-    tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base",
+    tokenizer_id: "NeoQuasar/Chronos2-Tokenizer-base",
     tokenizer_revision: "tokenizer-revision-a",
-    source_revision: "kronos-source-revision-a",
-    loader_version: "kronos-source-revision-a",
+    source_revision: "chronos2-source-revision-a",
+    loader_version: "chronos2-source-revision-a",
     license: "MIT",
     device: loaded ? "cuda" : "unavailable",
     dtype: "float32",
@@ -87,7 +87,7 @@ function series(
 
 function response(values: unknown[], loaded = true) {
   return {
-    schema_version: "scalping-ai/v1",
+    schema_version: "scalping-ai/v2",
     request_id: "forecast-1",
     mode: "forecast",
     status: loaded ? "available" : "unavailable",
@@ -272,7 +272,7 @@ describe("AI paper policy selection", () => {
       upProbability: 0.7,
       riskPenalty: 0.25,
       model: {
-        modelId: "NeoQuasar/Kronos-base",
+        modelId: "amazon/chronos-2",
         modelRevision: "revision-a",
         device: "cuda",
       },
@@ -308,14 +308,14 @@ describe("AI paper policy selection", () => {
     });
     expect(selectAiForecastSeries(fincast, {
       ...config,
-      modelLane: "kronos_base",
+      modelLane: "chronos2",
     })).toMatchObject({
       status: "unavailable",
       reason: "invalid_forecast_response",
     });
     expect(selectAiForecastSeries({
       ...fincast,
-      model: { ...fincast.model, fallback_from: "NeoQuasar/Kronos-base" },
+      model: { ...fincast.model, fallback_from: "amazon/chronos-2" },
     }, {
       ...config,
       modelLane: "fincast",
@@ -612,7 +612,7 @@ describe("AI paper policy actions", () => {
     expect(action.targetAllocationRate).toBeLessThan(aggressiveProfile.targetAllocationRate);
   });
 
-  it("uses optional Kronos path and volatility evidence to reduce stock allocation", () => {
+  it("uses optional Chronos-2 path and volatility evidence to reduce stock allocation", () => {
     const selection = availableSelection();
     selection.selected[0] = {
       ...selection.selected[0]!,

@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::control::{ComputeControl, checkpoint};
 use crate::date::parse_iso_date;
@@ -17,6 +20,254 @@ const MAX_TOTAL_BARS: usize = 2_000_000;
 const MAX_INDICATOR_DEFINITIONS: usize = 256;
 const MAX_VOLUME_PROFILE_BUCKETS: usize = 200;
 const MAX_VOLUME_PROFILE_OBSERVATIONS: usize = 20_000;
+const MAX_PRIMITIVE_CACHE_ENTRIES: usize = 128;
+const MAX_PRIMITIVE_CACHE_CELLS: usize = 2_000_000;
+const MAX_CALCULATION_CACHE_ENTRIES: usize = 64;
+const MAX_CALCULATION_CACHE_POINTS: usize = 250_000;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum SourceColumn {
+    Open,
+    High,
+    Low,
+    Close,
+    TypicalPrice,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum CachedPrimitive {
+    Column(SourceColumn),
+    TrueRange,
+    Atr { period: usize },
+    Ema { source: SourceColumn, period: usize },
+    RollingMean { source: SourceColumn, period: usize },
+    RollingPopulationStddev { source: SourceColumn, period: usize },
+    RollingMin { source: SourceColumn, period: usize },
+    RollingMax { source: SourceColumn, period: usize },
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct PrimitiveCacheKey {
+    input_digest: [u8; 32],
+    instrument_key: String,
+    primitive: CachedPrimitive,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct CalculationCacheKey {
+    input_digest: [u8; 32],
+    instrument_key: String,
+    calculation_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+enum PrimitiveCacheValue {
+    Dense(Arc<Vec<f64>>),
+    Optional(Arc<Vec<Option<f64>>>),
+}
+
+impl PrimitiveCacheValue {
+    fn cells(&self) -> usize {
+        match self {
+            Self::Dense(values) => values.len(),
+            Self::Optional(values) => values.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IndicatorCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub entries: usize,
+    pub cells: usize,
+    pub calculation_hits: u64,
+    pub calculation_misses: u64,
+    pub calculation_evictions: u64,
+    pub calculation_entries: usize,
+    pub calculation_points: usize,
+}
+
+#[derive(Debug, Default)]
+struct BoundedPrimitiveCache {
+    entries: HashMap<PrimitiveCacheKey, PrimitiveCacheValue>,
+    lru: VecDeque<PrimitiveCacheKey>,
+    cells: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl BoundedPrimitiveCache {
+    fn touch(&mut self, key: &PrimitiveCacheKey) {
+        if let Some(index) = self.lru.iter().position(|candidate| candidate == key) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(key.clone());
+    }
+
+    fn dense(&mut self, key: &PrimitiveCacheKey) -> Option<Arc<Vec<f64>>> {
+        let value = match self.entries.get(key) {
+            Some(PrimitiveCacheValue::Dense(values)) => Some(Arc::clone(values)),
+            _ => None,
+        };
+        if value.is_some() {
+            self.hits += 1;
+            self.touch(key);
+        } else {
+            self.misses += 1;
+        }
+        value
+    }
+
+    fn optional(&mut self, key: &PrimitiveCacheKey) -> Option<Arc<Vec<Option<f64>>>> {
+        let value = match self.entries.get(key) {
+            Some(PrimitiveCacheValue::Optional(values)) => Some(Arc::clone(values)),
+            _ => None,
+        };
+        if value.is_some() {
+            self.hits += 1;
+            self.touch(key);
+        } else {
+            self.misses += 1;
+        }
+        value
+    }
+
+    fn insert(&mut self, key: PrimitiveCacheKey, value: PrimitiveCacheValue) {
+        let value_cells = value.cells();
+        if value_cells > MAX_PRIMITIVE_CACHE_CELLS {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.cells = self.cells.saturating_sub(previous.cells());
+            if let Some(index) = self.lru.iter().position(|candidate| candidate == &key) {
+                self.lru.remove(index);
+            }
+        }
+        while self.entries.len() >= MAX_PRIMITIVE_CACHE_ENTRIES
+            || self.cells + value_cells > MAX_PRIMITIVE_CACHE_CELLS
+        {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.cells = self.cells.saturating_sub(previous.cells());
+                self.evictions += 1;
+            }
+        }
+        self.cells += value_cells;
+        self.lru.push_back(key.clone());
+        self.entries.insert(key, value);
+    }
+
+    fn stats(&self) -> IndicatorCacheStats {
+        IndicatorCacheStats {
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            entries: self.entries.len(),
+            cells: self.cells,
+            ..IndicatorCacheStats::default()
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BoundedCalculationCache {
+    entries: HashMap<CalculationCacheKey, Arc<ComputedSeries>>,
+    lru: VecDeque<CalculationCacheKey>,
+    points: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl BoundedCalculationCache {
+    fn get(&mut self, key: &CalculationCacheKey) -> Option<Arc<ComputedSeries>> {
+        let value = self.entries.get(key).map(Arc::clone);
+        if value.is_some() {
+            self.hits += 1;
+            if let Some(index) = self.lru.iter().position(|candidate| candidate == key) {
+                self.lru.remove(index);
+            }
+            self.lru.push_back(key.clone());
+        } else {
+            self.misses += 1;
+        }
+        value
+    }
+
+    fn insert(&mut self, key: CalculationCacheKey, value: Arc<ComputedSeries>) {
+        let value_points = value.points.len();
+        if value_points > MAX_CALCULATION_CACHE_POINTS {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.points = self.points.saturating_sub(previous.points.len());
+            if let Some(index) = self.lru.iter().position(|candidate| candidate == &key) {
+                self.lru.remove(index);
+            }
+        }
+        while self.entries.len() >= MAX_CALCULATION_CACHE_ENTRIES
+            || self.points + value_points > MAX_CALCULATION_CACHE_POINTS
+        {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.points = self.points.saturating_sub(previous.points.len());
+                self.evictions += 1;
+            }
+        }
+        self.points += value_points;
+        self.lru.push_back(key.clone());
+        self.entries.insert(key, value);
+    }
+}
+
+thread_local! {
+    static ACTIVE_INSTRUMENT_DIGESTS: RefCell<BTreeMap<String, [u8; 32]>> =
+        const { RefCell::new(BTreeMap::new()) };
+    static PRIMITIVE_CACHE: RefCell<BoundedPrimitiveCache> =
+        RefCell::new(BoundedPrimitiveCache::default());
+    static CALCULATION_CACHE: RefCell<BoundedCalculationCache> =
+        RefCell::new(BoundedCalculationCache::default());
+    static PRIMITIVE_CACHE_ENABLED: Cell<bool> = const { Cell::new(true) };
+}
+
+pub fn indicator_cache_stats() -> IndicatorCacheStats {
+    let mut stats = PRIMITIVE_CACHE.with(|cache| cache.borrow().stats());
+    CALCULATION_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        stats.calculation_hits = cache.hits;
+        stats.calculation_misses = cache.misses;
+        stats.calculation_evictions = cache.evictions;
+        stats.calculation_entries = cache.entries.len();
+        stats.calculation_points = cache.points;
+    });
+    stats
+}
+
+pub fn clear_indicator_cache() {
+    PRIMITIVE_CACHE.with(|cache| {
+        *cache.borrow_mut() = BoundedPrimitiveCache::default();
+    });
+    CALCULATION_CACHE.with(|cache| {
+        *cache.borrow_mut() = BoundedCalculationCache::default();
+    });
+}
+
+pub fn without_indicator_cache<T>(operation: impl FnOnce() -> T) -> T {
+    PRIMITIVE_CACHE_ENABLED.with(|enabled| {
+        let previous = enabled.replace(false);
+        let output = operation();
+        enabled.set(previous);
+        output
+    })
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1186,6 +1437,11 @@ struct ComputedSeries {
     insufficient_reason: &'static str,
 }
 
+enum CalculationPoints {
+    Owned(Vec<IndicatorPoint>),
+    Cached(Arc<ComputedSeries>),
+}
+
 fn price_indicator_supported(kind: IndicatorKind) -> bool {
     matches!(
         kind,
@@ -1244,38 +1500,193 @@ fn loop_checkpoint(control: Option<&dyn ComputeControl>, index: usize) -> Result
     Ok(())
 }
 
+fn instrument_input_digest(instrument: &InstrumentSeries) -> [u8; 32] {
+    let payload = serde_json::to_vec(instrument)
+        .expect("validated technical-analysis instruments are JSON serializable");
+    Sha256::digest(payload).into()
+}
+
+fn active_instrument_digest(instrument: &InstrumentSeries) -> [u8; 32] {
+    ACTIVE_INSTRUMENT_DIGESTS.with(|digests| {
+        digests
+            .borrow()
+            .get(&instrument.key)
+            .copied()
+            .unwrap_or_else(|| instrument_input_digest(instrument))
+    })
+}
+
+fn primitive_cache_key(
+    instrument: &InstrumentSeries,
+    primitive: CachedPrimitive,
+) -> PrimitiveCacheKey {
+    PrimitiveCacheKey {
+        input_digest: active_instrument_digest(instrument),
+        instrument_key: instrument.key.clone(),
+        primitive,
+    }
+}
+
+fn cached_dense(
+    instrument: &InstrumentSeries,
+    primitive: CachedPrimitive,
+    compute: impl FnOnce() -> Result<Vec<f64>>,
+) -> Result<Arc<Vec<f64>>> {
+    if !PRIMITIVE_CACHE_ENABLED.with(Cell::get) {
+        return compute().map(Arc::new);
+    }
+    let key = primitive_cache_key(instrument, primitive);
+    if let Some(values) = PRIMITIVE_CACHE.with(|cache| cache.borrow_mut().dense(&key)) {
+        return Ok(values);
+    }
+    let values = Arc::new(compute()?);
+    PRIMITIVE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(key, PrimitiveCacheValue::Dense(Arc::clone(&values)));
+    });
+    Ok(values)
+}
+
+fn cached_optional(
+    instrument: &InstrumentSeries,
+    primitive: CachedPrimitive,
+    compute: impl FnOnce() -> Result<Vec<Option<f64>>>,
+) -> Result<Arc<Vec<Option<f64>>>> {
+    if !PRIMITIVE_CACHE_ENABLED.with(Cell::get) {
+        return compute().map(Arc::new);
+    }
+    let key = primitive_cache_key(instrument, primitive);
+    if let Some(values) = PRIMITIVE_CACHE.with(|cache| cache.borrow_mut().optional(&key)) {
+        return Ok(values);
+    }
+    let values = Arc::new(compute()?);
+    PRIMITIVE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(key, PrimitiveCacheValue::Optional(Arc::clone(&values)));
+    });
+    Ok(values)
+}
+
+fn source_column(parameters: &BTreeMap<String, Value>) -> SourceColumn {
+    match parameters
+        .get("source")
+        .and_then(Value::as_str)
+        .expect("validated source parameter is required")
+    {
+        "open" => SourceColumn::Open,
+        "high" => SourceColumn::High,
+        "low" => SourceColumn::Low,
+        "close" => SourceColumn::Close,
+        "typical_price" => SourceColumn::TypicalPrice,
+        _ => unreachable!("catalog validation accepts only declared source values"),
+    }
+}
+
+fn column_values(instrument: &InstrumentSeries, source: SourceColumn) -> Result<Arc<Vec<f64>>> {
+    cached_dense(
+        instrument,
+        CachedPrimitive::Column(source),
+        || match source {
+            SourceColumn::Open => Ok(instrument.bars.iter().map(|bar| bar.open).collect()),
+            SourceColumn::High => Ok(instrument.bars.iter().map(|bar| bar.high).collect()),
+            SourceColumn::Low => Ok(instrument.bars.iter().map(|bar| bar.low).collect()),
+            SourceColumn::Close => Ok(instrument.bars.iter().map(|bar| bar.close).collect()),
+            SourceColumn::TypicalPrice => {
+                let high = column_values(instrument, SourceColumn::High)?;
+                let low = column_values(instrument, SourceColumn::Low)?;
+                let close = column_values(instrument, SourceColumn::Close)?;
+                primitives::typical_price(&high, &low, &close)
+            }
+        },
+    )
+}
+
+fn cached_true_range(instrument: &InstrumentSeries) -> Result<Arc<Vec<f64>>> {
+    cached_dense(instrument, CachedPrimitive::TrueRange, || {
+        let high = column_values(instrument, SourceColumn::High)?;
+        let low = column_values(instrument, SourceColumn::Low)?;
+        let close = column_values(instrument, SourceColumn::Close)?;
+        primitives::true_range(&high, &low, &close)
+    })
+}
+
+fn cached_atr(instrument: &InstrumentSeries, period: usize) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(instrument, CachedPrimitive::Atr { period }, || {
+        let true_range = cached_true_range(instrument)?;
+        primitives::wilder_smoothing(&true_range, period)
+    })
+}
+
+fn cached_ema(
+    instrument: &InstrumentSeries,
+    source: SourceColumn,
+    period: usize,
+    values: &[f64],
+) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(instrument, CachedPrimitive::Ema { source, period }, || {
+        primitives::ema(values, period)
+    })
+}
+
+fn cached_rolling_mean(
+    instrument: &InstrumentSeries,
+    source: SourceColumn,
+    period: usize,
+    values: &[f64],
+) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(
+        instrument,
+        CachedPrimitive::RollingMean { source, period },
+        || primitives::rolling_mean(values, period),
+    )
+}
+
+fn cached_rolling_population_stddev(
+    instrument: &InstrumentSeries,
+    source: SourceColumn,
+    period: usize,
+    values: &[f64],
+) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(
+        instrument,
+        CachedPrimitive::RollingPopulationStddev { source, period },
+        || primitives::rolling_population_stddev(values, period),
+    )
+}
+
+fn cached_rolling_min(
+    instrument: &InstrumentSeries,
+    source: SourceColumn,
+    period: usize,
+    values: &[f64],
+) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(
+        instrument,
+        CachedPrimitive::RollingMin { source, period },
+        || primitives::rolling_min(values, period),
+    )
+}
+
+fn cached_rolling_max(
+    instrument: &InstrumentSeries,
+    source: SourceColumn,
+    period: usize,
+    values: &[f64],
+) -> Result<Arc<Vec<Option<f64>>>> {
+    cached_optional(
+        instrument,
+        CachedPrimitive::RollingMax { source, period },
+        || primitives::rolling_max(values, period),
+    )
+}
+
 fn selected_source(
     instrument: &InstrumentSeries,
     parameters: &BTreeMap<String, Value>,
-) -> Result<Vec<f64>> {
-    let source = parameters
-        .get("source")
-        .and_then(Value::as_str)
-        .context("normalized source parameter is required")?;
-    match source {
-        "open" => Ok(instrument.bars.iter().map(|bar| bar.open).collect()),
-        "high" => Ok(instrument.bars.iter().map(|bar| bar.high).collect()),
-        "low" => Ok(instrument.bars.iter().map(|bar| bar.low).collect()),
-        "close" => Ok(instrument.bars.iter().map(|bar| bar.close).collect()),
-        "typical_price" => primitives::typical_price(
-            &instrument
-                .bars
-                .iter()
-                .map(|bar| bar.high)
-                .collect::<Vec<_>>(),
-            &instrument
-                .bars
-                .iter()
-                .map(|bar| bar.low)
-                .collect::<Vec<_>>(),
-            &instrument
-                .bars
-                .iter()
-                .map(|bar| bar.close)
-                .collect::<Vec<_>>(),
-        ),
-        _ => unreachable!("catalog validation accepts only declared source values"),
-    }
+) -> Result<Arc<Vec<f64>>> {
+    column_values(instrument, source_column(parameters))
 }
 
 fn numeric_values(entries: impl IntoIterator<Item = (&'static str, f64)>) -> BTreeMap<String, f64> {
@@ -1337,7 +1748,7 @@ fn points_from_values(
 }
 
 fn single_output(
-    values: Vec<Option<f64>>,
+    values: impl IntoIterator<Item = Option<f64>>,
     name: &'static str,
 ) -> Vec<Option<BTreeMap<String, f64>>> {
     values
@@ -1351,8 +1762,10 @@ fn compute_sma(
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
     let values = selected_source(instrument, &definition.parameters)?;
+    let source = source_column(&definition.parameters);
     let period = parameter_usize(&definition.parameters, "period");
-    let values = single_output(primitives::rolling_mean(&values, period)?, "value");
+    let values = cached_rolling_mean(instrument, source, period, &values)?;
+    let values = single_output(values.iter().copied(), "value");
     Ok(ComputedSeries {
         points: points_from_values(instrument, definition.kind, values, None)?,
         observed_observations: instrument.bars.len(),
@@ -1365,8 +1778,10 @@ fn compute_ema(
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
     let values = selected_source(instrument, &definition.parameters)?;
+    let source = source_column(&definition.parameters);
     let period = parameter_usize(&definition.parameters, "period");
-    let values = single_output(primitives::ema(&values, period)?, "value");
+    let values = cached_ema(instrument, source, period, &values)?;
+    let values = single_output(values.iter().copied(), "value");
     Ok(ComputedSeries {
         points: points_from_values(instrument, definition.kind, values, None)?,
         observed_observations: instrument.bars.len(),
@@ -1412,11 +1827,12 @@ fn compute_macd(
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
     let source = selected_source(instrument, &definition.parameters)?;
+    let source_column = source_column(&definition.parameters);
     let fast_period = parameter_usize(&definition.parameters, "fast_period");
     let slow_period = parameter_usize(&definition.parameters, "slow_period");
     let signal_period = parameter_usize(&definition.parameters, "signal_period");
-    let fast = primitives::ema(&source, fast_period)?;
-    let slow = primitives::ema(&source, slow_period)?;
+    let fast = cached_ema(instrument, source_column, fast_period, &source)?;
+    let slow = cached_ema(instrument, source_column, slow_period, &source)?;
     let mut macd = vec![None; source.len()];
     for index in 0..source.len() {
         if let (Some(fast), Some(slow)) = (fast[index], slow[index]) {
@@ -1455,13 +1871,15 @@ fn compute_bollinger_bands(
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
     let source = selected_source(instrument, &definition.parameters)?;
+    let source_column = source_column(&definition.parameters);
     let period = parameter_usize(&definition.parameters, "period");
     let multiplier = definition.parameters["stddev_multiplier"].as_f64().unwrap();
-    let means = primitives::rolling_mean(&source, period)?;
-    let deviations = primitives::rolling_population_stddev(&source, period)?;
+    let means = cached_rolling_mean(instrument, source_column, period, &source)?;
+    let deviations = cached_rolling_population_stddev(instrument, source_column, period, &source)?;
     let values = means
-        .into_iter()
-        .zip(deviations)
+        .iter()
+        .copied()
+        .zip(deviations.iter().copied())
         .map(|(mean, deviation)| {
             mean.zip(deviation).map(|(middle, deviation)| {
                 numeric_values([
@@ -1483,24 +1901,9 @@ fn compute_atr(
     instrument: &InstrumentSeries,
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
-    let high = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.high)
-        .collect::<Vec<_>>();
-    let low = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.low)
-        .collect::<Vec<_>>();
-    let close = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.close)
-        .collect::<Vec<_>>();
     let period = parameter_usize(&definition.parameters, "period");
-    let true_range = primitives::true_range(&high, &low, &close)?;
-    let values = single_output(primitives::wilder_smoothing(&true_range, period)?, "atr");
+    let atr = cached_atr(instrument, period)?;
+    let values = single_output(atr.iter().copied(), "atr");
     Ok(ComputedSeries {
         points: points_from_values(instrument, definition.kind, values, None)?,
         observed_observations: instrument.bars.len(),
@@ -1512,22 +1915,15 @@ fn compute_donchian(
     instrument: &InstrumentSeries,
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
-    let high = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.high)
-        .collect::<Vec<_>>();
-    let low = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.low)
-        .collect::<Vec<_>>();
+    let high = column_values(instrument, SourceColumn::High)?;
+    let low = column_values(instrument, SourceColumn::Low)?;
     let period = parameter_usize(&definition.parameters, "period");
-    let upper = primitives::rolling_max(&high, period)?;
-    let lower = primitives::rolling_min(&low, period)?;
+    let upper = cached_rolling_max(instrument, SourceColumn::High, period, &high)?;
+    let lower = cached_rolling_min(instrument, SourceColumn::Low, period, &low)?;
     let values = upper
-        .into_iter()
-        .zip(lower)
+        .iter()
+        .copied()
+        .zip(lower.iter().copied())
         .map(|(upper, lower)| {
             upper.zip(lower).map(|(upper, lower)| {
                 numeric_values([
@@ -1589,22 +1985,15 @@ fn compute_fifty_two_week_position(
     instrument: &InstrumentSeries,
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
-    let high = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.high)
-        .collect::<Vec<_>>();
-    let low = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.low)
-        .collect::<Vec<_>>();
+    let high = column_values(instrument, SourceColumn::High)?;
+    let low = column_values(instrument, SourceColumn::Low)?;
     let period = parameter_usize(&definition.parameters, "period");
-    let rolling_high = primitives::rolling_max(&high, period)?;
-    let rolling_low = primitives::rolling_min(&low, period)?;
+    let rolling_high = cached_rolling_max(instrument, SourceColumn::High, period, &high)?;
+    let rolling_low = cached_rolling_min(instrument, SourceColumn::Low, period, &low)?;
     let values = rolling_high
-        .into_iter()
-        .zip(rolling_low)
+        .iter()
+        .copied()
+        .zip(rolling_low.iter().copied())
         .enumerate()
         .map(|(index, (high, low))| {
             high.zip(low).map(|(high, low)| {
@@ -1633,15 +2022,17 @@ fn compute_moving_average_distance(
     definition: &ValidatedIndicatorDefinition,
 ) -> Result<ComputedSeries> {
     let source = selected_source(instrument, &definition.parameters)?;
+    let source_column = source_column(&definition.parameters);
     let period = parameter_usize(&definition.parameters, "period");
     let averages = match definition.parameters["average_type"].as_str().unwrap() {
-        "sma" => primitives::rolling_mean(&source, period)?,
-        "ema" => primitives::ema(&source, period)?,
+        "sma" => cached_rolling_mean(instrument, source_column, period, &source)?,
+        "ema" => cached_ema(instrument, source_column, period, &source)?,
         _ => unreachable!("catalog validation accepts only SMA or EMA"),
     };
     let values = averages
-        .into_iter()
-        .zip(source)
+        .iter()
+        .copied()
+        .zip(source.iter().copied())
         .map(|(average, source)| {
             average.map(|average| {
                 numeric_values([
@@ -1658,11 +2049,15 @@ fn compute_moving_average_distance(
     })
 }
 
-fn ohlc_columns(instrument: &InstrumentSeries) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let high = instrument.bars.iter().map(|bar| bar.high).collect();
-    let low = instrument.bars.iter().map(|bar| bar.low).collect();
-    let close = instrument.bars.iter().map(|bar| bar.close).collect();
-    (high, low, close)
+type DenseColumn = Arc<Vec<f64>>;
+type OhlcColumns = (DenseColumn, DenseColumn, DenseColumn);
+
+fn ohlc_columns(instrument: &InstrumentSeries) -> Result<OhlcColumns> {
+    Ok((
+        column_values(instrument, SourceColumn::High)?,
+        column_values(instrument, SourceColumn::Low)?,
+        column_values(instrument, SourceColumn::Close)?,
+    ))
 }
 
 fn compute_adx_dmi(
@@ -1670,7 +2065,7 @@ fn compute_adx_dmi(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let (high, low, close) = ohlc_columns(instrument)?;
     let period = parameter_usize(&definition.parameters, "period");
     let mut true_ranges = Vec::with_capacity(instrument.bars.len().saturating_sub(1));
     let mut plus_movements = Vec::with_capacity(true_ranges.capacity());
@@ -1760,12 +2155,12 @@ fn compute_stochastic_oscillator(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let (high, low, close) = ohlc_columns(instrument)?;
     let lookback = parameter_usize(&definition.parameters, "lookback_period");
     let smooth_k = parameter_usize(&definition.parameters, "smooth_k");
     let smooth_d = parameter_usize(&definition.parameters, "smooth_d");
-    let rolling_high = primitives::rolling_max(&high, lookback)?;
-    let rolling_low = primitives::rolling_min(&low, lookback)?;
+    let rolling_high = cached_rolling_max(instrument, SourceColumn::High, lookback, &high)?;
+    let rolling_low = cached_rolling_min(instrument, SourceColumn::Low, lookback, &low)?;
     let mut raw_k = Vec::with_capacity(instrument.bars.len().saturating_sub(lookback - 1));
     for index in lookback - 1..instrument.bars.len() {
         loop_checkpoint(control, index)?;
@@ -1835,13 +2230,12 @@ fn compute_keltner_channel(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let close = column_values(instrument, SourceColumn::Close)?;
     let ema_period = parameter_usize(&definition.parameters, "ema_period");
     let atr_period = parameter_usize(&definition.parameters, "atr_period");
     let multiplier = definition.parameters["multiplier"].as_f64().unwrap();
-    let middle = primitives::ema(&close, ema_period)?;
-    let true_range = primitives::true_range(&high, &low, &close)?;
-    let atr = primitives::wilder_smoothing(&true_range, atr_period)?;
+    let middle = cached_ema(instrument, SourceColumn::Close, ema_period, &close)?;
+    let atr = cached_atr(instrument, atr_period)?;
     let mut values = vec![None; instrument.bars.len()];
     for (index, value) in values.iter_mut().enumerate() {
         loop_checkpoint(control, index)?;
@@ -1865,11 +2259,10 @@ fn compute_supertrend(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let (high, low, close) = ohlc_columns(instrument)?;
     let period = parameter_usize(&definition.parameters, "atr_period");
     let multiplier = definition.parameters["multiplier"].as_f64().unwrap();
-    let true_range = primitives::true_range(&high, &low, &close)?;
-    let atr = primitives::wilder_smoothing(&true_range, period)?;
+    let atr = cached_atr(instrument, period)?;
     let mut values = vec![None; instrument.bars.len()];
     let Some(first) = atr.iter().position(Option::is_some) else {
         return Ok(ComputedSeries {
@@ -1932,11 +2325,7 @@ fn compute_historical_volatility(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let close = instrument
-        .bars
-        .iter()
-        .map(|bar| bar.close)
-        .collect::<Vec<_>>();
+    let close = column_values(instrument, SourceColumn::Close)?;
     let period = parameter_usize(&definition.parameters, "period");
     let annualization = parameter_usize(&definition.parameters, "annualization") as f64;
     let return_type = definition.parameters["return_type"].as_str().unwrap();
@@ -1973,10 +2362,9 @@ fn compute_normalized_atr(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let close = column_values(instrument, SourceColumn::Close)?;
     let period = parameter_usize(&definition.parameters, "period");
-    let true_range = primitives::true_range(&high, &low, &close)?;
-    let atr = primitives::wilder_smoothing(&true_range, period)?;
+    let atr = cached_atr(instrument, period)?;
     let mut values = vec![None; instrument.bars.len()];
     for (index, value) in values.iter_mut().enumerate() {
         loop_checkpoint(control, index)?;
@@ -1997,10 +2385,11 @@ fn compute_bollinger_band_width_percent_b(
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
     let source = selected_source(instrument, &definition.parameters)?;
+    let source_column = source_column(&definition.parameters);
     let period = parameter_usize(&definition.parameters, "period");
     let multiplier = definition.parameters["stddev_multiplier"].as_f64().unwrap();
-    let middle = primitives::rolling_mean(&source, period)?;
-    let deviation = primitives::rolling_population_stddev(&source, period)?;
+    let middle = cached_rolling_mean(instrument, source_column, period, &source)?;
+    let deviation = cached_rolling_population_stddev(instrument, source_column, period, &source)?;
     let mut values = vec![None; source.len()];
     for index in 0..source.len() {
         loop_checkpoint(control, index)?;
@@ -2091,11 +2480,10 @@ fn compute_cci(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
     let period = parameter_usize(&definition.parameters, "period");
     let constant = definition.parameters["constant"].as_f64().unwrap();
-    let typical = primitives::typical_price(&high, &low, &close)?;
-    let means = primitives::rolling_mean(&typical, period)?;
+    let typical = column_values(instrument, SourceColumn::TypicalPrice)?;
+    let means = cached_rolling_mean(instrument, SourceColumn::TypicalPrice, period, &typical)?;
     let deviations = primitives::rolling_mean_absolute_deviation(&typical, period)?;
     let mut values = vec![None; instrument.bars.len()];
     for index in 0..instrument.bars.len() {
@@ -2121,10 +2509,10 @@ fn compute_williams_r(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let (high, low, close) = ohlc_columns(instrument)?;
     let period = parameter_usize(&definition.parameters, "period");
-    let rolling_high = primitives::rolling_max(&high, period)?;
-    let rolling_low = primitives::rolling_min(&low, period)?;
+    let rolling_high = cached_rolling_max(instrument, SourceColumn::High, period, &high)?;
+    let rolling_low = cached_rolling_min(instrument, SourceColumn::Low, period, &low)?;
     let mut values = vec![None; instrument.bars.len()];
     for index in 0..instrument.bars.len() {
         loop_checkpoint(control, index)?;
@@ -2229,12 +2617,13 @@ fn compute_choppiness_index(
     definition: &ValidatedIndicatorDefinition,
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedSeries> {
-    let (high, low, close) = ohlc_columns(instrument);
+    let high = column_values(instrument, SourceColumn::High)?;
+    let low = column_values(instrument, SourceColumn::Low)?;
     let period = parameter_usize(&definition.parameters, "period");
-    let true_range = primitives::true_range(&high, &low, &close)?;
+    let true_range = cached_true_range(instrument)?;
     let range_sum = primitives::rolling_sum(&true_range, period)?;
-    let rolling_high = primitives::rolling_max(&high, period)?;
-    let rolling_low = primitives::rolling_min(&low, period)?;
+    let rolling_high = cached_rolling_max(instrument, SourceColumn::High, period, &high)?;
+    let rolling_low = cached_rolling_min(instrument, SourceColumn::Low, period, &low)?;
     let mut values = vec![None; instrument.bars.len()];
     for index in 0..instrument.bars.len() {
         loop_checkpoint(control, index)?;
@@ -2422,8 +2811,7 @@ fn compute_mfi(
     control: Option<&dyn ComputeControl>,
 ) -> Result<ComputedVolumeSeries> {
     let period = parameter_usize(&definition.parameters, "period");
-    let (high, low, close) = ohlc_columns(instrument);
-    let typical_price = primitives::typical_price(&high, &low, &close)?;
+    let typical_price = column_values(instrument, SourceColumn::TypicalPrice)?;
     let volume = volume_columns(instrument);
     let mut raw_flows = vec![None; instrument.bars.len()];
     for index in 1..instrument.bars.len() {
@@ -2610,8 +2998,7 @@ fn compute_vwap_anchored_vwap(
     let mode = definition.parameters["mode"].as_str().unwrap();
     let anchor = definition.parameters["anchor"].as_str().unwrap();
     let lookback = parameter_usize(&definition.parameters, "lookback_period");
-    let (high, low, close) = ohlc_columns(instrument);
-    let prices = primitives::typical_price(&high, &low, &close)?;
+    let prices = column_values(instrument, SourceColumn::TypicalPrice)?;
     let mut weighted_prefix = vec![0.0; instrument.bars.len() + 1];
     let mut volume_prefix = vec![0.0; instrument.bars.len() + 1];
     let mut missing_prefix = vec![0_usize; instrument.bars.len() + 1];
@@ -2769,14 +3156,19 @@ fn compute_volume_profile(
     let value_area_percent = definition.parameters["value_area_percent"]
         .as_f64()
         .unwrap();
-    let (high, low, close) = ohlc_columns(instrument);
+    let close = column_values(instrument, SourceColumn::Close)?;
     let prices = if price_source == "close" {
         close
     } else {
-        primitives::typical_price(&high, &low, &close)?
+        column_values(instrument, SourceColumn::TypicalPrice)?
     };
     let mut observations = Vec::new();
-    for (index, (bar, price)) in instrument.bars.iter().zip(prices).enumerate() {
+    for (index, (bar, price)) in instrument
+        .bars
+        .iter()
+        .zip(prices.iter().copied())
+        .enumerate()
+    {
         loop_checkpoint(control, index)?;
         if let Some(volume) = bar.volume {
             observations.push((price, volume));
@@ -2993,7 +3385,59 @@ fn compute_volume_indicator(
     }
 }
 
+fn calculation_cache_key(
+    instrument: &InstrumentSeries,
+    definition: &ValidatedIndicatorDefinition,
+    instruments: &BTreeMap<&str, &InstrumentSeries>,
+) -> Result<CalculationCacheKey> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"technical-indicator-calculation/v1\0");
+    hasher.update(serde_json::to_vec(&definition.kind)?);
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(&definition.parameters)?);
+    if definition.kind == IndicatorKind::BenchmarkRelativeStrength {
+        let benchmark_key = definition.parameters["benchmark_key"]
+            .as_str()
+            .context("validated benchmark key is required")?;
+        let benchmark = instruments
+            .get(benchmark_key)
+            .context("validated benchmark instrument must exist")?;
+        hasher.update(active_instrument_digest(benchmark));
+    }
+    Ok(CalculationCacheKey {
+        input_digest: active_instrument_digest(instrument),
+        instrument_key: instrument.key.clone(),
+        calculation_digest: hasher.finalize().into(),
+    })
+}
+
 fn compute_price_indicator(
+    instrument: &InstrumentSeries,
+    definition: &ValidatedIndicatorDefinition,
+    instruments: &BTreeMap<&str, &InstrumentSeries>,
+    control: Option<&dyn ComputeControl>,
+) -> Result<Arc<ComputedSeries>> {
+    if !PRIMITIVE_CACHE_ENABLED.with(Cell::get) {
+        return compute_price_indicator_uncached(instrument, definition, instruments, control)
+            .map(Arc::new);
+    }
+    let key = calculation_cache_key(instrument, definition, instruments)?;
+    if let Some(computed) = CALCULATION_CACHE.with(|cache| cache.borrow_mut().get(&key)) {
+        return Ok(computed);
+    }
+    let computed = Arc::new(compute_price_indicator_uncached(
+        instrument,
+        definition,
+        instruments,
+        control,
+    )?);
+    CALCULATION_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, Arc::clone(&computed));
+    });
+    Ok(computed)
+}
+
+fn compute_price_indicator_uncached(
     instrument: &InstrumentSeries,
     definition: &ValidatedIndicatorDefinition,
     instruments: &BTreeMap<&str, &InstrumentSeries>,
@@ -3045,6 +3489,24 @@ pub fn analyze(
 ) -> Result<TechnicalAnalysisResult> {
     checkpoint(control)?;
     let definitions = validate_request(request)?;
+    let digests = request
+        .instruments
+        .iter()
+        .map(|instrument| (instrument.key.clone(), instrument_input_digest(instrument)))
+        .collect::<BTreeMap<_, _>>();
+    let previous_digests = ACTIVE_INSTRUMENT_DIGESTS.with(|active| active.replace(digests));
+    let result = analyze_validated(request, &definitions, control);
+    ACTIVE_INSTRUMENT_DIGESTS.with(|active| {
+        active.replace(previous_digests);
+    });
+    result
+}
+
+fn analyze_validated(
+    request: &TechnicalAnalysisRequest,
+    definitions: &[ValidatedIndicatorDefinition],
+    control: Option<&dyn ComputeControl>,
+) -> Result<TechnicalAnalysisResult> {
     let instruments_by_key = request
         .instruments
         .iter()
@@ -3054,7 +3516,7 @@ pub fn analyze(
     instruments.sort_by(|left, right| left.key.cmp(&right.key));
     let mut calculations = Vec::new();
     for instrument in instruments {
-        for definition in &definitions {
+        for definition in definitions {
             if !definition.instrument_keys.contains(&instrument.key) {
                 continue;
             }
@@ -3105,7 +3567,13 @@ pub fn analyze(
                         },
                         first_available_date,
                     };
-                    (computed.points, availability, warmup, BTreeMap::new(), None)
+                    (
+                        CalculationPoints::Cached(computed),
+                        availability,
+                        warmup,
+                        BTreeMap::new(),
+                        None,
+                    )
                 } else if volume_indicator_supported(definition.kind)
                     && instrument_supports_volume_indicators(instrument.instrument_type)
                 {
@@ -3210,7 +3678,7 @@ pub fn analyze(
                         first_available_date,
                     };
                     (
-                        computed.points,
+                        CalculationPoints::Owned(computed.points),
                         availability,
                         warmup,
                         computed.metadata,
@@ -3236,7 +3704,7 @@ pub fn analyze(
                         ));
                     }
                     (
-                        points,
+                        CalculationPoints::Owned(points),
                         Availability {
                             status: if volume_indicator_supported(definition.kind) {
                                 AvailabilityStatus::UnsupportedInstrument
@@ -3273,7 +3741,13 @@ pub fn analyze(
                     )
                 };
             let (points, latest, profile) = match request.response_mode {
-                ResponseMode::FullSeries => (Some(full_points), None, profile),
+                ResponseMode::FullSeries => {
+                    let points = match full_points {
+                        CalculationPoints::Owned(points) => points,
+                        CalculationPoints::Cached(computed) => computed.points.clone(),
+                    };
+                    (Some(points), None, profile)
+                }
                 ResponseMode::LatestSummary => {
                     let mut summary_profile = profile;
                     if let Some(profile) = &mut summary_profile {
@@ -3281,7 +3755,11 @@ pub fn analyze(
                         metadata
                             .insert("profile_buckets".into(), json!("omitted_in_latest_summary"));
                     }
-                    (None, full_points.last().cloned(), summary_profile)
+                    let latest = match &full_points {
+                        CalculationPoints::Owned(points) => points.last().cloned(),
+                        CalculationPoints::Cached(computed) => computed.points.last().cloned(),
+                    };
+                    (None, latest, summary_profile)
                 }
             };
             calculations.push(IndicatorCalculation {
@@ -3971,6 +4449,44 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("finite and positive")
+        );
+    }
+
+    #[test]
+    fn primitive_cache_reuses_identical_inputs_and_invalidates_changed_digest() {
+        clear_indicator_cache();
+        let request = request(ResponseMode::FullSeries);
+        let first = analyze(&request, None).unwrap();
+        let after_first = indicator_cache_stats();
+        let second = analyze(&request, None).unwrap();
+        let after_second = indicator_cache_stats();
+
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+        assert!(
+            after_second.hits + after_second.calculation_hits
+                > after_first.hits + after_first.calculation_hits
+        );
+        assert!(after_second.entries <= MAX_PRIMITIVE_CACHE_ENTRIES);
+        assert!(after_second.cells <= MAX_PRIMITIVE_CACHE_CELLS);
+        assert!(after_second.calculation_entries <= MAX_CALCULATION_CACHE_ENTRIES);
+        assert!(after_second.calculation_points <= MAX_CALCULATION_CACHE_POINTS);
+
+        let mut changed = request;
+        changed.instruments[1].bars[0].close += 0.25;
+        changed.instruments[1].bars[0].high += 0.25;
+        let before_changed = indicator_cache_stats();
+        let changed_result = analyze(&changed, None).unwrap();
+        let after_changed = indicator_cache_stats();
+        assert_ne!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(changed_result).unwrap()
+        );
+        assert!(
+            after_changed.misses + after_changed.calculation_misses
+                > before_changed.misses + before_changed.calculation_misses
         );
     }
 
