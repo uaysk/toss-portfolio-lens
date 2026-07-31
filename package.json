@@ -17,6 +17,8 @@
     "test:release-tools": "node --test scripts/*.test.mjs",
     "test": "node scripts/run-vitest-batches.mjs --group all",
     "test:unit": "node scripts/run-vitest-batches.mjs --group unit",
+    "test:light": "node scripts/run-vitest-batches.mjs --group light",
+    "test:heavy": "node scripts/run-vitest-batches.mjs --group heavy",
     "test:pglite": "node scripts/run-vitest-batches.mjs --group pglite",
     "check": "npm run build && npm run check:bundle && npm run check:legacy && npm run typecheck:tools && npm run docs:mcp:check",
     "test:postgres": "tsx scripts/verify-postgres-storage.ts",

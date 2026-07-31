@@ -46,10 +46,18 @@ test("plans light batches for parallel execution and heavy/PGlite files one at a
     planBatches(files, "unit", 2).flatMap(({ files: batchFiles }) => batchFiles),
     ["a.test.ts", "b.test.ts", "c.test.ts", "crypto.test.ts"],
   );
+  assert.deepEqual(planBatches(files, "light", 2), [
+    { ordinal: 1, name: "light-1", lane: "light", files: ["a.test.ts", "b.test.ts"] },
+    { ordinal: 2, name: "light-2", lane: "light", files: ["c.test.ts"] },
+  ]);
+  assert.deepEqual(planBatches(files, "heavy", 2), [
+    { ordinal: 1, name: "heavy-1", lane: "heavy", files: ["crypto.test.ts"] },
+  ]);
   assert.deepEqual(
     planBatches(files, "pglite", 2).flatMap(({ files: batchFiles }) => batchFiles),
     ["database.test.ts"],
   );
+  assert.deepEqual(planBatches(files, "unknown", 2), []);
 });
 
 test("caps light parallelism by the smaller detected or explicit memory budget", () => {

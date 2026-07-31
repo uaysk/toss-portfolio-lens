@@ -28,6 +28,13 @@ const HEAVY_FILE_BYTES = 64 * 1_024;
 const REPORT_PATH = ".cache/performance/vitest-batches.json";
 const RSS_SAMPLE_INTERVAL_MS = 250;
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const GROUP_LANES = Object.freeze({
+  all: Object.freeze(["light", "heavy", "pglite"]),
+  unit: Object.freeze(["light", "heavy"]),
+  light: Object.freeze(["light"]),
+  heavy: Object.freeze(["heavy"]),
+  pglite: Object.freeze(["pglite"]),
+});
 
 function argumentValue(arguments_, name) {
   const assignment = arguments_.find((value) => value.startsWith(`${name}=`));
@@ -83,25 +90,26 @@ function chunks(values, size) {
 }
 
 export function planBatches(files, group, unitBatchSize = UNIT_BATCH_SIZE) {
+  const selectedLanes = new Set(GROUP_LANES[group] ?? []);
   const lightFiles = files.filter(({ lane }) => lane === "light").map(({ path }) => path);
   const heavyFiles = files.filter(({ lane }) => lane === "heavy").map(({ path }) => path);
   const pgliteFiles = files.filter(({ lane }) => lane === "pglite").map(({ path }) => path);
   const batches = [
-    ...(group === "all" || group === "unit"
+    ...(selectedLanes.has("light")
       ? chunks(lightFiles, unitBatchSize).map((batch, index) => ({
           name: `light-${index + 1}`,
           lane: "light",
           files: batch,
         }))
       : []),
-    ...(group === "all" || group === "unit"
+    ...(selectedLanes.has("heavy")
       ? heavyFiles.map((path, index) => ({
           name: `heavy-${index + 1}`,
           lane: "heavy",
           files: [path],
         }))
       : []),
-    ...(group === "all" || group === "pglite"
+    ...(selectedLanes.has("pglite")
       ? pgliteFiles.map((path, index) => ({
           name: `pglite-${index + 1}`,
           lane: "pglite",
@@ -416,7 +424,7 @@ function writeReport(report) {
 
 export async function main(arguments_ = process.argv.slice(2), environment = process.env) {
   const group = argumentValue(arguments_, "--group") ?? "all";
-  const validGroups = new Set(["all", "unit", "pglite"]);
+  const validGroups = new Set(Object.keys(GROUP_LANES));
   if (!validGroups.has(group)) throw new Error(`Unknown Vitest group: ${group}`);
   const startBatch = positiveInteger(
     argumentValue(arguments_, "--start-batch") ?? "1",

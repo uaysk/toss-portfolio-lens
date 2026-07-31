@@ -33,12 +33,26 @@ jobs:
       - run: docker build --target verify .
       - run: docker build --target runtime-verify .
 
-  node-unit:
+  node-vitest:
+    name: node-vitest (${{ matrix.lane }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: light
+            memory_budget_mb: "4096"
+            max_parallel: "3"
+          - lane: heavy
+            memory_budget_mb: "2048"
+            max_parallel: "1"
+          - lane: pglite
+            memory_budget_mb: "2048"
+            max_parallel: "1"
     env:
-      VITEST_MEMORY_BUDGET_MB: "4096"
-      VITEST_MAX_PARALLEL: "3"
+      VITEST_MEMORY_BUDGET_MB: ${{ matrix.memory_budget_mb }}
+      VITEST_MAX_PARALLEL: ${{ matrix.max_parallel }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,33 +60,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node --test scripts/run-vitest-batches.test.mjs
-      - run: npm run test:unit
+      - run: npm run test:${{ matrix.lane }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: vitest-unit-performance
-          path: .cache/performance/vitest-batches.json
-          if-no-files-found: error
-
-  node-pglite:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      VITEST_MEMORY_BUDGET_MB: "2048"
-      VITEST_MAX_PARALLEL: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run test:pglite
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: vitest-pglite-performance
+          name: vitest-${{ matrix.lane }}-performance
           path: .cache/performance/vitest-batches.json
           if-no-files-found: error
 
@@ -160,6 +152,18 @@ jobs:
           name: rust-indicator-performance
           path: .cache/performance/rust-indicator-cache.json
           if-no-files-found: error
+
+  cnpg-backup-retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test and build scratch retention image
+        run: >-
+          docker build
+          --build-arg APP_GIT_SHA=${{ github.sha }}
+          -t toss-portfolio-lens-cnpg-backup-retention:${{ github.sha }}
+          infra/homelab/cnpg-backup-retention
 
   python-ai-contract:
     runs-on: ubuntu-latest

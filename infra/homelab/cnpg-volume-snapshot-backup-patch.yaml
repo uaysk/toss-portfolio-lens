@@ -1,0 +1,10 @@
+spec:
+  backup:
+    volumeSnapshot:
+      className: rook-ceph-rbd-cnpg-managed
+      walClassName: rook-ceph-rbd-cnpg-managed
+      snapshotOwnerReference: backup
+      online: true
+      onlineConfiguration:
+        immediateCheckpoint: true
+        waitForArchive: true

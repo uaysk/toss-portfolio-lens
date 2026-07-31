@@ -431,9 +431,17 @@ cargo fmt --manifest-path worker/rust/Cargo.toml --check
 cargo clippy --manifest-path worker/rust/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path worker/rust/Cargo.toml
 npm run benchmark:rust-indicators
+docker build --build-arg APP_GIT_SHA=local \
+  -t toss-portfolio-lens-cnpg-backup-retention:verify \
+  infra/homelab/cnpg-backup-retention
 ```
 
 `npm run test:rust-worker`는 Node/Rust golden 수치, 모든 optimizer·Monte Carlo 방식, 동일 seed/input/data revision 재현성, data revision 독립성, Walk-forward OOS 누수 probe와 비용·현금·정수 수량 ledger 보존 법칙을 release worker에서 검증합니다. Vitest에는 UI operation·HTTP route·MCP tool/schema inventory parity 검사가 포함됩니다.
+
+Vitest는 OOM 방지를 위해 각 child process의 V8 heap을 768MB로 제한합니다. 로컬 전체 검증은
+`npm test`를 사용하고, CI는 `npm run test:light`, `npm run test:heavy`,
+`npm run test:pglite`를 독립 shard로 동시에 실행합니다. light shard만 가용 메모리에 따라
+최대 3개 batch를 병렬 실행하며, heavy와 PGlite shard는 테스트 파일을 하나씩 직렬 실행합니다.
 
 MCP 도구 표와 `server/mcp/generated-contract.json`은 코드에서 생성합니다. 위 README marker 구간을 직접 수정하지 말고 다음 명령을 사용합니다.
 
