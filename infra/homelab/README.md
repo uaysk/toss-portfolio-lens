@@ -48,6 +48,9 @@ garbage collection이 `VolumeSnapshot`과 backend RBD snapshot까지 함께 제�
 CNPG cron은 초를 포함한 6-field 형식이고 timezone 필드가 없으므로, 적용 후
 `status.nextScheduleTime`이 의도한 Asia/Seoul 시각인지 확인해야 합니다. retention CronJob은
 Kubernetes `timeZone: Asia/Seoul`을 명시합니다.
+매니페스트는 namespace-local `pg/harbor-pull-toss-portfolio-lens` pull secret 이름만 참조합니다.
+Harbor credential 원문은 저장소나 매니페스트에 넣지 않고 배포 시 secret manager 또는 제한된
+Docker config의 `harbor.uaysk.com` 항목에서 생성합니다.
 
 ```bash
 kubectl apply --dry-run=server \
