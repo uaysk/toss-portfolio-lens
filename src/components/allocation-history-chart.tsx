@@ -29,7 +29,7 @@ import {
   shouldPollPortfolioHistoryBackfill,
   type ValueChartPoint,
 } from "@/lib/history-chart";
-import { stockColor } from "@/lib/stock-appearance";
+import { stockColor, stockColorMap } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type {
   ApiError,
@@ -106,7 +106,11 @@ function ActiveAreaLabels({
             y={label.labelY}
             dy="0.35em"
             textAnchor="middle"
-            fill="#000000"
+            fill="hsl(var(--foreground))"
+            stroke="hsl(var(--card))"
+            strokeWidth={4}
+            strokeLinejoin="round"
+            paintOrder="stroke"
             fontSize={11}
             fontWeight={800}
           >
@@ -297,6 +301,10 @@ export function AllocationHistoryChart({
 
   const points = visibleHistory?.points ?? [];
   const series = visibleHistory?.series ?? [];
+  const seriesColors = useMemo(
+    () => stockColorMap(series.map((item) => item.key), theme),
+    [series, theme],
+  );
 
   return (
     <section id="history" className="scroll-mt-5" aria-labelledby="history-title">
@@ -478,7 +486,7 @@ export function AllocationHistoryChart({
                   <div
                     key={item.key}
                     className="grid min-w-1 place-items-center overflow-hidden text-[10px] font-black"
-                    style={{ width: `${weight}%`, backgroundColor: stockColor(item.symbol, theme) }}
+                    style={{ width: `${weight}%`, backgroundColor: seriesColors.get(item.key) ?? stockColor(item.key, theme) }}
                     title={`${item.name} ${weight.toFixed(1)}%`}
                   />
                 ) : null;
@@ -529,8 +537,8 @@ export function AllocationHistoryChart({
                     dataKey={`series${index}`}
                     name={item.name}
                     stackId="portfolio"
-                    stroke={stockColor(item.symbol, theme)}
-                    fill={stockColor(item.symbol, theme)}
+                    stroke={seriesColors.get(item.key) ?? stockColor(item.key, theme)}
+                    fill={seriesColors.get(item.key) ?? stockColor(item.key, theme)}
                     strokeWidth={1.4}
                     strokeOpacity={0.96}
                     strokeLinecap="round"
@@ -553,7 +561,7 @@ export function AllocationHistoryChart({
           <div className="mt-6 flex flex-wrap gap-x-5 gap-y-3" aria-label="종목 범례">
             {series.map((item) => (
               <div key={item.key} className="flex min-w-0 items-center gap-2 text-xs">
-                <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: stockColor(item.symbol, theme) }} />
+                <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: seriesColors.get(item.key) ?? stockColor(item.key, theme) }} />
                 <span className="max-w-40 truncate font-bold">{item.name}</span>
                 <span className="text-muted-foreground">평균 {item.averageWeight.toFixed(1)}%</span>
               </div>

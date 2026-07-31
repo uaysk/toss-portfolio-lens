@@ -9,14 +9,15 @@
 제거하므로 소스 checkout에서 암묵적으로 이미지를 다시 만들 수 없다. 운영 호스트의 Compose가
 `!reset` custom tag를 지원하는지 `docker compose config`로 먼저 확인한다.
 
-이미지를 build할 때 `APP_GIT_SHA`에 전체 Git SHA를 전달한다. 모든 runtime image는 이 값을
-`org.opencontainers.image.revision` OCI label로 보존한다. push 결과의 manifest digest를 release 파일에
-기록한 뒤 digest를 pull하고 label이 `APP_GIT_SHA`와 일치하는지 검사한다.
+이미지를 build할 때 해당 component의 전체 Git SHA를 `APP_GIT_SHA` build argument로 전달한다. 각 runtime
+image는 이 값을 `org.opencontainers.image.revision` OCI label로 보존한다. release 파일의
+`APP_GIT_SHA`는 web revision, `RUST_WORKER_GIT_SHA`는 Rust worker revision을 뜻한다. push 결과의 manifest
+digest를 기록한 뒤 digest를 pull하고 각 label이 해당 component revision과 일치하는지 검사한다.
 
 push 직후에는 Harbor의 Trivy adapter로 각 digest를 다시 스캔한다. 스캔 결과는 credential을 포함하지 않는
-mode 600 JSON으로 `.cache/security/`에 저장한다. 수정 가능한 Critical 또는 High 취약점이 있으면 해당
-release를 배포하지 않고 base image나 직접 dependency를 갱신한 뒤 새 Git SHA와 새 digest로 다시
-build·push·scan한다.
+mode 600 JSON으로 `.cache/security/`에 저장한다. `verify:harbor-trivy`는 수정 가능한 Critical 또는 High
+취약점이 있으면 nonzero로 종료한다. 이 gate가 실패하면 해당 release를 배포하지 않고 base image나 직접
+dependency를 갱신한 뒤 새 Git SHA와 새 digest로 다시 build·push·scan한다.
 
 ```bash
 npm run verify:harbor-trivy -- "$WEB_IMAGE" \
@@ -35,6 +36,7 @@ Git에 넣지 않는 `.env.harbor.release`에 현재 release set을 저장한다
 
 ```dotenv
 APP_GIT_SHA=<full-40-character-git-sha>
+RUST_WORKER_GIT_SHA=<full-40-character-rust-worker-git-sha>
 WEB_IMAGE=harbor.uaysk.com/toss-portfolio-lens/web@sha256:<manifest-digest>
 RUST_WORKER_IMAGE=harbor.uaysk.com/toss-portfolio-lens/rust-worker@sha256:<manifest-digest>
 ```
@@ -70,6 +72,43 @@ docker compose \
 `/api/health`, simulation status의 `paperOnly=true`와 `realOrder=false`, 컨테이너 health를 확인한 뒤에만
 이 release set을 현재 운영본으로 간주한다. 직전 release는 별도 ignored env 파일에 digest set 전체를
 보존한다. rollback은 그 파일로 같은 `pull`과 `up --no-build --pull never` 절차를 반복한다.
+
+### Web-only release
+
+UI처럼 web만 변경된 release는 현재 Rust digest와 `RUST_WORKER_GIT_SHA`를 candidate 파일에 그대로 보존한다.
+현재 `.env.harbor.release`는 먼저 mode 600의 `.env.harbor.rollback`으로 복사하고, 새 web SHA와 digest를
+`.env.harbor.candidate`에 기록한다. Trivy 검사와 release 검증을 통과한 뒤 web 이미지만 pull한다.
+
+```bash
+npm run verify:harbor-release -- .env.harbor.candidate
+
+docker compose \
+  --env-file .env \
+  --env-file .env.scalping \
+  --env-file .env.harbor.candidate \
+  -f compose.yaml \
+  -f compose.chatgpt.yaml \
+  -f compose.ai-remote-main.yaml \
+  -f compose.harbor-main.yaml \
+  pull web
+
+npm run verify:harbor-release -- .env.harbor.candidate --inspect-local
+
+docker compose \
+  --env-file .env \
+  --env-file .env.scalping \
+  --env-file .env.harbor.candidate \
+  -f compose.yaml \
+  -f compose.chatgpt.yaml \
+  -f compose.ai-remote-main.yaml \
+  -f compose.harbor-main.yaml \
+  up -d --no-build --pull never --no-deps web
+```
+
+`--no-deps`를 생략하거나 `compute-ipc`를 target에 포함하면 Rust runtime을 함께 다룰 수 있으므로 web-only
+배포에서는 금지한다. 로컬과 공개 `/api/health`의 `build.gitSha`, web container health와 UI smoke를 확인한
+뒤 candidate를 `.env.harbor.release`로 승격한다. 실패하면 rollback 파일로 web만 `pull`하고 같은
+`up -d --no-build --pull never --no-deps web` 명령을 실행한다.
 
 ## GPU worker release
 

@@ -208,6 +208,11 @@ async function prepareOverview(page) {
   const chart = page.locator("#allocation .recharts-responsive-container").first();
   await waitForVisible(chart, "overview allocation chart");
   await assertBoxHasSize(chart, "overview allocation chart", 100, 100);
+  const allocationColors = await page.locator("#allocation .recharts-pie-sector path").evaluateAll((paths) => (
+    paths.map((path) => getComputedStyle(path).fill)
+  ));
+  check(allocationColors.length > 1, "overview allocation chart에 비교할 종목 색상이 부족합니다.");
+  check(new Set(allocationColors).size === allocationColors.length, `overview allocation chart 종목 색상이 충돌합니다: ${JSON.stringify(allocationColors)}`);
   await assertNoContainerClipping(page.locator(".portfolio-hero"), "overview hero");
   return page.locator(".portfolio-hero");
 }
@@ -237,6 +242,11 @@ async function prepareBacktest(page) {
   const chart = resultCard.locator(".recharts-responsive-container").first();
   await waitForVisible(chart, "backtest result chart");
   await assertBoxHasSize(chart, "backtest result chart", 100, 100);
+  const seriesColors = await chart.locator(".recharts-line-curve").evaluateAll((lines) => (
+    lines.map((line) => getComputedStyle(line).stroke).filter((color) => color && color !== "none")
+  ));
+  check(seriesColors.length >= 2, `backtest result chart series가 2개 미만입니다: ${JSON.stringify(seriesColors)}`);
+  check(new Set(seriesColors).size === seriesColors.length, `backtest result chart series 색상이 충돌합니다: ${JSON.stringify(seriesColors)}`);
   await page.evaluate(() => window.scrollTo(0, 0));
   return page.getByRole("heading", { name: "포트폴리오 전략 백테스트", exact: true }).locator("..");
 }

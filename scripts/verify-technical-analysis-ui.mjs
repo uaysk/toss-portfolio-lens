@@ -793,6 +793,20 @@ async function exerciseStageTwoPresets(page, state) {
   const firstCard = page.locator("[data-technical-symbol]").first();
   await firstCard.getByText("Keltner · 사용 가능", { exact: true }).waitFor();
   await firstCard.locator('[data-technical-indicator-panel="historical_volatility"]').waitFor();
+  await firstCard.scrollIntoViewIfNeeded();
+  await firstCard.locator("[data-technical-bollinger-band]").first().waitFor();
+  const bollingerBandIds = await firstCard.locator("[data-technical-bollinger-band]").evaluateAll((nodes) => (
+    [...new Set(nodes.map((node) => node.getAttribute("data-technical-bollinger-band")).filter(Boolean))]
+  ));
+  const bollingerMiddleIds = await firstCard.locator("[data-technical-bollinger-middle]").evaluateAll((nodes) => (
+    [...new Set(nodes.map((node) => node.getAttribute("data-technical-bollinger-middle")).filter(Boolean))]
+  ));
+  const bollingerBandStrokes = await firstCard.locator("[data-technical-bollinger-band]").evaluateAll((nodes) => (
+    nodes.map((node) => getComputedStyle(node).stroke)
+  ));
+  check(bollingerBandIds.length === 1, `동일한 볼린저 범위가 하나로 합쳐지지 않았습니다: ${JSON.stringify(bollingerBandIds)}`);
+  check(bollingerMiddleIds.length === 1, `동일한 볼린저 중앙선이 하나로 합쳐지지 않았습니다: ${JSON.stringify(bollingerMiddleIds)}`);
+  check(bollingerBandStrokes.every((stroke) => stroke === "none"), `볼린저 범위에 상·하단 외곽선이 남아 있습니다: ${JSON.stringify(bollingerBandStrokes)}`);
   await page.getByRole("button", { name: "변화율 선택", exact: true }).click();
   await page.locator("[data-technical-indicator-mode]").filter({ hasText: "사용자 정의" }).waitFor();
 }
@@ -1266,8 +1280,9 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
 
     const cardCount = await page.locator("[data-technical-symbol]").count();
     const lazyPlaceholders = await page.getByText("스크롤하면 차트를 렌더링합니다", { exact: true }).count();
+    const maximumEagerCharts = viewport.width >= 1280 ? 8 : 6;
     check(cardCount >= 20, `${viewport.width}px에서 20개 이상 종목 chart를 만들지 못했습니다.`);
-    check(lazyPlaceholders >= cardCount - 6, `${viewport.width}px에서 다종목 지연 렌더링이 충분히 적용되지 않았습니다: ${lazyPlaceholders}/${cardCount}`);
+    check(lazyPlaceholders >= cardCount - maximumEagerCharts, `${viewport.width}px에서 다종목 지연 렌더링이 충분히 적용되지 않았습니다: ${lazyPlaceholders}/${cardCount}`);
     const lastCard = page.locator("[data-technical-symbol]").last();
     await lastCard.scrollIntoViewIfNeeded();
     await lastCard.locator("[data-technical-chart]").waitFor({ timeout: 20_000 });

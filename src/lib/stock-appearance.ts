@@ -1,16 +1,32 @@
 import type { Theme } from "@/types";
 
+// These palettes are fixed visual contracts. Each slot has a matching hue in
+// both themes, while its luminance is tuned for a `bg-secondary` chart card.
+// The dark-theme values also keep 3:1 contrast after the history chart's 0.78
+// fill opacity is composited over #242424.
 const darkPalette = [
-  "#E7E8EA", "#C7CDD5", "#B8C2B0", "#C8B8AE", "#AAB8C0", "#B8AEBE",
-  "#96AAA8", "#A69C84", "#7F8CA1", "#998487", "#788C7D", "#758691",
-  "#8C8094", "#887F68", "#637884", "#75676E", "#657469", "#596873",
-];
+  "#DD7D90", "#DD8362", "#CB923F", "#A8A340", "#76B066", "#37B696",
+  "#00B3C1", "#49A9E0", "#819AE9", "#AD8BDC", "#CC81BB",
+  "#F290A2", "#F19674", "#DFA553", "#BBB655", "#89C479", "#4FCAA8",
+  "#31C7D5", "#5EBCF4", "#93ADFE", "#C09EF0", "#E193CF",
+  "#FFA3B5", "#FFA987", "#F3B867", "#CEC968", "#9BD78B", "#65DDBB",
+  "#4DDAE8", "#72CFFF", "#A6C0FF", "#D3B1FF", "#F5A6E2",
+  "#FFB6C8", "#FFBC9A", "#FFCB7A", "#E1DD7C", "#AEEB9E", "#7AF1CE",
+  "#65EEFC", "#86E3FF", "#B9D4FF", "#E7C4FF", "#FFB9F6",
+] as const;
 
 const lightPalette = [
-  "#161718", "#252B33", "#29332B", "#382D2A", "#26333A", "#332B38",
-  "#273A39", "#3A3627", "#2E384A", "#433235", "#2E4134", "#2D3B44",
-  "#3D3244", "#45402D", "#334853", "#4A3D43", "#3B4C40", "#40515B",
-];
+  "#570020", "#580500", "#4C1B00", "#342C00", "#003700", "#003C24",
+  "#003947", "#002F5E", "#162166", "#38145B", "#4C0642",
+  "#6C152F", "#6C1C00", "#5F2D00", "#453E00", "#104900", "#004E34",
+  "#004B59", "#004172", "#253479", "#49276E", "#5F1C54",
+  "#802A40", "#80300C", "#733F00", "#565000", "#245C11", "#006145",
+  "#005E6B", "#005485", "#34468E", "#5B3982", "#732F66",
+  "#953D52", "#954323", "#865200", "#686200", "#376E26", "#007457",
+  "#00717E", "#00679A", "#4559A2", "#6D4C96", "#874179",
+] as const;
+
+const STOCK_COLOR_SEED = 519_252;
 
 function hashStockKey(key: string): number {
   let hash = 2166136261;
@@ -21,17 +37,51 @@ function hashStockKey(key: string): number {
   return hash >>> 0;
 }
 
+function canonicalStockColorKey(key: string): string {
+  const normalized = key.trim().toUpperCase();
+  const separator = normalized.lastIndexOf(":");
+  const symbol = separator >= 0 ? normalized.slice(separator + 1).trim() : normalized;
+  return symbol || normalized;
+}
+
+function mixStockHash(hash: number): number {
+  let mixed = hash >>> 0;
+  mixed ^= mixed >>> 16;
+  mixed = Math.imul(mixed, 0x85ebca6b);
+  mixed ^= mixed >>> 13;
+  mixed = Math.imul(mixed, 0xc2b2ae35);
+  mixed ^= mixed >>> 16;
+  return mixed >>> 0;
+}
+
+function stockColorIndex(key: string): number {
+  const canonical = canonicalStockColorKey(key);
+  return mixStockHash(hashStockKey(canonical) ^ STOCK_COLOR_SEED) % lightPalette.length;
+}
+
 export function stockColor(key: string, theme: Theme): string {
   const palette = theme === "dark" ? darkPalette : lightPalette;
-  return palette[hashStockKey(key) % palette.length];
+  return palette[stockColorIndex(key)];
+}
+
+export function stockColorMap(keys: readonly string[], theme: Theme): ReadonlyMap<string, string> {
+  return new Map(keys.map((key) => [key, stockColor(key, theme)]));
+}
+
+function relativeLuminance(color: string): number {
+  const channels = [1, 3, 5].map((start) => Number.parseInt(color.slice(start, start + 2), 16) / 255);
+  const [red, green, blue] = channels.map((channel) => (
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  ));
+  return red * 0.2126 + green * 0.7152 + blue * 0.0722;
 }
 
 export function stockForeground(key: string, theme: Theme): string {
   const color = stockColor(key, theme);
-  const red = Number.parseInt(color.slice(1, 3), 16);
-  const green = Number.parseInt(color.slice(3, 5), 16);
-  const blue = Number.parseInt(color.slice(5, 7), 16);
-  return red * 0.299 + green * 0.587 + blue * 0.114 > 155 ? "#111111" : "#ffffff";
+  const luminance = relativeLuminance(color);
+  const darkContrast = (luminance + 0.05) / (relativeLuminance("#111111") + 0.05);
+  const lightContrast = (relativeLuminance("#ffffff") + 0.05) / (luminance + 0.05);
+  return darkContrast >= lightContrast ? "#111111" : "#ffffff";
 }
 
 export function holdingKey(holding: { market: string; symbol: string }): string {

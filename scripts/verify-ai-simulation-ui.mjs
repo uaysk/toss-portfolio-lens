@@ -1944,6 +1944,19 @@ async function verify(browser, baseUrl, viewport, theme) {
         `[data-ai-simulation-model-forecast-horizon="chronos2:${horizon}"]`,
       ).waitFor();
     }
+    const firstChartSeriesColors = await chartGrid.locator("[data-ai-simulation-chart]").first().evaluate((chart) => {
+      const bySeries = new Map();
+      for (const node of chart.querySelectorAll(
+        "[data-ai-simulation-price-overlay-line], [data-ai-simulation-forecast-line]",
+      )) {
+        const key = node.getAttribute("data-ai-simulation-price-overlay-line")
+          ?? node.getAttribute("data-ai-simulation-forecast-line");
+        if (key) bySeries.set(key, getComputedStyle(node).stroke);
+      }
+      return [...bySeries.entries()];
+    });
+    check(firstChartSeriesColors.length >= 3, `일반 overlay와 모델 예측선 색상 검증 대상이 부족합니다: ${JSON.stringify(firstChartSeriesColors)}`);
+    check(new Set(firstChartSeriesColors.map(([, color]) => color)).size === firstChartSeriesColors.length, `일반 overlay와 모델 예측선 색상이 충돌합니다: ${JSON.stringify(firstChartSeriesColors)}`);
     const liveForecastCount = await liveForecastOverlays.count();
     check(liveForecastCount === 1, `인라인 모델 예측 overlay가 1개가 아니라 ${liveForecastCount}개입니다.`);
     await mkdir(screenshotDirectory, { recursive: true });

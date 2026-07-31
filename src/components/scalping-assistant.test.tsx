@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ScalpingMarketSelector, ScalpingVirtualizedCandidateCard } from "./scalping-assistant";
+import {
+  ScalpingMarketSelector,
+  ScalpingVirtualizedCandidateCard,
+  scalpingPriceLayers,
+} from "./scalping-assistant";
 import type { ScalpingCandidate } from "@/lib/scalping-assistant";
 
 const candidate: ScalpingCandidate = {
@@ -33,5 +37,26 @@ describe("ScalpingMarketSelector", () => {
     expect(markup).toContain('aria-label="국내 상장 종목 스캔"');
     expect(markup).toContain('aria-label="미국 상장 종목 스캔"');
     expect(markup).toMatch(/aria-label="미국 상장 종목 스캔"[^>]*aria-pressed="true"/);
+  });
+});
+
+describe("scalpingPriceLayers", () => {
+  it("renders the active width/%B alias as one range and one middle line", () => {
+    const layers = scalpingPriceLayers([{
+      "scanner-bb:upper": 110,
+      "scanner-bb:middle": 100,
+      "scanner-bb:lower": 90,
+    }], [{
+      id: "scanner-bb",
+      kind: "bollinger_band_width_percent_b",
+      status: "available",
+      values: {},
+    }]);
+
+    expect(layers.bands).toEqual([expect.objectContaining({
+      lowerKey: "scanner-bb:lower",
+      upperKey: "scanner-bb:upper",
+    })]);
+    expect(layers.lines.map((line) => line.key)).toEqual(["scanner-bb:middle"]);
   });
 });

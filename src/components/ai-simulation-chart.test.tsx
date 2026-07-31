@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   AiSimulationChart,
+  aiSimulationPriceLayers,
   aiSimulationChartTradePoints,
   aiSimulationChartCoordinateRows,
   aiSimulationCombinedChartRows,
@@ -75,6 +76,78 @@ const modelForecasts: AiSimulationModelForecast[] = [{
 }];
 
 describe("AiSimulationChart", () => {
+  it("groups Bollinger upper and lower values into one range plus a middle line", () => {
+    const layers = aiSimulationPriceLayers([{
+      indicatorValues: {
+        "bb:upper": 110,
+        "bb:middle": 100,
+        "bb:lower": 90,
+        "bb-width:upper": 110,
+        "bb-width:middle": 100,
+        "bb-width:lower": 90,
+        "donchian:upper": 112,
+        "donchian:middle": 101,
+        "donchian:lower": 88,
+      },
+    }], [{ id: "bb", kind: "bollinger_bands", status: "available", values: {} }, {
+      id: "bb-width",
+      kind: "bollinger_band_width_percent_b",
+      status: "available",
+      values: {},
+    }, {
+      id: "donchian",
+      kind: "donchian_channel",
+      status: "available",
+      values: {},
+    }]);
+
+    expect(layers.bands).toEqual([expect.objectContaining({
+      key: "bb:range",
+      lowerKey: "bb:lower",
+      upperKey: "bb:upper",
+    })]);
+    expect(layers.lines.map((line) => line.key)).toEqual([
+      "bb:middle",
+      "donchian:upper",
+      "donchian:middle",
+      "donchian:lower",
+    ]);
+    expect(layers.lines.find((line) => line.key === "bb:middle")?.bollingerMiddle).toBe(true);
+    expect(layers.lines.some((line) => line.key === "bb-width:middle")).toBe(false);
+  });
+
+  it("does not create an empty Bollinger range from disjoint bounds", () => {
+    const layers = aiSimulationPriceLayers([{
+      indicatorValues: { "bb:lower": 90, "bb:middle": 100 },
+    }, {
+      indicatorValues: { "bb:upper": 110, "bb:middle": 101 },
+    }], [{ id: "bb", kind: "bollinger_bands", status: "available", values: {} }]);
+
+    expect(layers.bands).toEqual([]);
+    expect(layers.lines.map((line) => line.key)).toEqual(["bb:middle"]);
+  });
+
+  it("assigns different colors to distinct Bollinger ranges", () => {
+    const layers = aiSimulationPriceLayers([{
+      indicatorValues: {
+        "bb-fast:lower": 92,
+        "bb-fast:middle": 100,
+        "bb-fast:upper": 108,
+        "bb-slow:lower": 88,
+        "bb-slow:middle": 99,
+        "bb-slow:upper": 112,
+      },
+    }], [{ id: "bb-fast", kind: "bollinger_bands", status: "available", values: {} }, {
+      id: "bb-slow",
+      kind: "bollinger_bands",
+      status: "available",
+      values: {},
+    }]);
+
+    expect(layers.bands.map((band) => band.colorIndex)).toEqual([0, 1]);
+    expect(layers.lines.map((line) => line.bandColorIndex)).toEqual([0, 1]);
+  });
+
   it("keeps the empty chart stable while still exposing indicator and pattern evidence", () => {
     const markup = renderToStaticMarkup(
       <AiSimulationChart

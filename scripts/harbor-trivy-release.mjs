@@ -181,6 +181,15 @@ export function summarizeVulnerabilityReport(report) {
   };
 }
 
+export function releaseBlockingVulnerabilities(summary) {
+  if (!summary || !Array.isArray(summary.vulnerabilities)) return [];
+  return summary.vulnerabilities.filter((vulnerability) => (
+    (vulnerability.severity === "Critical" || vulnerability.severity === "High")
+    && typeof vulnerability.fixedVersion === "string"
+    && vulnerability.fixedVersion.trim().length > 0
+  ));
+}
+
 async function artifactWithScanOverview(image, credential) {
   const query = "?with_scan_overview=true&with_label=false&with_accessory=false"
     + "&with_signature=false&with_immutable_status=false";
@@ -294,7 +303,7 @@ async function main() {
   }
   const parsed = parseHarborImageReference(imageReference);
   const defaultOutput = `.cache/security/harbor-trivy-${parsed.repository.replaceAll("/", "-")}.json`;
-  await scanHarborArtifact({
+  const result = await scanHarborArtifact({
     imageReference,
     outputPath: resolve(requiredArgument(arguments_, "--output") ?? defaultOutput),
     timeoutMs: positiveInteger(
@@ -302,6 +311,12 @@ async function main() {
       "timeout",
     ),
   });
+  const blockers = releaseBlockingVulnerabilities(result.summary);
+  if (blockers.length > 0) {
+    throw new Error(
+      `release blocked: ${blockers.length} fixable Critical/High vulnerabilities remain`,
+    );
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -24,6 +24,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  Area,
   Bar,
   CartesianGrid,
   ComposedChart,
@@ -41,7 +42,15 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { MONOCHROME_DASHES } from "@/lib/chart-theme";
+import {
+  chartBandColor,
+  chartRangeSignature,
+  chartRangeValue,
+  chartSeriesColor,
+  chartSeriesDash,
+  isBollingerBandKind,
+  splitChartIndicatorFields,
+} from "@/lib/chart-theme";
 import { isValidCalendarRange, seoulDateString } from "@/lib/date-range";
 import { formatMoney, formatPercent, formatQuantity } from "@/lib/format";
 import {
@@ -111,14 +120,6 @@ import { cn } from "@/lib/utils";
 import type { Holding, Portfolio, Theme } from "@/types";
 
 const CHART_SYNC_ID = "technical-analysis-shared-range";
-const INDICATOR_COLORS = [
-  "hsl(var(--foreground))",
-  "#2563eb",
-  "#f97316",
-  "#8b5cf6",
-  "#0d9488",
-  "#e11d48",
-] as const;
 
 type PriceMode = "actual" | "starting100";
 type CurrencyMode = "local" | "KRW";
@@ -142,17 +143,80 @@ function displayDate(value: string): string {
   return new Intl.DateTimeFormat("ko-KR", { month: "short", day: "numeric", timeZone: "UTC" }).format(parsed);
 }
 
-function priceLineEntries(calculations: TechnicalIndicatorCalculation[]) {
+type PriceBandEntry = {
+  calculation: TechnicalIndicatorCalculation;
+  lowerKey: string;
+  upperKey: string;
+  label: string;
+  colorIndex: number;
+  coveredIndicatorIds: string[];
+};
+
+function priceLineEntries(
+  calculations: TechnicalIndicatorCalculation[],
+  bands: readonly PriceBandEntry[],
+) {
+  const duplicateBandIds = new Set(bands.flatMap((band) => band.coveredIndicatorIds.slice(1)));
+  const bandColorByIndicatorId = new Map(bands.flatMap((band) => (
+    band.coveredIndicatorIds.map((indicatorId) => [indicatorId, band.colorIndex] as const)
+  )));
   return calculations.flatMap((calculation) => {
     const option = TECHNICAL_INDICATOR_BY_KIND.get(calculation.kind);
     if (!option) return [];
-    return option.priceFields.filter((field) => hasRenderableIndicatorValues(calculation, [field])).map((field) => ({
-      calculation,
-      field,
-      key: indicatorValueKey(calculation.indicator_id, field),
-      label: `${option.shortLabel} ${field === "value" ? "" : field}`.trim(),
-    }));
+    const renderableFields = option.priceFields.filter((field) => hasRenderableIndicatorValues(calculation, [field]));
+    const { lineFields } = splitChartIndicatorFields(calculation.kind, renderableFields);
+    return lineFields.flatMap((field) => {
+      const bollingerMiddle = isBollingerBandKind(calculation.kind) && field === "middle";
+      if (bollingerMiddle && duplicateBandIds.has(calculation.indicator_id)) return [];
+      return [{
+        calculation,
+        field,
+        key: indicatorValueKey(calculation.indicator_id, field),
+        label: bollingerMiddle
+          ? `${option.shortLabel} 중앙`
+          : `${option.shortLabel} ${field === "value" ? "" : field}`.trim(),
+        bollingerMiddle,
+        ...(bollingerMiddle ? {
+          bandColorIndex: bandColorByIndicatorId.get(calculation.indicator_id) ?? bands.length,
+        } : {}),
+      }];
+    });
   });
+}
+
+function priceBandEntries(
+  calculations: TechnicalIndicatorCalculation[],
+  rows: readonly Readonly<Record<string, unknown>>[],
+): PriceBandEntry[] {
+  const bands: PriceBandEntry[] = [];
+  const bandsBySignature = new Map<string, PriceBandEntry>();
+  for (const calculation of calculations) {
+    const option = TECHNICAL_INDICATOR_BY_KIND.get(calculation.kind);
+    if (!option) continue;
+    const renderableFields = option.priceFields.filter((field) => hasRenderableIndicatorValues(calculation, [field]));
+    const { band } = splitChartIndicatorFields(calculation.kind, renderableFields);
+    if (!band) continue;
+    const lowerKey = indicatorValueKey(calculation.indicator_id, band.lowerField);
+    const upperKey = indicatorValueKey(calculation.indicator_id, band.upperField);
+    const signature = chartRangeSignature(rows, lowerKey, upperKey);
+    if (!signature) continue;
+    const existing = bandsBySignature.get(signature);
+    if (existing) {
+      existing.coveredIndicatorIds.push(calculation.indicator_id);
+      continue;
+    }
+    const layer = {
+      calculation,
+      lowerKey,
+      upperKey,
+      label: `${option.shortLabel} 범위`,
+      colorIndex: bands.length,
+      coveredIndicatorIds: [calculation.indicator_id],
+    };
+    bands.push(layer);
+    bandsBySignature.set(signature, layer);
+  }
+  return bands;
 }
 
 function hasRenderableIndicatorValues(calculation: TechnicalIndicatorCalculation, fields: string[]): boolean {
@@ -252,12 +316,14 @@ function PriceTooltip({
   priceMode,
   currency,
   lines,
+  bands,
 }: {
   active?: boolean;
   payload?: Array<{ payload?: ChartDatum }>;
   priceMode: PriceMode;
   currency: string;
   lines: ReturnType<typeof priceLineEntries>;
+  bands: ReturnType<typeof priceBandEntries>;
 }) {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
@@ -275,6 +341,15 @@ function PriceTooltip({
           return typeof value === "number" ? (
             <span className="contents" key={line.key}>
               <span>{line.label}</span><strong className="text-right text-foreground">{formatPrice(value)}</strong>
+            </span>
+          ) : null;
+        })}
+        {bands.map((band) => {
+          const range = chartRangeValue(point, band.lowerKey, band.upperKey);
+          return range ? (
+            <span className="contents" key={`${band.calculation.indicator_id}:range`}>
+              <span>{band.label}</span>
+              <strong className="text-right text-foreground">{formatPrice(range[0])}–{formatPrice(range[1])}</strong>
             </span>
           ) : null;
         })}
@@ -372,9 +447,23 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
     () => calculations.filter((calculation) => !isTechnicalVolumeIndicator(calculation.kind)),
     [calculations],
   );
-  const priceLines = useMemo(() => priceLineEntries(calculations), [calculations]);
-  const priceKeys = useMemo(() => new Set(priceLines.map((line) => line.key)), [priceLines]);
   const rows = useMemo(() => buildTechnicalChartRows(series, calculations), [calculations, series]);
+  const rangeRows = useMemo(
+    () => rows.map((row) => Object.assign({}, row, row.indicatorValues) as ChartDatum),
+    [rows],
+  );
+  const priceBands = useMemo(
+    () => priceBandEntries(calculations, rangeRows),
+    [calculations, rangeRows],
+  );
+  const priceLines = useMemo(
+    () => priceLineEntries(calculations, priceBands),
+    [calculations, priceBands],
+  );
+  const priceKeys = useMemo(() => new Set([
+    ...priceLines.map((line) => line.key),
+    ...priceBands.flatMap((band) => [band.lowerKey, band.upperKey]),
+  ]), [priceBands, priceLines]);
   const displayRows = useMemo(
     () => displayTechnicalChartRows(rows, priceMode, priceKeys),
     [priceKeys, priceMode, rows],
@@ -521,10 +610,24 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                   <XAxis dataKey="date" tickFormatter={displayDate} tick={{ fontSize: 9 }} minTickGap={35} axisLine={false} tickLine={false} />
                   <YAxis width={52} orientation="right" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
                   <Tooltip
-                    content={<PriceTooltip priceMode={priceMode} currency={currency} lines={priceLines} />}
+                    content={<PriceTooltip priceMode={priceMode} currency={currency} lines={priceLines} bands={priceBands} />}
                     cursor={{ stroke: "hsl(var(--foreground) / 0.5)", strokeWidth: 1 }}
                     wrapperStyle={{ zIndex: 30 }}
                   />
+                  {priceBands.map((band) => (
+                    <Area
+                      key={`${band.calculation.indicator_id}:range`}
+                      dataKey={(row: ChartDatum) => chartRangeValue(row, band.lowerKey, band.upperKey)}
+                      name={band.label}
+                      type="linear"
+                      fill={chartBandColor(band.colorIndex)}
+                      fillOpacity={0.13}
+                      stroke="none"
+                      connectNulls={false}
+                      isAnimationActive={false}
+                      data-technical-bollinger-band={band.calculation.indicator_id}
+                    />
+                  ))}
                   <Bar dataKey="candleRange" shape={<CandleShape />} isAnimationActive={false} />
                   {priceLines.map((line, index) => (
                     <Line
@@ -534,10 +637,11 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                       type="linear"
                       dot={false}
                       connectNulls={false}
-                      stroke={INDICATOR_COLORS[index % INDICATOR_COLORS.length]}
-                      strokeDasharray={MONOCHROME_DASHES[index % MONOCHROME_DASHES.length]}
-                      strokeWidth={1.5}
+                      stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(index)}
+                      strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(index)}
+                      strokeWidth={line.bollingerMiddle ? 1.9 : 1.5}
                       isAnimationActive={false}
+                      data-technical-bollinger-middle={line.bollingerMiddle ? line.calculation.indicator_id : undefined}
                     />
                   ))}
                   {markerPoints.map(({ marker, row, barDate, sideOffset }) => {
@@ -590,8 +694,8 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                             name={item.field}
                             dot={false}
                             connectNulls={false}
-                            stroke={INDICATOR_COLORS[(panelIndex + index) % INDICATOR_COLORS.length]}
-                            strokeDasharray={MONOCHROME_DASHES[index % MONOCHROME_DASHES.length]}
+                            stroke={chartSeriesColor(panelIndex + index)}
+                            strokeDasharray={chartSeriesDash(index)}
                             strokeWidth={1.4}
                             isAnimationActive={false}
                           />

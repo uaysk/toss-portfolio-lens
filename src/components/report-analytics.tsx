@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StockSwatch } from "@/components/stock-swatch";
-import { chartTooltipStyle, MONOCHROME_DASHES, MONOCHROME_SERIES } from "@/lib/chart-theme";
+import { CHART_DASHES, CHART_SERIES, chartTooltipStyle } from "@/lib/chart-theme";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
@@ -149,7 +149,7 @@ function DrawdownAnalytics({ data }: { data: DrawdownData }) {
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
-                <Line type="monotone" dataKey="drawdownPercent" name="낙폭" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} />
+                <Line type="monotone" dataKey="drawdownPercent" name="낙폭" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -288,10 +288,10 @@ function AnalysisRolling({ analysis }: { analysis: AnalysisData }) {
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [metricPercent(Number(value)), String(name)]} contentStyle={chartTooltipStyle} />
-                  <Line type="monotone" dataKey="return20d" name="20일" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return60d" name="60일" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return120d" name="120일" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return252d" name="252일" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return20d" name="20일" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return60d" name="60일" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return120d" name="120일" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return252d" name="252일" stroke={CHART_SERIES[3]} strokeDasharray={CHART_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -306,11 +306,11 @@ function AnalysisRolling({ analysis }: { analysis: AnalysisData }) {
                   <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="ratio" orientation="right" width={38} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={chartTooltipStyle} />
-                  <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
-                  <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
-                  {activeKey ? <Line yAxisId="percent" type="monotone" dataKey={`benchmarkExcess60d.${activeKey}`} name="초과수익 %" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls /> : null}
-                  {activeKey ? <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkBeta60d.${activeKey}`} name="베타" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls /> : null}
-                  {activeKey ? <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkCorrelation60d.${activeKey}`} name="상관" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={1.8} dot={false} connectNulls /> : null}
+                  <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                  <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                  {activeKey ? <Line yAxisId="percent" type="monotone" dataKey={`benchmarkExcess60d.${activeKey}`} name="초과수익 %" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls /> : null}
+                  {activeKey ? <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkBeta60d.${activeKey}`} name="베타" stroke={CHART_SERIES[3]} strokeDasharray={CHART_DASHES[3]} strokeWidth={2} dot={false} connectNulls /> : null}
+                  {activeKey ? <Line yAxisId="ratio" type="monotone" dataKey={`benchmarkCorrelation60d.${activeKey}`} name="상관" stroke={CHART_SERIES[4]} strokeDasharray={CHART_DASHES[4]} strokeWidth={1.8} dot={false} connectNulls /> : null}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -392,9 +392,9 @@ function AnalysisCostAndTrades({ analysis }: { analysis: AnalysisData }) {
               <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : name === "거래 건수" ? `${Number(value)}건` : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={chartTooltipStyle} />
-              <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={MONOCHROME_SERIES[1]} radius={[6, 6, 0, 0]} />
-              <Line yAxisId="cost" type="monotone" dataKey="cost" name="비용" stroke={MONOCHROME_SERIES[0]} strokeWidth={2} dot={false} />
-              <Line yAxisId="turnover" type="monotone" dataKey="tradeCount" name="거래 건수" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={1.8} dot={false} />
+              <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={CHART_SERIES[1]} radius={[6, 6, 0, 0]} />
+              <Line yAxisId="cost" type="monotone" dataKey="cost" name="비용" stroke={CHART_SERIES[0]} strokeWidth={2} dot={false} />
+              <Line yAxisId="turnover" type="monotone" dataKey="tradeCount" name="거래 건수" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={1.8} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -479,10 +479,10 @@ function BacktestRolling({ advanced, benchmarkName }: { advanced: BacktestAdvanc
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [metricPercent(Number(value)), String(name)]} contentStyle={chartTooltipStyle} />
-                  <Line type="monotone" dataKey="return20d" name="20일" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return60d" name="60일" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return120d" name="120일" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
-                  <Line type="monotone" dataKey="return252d" name="252일" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return20d" name="20일" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return60d" name="60일" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return120d" name="120일" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                  <Line type="monotone" dataKey="return252d" name="252일" stroke={CHART_SERIES[3]} strokeDasharray={CHART_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -497,11 +497,11 @@ function BacktestRolling({ advanced, benchmarkName }: { advanced: BacktestAdvanc
                   <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="ratio" orientation="right" width={38} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={chartTooltipStyle} />
-                  <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={MONOCHROME_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
-                  <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
-                  <Line yAxisId="percent" type="monotone" dataKey="benchmarkExcess60d" name="초과수익 %" stroke={MONOCHROME_SERIES[2]} strokeDasharray={MONOCHROME_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
-                  <Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
-                  <Line yAxisId="ratio" type="monotone" dataKey="benchmarkCorrelation60d" name="상관" stroke={MONOCHROME_SERIES[1]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={1.8} dot={false} connectNulls />
+                  <Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
+                  <Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="percent" type="monotone" dataKey="benchmarkExcess60d" name="초과수익 %" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke={CHART_SERIES[3]} strokeDasharray={CHART_DASHES[3]} strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="ratio" type="monotone" dataKey="benchmarkCorrelation60d" name="상관" stroke={CHART_SERIES[4]} strokeDasharray={CHART_DASHES[4]} strokeWidth={1.8} dot={false} connectNulls />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -571,10 +571,10 @@ function BacktestCostAndTrades({ advanced }: { advanced: BacktestAdvancedAnalyti
               <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="money" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : name === "거래 건수" ? `${Number(value)}건` : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={chartTooltipStyle} />
-              <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={MONOCHROME_SERIES[1]} radius={[6, 6, 0, 0]} />
-              <Line yAxisId="money" type="monotone" dataKey="tradedAmount" name="거래금액" stroke={MONOCHROME_SERIES[2]} strokeWidth={1.8} dot={false} />
-              <Line yAxisId="money" type="monotone" dataKey="estimatedCost" name="추정비용" stroke={MONOCHROME_SERIES[0]} strokeWidth={2} dot={false} />
-              <Line yAxisId="turnover" type="monotone" dataKey="tradeCount" name="거래 건수" stroke={MONOCHROME_SERIES[3]} strokeDasharray={MONOCHROME_DASHES[3]} strokeWidth={1.8} dot={false} />
+              <Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={CHART_SERIES[1]} radius={[6, 6, 0, 0]} />
+              <Line yAxisId="money" type="monotone" dataKey="tradedAmount" name="거래금액" stroke={CHART_SERIES[2]} strokeWidth={1.8} dot={false} />
+              <Line yAxisId="money" type="monotone" dataKey="estimatedCost" name="추정비용" stroke={CHART_SERIES[0]} strokeWidth={2} dot={false} />
+              <Line yAxisId="turnover" type="monotone" dataKey="tradeCount" name="거래 건수" stroke={CHART_SERIES[3]} strokeDasharray={CHART_DASHES[3]} strokeWidth={1.8} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>

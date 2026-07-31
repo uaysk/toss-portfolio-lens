@@ -25,6 +25,15 @@
     --shell: #ececea;
     --panel: #ffffff;
     --chart-grid: 0 0% 78%;
+    --chart-series-1: 224 76% 48%;
+    --chart-series-2: 17 86% 40%;
+    --chart-series-3: 175 77% 26%;
+    --chart-series-4: 273 82% 47%;
+    --chart-series-5: 333 81% 42%;
+    --chart-series-6: 82 72% 31%;
+    --chart-band: 263 70% 50%;
+    --chart-forecast-chronos: 32 95% 32%;
+    --chart-forecast-fincast: 199 89% 32%;
     --candle-rise: #a63e49;
     --candle-fall: #355f96;
   }
@@ -50,6 +59,15 @@
     --shell: #050505;
     --panel: #0d0d0d;
     --chart-grid: 0 0% 25%;
+    --chart-series-1: 213 94% 68%;
+    --chart-series-2: 27 96% 61%;
+    --chart-series-3: 173 80% 50%;
+    --chart-series-4: 270 95% 75%;
+    --chart-series-5: 330 81% 70%;
+    --chart-series-6: 84 81% 44%;
+    --chart-band: 255 92% 76%;
+    --chart-forecast-chronos: 48 96% 53%;
+    --chart-forecast-fincast: 198 93% 60%;
     --candle-rise: #d06c75;
     --candle-fall: #5f83b7;
   }

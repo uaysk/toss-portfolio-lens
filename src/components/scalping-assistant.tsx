@@ -20,6 +20,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import {
+  Area,
   Bar,
   CartesianGrid,
   ComposedChart,
@@ -34,6 +35,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
+import {
+  CHART_SERIES,
+  chartBandColor,
+  chartRangeSignature,
+  chartRangeValue,
+  chartSeriesColor,
+  chartSeriesDash,
+  isBollingerBandKind,
+  splitChartIndicatorFields,
+} from "@/lib/chart-theme";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatMoney, formatQuantity } from "@/lib/format";
@@ -134,14 +145,15 @@ type ChartRow = ScalpingCandidate["bars"][number] & { candleRange: [number, numb
 const INDICATOR_LINE_FIELDS: Record<string, string[]> = {
   sma: ["value"],
   ema: ["value"],
+  bollinger: ["upper", "middle", "lower"],
+  bollinger_band: ["upper", "middle", "lower"],
   bollinger_bands: ["upper", "middle", "lower"],
+  bollinger_band_width_percent_b: ["upper", "middle", "lower"],
   donchian_channel: ["upper", "middle", "lower"],
   keltner_channel: ["upper", "middle", "lower"],
   supertrend: ["supertrend", "value"],
   parabolic_sar: ["sar", "value"],
 };
-
-const INDICATOR_LINE_COLORS = ["#2563eb", "#e11d48", "#0d9488", "#8b5cf6", "#ca8a04", "#475569"] as const;
 
 function finite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -160,6 +172,72 @@ function formatRatio(value: number | undefined, signed = false): string {
 
 function formatProbability(value: number | undefined): string {
   return finite(value) ? `${(value * 100).toFixed(1)}%` : "unavailable";
+}
+
+export function scalpingPriceLayers(
+  rows: readonly Readonly<Record<string, unknown>>[],
+  indicators: readonly ScalpingCandidate["indicators"][number][],
+) {
+  const lines: Array<{
+    key: string;
+    label: string;
+    indicatorId: string;
+    bollingerMiddle: boolean;
+    bandColorIndex?: number;
+  }> = [];
+  const bands: Array<{
+    lowerKey: string;
+    upperKey: string;
+    label: string;
+    indicatorId: string;
+    colorIndex: number;
+  }> = [];
+  const bandsBySignature = new Map<string, (typeof bands)[number]>();
+  for (const indicator of indicators) {
+    const kind = indicator.kind.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    const fields = (INDICATOR_LINE_FIELDS[kind] ?? []).filter((field) => {
+      const key = `${indicator.id}:${field}`;
+      return rows.some((row) => finite(row[key] as number | undefined));
+    });
+    const { lineFields, band } = splitChartIndicatorFields(kind, fields);
+    let bandColorIndex: number | undefined;
+    let duplicateBand = false;
+    if (band) {
+      const lowerKey = `${indicator.id}:${band.lowerField}`;
+      const upperKey = `${indicator.id}:${band.upperField}`;
+      const signature = chartRangeSignature(rows, lowerKey, upperKey);
+      if (signature) {
+        const existing = bandsBySignature.get(signature);
+        if (existing) {
+          duplicateBand = true;
+          bandColorIndex = existing.colorIndex;
+        } else {
+          const layer = {
+            lowerKey,
+            upperKey,
+            label: `${indicator.kind} 범위`,
+            indicatorId: indicator.id,
+            colorIndex: bands.length,
+          };
+          bandColorIndex = layer.colorIndex;
+          bands.push(layer);
+          bandsBySignature.set(signature, layer);
+        }
+      }
+    }
+    for (const field of lineFields) {
+      const bollingerMiddle = isBollingerBandKind(kind) && field === "middle";
+      if (bollingerMiddle && duplicateBand) continue;
+      lines.push({
+        key: `${indicator.id}:${field}`,
+        label: bollingerMiddle ? `${indicator.kind} 중앙` : `${indicator.kind} ${field}`,
+        indicatorId: indicator.id,
+        bollingerMiddle,
+        ...(bollingerMiddle ? { bandColorIndex: bandColorIndex ?? bands.length } : {}),
+      });
+    }
+  }
+  return { lines, bands };
 }
 
 function formatTimestamp(value: string | undefined, withDate = false): string {
@@ -287,12 +365,10 @@ export function ScalpingMarketSelector({
 
 function PriceChart({ candidate, preset }: { candidate: ScalpingCandidate; preset: ScalpingPreset }) {
   const rows = useMemo<ChartRow[]>(() => candidate.bars.slice(-180).map((bar) => ({ ...bar, ...bar.indicatorValues, candleRange: [bar.low, bar.high] })), [candidate.bars]);
-  const indicatorLines = useMemo(() => candidate.indicators.flatMap((indicator) => (
-    (INDICATOR_LINE_FIELDS[indicator.kind] ?? []).flatMap((field) => {
-      const key = `${indicator.id}:${field}`;
-      return rows.some((row) => finite(row[key] as number | undefined)) ? [{ key, label: `${indicator.kind} ${field}` }] : [];
-    })
-  )), [candidate.indicators, rows]);
+  const indicatorLayers = useMemo(
+    () => scalpingPriceLayers(rows, candidate.indicators),
+    [candidate.indicators, rows],
+  );
   const markerPoints = useMemo(
     () => scalpingTradeMarkerPoints(candidate.bars, candidate.tradeMarkers, 180),
     [candidate.bars, candidate.tradeMarkers],
@@ -314,19 +390,33 @@ function PriceChart({ candidate, preset }: { candidate: ScalpingCandidate; prese
             cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
             wrapperStyle={{ zIndex: 30 }}
           />
+          {indicatorLayers.bands.map((band) => (
+            <Area
+              key={`${band.indicatorId}:range`}
+              dataKey={(row: ChartRow) => chartRangeValue(row, band.lowerKey, band.upperKey)}
+              name={band.label}
+              type="linear"
+              fill={chartBandColor(band.colorIndex)}
+              fillOpacity={0.13}
+              stroke="none"
+              connectNulls={false}
+              isAnimationActive={false}
+              data-scalping-bollinger-band={band.indicatorId}
+            />
+          ))}
           <Bar dataKey="candleRange" name="OHLC" shape={<CandleShape />} isAnimationActive={false} />
-          {preset !== "risk_management" ? <Line dataKey="sessionVwap" name="Session VWAP" type="linear" dot={false} connectNulls={false} stroke="#f97316" strokeWidth={1.5} isAnimationActive={false} /> : null}
-          {preset === "trend" || preset === "mean_reversion" ? <Line dataKey="anchoredVwap" name="Anchored VWAP" type="linear" dot={false} connectNulls={false} stroke="#8b5cf6" strokeDasharray="5 3" strokeWidth={1.4} isAnimationActive={false} /> : null}
-          {preset === "breakout" && finite(levels?.previousHigh) ? <ReferenceLine y={levels?.previousHigh} stroke="#e11d48" strokeDasharray="4 4" label={{ value: "전고", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.previousLow) ? <ReferenceLine y={levels?.previousLow} stroke="#2563eb" strokeDasharray="4 4" label={{ value: "전저", fontSize: 8 }} /> : null}
+          {preset !== "risk_management" ? <Line dataKey="sessionVwap" name="Session VWAP" type="linear" dot={false} connectNulls={false} stroke={CHART_SERIES[1]} strokeWidth={1.5} isAnimationActive={false} /> : null}
+          {preset === "trend" || preset === "mean_reversion" ? <Line dataKey="anchoredVwap" name="Anchored VWAP" type="linear" dot={false} connectNulls={false} stroke={CHART_SERIES[3]} strokeDasharray="5 3" strokeWidth={1.4} isAnimationActive={false} /> : null}
+          {preset === "breakout" && finite(levels?.previousHigh) ? <ReferenceLine y={levels?.previousHigh} stroke={CHART_SERIES[4]} strokeDasharray="4 4" label={{ value: "전고", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.previousLow) ? <ReferenceLine y={levels?.previousLow} stroke={CHART_SERIES[0]} strokeDasharray="4 4" label={{ value: "전저", fontSize: 8 }} /> : null}
           {preset === "mean_reversion" && finite(levels?.previousClose) ? <ReferenceLine y={levels?.previousClose} stroke="hsl(var(--muted-foreground))" strokeDasharray="2 4" label={{ value: "전종", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange5?.high) ? <ReferenceLine y={levels?.openingRange5?.high} stroke="#14b8a6" strokeDasharray="2 3" label={{ value: "OR5 H", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange5?.low) ? <ReferenceLine y={levels?.openingRange5?.low} stroke="#14b8a6" strokeDasharray="2 3" label={{ value: "OR5 L", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange15?.high) ? <ReferenceLine y={levels?.openingRange15?.high} stroke="#0d9488" strokeDasharray="5 3" label={{ value: "OR15 H", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange15?.low) ? <ReferenceLine y={levels?.openingRange15?.low} stroke="#0d9488" strokeDasharray="5 3" label={{ value: "OR15 L", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange30?.high) ? <ReferenceLine y={levels?.openingRange30?.high} stroke="#0f766e" strokeDasharray="8 3" label={{ value: "OR30 H", fontSize: 8 }} /> : null}
-          {preset === "breakout" && finite(levels?.openingRange30?.low) ? <ReferenceLine y={levels?.openingRange30?.low} stroke="#0f766e" strokeDasharray="8 3" label={{ value: "OR30 L", fontSize: 8 }} /> : null}
-          {indicatorLines.map((line, index) => <Line key={line.key} dataKey={line.key} name={line.label} type="linear" dot={false} connectNulls={false} stroke={INDICATOR_LINE_COLORS[index % INDICATOR_LINE_COLORS.length]} strokeDasharray={index % 2 ? "5 3" : undefined} strokeWidth={1.25} isAnimationActive={false} />)}
+          {preset === "breakout" && finite(levels?.openingRange5?.high) ? <ReferenceLine y={levels?.openingRange5?.high} stroke={CHART_SERIES[2]} strokeDasharray="2 3" label={{ value: "OR5 H", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.openingRange5?.low) ? <ReferenceLine y={levels?.openingRange5?.low} stroke={CHART_SERIES[2]} strokeDasharray="2 3" label={{ value: "OR5 L", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.openingRange15?.high) ? <ReferenceLine y={levels?.openingRange15?.high} stroke={CHART_SERIES[3]} strokeDasharray="5 3" label={{ value: "OR15 H", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.openingRange15?.low) ? <ReferenceLine y={levels?.openingRange15?.low} stroke={CHART_SERIES[3]} strokeDasharray="5 3" label={{ value: "OR15 L", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.openingRange30?.high) ? <ReferenceLine y={levels?.openingRange30?.high} stroke={CHART_SERIES[5]} strokeDasharray="8 3" label={{ value: "OR30 H", fontSize: 8 }} /> : null}
+          {preset === "breakout" && finite(levels?.openingRange30?.low) ? <ReferenceLine y={levels?.openingRange30?.low} stroke={CHART_SERIES[5]} strokeDasharray="8 3" label={{ value: "OR30 L", fontSize: 8 }} /> : null}
+          {indicatorLayers.lines.map((line, index) => <Line key={line.key} dataKey={line.key} name={line.label} type="linear" dot={false} connectNulls={false} stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(index)} strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(index)} strokeWidth={line.bollingerMiddle ? 1.9 : 1.35} isAnimationActive={false} data-scalping-bollinger-middle={line.bollingerMiddle ? line.indicatorId : undefined} />)}
           {finite(candidate.position?.averagePrice) ? <ReferenceLine y={candidate.position?.averagePrice} stroke="hsl(var(--foreground))" strokeWidth={1.4} label={{ value: "평균 매수가", fontSize: 8 }} /> : null}
           {markerPoints.map(({ marker, timestamp, price }) => (
             <ReferenceDot key={marker.id} x={timestamp} y={price} ifOverflow="extendDomain" shape={<TradeMarkerShape marker={marker} />} />

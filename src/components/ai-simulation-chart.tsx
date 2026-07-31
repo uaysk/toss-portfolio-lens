@@ -15,6 +15,15 @@ import {
 } from "recharts";
 import { Card } from "@/components/ui/card";
 import { createAnimationFrameCoalescer } from "@/lib/chart-interaction";
+import {
+  chartBandColor,
+  chartRangeSignature,
+  chartRangeValue,
+  chartSeriesColor,
+  chartSeriesDash,
+  isBollingerBandKind,
+  splitChartIndicatorFields,
+} from "@/lib/chart-theme";
 import { formatMoney, formatQuantity } from "@/lib/format";
 import type { AiSimulationCurrency } from "@/lib/ai-simulation";
 import type {
@@ -110,6 +119,18 @@ type ChartRow = AiSimulationCombinedChartRow;
 type PriceOverlay = {
   key: string;
   label: string;
+  indicatorId?: string;
+  bollingerMiddle?: boolean;
+  bandColorIndex?: number;
+};
+
+type PriceBand = {
+  key: string;
+  label: string;
+  indicatorId: string;
+  lowerKey: string;
+  upperKey: string;
+  colorIndex: number;
 };
 
 const PRICE_INDICATOR_FIELDS: Readonly<Record<string, readonly string[]>> = {
@@ -118,6 +139,7 @@ const PRICE_INDICATOR_FIELDS: Readonly<Record<string, readonly string[]>> = {
   bollinger: ["upper", "middle", "lower"],
   bollinger_band: ["upper", "middle", "lower"],
   bollinger_bands: ["upper", "middle", "lower"],
+  bollinger_band_width_percent_b: ["upper", "middle", "lower"],
   donchian: ["upper", "middle", "lower"],
   donchian_channel: ["upper", "middle", "lower"],
   keltner: ["upper", "middle", "lower"],
@@ -130,15 +152,6 @@ const PRICE_INDICATOR_FIELDS: Readonly<Record<string, readonly string[]>> = {
   vwap_anchored_vwap: ["vwap", "anchored_vwap"],
 };
 
-const PRICE_OVERLAY_COLORS = [
-  "#2563eb",
-  "#e11d48",
-  "#0d9488",
-  "#8b5cf6",
-  "#ca8a04",
-  "#475569",
-] as const;
-
 const MODEL_FORECAST_STYLE: Readonly<Record<AiSimulationForecastLane, {
   label: string;
   stroke: string;
@@ -146,13 +159,13 @@ const MODEL_FORECAST_STYLE: Readonly<Record<AiSimulationForecastLane, {
 }>> = {
   chronos2: {
     label: "Chronos-2",
-    stroke: "#c2410c",
-    fill: "#f97316",
+    stroke: "hsl(var(--chart-forecast-chronos))",
+    fill: "hsl(var(--chart-forecast-chronos))",
   },
   fincast: {
     label: "FinCast",
-    stroke: "#0f766e",
-    fill: "#14b8a6",
+    stroke: "hsl(var(--chart-forecast-fincast))",
+    fill: "hsl(var(--chart-forecast-fincast))",
   },
 };
 
@@ -468,35 +481,71 @@ function vwapLabel(key: string): string | undefined {
   return undefined;
 }
 
-function priceOverlays(
-  rows: readonly ChartRow[],
+export function aiSimulationPriceLayers(
+  rows: readonly { indicatorValues: Readonly<Record<string, number>> }[],
   indicators: readonly AiSimulationChartIndicator[],
-): PriceOverlay[] {
-  const overlays = new Map<string, PriceOverlay>();
+): { lines: PriceOverlay[]; bands: PriceBand[] } {
+  const lines = new Map<string, PriceOverlay>();
+  const bands: PriceBand[] = [];
+  const bandsBySignature = new Map<string, PriceBand>();
   const hasValue = (key: string) => rows.some((row) => finite(row.indicatorValues[key]));
+  const indicatorRows = rows.map((row) => row.indicatorValues);
 
   for (const indicator of indicators) {
     const kind = normalizeKind(indicator.kind);
-    for (const field of PRICE_INDICATOR_FIELDS[kind] ?? []) {
-      const key = `${indicator.id}:${field}`;
-      if (hasValue(key)) {
-        overlays.set(key, {
-          key,
-          label: `${indicator.kind.replaceAll("_", " ")} · ${field.replaceAll("_", " ")}`,
-        });
+    const renderableFields = (PRICE_INDICATOR_FIELDS[kind] ?? []).filter((field) => hasValue(`${indicator.id}:${field}`));
+    const { lineFields, band } = splitChartIndicatorFields(kind, renderableFields);
+    let bandColorIndex: number | undefined;
+    let duplicateBand = false;
+    if (band) {
+      const lowerKey = `${indicator.id}:${band.lowerField}`;
+      const upperKey = `${indicator.id}:${band.upperField}`;
+      const signature = chartRangeSignature(indicatorRows, lowerKey, upperKey);
+      if (signature) {
+        const existing = bandsBySignature.get(signature);
+        if (existing) {
+          duplicateBand = true;
+          bandColorIndex = existing.colorIndex;
+        } else {
+          const layer: PriceBand = {
+            key: `${indicator.id}:range`,
+            label: `${indicator.kind.replaceAll("_", " ")} · 범위`,
+            indicatorId: indicator.id,
+            lowerKey,
+            upperKey,
+            colorIndex: bands.length,
+          };
+          bandColorIndex = layer.colorIndex;
+          bands.push(layer);
+          bandsBySignature.set(signature, layer);
+        }
       }
+    }
+    for (const field of lineFields) {
+      const bollingerMiddle = isBollingerBandKind(kind) && field === "middle";
+      if (bollingerMiddle && duplicateBand) continue;
+      const key = `${indicator.id}:${field}`;
+      lines.set(key, {
+        key,
+        label: bollingerMiddle
+          ? `${indicator.kind.replaceAll("_", " ")} · 중앙`
+          : `${indicator.kind.replaceAll("_", " ")} · ${field.replaceAll("_", " ")}`,
+        indicatorId: indicator.id,
+        bollingerMiddle,
+        ...(bollingerMiddle ? { bandColorIndex: bandColorIndex ?? bands.length } : {}),
+      });
     }
   }
 
   for (const row of rows) {
     for (const key of Object.keys(row.indicatorValues)) {
       const label = vwapLabel(key);
-      if (label && hasValue(key) && !overlays.has(key)) {
-        overlays.set(key, { key, label });
+      if (label && hasValue(key) && !lines.has(key)) {
+        lines.set(key, { key, label });
       }
     }
   }
-  return [...overlays.values()];
+  return { lines: [...lines.values()], bands };
 }
 
 /**
@@ -745,8 +794,8 @@ export function AiSimulationChart({
     const nearest = aiSimulationNearestChartRow(coordinateRows, coordinate);
     return nearest?.timestamp ?? new Date(coordinate).toISOString();
   };
-  const overlays = useMemo(
-    () => priceOverlays(actualRows, indicators),
+  const priceLayers = useMemo(
+    () => aiSimulationPriceLayers(actualRows, indicators),
     [actualRows, indicators],
   );
   const tradePoints = useMemo(
@@ -992,13 +1041,27 @@ export function AiSimulationChart({
                 cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
                 wrapperStyle={{ display: "none" }}
               />
+              {priceLayers.bands.map((band) => (
+                <Area
+                  key={band.key}
+                  dataKey={(row: ChartRow) => chartRangeValue(row, band.lowerKey, band.upperKey)}
+                  name={band.label}
+                  type="linear"
+                  fill={chartBandColor(band.colorIndex)}
+                  fillOpacity={0.11}
+                  stroke="none"
+                  connectNulls={false}
+                  isAnimationActive={false}
+                  data-ai-simulation-bollinger-band={band.indicatorId}
+                />
+              ))}
               <Bar
                 dataKey="candleRange"
                 name="저가–고가"
                 shape={<CandleShape />}
                 isAnimationActive={false}
               />
-              {overlays.map((overlay, index) => (
+              {priceLayers.lines.map((overlay, index) => (
                 <Line
                   key={overlay.key}
                   dataKey={overlay.key}
@@ -1006,10 +1069,12 @@ export function AiSimulationChart({
                   type="linear"
                   dot={false}
                   connectNulls={false}
-                  stroke={PRICE_OVERLAY_COLORS[index % PRICE_OVERLAY_COLORS.length]}
-                  strokeDasharray={index % 2 ? "5 3" : undefined}
-                  strokeWidth={1.25}
+                  stroke={overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(index)}
+                  strokeDasharray={overlay.bollingerMiddle ? undefined : chartSeriesDash(index)}
+                  strokeWidth={overlay.bollingerMiddle ? 1.9 : 1.35}
                   isAnimationActive={false}
+                  data-ai-simulation-bollinger-middle={overlay.bollingerMiddle ? overlay.indicatorId : undefined}
+                  data-ai-simulation-price-overlay-line={overlay.bollingerMiddle ? undefined : overlay.key}
                 />
               ))}
               {availableForecasts.map((forecast) => {
@@ -1192,13 +1257,25 @@ export function AiSimulationChart({
         </section>
       ) : null}
 
-      {overlays.length ? (
+      {priceLayers.lines.length || priceLayers.bands.length ? (
         <div
           className="mt-2 flex max-w-full flex-wrap gap-1.5"
           data-ai-simulation-price-overlays="available"
           aria-label="가격 차트 오버레이"
         >
-          {overlays.map((overlay, index) => (
+          {priceLayers.bands.map((band) => (
+            <span
+              key={band.key}
+              className="inline-flex max-w-full items-center gap-1 rounded-full bg-secondary px-2 py-1 text-[8px] font-black text-muted-foreground"
+              data-ai-simulation-price-overlay={band.key}
+              data-ai-simulation-bollinger-band-legend={band.indicatorId}
+              title={band.label}
+            >
+              <span className="h-2 w-3 shrink-0 rounded-sm" style={{ backgroundColor: chartBandColor(band.colorIndex), opacity: 0.45 }} />
+              <span className="truncate">{band.label}</span>
+            </span>
+          ))}
+          {priceLayers.lines.map((overlay, index) => (
             <span
               key={overlay.key}
               className="inline-flex max-w-full items-center gap-1 rounded-full bg-secondary px-2 py-1 text-[8px] font-black text-muted-foreground"
@@ -1207,7 +1284,7 @@ export function AiSimulationChart({
             >
               <span
                 className="h-0.5 w-3 shrink-0"
-                style={{ backgroundColor: PRICE_OVERLAY_COLORS[index % PRICE_OVERLAY_COLORS.length] }}
+                style={{ backgroundColor: overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(index) }}
               />
               <span className="truncate">{overlay.label}</span>
             </span>

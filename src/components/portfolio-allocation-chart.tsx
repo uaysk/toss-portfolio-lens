@@ -4,7 +4,7 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { Card } from "@/components/ui/card";
 import { buildAllocation } from "@/lib/allocation";
 import { formatMoney, formatPercent } from "@/lib/format";
-import { stockColor } from "@/lib/stock-appearance";
+import { stockColor, stockColorMap } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
 import type { Portfolio, Theme } from "@/types";
 
@@ -44,6 +44,10 @@ export function PortfolioAllocationChart({
   const allocation = useMemo(
     () => buildAllocation(portfolio.holdings, selectedCurrency),
     [portfolio.holdings, selectedCurrency],
+  );
+  const allocationColors = useMemo(
+    () => stockColorMap(allocation.map((item) => item.key), theme),
+    [allocation, theme],
   );
   const total = allocation.reduce((sum, item) => sum + item.value, 0);
 
@@ -89,7 +93,7 @@ export function PortfolioAllocationChart({
                 <div key={item.key} className="flex items-center gap-3">
                   <span
                     className="size-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: stockColor(item.symbol, theme) }}
+                    style={{ backgroundColor: allocationColors.get(item.key) ?? stockColor(item.key, theme) }}
                   />
                   <span className="min-w-0 flex-1 truncate text-sm font-semibold">
                     {item.name}
@@ -125,7 +129,7 @@ export function PortfolioAllocationChart({
                     {allocation.map((item) => (
                       <Cell
                         key={item.key}
-                        fill={stockColor(item.symbol, theme)}
+                        fill={allocationColors.get(item.key) ?? stockColor(item.key, theme)}
                       />
                     ))}
                   </Pie>
