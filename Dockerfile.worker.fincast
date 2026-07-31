@@ -2,7 +2,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.7.19@sha256:2dcbc74e60ed6d842122ed538f5267c80e7cde4ff1b6e66a199b89972496f033 AS uv
 
-FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS gpu-core
+FROM python:3.12.13-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS gpu-core
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=0 \
@@ -55,7 +55,8 @@ COPY worker/ai/src ./src
 RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     UV_NO_CACHE=0 uv sync --frozen --no-dev --extra fincast \
-    && /app/.venv/bin/python -m compileall -q -f /app/src/portfolio_ai_worker
+    && /app/.venv/bin/python -m compileall -q -f /app/src/portfolio_ai_worker \
+    && python -m pip uninstall --yes pip setuptools wheel
 ARG APP_GIT_SHA=unknown
 LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
 USER portfolio

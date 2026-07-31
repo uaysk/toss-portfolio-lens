@@ -34,21 +34,23 @@ describe("Harbor Trivy release helper", () => {
 
   it("normalizes Trivy severity and fixability", () => {
     const result = summarizeVulnerabilityReport({
-      vulnerabilities: [
-        {
-          id: "CVE-1",
-          package: "lib-a",
-          version: "1",
-          fix_version: "2",
-          severity: "CRITICAL",
-        },
-        {
-          vulnerability_id: "CVE-2",
-          package_name: "lib-b",
-          installed_version: "3",
-          severity: "high",
-        },
-      ],
+      "application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.1": {
+        vulnerabilities: [
+          {
+            id: "CVE-1",
+            package: "lib-a",
+            version: "1",
+            fix_version: "2",
+            severity: "CRITICAL",
+          },
+          {
+            vulnerability_id: "CVE-2",
+            package_name: "lib-b",
+            installed_version: "3",
+            severity: "high",
+          },
+        ],
+      },
     });
     assert.equal(result.total, 2);
     assert.equal(result.fixable, 1);

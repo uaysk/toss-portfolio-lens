@@ -18,6 +18,7 @@ const TERMINAL_SCAN_STATUSES = new Set(["Success", "Error", "Stopped"]);
 const VULNERABILITY_REPORT_MEDIA_TYPES = [
   "application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.1",
   "application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0",
+  "application/json",
 ];
 
 function requiredArgument(arguments_, name) {
@@ -138,7 +139,11 @@ export function summarizeVulnerabilityReport(report) {
     ? report.vulnerabilities
     : Array.isArray(report)
       ? report.flatMap((item) => item?.vulnerabilities ?? [])
-      : [];
+      : report && typeof report === "object"
+        ? Object.values(report).flatMap((item) => (
+            Array.isArray(item?.vulnerabilities) ? item.vulnerabilities : []
+          ))
+        : [];
   const counts = {
     Critical: 0,
     High: 0,
