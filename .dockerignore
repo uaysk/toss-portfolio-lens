@@ -6,7 +6,7 @@ worker/ai/.coverage
 worker/ai/models
 worker/ai/model-cache
 worker/rust/target
-.cache/huggingface
+.cache
 ai-model-cache
 models
 **/__pycache__

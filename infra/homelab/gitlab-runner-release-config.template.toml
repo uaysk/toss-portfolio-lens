@@ -1,0 +1,17 @@
+concurrent = 1
+check_interval = 3
+shutdown_timeout = 0
+
+[[runners]]
+  request_concurrency = 1
+  limit = 1
+  output_limit = 20480
+  builds_dir = "/var/lib/toss-portfolio-release/builds"
+  cache_dir = "/var/lib/toss-portfolio-release/cache"
+  shell = "bash"
+  environment = [
+    "DOCKER_CONFIG=/home/toss-portfolio-release/.docker",
+    "PATH=/opt/toss-portfolio-release/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  ]
+  [runners.feature_flags]
+    FF_NETWORK_PER_BUILD = true

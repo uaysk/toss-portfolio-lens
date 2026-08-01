@@ -32,6 +32,20 @@ installed/fixed version, 도달성 근거와 만료일을 release 보고서에 �
 
 ## Main host release
 
+보호된 GitLab `main` pipeline은 아래 절차를 `release-production` job에서 자동 수행한다. test runner와
+분리된 release runner만 Docker socket과 project-scoped Harbor robot을 사용하며, 동일 release는 GitLab
+resource group과 host lock으로 직렬화된다. 운영 state의 canonical 위치는
+`/var/lib/toss-portfolio-lens-release/current.env`이고 직전 release는 `rollback.env`, Compose source는
+`compose/<git-sha>/`에 보존된다. 파일은 credential을 포함하지 않지만 변조 방지를 위해 mode 600/700으로
+유지한다.
+
+자동 release는 항상 web 이미지를 build한다. `Dockerfile.worker.rust`와 `worker/rust`가 현재 배포된
+`RUST_WORKER_GIT_SHA` 이후 바뀌지 않았다면 기존 Rust digest를 유지하고, 바뀌었거나 비교할 commit을 찾지
+못하면 Rust 이미지도 build한다. 어느 경우든 후보 release의 두 digest를 최신 Harbor Trivy DB로 다시
+검사한다. GPU/AI worker 이미지는 이 pipeline의 대상이 아니다.
+
+아래 수동 절차는 자동 release 장애 복구용으로 남긴다.
+
 Git에 넣지 않는 `.env.harbor.release`에 현재 release set을 저장한다.
 
 ```dotenv

@@ -102,6 +102,20 @@ export function readDockerCredential(
   throw new Error(`Docker credentials for ${registry} were not found`);
 }
 
+export function isHarborRobotUsername(username) {
+  return typeof username === "string" && username.startsWith("robot$") && username.length > 6;
+}
+
+export function assertReleaseRobotCredential(
+  registry = DEFAULT_REGISTRY,
+  dockerConfigDirectory = process.env.DOCKER_CONFIG || join(homedir(), ".docker"),
+) {
+  const credential = readDockerCredential(registry, dockerConfigDirectory);
+  if (!isHarborRobotUsername(credential.username)) {
+    throw new Error("the release Docker config must use a Harbor robot account");
+  }
+}
+
 function basicAuthorization(credential) {
   return `Basic ${Buffer.from(`${credential.username}:${credential.secret}`).toString("base64")}`;
 }
@@ -294,6 +308,14 @@ export async function scanHarborArtifact({
 
 async function main() {
   const arguments_ = process.argv.slice(2);
+  if (arguments_.includes("--check-release-credential")) {
+    if (arguments_.length !== 1) {
+      throw new Error("--check-release-credential does not accept other arguments");
+    }
+    assertReleaseRobotCredential();
+    console.log("Harbor release credential is a robot account.");
+    return;
+  }
   const imageReference = arguments_.find((argument) => !argument.startsWith("--"));
   if (!imageReference) {
     throw new Error(

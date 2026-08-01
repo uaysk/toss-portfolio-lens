@@ -1,0 +1,40 @@
+[Unit]
+Description=GitLab Runner for Toss Portfolio Lens (protected production release)
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=toss-portfolio-release
+Group=toss-portfolio-release
+SupplementaryGroups=docker uaysk
+WorkingDirectory=/var/lib/toss-portfolio-release
+Environment=HOME=/home/toss-portfolio-release
+Environment=DOCKER_CONFIG=/home/toss-portfolio-release/.docker
+Environment=PATH=/opt/toss-portfolio-release/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/gitlab-runner run --config /etc/gitlab-runner-toss-portfolio-lens-release/config.toml --working-directory /var/lib/toss-portfolio-release
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+KillSignal=SIGQUIT
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+LockPersonality=true
+MemoryHigh=1G
+MemoryMax=1536M
+TasksMax=512
+ReadWritePaths=/var/lib/toss-portfolio-release /var/lib/toss-portfolio-lens-release /home/toss-portfolio-release
+ReadOnlyPaths=/home/uaysk/toss-portfolio-lens
+InaccessiblePaths=/home/uaysk/.docker /home/uaysk/.ssh /home/uaysk/.config/glab-cli
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

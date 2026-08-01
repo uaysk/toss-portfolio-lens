@@ -11,6 +11,7 @@ stages:
   - validate
   - test
   - integration
+  - release
 
 default:
   tags:
@@ -20,7 +21,7 @@ default:
     max: 1
     when:
       - runner_system_failure
-      - stuck_or_timeout_failure
+      - server_timeout_running
 
 variables:
   GIT_DEPTH: "50"
@@ -244,3 +245,36 @@ postgres-integration:
     - npm run test:postgres
     - npm run test:worker-queue
     - npm run test:rust-worker-postgres
+
+release-production:
+  stage: release
+  tags:
+    - toss-portfolio-lens-release
+  timeout: 60 minutes
+  interruptible: false
+  retry: 0
+  resource_group: toss-portfolio-lens-production
+  dependencies: []
+  variables:
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: fetch
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    - when: never
+  environment:
+    name: production
+    url: https://tpl.uaysk.com
+    deployment_tier: production
+  script:
+    - bash scripts/ci-release-production.sh
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 90 days
+    paths:
+      - .cache/release/candidate.env
+      - .cache/release/web-build-metadata.json
+      - .cache/release/rust-build-metadata.json
+      - .cache/release/deployment-report.json
+      - .cache/security/harbor-trivy-web.json
+      - .cache/security/harbor-trivy-rust-worker.json

@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  isHarborRobotUsername,
   parseHarborImageReference,
   releaseBlockingVulnerabilities,
   summarizeVulnerabilityReport,
 } from "./harbor-trivy-release.mjs";
 
 describe("Harbor Trivy release helper", () => {
+  it("accepts only Harbor robot usernames for the release boundary", () => {
+    assert.equal(isHarborRobotUsername("robot$toss-portfolio-lens+gitlab-release"), true);
+    assert.equal(isHarborRobotUsername("admin"), false);
+    assert.equal(isHarborRobotUsername("robot$"), false);
+  });
+
   it("parses digest-pinned and tagged project images", () => {
     const digest = "a".repeat(64);
     assert.deepEqual(
