@@ -12,7 +12,7 @@ ARG APP_GIT_SHA=unknown
 LABEL org.opencontainers.image.title="toss-portfolio-lens CNPG backup retention" \
       org.opencontainers.image.description="Fail-closed retention for completed CNPG volume snapshot backups" \
       org.opencontainers.image.revision="${APP_GIT_SHA}" \
-      org.opencontainers.image.source="https://github.com/uaysk/toss-portfolio-lens"
+      org.opencontainers.image.source="https://gitlab.uaysk.com/uaysk/toss-portfolio-lens"
 
 COPY --from=build /out/cnpg-backup-retention /cnpg-backup-retention
 

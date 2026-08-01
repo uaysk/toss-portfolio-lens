@@ -1,0 +1,217 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+stages:
+  - validate
+  - test
+  - integration
+
+default:
+  tags:
+    - toss-portfolio-lens-docker
+  interruptible: true
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+variables:
+  GIT_DEPTH: "50"
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.cache/npm"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
+  CARGO_TARGET_DIR: "$CI_PROJECT_DIR/worker/rust/target"
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: "always"
+
+.node-job:
+  image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
+  before_script:
+    - npm ci --prefer-offline --no-audit --no-fund
+  cache:
+    key:
+      files:
+        - package-lock.json
+      prefix: npm
+    paths:
+      - .cache/npm/
+      - .cache/tsbuildinfo/
+
+node-static:
+  extends: .node-job
+  stage: validate
+  timeout: 25 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  script:
+    - npm run test:release-tools
+    - npm run typecheck:app
+    - npm run build:client
+    - npm run build:server
+    - npm run check:bundle
+    - npm run check:legacy
+    - |
+      if ! npm run typecheck:tools > typescript-diagnostics.txt 2>&1; then
+        cat typescript-diagnostics.txt
+        exit 1
+      fi
+      cat typescript-diagnostics.txt
+    - npm run docs:mcp:check
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - typescript-diagnostics.txt
+      - .cache/performance/bundle-report.json
+
+vitest-light:
+  extends: .node-job
+  stage: test
+  timeout: 25 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  variables:
+    VITEST_MEMORY_BUDGET_MB: "3584"
+    VITEST_MAX_PARALLEL: "2"
+  script:
+    - npm run test:light
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - .cache/performance/vitest-batches.json
+
+vitest-heavy:
+  extends: .node-job
+  stage: test
+  timeout: 30 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  variables:
+    VITEST_MEMORY_BUDGET_MB: "2048"
+    VITEST_MAX_PARALLEL: "1"
+  script:
+    - npm run test:heavy
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - .cache/performance/vitest-batches.json
+
+vitest-pglite:
+  extends: .node-job
+  stage: test
+  timeout: 35 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  variables:
+    VITEST_MEMORY_BUDGET_MB: "4096"
+    VITEST_MAX_PARALLEL: "1"
+  script:
+    - npm run test:pglite
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - .cache/performance/vitest-batches.json
+
+rust-quality:
+  stage: test
+  image: rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
+  timeout: 35 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  cache:
+    key:
+      files:
+        - worker/rust/Cargo.lock
+      prefix: rust
+    paths:
+      - .cache/cargo/registry/
+      - .cache/cargo/git/
+      - worker/rust/target/
+  before_script:
+    - rustup component add rustfmt clippy
+  script:
+    - cargo fmt --check --manifest-path worker/rust/Cargo.toml
+    - cargo clippy --all-targets --locked --manifest-path worker/rust/Cargo.toml -- -D warnings
+    - cargo test --locked --manifest-path worker/rust/Cargo.toml -- --test-threads=2
+    - cargo build --release --locked --manifest-path worker/rust/Cargo.toml
+    - INDICATOR_BENCH_OUTPUT=.cache/performance/rust-indicator-cache.json cargo run --release --locked --manifest-path worker/rust/Cargo.toml --example indicator_cache_benchmark
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - worker/rust/target/release/portfolio-lens-worker
+      - .cache/performance/rust-indicator-cache.json
+
+cnpg-backup-retention:
+  stage: test
+  image: golang:1.26.5-alpine3.23@sha256:73f9732658b30852522ee5ebe698daa27e1829add9a70ff4f4a828409f8d0a99
+  timeout: 10 minutes
+  script:
+    - cd infra/homelab/cnpg-backup-retention
+    - go test ./...
+    - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -buildid=' -o cnpg-backup-retention .
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - infra/homelab/cnpg-backup-retention/cnpg-backup-retention
+
+ui-regression:
+  extends: .node-job
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+  timeout: 25 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  variables:
+    UI_VALIDATION_SKIP_BUILD: "1"
+    UI_VALIDATION_SCREENSHOT_DIR: "$CI_PROJECT_DIR/.cache/ui-regression"
+  script:
+    - npm run build:client
+    - npm run test:ui-regression
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - .cache/ui-regression/
+
+postgres-integration:
+  extends: .node-job
+  stage: integration
+  timeout: 30 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  needs:
+    - job: rust-quality
+      artifacts: true
+  services:
+    - name: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+      alias: postgres
+  variables:
+    NODE_ENV: test
+    HOST: 127.0.0.1
+    CLIENT_ID: ci-client
+    CLIENT_SECRET: ci-client-secret
+    DASHBOARD_PASSWORD: ci-dashboard-password
+    READ_ONLY_API_TOKEN: ci-read-only-api-token
+    SESSION_SECRET: ci-session-secret-at-least-thirty-two-characters
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: portfolio_lens_test
+    POSTGRES_USER: portfolio_test
+    POSTGRES_PASSWORD: integration-password
+    POSTGRES_DATABASE: portfolio_lens_test
+    POSTGRES_TEST_HOST: postgres
+    POSTGRES_TEST_PORT: "5432"
+    POSTGRES_TEST_USER: portfolio_test
+    POSTGRES_TEST_PASSWORD: integration-password
+    POSTGRES_TEST_DATABASE: portfolio_lens_test
+    SCALPING_ENABLED: "false"
+    MCP_ENABLED: "false"
+    AI_FINCAST_COMPUTE_AUTH_TOKEN_FILE: /run/fincast-auth/token
+  script:
+    - npm run test:rust-worker
+    - npm run test:postgres
+    - npm run test:worker-queue
+    - npm run test:rust-worker-postgres
