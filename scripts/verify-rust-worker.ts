@@ -322,6 +322,7 @@ const advancedOptimization = rust("optimization", advancedOptimizationInput);
 const repeatedAdvancedOptimization = rust("optimization", advancedOptimizationInput);
 assert.deepEqual(advancedOptimization.value, repeatedAdvancedOptimization.value);
 const advanced = advancedOptimization.value;
+const advancedWorkerOutput = WorkerOutputSchema.parse(advancedOptimization.output);
 assert.equal(advanced.algorithm, "nsga_ii");
 assert.equal(advanced.algorithmDetails.deterministic, true);
 assert.equal(advanced.covarianceEstimator, "ledoit_wolf");
@@ -367,18 +368,15 @@ assert(regimePolicy.trainingDecisionCount >= 6 && regimePolicy.oosDecisionCount 
 assert.equal(regimePolicy.ledgerValidation.selectedCount, 2);
 assert.equal(regimePolicy.ledgerValidation.completedCount, 2);
 assert(regimePolicy.policies.some((policy: any) => policy.id.startsWith("adaptive:")));
-assert(Array.isArray(advanced.regimePolicyArtifact) && advanced.regimePolicyArtifact.length > 0);
-for (const policy of advanced.regimePolicyArtifact) {
+assert.equal((advancedWorkerOutput.result as any).regimePolicyArtifact, undefined);
+const regimePolicyArtifact = advancedWorkerOutput.artifacts?.find((artifact) => artifact.type === "regime-policy");
+assert(regimePolicyArtifact, "regime policy artifact must be externalized");
+assert(Array.isArray(regimePolicyArtifact.content) && regimePolicyArtifact.content.length > 0);
+for (const policy of regimePolicyArtifact.content) {
   for (const decision of policy.oosDecisionTrace) {
     assert(decision.signalCutoffDate < decision.date, "regime policy consumed a same/future-date signal");
   }
 }
-const optimizationWorkerOutput = WorkerOutputSchema.parse(rust(
-  "optimization",
-  workerInput("optimization", { optimization: advancedOptimizationInput, objective: "robust_score" }),
-).output);
-assert.equal((optimizationWorkerOutput.result as any).regimePolicyArtifact, undefined);
-assert(optimizationWorkerOutput.artifacts?.some((artifact) => artifact.type === "regime-policy"));
 const optimizerAlgorithms = ["random_search", "differential_evolution", "cma_es", "nsga_ii", "direct_cvar"] as const;
 const optimizerMethodTimings: Record<string, number> = {};
 for (const algorithm of optimizerAlgorithms) {
@@ -601,7 +599,7 @@ process.stdout.write(`${JSON.stringify({
       decisionCount: regimePolicy.decisionCount,
       oosCoverage: regimePolicy.oosCoverage,
       ledgerValidation: regimePolicy.ledgerValidation,
-      artifactExternalized: optimizationWorkerOutput.artifacts?.some((artifact) => artifact.type === "regime-policy") ?? false,
+      artifactExternalized: advancedWorkerOutput.artifacts?.some((artifact) => artifact.type === "regime-policy") ?? false,
     },
     methodProcessMs: optimizerMethodTimings,
     processMs: advancedOptimization.processMs,
