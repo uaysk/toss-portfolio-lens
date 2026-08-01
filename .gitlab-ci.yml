@@ -7,6 +7,7 @@ workflow:
     - if: '$CI_COMMIT_TAG'
 
 stages:
+  - preflight
   - validate
   - test
   - integration
@@ -30,6 +31,25 @@ variables:
   CARGO_TARGET_DIR: "$CI_PROJECT_DIR/worker/rust/target"
   CARGO_BUILD_JOBS: "2"
   CARGO_TERM_COLOR: "always"
+
+runner-boundary:
+  stage: preflight
+  image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
+  timeout: 5 minutes
+  script:
+    - mkdir -p .cache/performance
+    - |
+      memory_max="$(cat /sys/fs/cgroup/memory.max)"
+      test "$memory_max" != "max"
+      test "$memory_max" -le 5368709120
+      test ! -S /var/run/docker.sock
+      test -z "$(find /dev -maxdepth 1 -name 'nvidia*' -print -quit)"
+      printf '{"memoryMaxBytes":%s,"dockerSocketExposed":false,"gpuDeviceExposed":false}\n' "$memory_max" \
+        > .cache/performance/runner-boundary.json
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - .cache/performance/runner-boundary.json
 
 .node-job:
   image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46

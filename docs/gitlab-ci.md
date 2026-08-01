@@ -7,6 +7,7 @@ remote는 이전 검증과 긴급 rollback을 위해 `github`라는 이름으로
 
 `.gitlab-ci.yml`은 merge request, branch, tag에 대해 다음 gate를 실행한다.
 
+- runner build container의 5 GiB hard limit, Docker socket·GPU device 미노출 preflight
 - Node 정책·계약·TypeScript·production client/server build와 bundle budget
 - OOM-safe Vitest light/heavy/PGlite lane
 - Rust fmt, clippy, test, release binary와 indicator benchmark
