@@ -69,6 +69,10 @@ node-static:
   stage: validate
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends git >/dev/null
+    - npm ci --prefer-offline --no-audit --no-fund
   script:
     - npm run test:release-tools
     - npm run typecheck:app
