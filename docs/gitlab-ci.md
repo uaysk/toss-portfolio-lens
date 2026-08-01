@@ -25,7 +25,8 @@ runner에 제공하지 않는다.
 조건으로 유지한다.
 
 - `privileged=false`, Docker socket mount 없음, project에 lock
-- runner concurrency 1, job memory 6 GiB, service memory 1 GiB
+- runner concurrency 1, build container memory/swap 5 GiB, service container memory/swap 768 MiB
+- 전용 systemd slice의 `MemoryHigh` 5.5 GiB, `MemoryMax` 6 GiB로 호스트 전체 OOM을 차단
 - Vitest light만 batch 2개까지 실행하고 heavy/PGlite는 file worker 1개
 - 메모리 사용량이 큰 job은 `toss-portfolio-lens-memory-heavy` resource group으로 직렬화
 - CI job image와 PostgreSQL service image는 manifest digest로 고정
