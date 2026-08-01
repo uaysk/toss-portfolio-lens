@@ -206,12 +206,15 @@ postgres-integration:
   stage: integration
   timeout: 30 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends libssl3 >/dev/null
+    - npm ci --prefer-offline --no-audit --no-fund
   needs:
     - job: rust-quality
       artifacts: true
   services:
     - name: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
-      alias: postgres
   variables:
     NODE_ENV: test
     HOST: 127.0.0.1
