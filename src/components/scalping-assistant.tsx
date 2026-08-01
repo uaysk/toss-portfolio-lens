@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import {
+  CHART_COLORS,
   CHART_SERIES,
   chartBandColor,
   chartRangeSignature,
@@ -183,6 +184,8 @@ export function scalpingPriceLayers(
     label: string;
     indicatorId: string;
     bollingerMiddle: boolean;
+    colorIndex: number;
+    dashIndex: number;
     bandColorIndex?: number;
   }> = [];
   const bands: Array<{
@@ -193,7 +196,7 @@ export function scalpingPriceLayers(
     colorIndex: number;
   }> = [];
   const bandsBySignature = new Map<string, (typeof bands)[number]>();
-  for (const indicator of indicators) {
+  for (const [indicatorIndex, indicator] of indicators.entries()) {
     const kind = indicator.kind.trim().toLowerCase().replace(/[\s-]+/g, "_");
     const fields = (INDICATOR_LINE_FIELDS[kind] ?? []).filter((field) => {
       const key = `${indicator.id}:${field}`;
@@ -225,7 +228,7 @@ export function scalpingPriceLayers(
         }
       }
     }
-    for (const field of lineFields) {
+    for (const [fieldIndex, field] of lineFields.entries()) {
       const bollingerMiddle = isBollingerBandKind(kind) && field === "middle";
       if (bollingerMiddle && duplicateBand) continue;
       lines.push({
@@ -233,6 +236,8 @@ export function scalpingPriceLayers(
         label: bollingerMiddle ? `${indicator.kind} 중앙` : `${indicator.kind} ${field}`,
         indicatorId: indicator.id,
         bollingerMiddle,
+        colorIndex: indicatorIndex,
+        dashIndex: fieldIndex,
         ...(bollingerMiddle ? { bandColorIndex: bandColorIndex ?? bands.length } : {}),
       });
     }
@@ -319,8 +324,8 @@ function TradeMarkerShape({ cx = 0, cy = 0, marker }: { cx?: number; cy?: number
   const markerY = cy + (buy ? 8 : -8);
   return (
     <g aria-label={`${buy ? "매수" : "매도"} 체결`}>
-      <line x1={cx} y1={cy} x2={cx} y2={markerY} stroke={buy ? "#2563eb" : "#e11d48"} strokeWidth={1} />
-      <circle cx={cx} cy={markerY} r={7} fill={buy ? "#2563eb" : "#e11d48"} stroke="hsl(var(--card))" strokeWidth={2} />
+      <line x1={cx} y1={cy} x2={cx} y2={markerY} stroke={buy ? CHART_COLORS.primary : CHART_COLORS.positive} strokeWidth={1} />
+      <circle cx={cx} cy={markerY} r={7} fill={buy ? CHART_COLORS.primary : CHART_COLORS.positive} stroke="hsl(var(--card))" strokeWidth={2} />
       <path d={buy ? `M ${cx - 3} ${markerY + 1} L ${cx} ${markerY - 2} L ${cx + 3} ${markerY + 1}` : `M ${cx - 3} ${markerY - 1} L ${cx} ${markerY + 2} L ${cx + 3} ${markerY - 1}`} fill="none" stroke="white" strokeWidth={1.5} />
     </g>
   );
@@ -378,16 +383,16 @@ function PriceChart({ candidate, preset }: { candidate: ScalpingCandidate; prese
     return <div className="grid h-[300px] place-items-center rounded-[20px] bg-secondary px-4 text-center text-xs font-bold text-muted-foreground" data-scalping-chart-empty>확정 또는 진행 중인 분봉 데이터가 없습니다.</div>;
   }
   return (
-    <div className="h-[300px] min-w-0 rounded-[20px] bg-secondary p-2" data-scalping-price-chart aria-label={`${candidate.symbol} 실시간 분봉 차트`}>
+    <div className="toss-chart-surface h-[300px] min-w-0 p-2" data-scalping-price-chart aria-label={`${candidate.symbol} 실시간 분봉 차트`}>
       <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
         <ComposedChart data={rows} syncId={SCALPING_CHART_SYNC_ID} syncMethod="value" margin={{ top: 12, right: 5, bottom: 0, left: 0 }}>
-          <CartesianGrid stroke="hsl(var(--border))" vertical={false} strokeDasharray="3 5" />
+          <CartesianGrid stroke="hsl(var(--chart-grid))" vertical={false} />
           <XAxis dataKey="timestamp" tickFormatter={chartTime} minTickGap={28} tick={{ fontSize: 8 }} axisLine={false} tickLine={false} />
           <YAxis orientation="right" width={54} tick={{ fontSize: 8 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
           <Tooltip
             labelFormatter={(label) => formatTimestamp(String(label), true)}
             formatter={(value, name) => [typeof value === "number" ? formatMoney(value, candidate.currency) : String(value), String(name)]}
-            cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
+            cursor={{ stroke: CHART_COLORS.cursor, strokeWidth: 1 }}
             wrapperStyle={{ zIndex: 30 }}
           />
           {indicatorLayers.bands.map((band) => (
@@ -416,7 +421,7 @@ function PriceChart({ candidate, preset }: { candidate: ScalpingCandidate; prese
           {preset === "breakout" && finite(levels?.openingRange15?.low) ? <ReferenceLine y={levels?.openingRange15?.low} stroke={CHART_SERIES[3]} strokeDasharray="5 3" label={{ value: "OR15 L", fontSize: 8 }} /> : null}
           {preset === "breakout" && finite(levels?.openingRange30?.high) ? <ReferenceLine y={levels?.openingRange30?.high} stroke={CHART_SERIES[5]} strokeDasharray="8 3" label={{ value: "OR30 H", fontSize: 8 }} /> : null}
           {preset === "breakout" && finite(levels?.openingRange30?.low) ? <ReferenceLine y={levels?.openingRange30?.low} stroke={CHART_SERIES[5]} strokeDasharray="8 3" label={{ value: "OR30 L", fontSize: 8 }} /> : null}
-          {indicatorLayers.lines.map((line, index) => <Line key={line.key} dataKey={line.key} name={line.label} type="linear" dot={false} connectNulls={false} stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(index)} strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(index)} strokeWidth={line.bollingerMiddle ? 1.9 : 1.35} isAnimationActive={false} data-scalping-bollinger-middle={line.bollingerMiddle ? line.indicatorId : undefined} />)}
+          {indicatorLayers.lines.map((line) => <Line key={line.key} dataKey={line.key} name={line.label} type="linear" dot={false} connectNulls={false} stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(line.colorIndex)} strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(line.dashIndex)} strokeWidth={line.bollingerMiddle ? 1.9 : 1.35} isAnimationActive={false} data-scalping-bollinger-middle={line.bollingerMiddle ? line.indicatorId : undefined} />)}
           {finite(candidate.position?.averagePrice) ? <ReferenceLine y={candidate.position?.averagePrice} stroke="hsl(var(--foreground))" strokeWidth={1.4} label={{ value: "평균 매수가", fontSize: 8 }} /> : null}
           {markerPoints.map(({ marker, timestamp, price }) => (
             <ReferenceDot key={marker.id} x={timestamp} y={price} ifOverflow="extendDomain" shape={<TradeMarkerShape marker={marker} />} />

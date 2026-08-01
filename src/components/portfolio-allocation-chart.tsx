@@ -3,6 +3,11 @@ import { Layers3 } from "lucide-react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { Card } from "@/components/ui/card";
 import { buildAllocation } from "@/lib/allocation";
+import {
+  chartTooltipItemStyle,
+  chartTooltipLabelStyle,
+  chartTooltipStyle,
+} from "@/lib/chart-theme";
 import { formatMoney, formatPercent } from "@/lib/format";
 import { stockColor, stockColorMap } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
@@ -111,7 +116,7 @@ export function PortfolioAllocationChart({
           </div>
         </div>
 
-        <div className="relative min-h-[290px]">
+        <div className="toss-chart-surface relative min-h-[290px]">
           {allocation.length ? (
             <>
               <ResponsiveContainer width="100%" height="100%">
@@ -136,23 +141,9 @@ export function PortfolioAllocationChart({
                   <Tooltip
                     cursor={false}
                     formatter={(value) => formatMoney(Number(value), selectedCurrency)}
-                    contentStyle={{
-                      border: 0,
-                      borderRadius: 16,
-                      boxShadow: "0 16px 48px rgba(0,0,0,.12)",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      background: "hsl(var(--card))",
-                      color: "hsl(var(--card-foreground))",
-                    }}
-                    labelStyle={{
-                      color: "hsl(var(--card-foreground))",
-                      fontWeight: 800,
-                    }}
-                    itemStyle={{
-                      color: "hsl(var(--card-foreground))",
-                      fontWeight: 700,
-                    }}
+                    contentStyle={chartTooltipStyle}
+                    labelStyle={chartTooltipLabelStyle}
+                    itemStyle={chartTooltipItemStyle}
                   />
                 </PieChart>
               </ResponsiveContainer>

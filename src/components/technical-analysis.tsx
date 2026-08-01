@@ -29,6 +29,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceArea,
   ReferenceDot,
   ReferenceLine,
   ResponsiveContainer,
@@ -43,7 +44,9 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  CHART_COLORS,
   chartBandColor,
+  chartIndicatorColor,
   chartRangeSignature,
   chartRangeValue,
   chartSeriesColor,
@@ -160,12 +163,12 @@ function priceLineEntries(
   const bandColorByIndicatorId = new Map(bands.flatMap((band) => (
     band.coveredIndicatorIds.map((indicatorId) => [indicatorId, band.colorIndex] as const)
   )));
-  return calculations.flatMap((calculation) => {
+  return calculations.flatMap((calculation, calculationIndex) => {
     const option = TECHNICAL_INDICATOR_BY_KIND.get(calculation.kind);
     if (!option) return [];
     const renderableFields = option.priceFields.filter((field) => hasRenderableIndicatorValues(calculation, [field]));
     const { lineFields } = splitChartIndicatorFields(calculation.kind, renderableFields);
-    return lineFields.flatMap((field) => {
+    return lineFields.flatMap((field, fieldIndex) => {
       const bollingerMiddle = isBollingerBandKind(calculation.kind) && field === "middle";
       if (bollingerMiddle && duplicateBandIds.has(calculation.indicator_id)) return [];
       return [{
@@ -176,6 +179,8 @@ function priceLineEntries(
           ? `${option.shortLabel} 중앙`
           : `${option.shortLabel} ${field === "value" ? "" : field}`.trim(),
         bollingerMiddle,
+        colorIndex: calculationIndex,
+        dashIndex: fieldIndex,
         ...(bollingerMiddle ? {
           bandColorIndex: bandColorByIndicatorId.get(calculation.indicator_id) ?? bands.length,
         } : {}),
@@ -304,7 +309,7 @@ function TradeMarkerShape({ cx = 0, cy = 0, marker }: { cx?: number; cy?: number
   return (
     <g transform={`translate(${cx} ${cy})`} aria-label={detail} role="img">
       <title>{detail}</title>
-      <circle r={7} fill={buy ? "#2563eb" : "#e11d48"} stroke="hsl(var(--card))" strokeWidth={2} />
+      <circle r={7} fill={buy ? CHART_COLORS.primary : CHART_COLORS.positive} stroke="hsl(var(--card))" strokeWidth={2} />
       <path d={buy ? "M-3,-1 L0,3 L3,-1" : "M-3,1 L0,-3 L3,1"} fill="none" stroke="white" strokeWidth={1.5} />
     </g>
   );
@@ -329,7 +334,7 @@ function PriceTooltip({
   if (!active || !point) return null;
   const formatPrice = (value: number) => priceMode === "starting100" ? value.toFixed(2) : formatMoney(value, currency);
   return (
-    <div className="min-w-52 rounded-2xl bg-card p-4 text-xs shadow-2xl">
+    <div className="toss-chart-tooltip min-w-52 p-4 text-xs">
       <p className="font-black">{point.date}</p>
       <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
         <span>시가</span><strong className="text-right text-foreground">{formatPrice(point.open)}</strong>
@@ -361,7 +366,7 @@ function PriceTooltip({
 function OscillatorTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: unknown }>; label?: string }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="min-w-40 rounded-2xl bg-card p-3 text-xs shadow-2xl">
+    <div className="toss-chart-tooltip min-w-40 p-3 text-xs">
       <p className="font-black">{label}</p>
       <div className="mt-2 space-y-1">
         {payload.flatMap((item) => typeof item.value === "number" ? [(
@@ -488,7 +493,7 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
   }, [interval, markers, showTradeMarkers, visibleRows]);
   const visibleMarkers = markerPoints.map((point) => point.marker);
   const returnPercent = technicalSeriesReturn(series);
-  const chartHeight = 270 + auxiliaryPanels.length * 160;
+  const chartHeight = 280 + auxiliaryPanels.length * 138;
   const currency = priceMode === "starting100" ? "INDEX" : series.currency;
 
   const toggleOverride = (kind: TechnicalIndicatorKind) => {
@@ -598,20 +603,25 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
 
       <div ref={ref} className="mt-3 min-w-0" style={{ minHeight: chartHeight }}>
         {!visible ? (
-          <div className="grid rounded-[20px] bg-secondary text-center text-xs font-bold text-muted-foreground" style={{ height: chartHeight, placeItems: "center" }}>스크롤하면 차트를 렌더링합니다</div>
+          <div className="toss-chart-surface grid text-center text-xs font-bold text-muted-foreground" style={{ height: chartHeight, placeItems: "center" }}>스크롤하면 차트를 렌더링합니다</div>
         ) : !visibleRows.length ? (
-          <div className="grid rounded-[20px] bg-secondary text-center text-xs font-bold text-muted-foreground" style={{ height: chartHeight, placeItems: "center" }}>표시할 가격 시계열이 없습니다.</div>
+          <div className="toss-chart-surface grid text-center text-xs font-bold text-muted-foreground" style={{ height: chartHeight, placeItems: "center" }}>표시할 가격 시계열이 없습니다.</div>
         ) : (
-          <div className="space-y-2" data-technical-chart>
-            <div className="h-[270px] min-w-0 rounded-[20px] bg-secondary p-2" data-technical-price-chart aria-label={`${series.symbol} 가격 및 지표 오버레이 차트`}>
+          <div className="toss-chart-stack" data-technical-chart data-technical-chart-layout="integrated">
+            <div className="toss-chart-track h-[280px] px-1 pt-1" data-technical-price-chart aria-label={`${series.symbol} 가격 및 지표 오버레이 차트`}>
+              <div className="toss-chart-track-label" aria-hidden="true">
+                <span className="toss-chart-track-label-dot" style={{ backgroundColor: priceBands.length ? CHART_COLORS.bollinger : CHART_COLORS.primary }} />
+                <strong>가격</strong>
+                <span>{priceBands.length ? "캔들 · 볼린저 범위" : "캔들 · 가격 지표"}</span>
+              </div>
               <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                <ComposedChart data={visibleRows} syncId={CHART_SYNC_ID} syncMethod="value" margin={{ top: 12, right: 7, bottom: 0, left: 0 }}>
-                  <CartesianGrid stroke="hsl(var(--border))" vertical={false} strokeDasharray="3 5" />
-                  <XAxis dataKey="date" tickFormatter={displayDate} tick={{ fontSize: 9 }} minTickGap={35} axisLine={false} tickLine={false} />
+                <ComposedChart data={visibleRows} syncId={CHART_SYNC_ID} syncMethod="value" margin={{ top: 30, right: 7, bottom: 0, left: 0 }}>
+                  <CartesianGrid stroke="hsl(var(--chart-grid))" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={displayDate} tick={{ fontSize: 9 }} minTickGap={35} axisLine={false} tickLine={false} hide={auxiliaryPanels.length > 0} />
                   <YAxis width={52} orientation="right" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
                   <Tooltip
                     content={<PriceTooltip priceMode={priceMode} currency={currency} lines={priceLines} bands={priceBands} />}
-                    cursor={{ stroke: "hsl(var(--foreground) / 0.5)", strokeWidth: 1 }}
+                    cursor={{ stroke: CHART_COLORS.cursor, strokeWidth: 1 }}
                     wrapperStyle={{ zIndex: 30 }}
                   />
                   {priceBands.map((band) => (
@@ -629,7 +639,7 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                     />
                   ))}
                   <Bar dataKey="candleRange" shape={<CandleShape />} isAnimationActive={false} />
-                  {priceLines.map((line, index) => (
+                  {priceLines.map((line) => (
                     <Line
                       key={line.key}
                       dataKey={line.key}
@@ -637,8 +647,8 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                       type="linear"
                       dot={false}
                       connectNulls={false}
-                      stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(index)}
-                      strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(index)}
+                      stroke={line.bollingerMiddle ? chartBandColor(line.bandColorIndex ?? 0) : chartSeriesColor(line.colorIndex)}
+                      strokeDasharray={line.bollingerMiddle ? undefined : chartSeriesDash(line.dashIndex)}
                       strokeWidth={line.bollingerMiddle ? 1.9 : 1.5}
                       isAnimationActive={false}
                       data-technical-bollinger-middle={line.bollingerMiddle ? line.calculation.indicator_id : undefined}
@@ -666,27 +676,52 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
               const histogram = calculation.kind === "macd" ? fields.find((item) => item.field === "histogram") : undefined;
               return (
                 <div
-                  className="h-[152px] min-w-0 rounded-[20px] bg-secondary px-2 pt-2"
+                  className="toss-chart-track h-[138px] px-1"
                   key={calculation.indicator_id}
                   data-technical-indicator-panel={calculation.kind}
                   data-technical-panel-placement={volumeOverlay ? "volume-overlay" : "indicator-panel"}
                   data-technical-availability={calculation.availability.status}
                   aria-label={`${series.symbol} ${option.label} 보조 지표 패널`}
                 >
-                  <div className="flex items-center justify-between px-2 text-[9px] font-black">
-                    <span>{option.label}</span>
-                    <span className="text-muted-foreground">{calculation.availability.status} · {technicalAvailabilityLabel(calculation.availability.status)}</span>
+                  <div className="toss-chart-track-label" aria-hidden="true">
+                    <span className="toss-chart-track-label-dot" style={{ backgroundColor: chartIndicatorColor(calculation.kind, 0, panelIndex) }} />
+                    <strong>{option.shortLabel}</strong>
+                    <span>{calculation.availability.status} · {technicalAvailabilityLabel(calculation.availability.status)}</span>
                   </div>
-                  <div className="h-[126px]">
+                  <div className="h-full">
                     <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                      <ComposedChart data={visibleRows} syncId={CHART_SYNC_ID} syncMethod="value" margin={{ top: 4, right: 7, bottom: 0, left: 0 }}>
-                        <CartesianGrid stroke="hsl(var(--border))" vertical={false} strokeDasharray="3 5" />
-                        <XAxis dataKey="date" hide />
-                        <YAxis width={46} orientation="right" tick={{ fontSize: 8 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
-                        <Tooltip content={<OscillatorTooltip />} cursor={{ stroke: "hsl(var(--foreground) / 0.5)" }} wrapperStyle={{ zIndex: 30 }} />
-                        {option.referenceLines?.map((value) => <ReferenceLine key={value} y={value} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 4" />)}
-                        {volumeOverlay ? <Bar dataKey="volume" name="volume" fill="hsl(var(--muted-foreground) / 0.22)" isAnimationActive={false} /> : null}
-                        {histogram ? <Bar dataKey={histogram.key} name="histogram" fill="hsl(var(--muted-foreground) / 0.45)" isAnimationActive={false} /> : null}
+                      <ComposedChart data={visibleRows} syncId={CHART_SYNC_ID} syncMethod="value" margin={{ top: 27, right: 7, bottom: panelIndex === auxiliaryPanels.length - 1 ? 2 : 0, left: 0 }}>
+                        <CartesianGrid stroke="hsl(var(--chart-grid))" vertical={false} />
+                        <XAxis
+                          dataKey="date"
+                          hide={panelIndex !== auxiliaryPanels.length - 1}
+                          tickFormatter={displayDate}
+                          tick={{ fontSize: 8 }}
+                          minTickGap={35}
+                          axisLine={false}
+                          tickLine={false}
+                          height={18}
+                        />
+                        <YAxis
+                          width={46}
+                          orientation="right"
+                          tick={{ fontSize: 8 }}
+                          axisLine={false}
+                          tickLine={false}
+                          domain={calculation.kind === "rsi" ? [0, 100] : ["auto", "auto"]}
+                          ticks={calculation.kind === "rsi" ? [30, 50, 70] : undefined}
+                        />
+                        <Tooltip content={<OscillatorTooltip />} cursor={{ stroke: CHART_COLORS.cursor }} wrapperStyle={{ zIndex: 30 }} />
+                        {calculation.kind === "rsi" ? (
+                          <>
+                            <ReferenceArea y1={70} y2={100} fill={CHART_COLORS.positive} fillOpacity={0.055} stroke="none" ifOverflow="hidden" data-technical-rsi-zone="overbought" />
+                            <ReferenceArea y1={0} y2={30} fill={CHART_COLORS.negative} fillOpacity={0.055} stroke="none" ifOverflow="hidden" data-technical-rsi-zone="oversold" />
+                            <ReferenceLine y={50} stroke="hsl(var(--chart-grid))" strokeWidth={1} data-technical-rsi-midline />
+                          </>
+                        ) : null}
+                        {option.referenceLines?.map((value) => <ReferenceLine key={value} y={value} stroke="hsl(var(--chart-axis) / 0.62)" strokeDasharray="3 4" />)}
+                        {volumeOverlay ? <Bar dataKey="volume" name="volume" fill={CHART_COLORS.volume} fillOpacity={0.24} radius={[2, 2, 0, 0]} isAnimationActive={false} /> : null}
+                        {histogram ? <Bar dataKey={histogram.key} name="histogram" fill={CHART_COLORS.neutral} fillOpacity={0.48} radius={[2, 2, 0, 0]} isAnimationActive={false} /> : null}
                         {fields.filter((item) => item !== histogram).map((item, index) => (
                           <Line
                             key={item.key}
@@ -694,9 +729,9 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
                             name={item.field}
                             dot={false}
                             connectNulls={false}
-                            stroke={chartSeriesColor(panelIndex + index)}
+                            stroke={chartIndicatorColor(calculation.kind, index, panelIndex)}
                             strokeDasharray={chartSeriesDash(index)}
-                            strokeWidth={1.4}
+                            strokeWidth={calculation.kind === "rsi" ? 2.1 : 1.65}
                             isAnimationActive={false}
                           />
                         ))}

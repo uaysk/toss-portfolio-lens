@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Activity, Ban, FlaskConical, LoaderCircle, Play, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -11,7 +11,7 @@ import { ExposureResearchResults, OptimizationResearchResults, OutlookResearchRe
 import { StockSwatch } from "@/components/stock-swatch";
 import { cancelAdvancedAnalysis, loadAdvancedArtifact, runAdvancedAnalysis, type AdvancedAnalysisOperation } from "@/lib/advanced-analysis";
 import { normalizedBacktestWeights, parseNumberList, parseSymbolList } from "@/lib/backtest-config";
-import { chartSeriesColor, chartSeriesDash } from "@/lib/chart-theme";
+import { CHART_COLORS, chartSeriesColor, chartSeriesDash, chartTooltipStyle } from "@/lib/chart-theme";
 import { formatMoney, formatPercent } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
 import { parseFactorDraft } from "@/lib/research-visualization";
@@ -241,12 +241,14 @@ function ScenarioResults({ result }: { result: unknown }) {
       <div className="h-[270px] rounded-[20px] bg-card p-3">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={chart} margin={{ top: 10, right: 6, bottom: 30, left: 0 }}>
-            <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+            <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
             <XAxis dataKey="name" angle={-12} textAnchor="end" interval={0} height={58} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
             <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
-            <Tooltip formatter={(value) => formatPercent(Number(value), true)} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-            <Bar dataKey="totalReturn" name="누적 수익률" fill="hsl(var(--foreground))" radius={[6, 6, 0, 0]} />
-            <Bar dataKey="drawdown" name="최대 낙폭" fill="hsl(var(--muted-foreground))" radius={[6, 6, 0, 0]} />
+            <Tooltip formatter={(value) => formatPercent(Number(value), true)} contentStyle={chartTooltipStyle} />
+            <Bar dataKey="totalReturn" name="누적 수익률" radius={[6, 6, 0, 0]}>
+              {chart.map((item) => <Cell key={`${item.name}:return`} fill={item.totalReturn >= 0 ? CHART_COLORS.positive : CHART_COLORS.negative} />)}
+            </Bar>
+            <Bar dataKey="drawdown" name="최대 낙폭" fill={CHART_COLORS.negative} radius={[6, 6, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -395,11 +397,11 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
       </div>
       {data.percentilePathsExternalized && !loadedPercentiles ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">분위수 경로는 대용량 응답을 피하기 위해 별도 artifact로 보관했습니다. 불러온 뒤 경로당 최대 500점으로 표시합니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadPercentiles()} disabled={loadingPercentiles}>{loadingPercentiles ? <LoaderCircle className="animate-spin" /> : <Activity />}분위수 경로 불러오기</Button></div> : null}
       {percentileError ? <p className="text-xs text-rose-500">{percentileError}</p> : null}
-      {chart.length ? <div className="h-[320px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={chart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />{paths.map((path, index) => { const q = Math.round((numeric(path.quantile) ?? 0) * 100); return <Line key={q} type="monotone" dataKey={`q${q}`} name={`${q}% 경로`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={q === 50 ? 3 : 1.5} dot={false} />; })}</LineChart></ResponsiveContainer></div> : null}
+      {chart.length ? <div className="h-[320px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={chart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={chartTooltipStyle} />{paths.map((path, index) => { const q = Math.round((numeric(path.quantile) ?? 0) * 100); return <Line key={q} type="monotone" dataKey={`q${q}`} name={`${q}% 경로`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={q === 50 ? 3 : 1.5} dot={false} />; })}</LineChart></ResponsiveContainer></div> : null}
       <div className="flex flex-wrap gap-2">{percentileValues.map((item) => <span key={String(item.quantile)} className="rounded-full bg-card px-3 py-2 text-[10px] font-black">Q{Math.round((numeric(item.quantile) ?? 0) * 100)} {formatMoney(numeric(item.value) ?? 0, "KRW")}</span>)}</div>
       {data.samplePathsExternalized && !loadedSamples ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">표본 경로는 응답 정지를 막기 위해 별도 artifact로 보관했습니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadSamples()} disabled={loadingSamples}>{loadingSamples ? <LoaderCircle className="animate-spin" /> : <Activity />}표본 경로 불러오기</Button></div> : null}
       {sampleError ? <p className="text-xs text-rose-500">{sampleError}</p> : null}
-      {sampleChart.length ? <div><p className="mb-2 text-xs font-black">표본 경로 · 최대 10개 표시</p><div className="h-[280px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={sampleChart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />{samplePaths.map((path, index) => { const id = numeric(path.pathIndex) ?? index; return <Line key={id} type="monotone" dataKey={`p${id}`} name={`표본 ${id}`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={1.3} dot={false} />; })}</LineChart></ResponsiveContainer></div></div> : null}
+      {sampleChart.length ? <div><p className="mb-2 text-xs font-black">표본 경로 · 최대 10개 표시</p><div className="h-[280px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={sampleChart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={chartTooltipStyle} />{samplePaths.map((path, index) => { const id = numeric(path.pathIndex) ?? index; return <Line key={id} type="monotone" dataKey={`p${id}`} name={`표본 ${id}`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={1.3} dot={false} />; })}</LineChart></ResponsiveContainer></div></div> : null}
     </div>
   );
 }

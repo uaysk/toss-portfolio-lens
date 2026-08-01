@@ -19,6 +19,7 @@ import {
 } from "@/lib/ai-simulation-forecast";
 import type { AiSimulationChartView, AiSimulationCurrency } from "@/lib/ai-simulation";
 import { formatMoney } from "@/lib/format";
+import { CHART_COLORS } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
 type AiSimulationModelForecastSectionProps = {
@@ -102,7 +103,7 @@ function ForecastCard({
       {forecast.status === "available" && forecast.points.length ? (
         <>
           <div
-            className="mt-3 h-[280px] min-w-0 max-w-full rounded-[20px] bg-secondary p-2"
+            className="toss-chart-surface mt-3 h-[280px] min-w-0 max-w-full p-2"
             data-ai-simulation-model-forecast-chart
             role="img"
             aria-label={`${forecast.signalSymbol} 실제 확정 종가와 모델 Q10 중앙값 Q90 미래 가격 예측`}
@@ -113,9 +114,8 @@ function ForecastCard({
                 margin={{ top: 18, right: 8, bottom: 0, left: 0 }}
               >
                 <CartesianGrid
-                  stroke="hsl(var(--border))"
+                  stroke="hsl(var(--chart-grid))"
                   vertical={false}
-                  strokeDasharray="3 5"
                 />
                 <XAxis
                   dataKey="timestamp"
@@ -142,17 +142,17 @@ function ForecastCard({
                       : formatMoney(Number(value), currency),
                     String(label),
                   ]}
-                  cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
+                  cursor={{ stroke: CHART_COLORS.cursor, strokeWidth: 1 }}
                   wrapperStyle={{ zIndex: 30 }}
                 />
                 {forecast.origin ? (
                   <ReferenceLine
                     x={forecast.origin}
-                    stroke="#2563eb"
+                    stroke={CHART_COLORS.primary}
                     strokeDasharray="3 3"
                     label={{
                       value: "origin",
-                      fill: "#2563eb",
+                      fill: CHART_COLORS.primary,
                       fontSize: 8,
                       position: "insideTopLeft",
                     }}
@@ -162,7 +162,7 @@ function ForecastCard({
                   dataKey="predictionRange"
                   name="모델 Q10–Q90 예측 범위"
                   type="linear"
-                  fill="#8b5cf6"
+                  fill={CHART_COLORS.forecast}
                   fillOpacity={0.16}
                   stroke="none"
                   connectNulls={false}
@@ -172,7 +172,7 @@ function ForecastCard({
                   dataKey="q10Price"
                   name="모델 Q10 예측"
                   type="linear"
-                  stroke="#7c3aed"
+                  stroke={CHART_COLORS.forecast}
                   strokeDasharray="3 3"
                   strokeWidth={1}
                   dot={{ r: 2 }}
@@ -183,7 +183,7 @@ function ForecastCard({
                   dataKey="medianPrice"
                   name="모델 중앙값 예측"
                   type="linear"
-                  stroke="#6d28d9"
+                  stroke={CHART_COLORS.forecast}
                   strokeWidth={2.25}
                   dot={{ r: 2.5 }}
                   connectNulls={false}
@@ -193,7 +193,7 @@ function ForecastCard({
                   dataKey="q90Price"
                   name="모델 Q90 예측"
                   type="linear"
-                  stroke="#7c3aed"
+                  stroke={CHART_COLORS.forecast}
                   strokeDasharray="3 3"
                   strokeWidth={1}
                   dot={{ r: 2 }}
@@ -205,7 +205,7 @@ function ForecastCard({
                     x={actualMark.timestamp}
                     y={actualMark.close}
                     r={5}
-                    fill="#2563eb"
+                    fill={CHART_COLORS.primary}
                     stroke="hsl(var(--card))"
                     strokeWidth={2}
                     ifOverflow="extendDomain"

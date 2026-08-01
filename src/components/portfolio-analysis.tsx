@@ -17,6 +17,7 @@ import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import { ReportGenerateButton } from "@/components/report-generate-button";
 import { StockSwatch } from "@/components/stock-swatch";
 import {
+  CHART_COLORS,
   chartTooltipStyle,
   CHART_DASHES,
   CHART_SERIES,
@@ -462,11 +463,11 @@ export function PortfolioAnalysisView({
           <div className="mt-7 h-[420px] w-full sm:h-[520px]" aria-label="포트폴리오 평가금 일봉과 비교 지수 차트">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartData} margin={{ top: 12, right: 4, bottom: 4, left: 0 }}>
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} axisLine={false} tickLine={false} minTickGap={34} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11, fontWeight: 600 }} />
                 <YAxis yAxisId="portfolio" domain={chartDomain} allowDataOverflow tickFormatter={(value) => formatMoney(portfolioBase * (1 + Number(value) / 100), "KRW", true)} axisLine={false} tickLine={false} width={66} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
                 <YAxis yAxisId="benchmark" orientation="right" domain={chartDomain} allowDataOverflow tickFormatter={(value) => `${Number(value).toFixed(0)}%`} axisLine={false} tickLine={false} width={42} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 600 }} />
-                <Tooltip content={(props) => <AnalysisTooltip {...props} selectedBenchmarks={selectedBenchmarks} />} cursor={{ fill: "hsl(var(--foreground) / 0.04)" }} />
+                <Tooltip content={(props) => <AnalysisTooltip {...props} selectedBenchmarks={selectedBenchmarks} />} cursor={{ fill: CHART_COLORS.cursor, fillOpacity: 0.08 }} />
                 <Bar yAxisId="portfolio" dataKey="candleRange" shape={CandleShape} isAnimationActive={false} maxBarSize={12} />
                 {benchmarks.filter((item) => selectedBenchmarks.has(item.key)).map((item) => (
                   <Line
@@ -593,7 +594,7 @@ export function PortfolioAnalysisView({
                   <div className="mt-4 h-[280px]">
                     {hasRolling60 ? <ResponsiveContainer width="100%" height="100%">
                       <ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                        <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                        <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                         <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={chartTooltipStyle} />
@@ -613,7 +614,7 @@ export function PortfolioAnalysisView({
                   <div className="mt-4 h-[280px]">
                     <ResponsiveContainer width="100%" height="100%">
                       <ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                        <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                        <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                         <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <YAxis yAxisId="ratio" orientation="right" width={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
@@ -637,7 +638,7 @@ export function PortfolioAnalysisView({
               <div className="mt-5 h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={analysis.drawdowns.points} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                    <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                     <XAxis dataKey="date" tickFormatter={(value) => displayDate(String(value))} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
@@ -786,7 +787,7 @@ export function PortfolioAnalysisView({
               <div className="mt-5 h-[280px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={analysis.costEfficiency.monthly} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                    <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                     <XAxis dataKey="month" tickFormatter={(value) => String(value).slice(2).replace("-", ".")} minTickGap={26} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={56} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />

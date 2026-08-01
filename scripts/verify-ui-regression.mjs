@@ -222,6 +222,8 @@ async function prepareTechnicalAnalysis(page) {
   check(await page.locator("[data-technical-symbol]").count() >= 22, "기술적 분석 종목 카드가 22개 미만입니다.");
   const firstCard = page.locator("[data-technical-symbol]").first();
   await firstCard.scrollIntoViewIfNeeded();
+  const integrated = firstCard.locator('[data-technical-chart-layout="integrated"]');
+  await waitForVisible(integrated, "integrated technical chart");
   const chart = firstCard.locator("[data-technical-price-chart]");
   await waitForVisible(chart, "technical chart");
   await assertBoxHasSize(chart, "technical chart", 100, 100);
@@ -288,6 +290,13 @@ async function prepareSimulation(page) {
   await start.click();
   await waitForVisible(page.getByText("시뮬레이션 진행", { exact: true }), "simulation progress");
   await waitForVisible(page.locator("[data-simulation-selected] article").first(), "simulation selected instrument");
+  const chartStack = page.locator('[data-ai-simulation-chart-stack="integrated"]').first();
+  await waitForVisible(chartStack, "integrated simulation chart");
+  const chartLayout = await chartStack.evaluate((node) => ({
+    metricsShareStack: node.querySelector("[data-ai-simulation-hover-metrics]")?.parentElement === node,
+    priceSharesStack: node.querySelector("[data-ai-simulation-price-chart]")?.parentElement === node,
+  }));
+  check(chartLayout.metricsShareStack && chartLayout.priceSharesStack, `simulation 가격과 시점 지표가 연속 chart surface를 공유하지 않습니다: ${JSON.stringify(chartLayout)}`);
   const runtime = page.locator([
     "[data-simulation-run]",
     "[data-simulation-selected]",

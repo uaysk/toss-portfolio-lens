@@ -26,6 +26,23 @@ export const CHART_BAND_COLORS = [
   "hsl(var(--chart-series-2))",
 ] as const;
 
+/**
+ * Semantic chart colors keep the same meaning across every dashboard surface.
+ * The values themselves live in CSS so light and dark themes can tune contrast
+ * independently without changing chart code.
+ */
+export const CHART_COLORS = Object.freeze({
+  primary: "hsl(var(--chart-series-1))",
+  positive: "hsl(var(--chart-positive))",
+  negative: "hsl(var(--chart-negative))",
+  bollinger: "hsl(var(--chart-band))",
+  rsi: "hsl(var(--chart-rsi))",
+  forecast: "hsl(var(--chart-series-4))",
+  volume: "hsl(var(--chart-volume))",
+  neutral: "hsl(var(--chart-neutral))",
+  cursor: "hsl(var(--chart-cursor))",
+});
+
 export function chartSeriesColor(index: number): (typeof CHART_SERIES)[number] {
   const normalized = Number.isFinite(index) ? Math.max(0, Math.trunc(index)) : 0;
   return CHART_SERIES[normalized % CHART_SERIES.length];
@@ -39,6 +56,25 @@ export function chartSeriesDash(index: number): (typeof CHART_DASHES)[number] {
 export function chartBandColor(index: number): (typeof CHART_BAND_COLORS)[number] {
   const normalized = Number.isFinite(index) ? Math.max(0, Math.trunc(index)) : 0;
   return CHART_BAND_COLORS[normalized % CHART_BAND_COLORS.length];
+}
+
+export function chartIndicatorColor(kind: string, index = 0, paletteOffset = 0): string {
+  const normalized = normalizedIndicatorKind(kind);
+  if (normalized === "rsi") return CHART_COLORS.rsi;
+  if (["mfi", "stochastic_oscillator", "williams_r"].includes(normalized)) {
+    return index === 0 ? CHART_COLORS.rsi : CHART_COLORS.primary;
+  }
+  if ([
+    "volume_sma",
+    "relative_volume",
+    "obv",
+    "cmf",
+    "accumulation_distribution_line",
+  ].includes(normalized)) return index === 0 ? CHART_COLORS.volume : chartSeriesColor(index + 2);
+  if (normalized === "macd") {
+    return [CHART_COLORS.primary, CHART_COLORS.positive, CHART_COLORS.neutral][index % 3]!;
+  }
+  return chartSeriesColor(paletteOffset + index);
 }
 
 const BOLLINGER_BAND_KINDS = new Set([
@@ -103,11 +139,14 @@ export function chartRangeSignature(
 }
 
 export const chartTooltipStyle = {
-  border: 0,
-  borderRadius: 16,
-  background: "hsl(var(--card))",
+  border: "1px solid hsl(var(--chart-grid))",
+  borderRadius: 14,
+  background: "hsl(var(--chart-tooltip) / 0.96)",
   color: "hsl(var(--card-foreground))",
-  boxShadow: "0 18px 50px hsl(var(--background) / 0.38)",
+  boxShadow: "0 12px 36px hsl(var(--chart-shadow) / 0.16)",
+  backdropFilter: "blur(14px)",
+  padding: "10px 12px",
+  fontSize: 11,
 };
 
 export const chartTooltipLabelStyle = {

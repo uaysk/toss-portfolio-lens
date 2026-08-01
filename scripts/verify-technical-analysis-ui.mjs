@@ -778,7 +778,7 @@ async function assertStageFourIndicatorCatalog(page) {
   check(await page.locator('[data-technical-indicator="volume_profile"]').getAttribute("aria-pressed") === null, "Volume Profile focused badge가 batch toggle로 노출됐습니다.");
 }
 
-async function exerciseStageTwoPresets(page, state) {
+async function exerciseStageTwoPresets(page, state, bollingerScreenshotPath) {
   for (const [key, expectedKinds] of Object.entries(indicatorPresetKinds)) {
     await page.locator(`[data-technical-indicator-preset="${key}"]`).click();
     const selected = await selectedGlobalIndicatorKinds(page);
@@ -807,6 +807,7 @@ async function exerciseStageTwoPresets(page, state) {
   check(bollingerBandIds.length === 1, `동일한 볼린저 범위가 하나로 합쳐지지 않았습니다: ${JSON.stringify(bollingerBandIds)}`);
   check(bollingerMiddleIds.length === 1, `동일한 볼린저 중앙선이 하나로 합쳐지지 않았습니다: ${JSON.stringify(bollingerMiddleIds)}`);
   check(bollingerBandStrokes.every((stroke) => stroke === "none"), `볼린저 범위에 상·하단 외곽선이 남아 있습니다: ${JSON.stringify(bollingerBandStrokes)}`);
+  await firstCard.locator("[data-technical-chart]").screenshot({ path: bollingerScreenshotPath, animations: "disabled" });
   await page.getByRole("button", { name: "변화율 선택", exact: true }).click();
   await page.locator("[data-technical-indicator-mode]").filter({ hasText: "사용자 정의" }).waitFor();
 }
@@ -990,6 +991,32 @@ async function assertRenderedChartsHaveSize(page, label) {
   check(dimensions.length >= 2, `${label}에서 가격·RSI 차트 SVG를 찾지 못했습니다.`);
   check(dimensions.every(({ width, height }) => width > 1 && height > 1), `${label}에서 zero-size 차트를 발견했습니다: ${JSON.stringify(dimensions)}`);
   return dimensions.length;
+}
+
+async function assertIntegratedIndicatorLayout(page, screenshotPath) {
+  const card = page.locator("[data-technical-symbol]").first();
+  await card.scrollIntoViewIfNeeded();
+  const stack = card.locator('[data-technical-chart-layout="integrated"]');
+  await stack.waitFor();
+  const layout = await stack.evaluate((node) => {
+    const price = node.querySelector("[data-technical-price-chart]");
+    const rsi = node.querySelector('[data-technical-indicator-panel="rsi"]');
+    return {
+      priceSharesStack: price?.parentElement === node,
+      rsiSharesStack: rsi?.parentElement === node,
+      tracks: node.querySelectorAll(":scope > .toss-chart-track").length,
+      xAxes: node.querySelectorAll(".recharts-xAxis").length,
+      borderRadius: getComputedStyle(node).borderRadius,
+    };
+  });
+  check(layout.priceSharesStack && layout.rsiSharesStack, `가격과 RSI가 하나의 연속 chart stack을 공유하지 않습니다: ${JSON.stringify(layout)}`);
+  check(layout.tracks >= 2, `가격·RSI track 수가 부족합니다: ${JSON.stringify(layout)}`);
+  check(layout.xAxes === 1, `연속 chart stack의 날짜 축이 맨 아래 한 번만 표시되지 않습니다: ${JSON.stringify(layout)}`);
+  check(layout.borderRadius !== "0px", `연속 chart stack 외곽 surface가 없습니다: ${JSON.stringify(layout)}`);
+  check(await card.locator("[data-technical-rsi-zone]").count() === 2, "RSI 과매수·과매도 범위가 시각적으로 표시되지 않았습니다.");
+  check(await card.locator("[data-technical-rsi-midline]").count() === 1, "RSI 중앙 50 기준선이 표시되지 않았습니다.");
+  await mkdir(path.dirname(screenshotPath), { recursive: true });
+  await stack.screenshot({ path: screenshotPath, animations: "disabled" });
 }
 
 async function exerciseCustomPreset(page, state) {
@@ -1254,6 +1281,8 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
     check(state.analyzeRequests[0].symbols.length === 22, "초기 batch 요청에 22개 종목이 모두 포함되지 않았습니다.");
     check(state.tradeRequests[0]?.length === 22, "거래 marker 요청에 22개 종목이 모두 포함되지 않았습니다.");
     await assertStageFourIndicatorCatalog(page);
+    const integratedChartScreenshotPath = path.join(screenshotDirectory, `${viewport.width}x${viewport.height}-${theme}-integrated-chart.png`);
+    await assertIntegratedIndicatorLayout(page, integratedChartScreenshotPath);
     const markerNotice = (await page.getByRole("status").filter({ hasText: "거래 marker 주문 이력 complete" }).textContent())?.trim();
     check(markerNotice === "거래 marker 주문 이력 complete · 조회 범위 1건", `완전한 주문 이력 marker 상태가 UI에 표시되지 않았습니다: ${markerNotice || "missing"}`);
 
@@ -1270,8 +1299,10 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
       check(layout.boxes.slice(1).every((box, index) => box.y > layout.boxes[index].y), "390px 카드가 세로 1열 순서로 배치되지 않았습니다.");
     }
 
+    let bollingerScreenshotPath;
     if (exerciseMutations) {
-      await exerciseStageTwoPresets(page, state);
+      bollingerScreenshotPath = path.join(screenshotDirectory, `${viewport.width}x${viewport.height}-${theme}-bollinger-chart.png`);
+      await exerciseStageTwoPresets(page, state, bollingerScreenshotPath);
       await exerciseStageFourVwapAndProfile(page, state);
       await exerciseCustomPreset(page, state);
     } else {
@@ -1329,6 +1360,8 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
         httpAtLeast400: failures.responses.length,
       },
       screenshotPath,
+      integratedChartScreenshotPath,
+      ...(bollingerScreenshotPath ? { bollingerScreenshotPath } : {}),
       strategyScreenshotPath,
     };
   } finally {

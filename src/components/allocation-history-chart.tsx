@@ -512,7 +512,7 @@ export function AllocationHistoryChart({
                 }}
                 onMouseLeave={() => setHoveredPoint(undefined)}
               >
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 5" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis
                   dataKey="date"
                   tickFormatter={(value) => displayDate(String(value))}

@@ -22,7 +22,7 @@ import { ReportGenerateButton } from "@/components/report-generate-button";
 import { StockSwatch } from "@/components/stock-swatch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
-import { CHART_DASHES, CHART_SERIES, monochromeHeatmapStyle } from "@/lib/chart-theme";
+import { CHART_DASHES, CHART_SERIES, chartTooltipStyle, monochromeHeatmapStyle } from "@/lib/chart-theme";
 import { removeBacktestAssetPreservingWeights } from "@/lib/backtest-assets";
 import { scaleBacktestAssetWeights } from "@/lib/backtest-config";
 import { parseTargetWeightScheduleJson } from "@/lib/backtest-realism";
@@ -1220,13 +1220,13 @@ export function PortfolioBacktestView({
             <div className="mt-3 h-[300px] min-w-0 sm:h-[360px]">
               <Charts.ResponsiveContainer width="100%" height="100%">
                 <Charts.LineChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
-                  <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <Charts.XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Charts.YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={62} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Charts.Tooltip
                     labelFormatter={(value) => String(value)}
                     formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오 성장" : result.benchmark?.name || "비교 지수"]}
-                    contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }}
+                    contentStyle={chartTooltipStyle}
                   />
                   <Charts.Line type="monotone" dataKey="growth" name="growth" stroke={CHART_SERIES[0]} strokeWidth={2.5} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
                   {result.benchmark ? <Charts.Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke={CHART_SERIES[1]} strokeWidth={2} strokeDasharray={CHART_DASHES[1]} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} /> : null}
@@ -1243,10 +1243,10 @@ export function PortfolioBacktestView({
               <div className="mt-3 h-[300px] min-w-0 sm:h-[360px]">
                 <Charts.ResponsiveContainer width="100%" height="100%">
                   <Charts.LineChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
-                    <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                    <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                     <Charts.XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                     <Charts.YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={62} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                    <Charts.Tooltip labelFormatter={(value) => String(value)} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "balance" ? "총 잔액" : name === "investedBalance" ? "투자 자산" : "현금"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                    <Charts.Tooltip labelFormatter={(value) => String(value)} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "balance" ? "총 잔액" : name === "investedBalance" ? "투자 자산" : "현금"]} contentStyle={chartTooltipStyle} />
                     <Charts.Line type="monotone" dataKey="balance" name="balance" stroke={CHART_SERIES[0]} strokeWidth={2.5} dot={false} />
                     {result.points.some((point) => point.investedBalance !== undefined) ? <Charts.Line type="monotone" dataKey="investedBalance" name="investedBalance" stroke={CHART_SERIES[2]} strokeWidth={1.8} dot={false} /> : null}
                     {result.points.some((point) => point.cashBalance !== undefined) ? <Charts.Line type="monotone" dataKey="cashBalance" name="cashBalance" stroke={CHART_SERIES[1]} strokeWidth={1.5} strokeDasharray={CHART_DASHES[1]} dot={false} /> : null}
@@ -1325,10 +1325,10 @@ export function PortfolioBacktestView({
                     <div className="h-[280px] min-w-0 rounded-[20px] bg-card p-3">
                       <Charts.ResponsiveContainer width="100%" height="100%">
                         <Charts.ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                          <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                          <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                           <Charts.XAxis dataKey="date" tickFormatter={shortDate} minTickGap={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <Charts.YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                          <Charts.Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                          <Charts.Tooltip formatter={(value, name) => [formatPercent(Number(value), true), String(name)]} contentStyle={chartTooltipStyle} />
                           <Charts.Line type="monotone" dataKey="return20d" name="20일" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
                           <Charts.Line type="monotone" dataKey="return60d" name="60일" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
                           <Charts.Line type="monotone" dataKey="return120d" name="120일" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls />
@@ -1339,11 +1339,11 @@ export function PortfolioBacktestView({
                     <div className="h-[280px] min-w-0 rounded-[20px] bg-card p-3">
                       {hasRolling60 ? <Charts.ResponsiveContainer width="100%" height="100%">
                         <Charts.ComposedChart data={rollingData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                          <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                          <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                           <Charts.XAxis dataKey="date" tickFormatter={shortDate} minTickGap={36} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <Charts.YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                           <Charts.YAxis yAxisId="ratio" orientation="right" width={34} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                          <Charts.Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                          <Charts.Tooltip formatter={(value, name) => [Number(value).toFixed(2), String(name)]} contentStyle={chartTooltipStyle} />
                           <Charts.Line yAxisId="percent" type="monotone" dataKey="volatility60d" name="변동성 %" stroke={CHART_SERIES[0]} strokeWidth={2.4} dot={false} connectNulls />
                           <Charts.Line yAxisId="ratio" type="monotone" dataKey="sharpe60d" name="샤프" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} connectNulls />
                           {advanced.benchmarkComparison ? <Charts.Line yAxisId="ratio" type="monotone" dataKey="benchmarkBeta60d" name="베타" stroke={CHART_SERIES[2]} strokeDasharray={CHART_DASHES[2]} strokeWidth={2} dot={false} connectNulls /> : null}
@@ -1383,10 +1383,10 @@ export function PortfolioBacktestView({
             <div className="mt-5 h-[250px] min-w-0">
               <Charts.ResponsiveContainer width="100%" height="100%">
                 <Charts.AreaChart data={result.points} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                  <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <Charts.XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Charts.YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                  <Charts.Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                  <Charts.Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
                   <Charts.Area type="monotone" dataKey="drawdownPercent" stroke="none" fill={CHART_SERIES[1]} fillOpacity={0.38} activeDot={{ r: 3, strokeWidth: 0 }} />
                 </Charts.AreaChart>
               </Charts.ResponsiveContainer>
@@ -1513,11 +1513,11 @@ export function PortfolioBacktestView({
                   <div className="mt-4 h-[280px] min-w-0 rounded-[20px] bg-card p-3">
                     <Charts.ResponsiveContainer width="100%" height="100%">
                       <Charts.ComposedChart data={advanced.costEfficiency.monthly} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                        <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                        <Charts.CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                         <Charts.XAxis dataKey="month" tickFormatter={(value) => String(value).slice(2).replace("-", ".")} minTickGap={26} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Charts.YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                         <Charts.YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                        <Charts.Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                        <Charts.Tooltip formatter={(value, name) => [name === "회전율" ? formatPercent(Number(value)) : formatMoney(Number(value), "KRW"), String(name)]} contentStyle={chartTooltipStyle} />
                         <Charts.Bar yAxisId="turnover" dataKey="turnoverPercent" name="회전율" fill={CHART_SERIES[1]} radius={[6, 6, 0, 0]} />
                         <Charts.Line yAxisId="cost" type="monotone" dataKey="estimatedCost" name="추정비용" stroke={CHART_SERIES[0]} strokeWidth={2} dot={false} />
                       </Charts.ComposedChart>

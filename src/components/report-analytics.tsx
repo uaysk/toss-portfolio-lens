@@ -145,7 +145,7 @@ function DrawdownAnalytics({ data }: { data: DrawdownData }) {
           <div className="h-[300px]">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={data.points} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <Tooltip formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
@@ -284,7 +284,7 @@ function AnalysisRolling({ analysis }: { analysis: AnalysisData }) {
             <div className="mt-4 h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={chartData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [metricPercent(Number(value)), String(name)]} contentStyle={chartTooltipStyle} />
@@ -301,7 +301,7 @@ function AnalysisRolling({ analysis }: { analysis: AnalysisData }) {
             <div className="mt-4 h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={chartData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="ratio" orientation="right" width={38} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
@@ -387,7 +387,7 @@ function AnalysisCostAndTrades({ analysis }: { analysis: AnalysisData }) {
         <div className="mt-4 h-[280px] min-w-0 rounded-[20px] bg-card p-3">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={analysis.costEfficiency.monthly ?? []} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
               <XAxis dataKey="month" tickFormatter={shortDate} minTickGap={26} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="cost" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
@@ -475,7 +475,7 @@ function BacktestRolling({ advanced, benchmarkName }: { advanced: BacktestAdvanc
             <div className="mt-4 h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={chartData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <Tooltip formatter={(value, name) => [metricPercent(Number(value)), String(name)]} contentStyle={chartTooltipStyle} />
@@ -492,7 +492,7 @@ function BacktestRolling({ advanced, benchmarkName }: { advanced: BacktestAdvanc
             <div className="mt-4 h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={chartData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                  <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                   <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="percent" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                   <YAxis yAxisId="ratio" orientation="right" width={38} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
@@ -566,7 +566,7 @@ function BacktestCostAndTrades({ advanced }: { advanced: BacktestAdvancedAnalyti
         <div className="mt-4 h-[280px] min-w-0 rounded-[20px] bg-card p-3">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={advanced.costEfficiency.monthly} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
-              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
               <XAxis dataKey="month" tickFormatter={shortDate} minTickGap={26} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="turnover" tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis yAxisId="money" orientation="right" tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={54} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />

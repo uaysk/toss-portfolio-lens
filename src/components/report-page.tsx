@@ -17,6 +17,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -31,7 +32,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { analysisComparisonDomain, buildAnalysisChartData } from "@/lib/analysis-chart";
-import { CHART_DASHES, CHART_SERIES } from "@/lib/chart-theme";
+import { CHART_COLORS, CHART_DASHES, CHART_SERIES, chartTooltipStyle } from "@/lib/chart-theme";
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
@@ -175,7 +176,7 @@ function AnalysisReportContent({ report, theme }: { report: AnalysisReport; them
         <div className="mt-6 h-[360px] min-w-0 sm:h-[480px]">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
-              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+              <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
               <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
               <YAxis
                 domain={chartMode === "relative" ? domain : ["auto", "auto"]}
@@ -191,7 +192,7 @@ function AnalysisReportContent({ report, theme }: { report: AnalysisReport; them
                   chartMode === "relative" ? formatPercent(Number(value), true) : formatMoney(Number(value), "KRW"),
                   String(name),
                 ]}
-                contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }}
+                contentStyle={chartTooltipStyle}
               />
               <Line
                 type="monotone"
@@ -325,19 +326,19 @@ function BacktestReportContent({ report, theme }: { report: BacktestReport; them
           <ResponsiveContainer width="100%" height="100%">
             {chartMode === "growth" ? (
               <LineChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={64} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오" : result.benchmark?.name || "비교 지수"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value, name) => [formatMoney(Number(value), "KRW"), name === "growth" ? "포트폴리오" : result.benchmark?.name || "비교 지수"]} contentStyle={chartTooltipStyle} />
                 <Line type="monotone" dataKey="growth" name="growth" stroke={CHART_SERIES[0]} strokeWidth={2.8} dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
                 {result.benchmark ? <Line type="monotone" dataKey="benchmarkGrowth" name="benchmark" stroke={CHART_SERIES[1]} strokeDasharray={CHART_DASHES[1]} strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0 }} /> : null}
               </LineChart>
             ) : (
               <AreaChart data={result.points} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={42} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={46} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
+                <Tooltip labelFormatter={(value) => displayDate(String(value))} formatter={(value) => [formatPercent(Number(value), true), "낙폭"]} contentStyle={chartTooltipStyle} />
                 <Area type="monotone" dataKey="drawdownPercent" stroke="none" fill={CHART_SERIES[1]} fillOpacity={0.38} activeDot={{ r: 3, strokeWidth: 0 }} />
               </AreaChart>
             )}
@@ -395,11 +396,15 @@ function BacktestReportContent({ report, theme }: { report: BacktestReport; them
           <div className="mt-5 h-[340px] min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={result.annualReturns} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" strokeDasharray="3 7" />
+                <CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" />
                 <XAxis dataKey="year" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
                 <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-                <Tooltip formatter={(value) => [formatPercent(Number(value), true), "수익률"]} contentStyle={{ border: 0, borderRadius: 16, background: "hsl(var(--card))", color: "hsl(var(--foreground))" }} />
-                <Bar dataKey="returnPercent" fill="hsl(var(--foreground))" radius={[6, 6, 2, 2]} />
+                <Tooltip formatter={(value) => [formatPercent(Number(value), true), "수익률"]} contentStyle={chartTooltipStyle} />
+                <Bar dataKey="returnPercent" radius={[6, 6, 2, 2]}>
+                  {result.annualReturns.map((item) => (
+                    <Cell key={item.year} fill={item.returnPercent >= 0 ? CHART_COLORS.positive : CHART_COLORS.negative} />
+                  ))}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>

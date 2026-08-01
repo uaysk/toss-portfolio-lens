@@ -16,6 +16,7 @@ import {
 import { Card } from "@/components/ui/card";
 import { createAnimationFrameCoalescer } from "@/lib/chart-interaction";
 import {
+  CHART_COLORS,
   chartBandColor,
   chartRangeSignature,
   chartRangeValue,
@@ -119,6 +120,8 @@ type ChartRow = AiSimulationCombinedChartRow;
 type PriceOverlay = {
   key: string;
   label: string;
+  colorIndex: number;
+  dashIndex: number;
   indicatorId?: string;
   bollingerMiddle?: boolean;
   bandColorIndex?: number;
@@ -491,7 +494,7 @@ export function aiSimulationPriceLayers(
   const hasValue = (key: string) => rows.some((row) => finite(row.indicatorValues[key]));
   const indicatorRows = rows.map((row) => row.indicatorValues);
 
-  for (const indicator of indicators) {
+  for (const [indicatorIndex, indicator] of indicators.entries()) {
     const kind = normalizeKind(indicator.kind);
     const renderableFields = (PRICE_INDICATOR_FIELDS[kind] ?? []).filter((field) => hasValue(`${indicator.id}:${field}`));
     const { lineFields, band } = splitChartIndicatorFields(kind, renderableFields);
@@ -521,7 +524,7 @@ export function aiSimulationPriceLayers(
         }
       }
     }
-    for (const field of lineFields) {
+    for (const [fieldIndex, field] of lineFields.entries()) {
       const bollingerMiddle = isBollingerBandKind(kind) && field === "middle";
       if (bollingerMiddle && duplicateBand) continue;
       const key = `${indicator.id}:${field}`;
@@ -530,6 +533,8 @@ export function aiSimulationPriceLayers(
         label: bollingerMiddle
           ? `${indicator.kind.replaceAll("_", " ")} · 중앙`
           : `${indicator.kind.replaceAll("_", " ")} · ${field.replaceAll("_", " ")}`,
+        colorIndex: indicatorIndex,
+        dashIndex: fieldIndex,
         indicatorId: indicator.id,
         bollingerMiddle,
         ...(bollingerMiddle ? { bandColorIndex: bandColorIndex ?? bands.length } : {}),
@@ -541,7 +546,7 @@ export function aiSimulationPriceLayers(
     for (const key of Object.keys(row.indicatorValues)) {
       const label = vwapLabel(key);
       if (label && hasValue(key) && !lines.has(key)) {
-        lines.set(key, { key, label });
+        lines.set(key, { key, label, colorIndex: lines.size, dashIndex: 0 });
       }
     }
   }
@@ -923,10 +928,10 @@ export function AiSimulationChart({
       </div>
 
       {actualRows.length ? (
-        <>
+        <div className="toss-chart-stack mt-3" data-ai-simulation-chart-stack="integrated">
         {selectedRow ? (
           <section
-            className="mt-3 min-w-0 rounded-[20px] bg-secondary px-3 py-2.5"
+            className="toss-chart-context min-w-0 px-3 py-2.5"
             data-ai-simulation-hover-metrics
             aria-live="polite"
             aria-label="차트 커서 시점 지표"
@@ -961,7 +966,7 @@ export function AiSimulationChart({
         ) : null}
         <div
           className={cn(
-            "mt-3 h-[300px] min-w-0 max-w-full rounded-[20px] bg-secondary p-2",
+            "toss-chart-track h-[300px] min-w-0 max-w-full p-2",
             expanded && "h-[62vh] min-h-[420px]",
           )}
           data-ai-simulation-price-chart
@@ -1012,9 +1017,8 @@ export function AiSimulationChart({
               }}
             >
               <CartesianGrid
-                stroke="hsl(var(--border))"
+                stroke="hsl(var(--chart-grid))"
                 vertical={false}
-                strokeDasharray="3 5"
               />
               <XAxis
                 dataKey="chartTime"
@@ -1038,7 +1042,7 @@ export function AiSimulationChart({
               />
               <Tooltip
                 content={() => null}
-                cursor={{ stroke: "hsl(var(--foreground) / 0.45)", strokeWidth: 1 }}
+                cursor={{ stroke: CHART_COLORS.cursor, strokeWidth: 1 }}
                 wrapperStyle={{ display: "none" }}
               />
               {priceLayers.bands.map((band) => (
@@ -1061,7 +1065,7 @@ export function AiSimulationChart({
                 shape={<CandleShape />}
                 isAnimationActive={false}
               />
-              {priceLayers.lines.map((overlay, index) => (
+              {priceLayers.lines.map((overlay) => (
                 <Line
                   key={overlay.key}
                   dataKey={overlay.key}
@@ -1069,8 +1073,8 @@ export function AiSimulationChart({
                   type="linear"
                   dot={false}
                   connectNulls={false}
-                  stroke={overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(index)}
-                  strokeDasharray={overlay.bollingerMiddle ? undefined : chartSeriesDash(index)}
+                  stroke={overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(overlay.colorIndex)}
+                  strokeDasharray={overlay.bollingerMiddle ? undefined : chartSeriesDash(overlay.dashIndex)}
                   strokeWidth={overlay.bollingerMiddle ? 1.9 : 1.35}
                   isAnimationActive={false}
                   data-ai-simulation-bollinger-middle={overlay.bollingerMiddle ? overlay.indicatorId : undefined}
@@ -1165,7 +1169,7 @@ export function AiSimulationChart({
             </ComposedChart>
           </ResponsiveContainer>
         </div>
-        </>
+        </div>
       ) : (
         <div
           className="mt-3 grid h-[300px] place-items-center rounded-[20px] bg-secondary px-4 text-center text-xs font-bold text-muted-foreground"
@@ -1275,7 +1279,7 @@ export function AiSimulationChart({
               <span className="truncate">{band.label}</span>
             </span>
           ))}
-          {priceLayers.lines.map((overlay, index) => (
+          {priceLayers.lines.map((overlay) => (
             <span
               key={overlay.key}
               className="inline-flex max-w-full items-center gap-1 rounded-full bg-secondary px-2 py-1 text-[8px] font-black text-muted-foreground"
@@ -1284,7 +1288,7 @@ export function AiSimulationChart({
             >
               <span
                 className="h-0.5 w-3 shrink-0"
-                style={{ backgroundColor: overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(index) }}
+                style={{ backgroundColor: overlay.bollingerMiddle ? chartBandColor(overlay.bandColorIndex ?? 0) : chartSeriesColor(overlay.colorIndex) }}
               />
               <span className="truncate">{overlay.label}</span>
             </span>

@@ -24,18 +24,28 @@
     --radius: 1rem;
     --shell: #ececea;
     --panel: #ffffff;
-    --chart-grid: 0 0% 78%;
-    --chart-series-1: 224 76% 48%;
-    --chart-series-2: 17 86% 40%;
-    --chart-series-3: 175 77% 26%;
-    --chart-series-4: 273 82% 47%;
-    --chart-series-5: 333 81% 42%;
-    --chart-series-6: 82 72% 31%;
-    --chart-band: 263 70% 50%;
+    --chart-surface: 216 33% 98%;
+    --chart-tooltip: 0 0% 100%;
+    --chart-shadow: 220 43% 11%;
+    --chart-grid: 216 22% 90%;
+    --chart-axis: 215 12% 46%;
+    --chart-cursor: 215 17% 38%;
+    --chart-series-1: 216 92% 58%;
+    --chart-series-2: 355 85% 60%;
+    --chart-series-3: 174 100% 29%;
+    --chart-series-4: 258 90% 66%;
+    --chart-series-5: 24 90% 45%;
+    --chart-series-6: 320 72% 47%;
+    --chart-positive: 355 85% 60%;
+    --chart-negative: 225 70% 54%;
+    --chart-band: 40 100% 40%;
+    --chart-rsi: 258 90% 66%;
+    --chart-volume: 190 80% 40%;
+    --chart-neutral: 215 12% 46%;
     --chart-forecast-chronos: 32 95% 32%;
     --chart-forecast-fincast: 199 89% 32%;
-    --candle-rise: #a63e49;
-    --candle-fall: #355f96;
+    --candle-rise: #f04452;
+    --candle-fall: #4169d8;
   }
 
   .dark {
@@ -58,18 +68,28 @@
     --ring: 0 0% 72%;
     --shell: #050505;
     --panel: #0d0d0d;
-    --chart-grid: 0 0% 25%;
-    --chart-series-1: 213 94% 68%;
-    --chart-series-2: 27 96% 61%;
-    --chart-series-3: 173 80% 50%;
-    --chart-series-4: 270 95% 75%;
-    --chart-series-5: 330 81% 70%;
-    --chart-series-6: 84 81% 44%;
-    --chart-band: 255 92% 76%;
+    --chart-surface: 220 12% 10%;
+    --chart-tooltip: 220 12% 13%;
+    --chart-shadow: 0 0% 0%;
+    --chart-grid: 220 10% 22%;
+    --chart-axis: 215 12% 65%;
+    --chart-cursor: 214 18% 72%;
+    --chart-series-1: 216 100% 71%;
+    --chart-series-2: 355 100% 70%;
+    --chart-series-3: 168 67% 55%;
+    --chart-series-4: 258 100% 81%;
+    --chart-series-5: 28 100% 68%;
+    --chart-series-6: 320 88% 75%;
+    --chart-positive: 355 100% 70%;
+    --chart-negative: 225 100% 75%;
+    --chart-band: 44 100% 64%;
+    --chart-rsi: 258 100% 81%;
+    --chart-volume: 190 85% 60%;
+    --chart-neutral: 215 12% 65%;
     --chart-forecast-chronos: 48 96% 53%;
     --chart-forecast-fincast: 198 93% 60%;
-    --candle-rise: #d06c75;
-    --candle-fall: #5f83b7;
+    --candle-rise: #ff6b7a;
+    --candle-fall: #8aa6ff;
   }
 
   * {
@@ -213,16 +233,127 @@
   }
 
   .recharts-default-tooltip {
-    border: 0 !important;
-    border-radius: 16px !important;
-    background: hsl(var(--card)) !important;
+    border: 1px solid hsl(var(--chart-grid)) !important;
+    border-radius: 14px !important;
+    background: hsl(var(--chart-tooltip) / 0.96) !important;
     color: hsl(var(--card-foreground)) !important;
-    box-shadow: 0 18px 50px hsl(var(--background) / 0.38) !important;
+    box-shadow: 0 12px 36px hsl(var(--chart-shadow) / 0.16) !important;
+    backdrop-filter: blur(14px);
+    padding: 10px 12px !important;
+  }
+
+  .toss-chart-tooltip {
+    border: 1px solid hsl(var(--chart-grid));
+    border-radius: 14px;
+    background: hsl(var(--chart-tooltip) / 0.96);
+    box-shadow: 0 12px 36px hsl(var(--chart-shadow) / 0.16);
+    backdrop-filter: blur(14px);
   }
 
   .recharts-tooltip-label,
   .recharts-tooltip-item {
     color: hsl(var(--card-foreground)) !important;
+  }
+
+  .toss-chart-surface,
+  .toss-chart-stack {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid hsl(var(--chart-grid) / 0.9);
+    border-radius: 22px;
+    background: hsl(var(--chart-surface));
+    box-shadow: inset 0 1px 0 hsl(var(--background) / 0.7);
+  }
+
+  .toss-chart-track {
+    position: relative;
+    min-width: 0;
+    background: transparent;
+  }
+
+  .toss-chart-track + .toss-chart-track {
+    border-top: 1px solid hsl(var(--chart-grid) / 0.9);
+  }
+
+  .toss-chart-context {
+    border-bottom: 1px solid hsl(var(--chart-grid) / 0.9);
+    background: hsl(var(--chart-surface));
+  }
+
+  .toss-chart-track-label {
+    position: absolute;
+    z-index: 12;
+    top: 9px;
+    left: 12px;
+    display: flex;
+    max-width: calc(100% - 76px);
+    align-items: center;
+    gap: 7px;
+    pointer-events: none;
+    color: hsl(var(--chart-axis));
+    font-size: 9px;
+    font-weight: 750;
+    letter-spacing: -0.01em;
+  }
+
+  .toss-chart-track-label strong {
+    color: hsl(var(--foreground));
+    font-size: 10px;
+    font-weight: 850;
+  }
+
+  .toss-chart-track-label-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: var(--indicator-color, hsl(var(--chart-series-1)));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--indicator-color, hsl(var(--chart-series-1))) 13%, transparent);
+  }
+
+  .recharts-responsive-container {
+    border-radius: 18px;
+    background: hsl(var(--chart-surface));
+    font-variant-numeric: tabular-nums;
+  }
+
+  .toss-chart-stack .recharts-responsive-container,
+  .toss-chart-surface .recharts-responsive-container {
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .recharts-cartesian-grid-horizontal line,
+  .recharts-cartesian-grid-vertical line {
+    stroke: hsl(var(--chart-grid)) !important;
+    stroke-dasharray: none !important;
+    stroke-width: 1;
+  }
+
+  .recharts-cartesian-axis-tick-value,
+  .recharts-label,
+  .recharts-label-list text {
+    fill: hsl(var(--chart-axis));
+    font-weight: 600;
+  }
+
+  .recharts-tooltip-cursor {
+    stroke: hsl(var(--chart-cursor)) !important;
+    stroke-width: 1;
+  }
+
+  rect.recharts-tooltip-cursor {
+    fill: hsl(var(--chart-series-1) / 0.055) !important;
+  }
+
+  .recharts-line-curve,
+  .recharts-area-curve {
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .recharts-active-dot circle {
+    filter: drop-shadow(0 2px 5px hsl(var(--chart-shadow) / 0.2));
   }
 }
 
