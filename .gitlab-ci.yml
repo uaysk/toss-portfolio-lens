@@ -59,10 +59,12 @@ runner-boundary:
     key:
       files:
         - package-lock.json
-      prefix: npm
+      prefix: node-project-references-v1
     paths:
       - .cache/npm/
+      - .cache/types/
       - .cache/tsbuildinfo/
+      - dist/server/
 
 node-static:
   extends: .node-job

@@ -31,8 +31,8 @@ runner에 제공하지 않는다.
 - 메모리 사용량이 큰 job은 `toss-portfolio-lens-memory-heavy` resource group으로 직렬화
 - CI job image와 PostgreSQL service image는 manifest digest로 고정
 
-GitLab CI cache에는 npm download cache, TypeScript build info와 Cargo cache만 저장한다. credential, `.env`,
-database dump, production release manifest는 cache나 artifact로 올리지 않는다.
+GitLab CI cache에는 npm download cache, 서로 일치하는 TypeScript build info·declaration output과 Cargo cache만
+저장한다. credential, `.env`, database dump, production release manifest는 cache나 artifact로 올리지 않는다.
 
 ## 이미지와 배포
 
