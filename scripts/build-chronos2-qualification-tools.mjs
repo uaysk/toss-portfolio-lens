@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.join(root, "qualification-tools");
+const output = process.env.QUALIFICATION_TOOLS_OUTPUT
+  ? path.resolve(root, process.env.QUALIFICATION_TOOLS_OUTPUT)
+  : path.join(root, "qualification-tools");
 await mkdir(output, { recursive: true, mode: 0o755 });
 
 const tools = [

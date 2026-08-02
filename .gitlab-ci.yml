@@ -27,6 +27,17 @@ default:
     when:
       - runner_system_failure
       - server_timeout_running
+  after_script:
+    - |
+      memory_peak_bytes="$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || true)"
+      memory_current_bytes="$(cat /sys/fs/cgroup/memory.current 2>/dev/null || true)"
+      memory_events="$(tr '\n' ',' < /sys/fs/cgroup/memory.events 2>/dev/null | sed 's/,$//' || true)"
+      cpu_usage_usec="$(awk '$1 == "usage_usec" { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || true)"
+      io_bytes="$(awk '{ for (field = 1; field <= NF; field += 1) if ($field ~ /^rbytes=|^wbytes=/) { split($field, pair, "="); total += pair[2] } } END { print total + 0 }' /sys/fs/cgroup/io.stat 2>/dev/null || true)"
+      printf 'ci-resource-metrics job=%s runner=%s memory_peak_bytes=%s memory_current_bytes=%s cpu_usage_usec=%s io_bytes=%s memory_events=%s\n' \
+        "${CI_JOB_NAME:-unknown}" "${CI_RUNNER_ID:-unknown}" "${memory_peak_bytes:-unknown}" \
+        "${memory_current_bytes:-unknown}" "${cpu_usage_usec:-unknown}" "${io_bytes:-unknown}" \
+        "${memory_events:-unknown}"
 
 variables:
   GIT_DEPTH: "50"
@@ -38,12 +49,14 @@ variables:
   CARGO_BUILD_JOBS: "2"
   CARGO_TERM_COLOR: "always"
   AST_ENABLE_MR_PIPELINES: "true"
-  SAST_EXCLUDED_PATHS: "graphify-out,docs/reports,.cache,dist,node_modules,worker/rust/target"
+  SAST_EXCLUDED_PATHS: "graphify-out,docs/reports,.cache,dist,node_modules,qualification-tools,worker/rust/target"
 
 runner-boundary:
   stage: preflight
   image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
   timeout: 5 minutes
+  variables:
+    GIT_STRATEGY: none
   script:
     - mkdir -p .cache/performance
     - |
@@ -64,15 +77,13 @@ runner-boundary:
   before_script:
     - npm ci --prefer-offline --no-audit --no-fund
   cache:
-    key:
-      files:
-        - package-lock.json
-      prefix: node-project-references-v1
-    paths:
-      - .cache/npm/
-      - .cache/types/
-      - .cache/tsbuildinfo/
-      - dist/server/
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-npm-v2
+      policy: pull
+      paths:
+        - .cache/npm/
 
 node-static:
   extends: .node-job
@@ -83,8 +94,30 @@ node-static:
     - apt-get update -qq
     - apt-get install -y --no-install-recommends git >/dev/null
     - npm ci --prefer-offline --no-audit --no-fund
+  cache:
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-npm-v2
+      policy: pull-push
+      paths:
+        - .cache/npm/
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-build-v2
+      policy: pull-push
+      paths:
+        - .cache/types/
+        - .cache/tsbuildinfo/
+        - dist/server/
   script:
     - npm run test:release-tools
+    - |
+      qualification_output="$(mktemp -d)"
+      trap 'rm -rf "$qualification_output"' EXIT
+      QUALIFICATION_TOOLS_OUTPUT="$qualification_output" npm run qualification:chronos2:tools
+      node scripts/verify-qualification-tools.mjs "$qualification_output"
     - npm run typecheck:app
     - npm run build:client
     - npm run build:server
@@ -99,7 +132,7 @@ node-static:
     - npm run docs:mcp:check
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - typescript-diagnostics.txt
       - .cache/performance/bundle-report.json
@@ -117,7 +150,7 @@ vitest-light:
     - npm run test:light
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-light/
@@ -137,7 +170,7 @@ vitest-heavy:
     - npm run test:heavy
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-heavy/
@@ -157,7 +190,7 @@ vitest-pglite:
     - npm run test:pglite
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-pglite/
@@ -182,7 +215,7 @@ vitest-coverage:
   coverage: '/Lines\s*:\s*(\d+(?:\.\d+)?)%/'
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/coverage/vitest-light/
       - .cache/performance/vitest-batches.json
@@ -224,7 +257,7 @@ rust-quality:
     - cargo build --release --locked --manifest-path worker/rust/Cargo.toml
     - INDICATOR_BENCH_OUTPUT=.cache/performance/rust-indicator-cache.json cargo run --release --locked --manifest-path worker/rust/Cargo.toml --example indicator_cache_benchmark
   artifacts:
-    expire_in: 30 days
+    expire_in: 7 days
     paths:
       - worker/rust/target/release/portfolio-lens-worker
       - .cache/performance/rust-indicator-cache.json
@@ -233,14 +266,17 @@ cnpg-backup-retention:
   stage: test
   image: golang:1.26.5-alpine3.23@sha256:73f9732658b30852522ee5ebe698daa27e1829add9a70ff4f4a828409f8d0a99
   timeout: 10 minutes
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - changes:
+        - infra/homelab/cnpg-backup-retention/**/*
+        - .gitlab-ci.yml
+      when: on_success
+    - when: never
   script:
     - cd infra/homelab/cnpg-backup-retention
     - go test ./...
     - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -buildid=' -o cnpg-backup-retention .
-  artifacts:
-    expire_in: 30 days
-    paths:
-      - infra/homelab/cnpg-backup-retention/cnpg-backup-retention
 
 ui-regression:
   extends: .node-job
@@ -256,7 +292,7 @@ ui-regression:
     - npm run test:ui-regression
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 7 days
     paths:
       - .cache/ui-regression/
 

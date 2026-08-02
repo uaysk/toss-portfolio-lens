@@ -45863,8 +45863,8 @@ var SimulationStrategySchema = external_exports.discriminatedUnion("mode", [
   external_exports.object({
     mode: external_exports.literal("pair"),
     pairId: SimulationPairIdSchema,
-    // Keep the legacy field shape for v4 false-valued requests, while v6
-    // cannot opt a degraded model into forward execution.
+    // Forward execution is always fail-closed; degraded-model opt-in is not
+    // part of the v9 public contract.
     allowDegradedMode: external_exports.literal(false).default(false)
   }).strict()
 ]);
