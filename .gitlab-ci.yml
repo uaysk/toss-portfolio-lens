@@ -15,6 +15,7 @@ stages:
   - validate
   - test
   - integration
+  - release-preflight
   - release
 
 default:
@@ -322,6 +323,29 @@ security-report-gate:
     paths:
       - .cache/security/gitlab-security-summary.json
 
+release-preflight:
+  stage: release-preflight
+  tags:
+    - toss-portfolio-lens-release
+  timeout: 10 minutes
+  interruptible: false
+  retry: 0
+  resource_group: toss-portfolio-lens-production
+  dependencies: []
+  variables:
+    GIT_STRATEGY: fetch
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    - when: never
+  script:
+    - bash scripts/ci-release-production.sh --preflight-only
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 90 days
+    paths:
+      - .cache/release/preflight.json
+
 release-production:
   stage: release
   tags:
@@ -334,7 +358,6 @@ release-production:
   variables:
     GIT_DEPTH: "0"
     GIT_STRATEGY: fetch
-    DOCKER_CONFIG: "/home/toss-portfolio-release/.docker"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_DEPLOY_FREEZE'
       when: manual
@@ -352,6 +375,7 @@ release-production:
     access: developer
     expire_in: 90 days
     paths:
+      - .cache/release/preflight.json
       - .cache/release/candidate.env
       - .cache/release/web-build-metadata.json
       - .cache/release/rust-build-metadata.json

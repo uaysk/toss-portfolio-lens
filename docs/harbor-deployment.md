@@ -15,9 +15,9 @@ image는 이 값을 `org.opencontainers.image.revision` OCI label로 보존한�
 digest를 기록한 뒤 digest를 pull하고 각 label이 해당 component revision과 일치하는지 검사한다.
 
 push 직후에는 Harbor의 Trivy adapter로 각 digest를 다시 스캔한다. 스캔 결과는 credential을 포함하지 않는
-mode 600 JSON으로 `.cache/security/`에 저장한다. `verify:harbor-trivy`는 수정 가능한 Critical 또는 High
-취약점이 있으면 nonzero로 종료한다. 이 gate가 실패하면 해당 release를 배포하지 않고 base image나 직접
-dependency를 갱신한 뒤 새 Git SHA와 새 digest로 다시 build·push·scan한다.
+mode 600 JSON으로 `.cache/security/`에 저장한다. `verify:harbor-trivy`는 fix 제공 여부와 관계없이 Critical
+또는 High 취약점이 하나라도 있으면 nonzero로 종료한다. 이 gate가 실패하면 해당 release를 배포하지 않고
+base image나 직접 dependency를 갱신한 뒤 새 Git SHA와 새 digest로 다시 build·push·scan한다.
 
 ```bash
 npm run verify:harbor-trivy -- "$WEB_IMAGE" \

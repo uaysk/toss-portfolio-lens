@@ -216,8 +216,6 @@ export function releaseBlockingVulnerabilities(summary) {
   if (!summary || !Array.isArray(summary.vulnerabilities)) return [];
   return summary.vulnerabilities.filter((vulnerability) => (
     (vulnerability.severity === "Critical" || vulnerability.severity === "High")
-    && typeof vulnerability.fixedVersion === "string"
-    && vulnerability.fixedVersion.trim().length > 0
   ));
 }
 
@@ -354,7 +352,7 @@ async function main() {
   const blockers = releaseBlockingVulnerabilities(result.summary);
   if (blockers.length > 0) {
     throw new Error(
-      `release blocked: ${blockers.length} fixable Critical/High vulnerabilities remain`,
+      `release blocked: ${blockers.length} Critical/High vulnerabilities remain`,
     );
   }
 }

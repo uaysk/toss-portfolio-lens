@@ -14,7 +14,8 @@ remote는 이전 검증과 긴급 rollback을 위해 `github`라는 이름으로
 - PostgreSQL 17 임시 service에서 migration, locking, durable queue와 Rust worker 통합
 - fixture 기반 Playwright UI 회귀
 - CNPG backup retention Go test와 정적 binary build
-- 보호된 기본 브랜치에서 web/Rust 이미지의 Harbor publish, Trivy gate와 production 배포
+- 보호된 기본 브랜치에서 전용 runner의 독립 release preflight를 거친 web/Rust Harbor publish,
+  Trivy gate와 production 배포
 - Vitest batch별 JUnit report와 MR/예약 pipeline의 OOM-safe light-suite Cobertura coverage
 - GitLab Semgrep SAST와 pipeline secret detection, High/Critical SAST·모든 secret의 fail-closed gate
 
@@ -39,8 +40,8 @@ runner allowlist 모두 검증한 OCI index digest로 고정한다.
 
 ## Runner 경계
 
-모든 job은 project-scoped Docker runner의 `toss-portfolio-lens-docker` tag를 요구한다. Runner는 다음
-조건으로 유지한다.
+일반 build/test job은 project-scoped Docker runner의 `toss-portfolio-lens-docker` tag를 요구한다. Runner는
+다음 조건으로 유지한다.
 
 - `privileged=false`, Docker socket mount 없음, project에 lock
 - runner concurrency 1, build container memory/swap 5 GiB, service container memory/swap 768 MiB
@@ -60,28 +61,47 @@ GitLab CI cache에는 npm download cache, 서로 일치하는 TypeScript build i
 전용 Harbor project robot credential만 사용한다. Docker 접근 권한은 전용 systemd service의
 `SupplementaryGroups=docker`에만 부여하고 test runner에는 전달하지 않는다.
 
+Release tag는 GitLab scheduling 경계이고 스크립트 내부 identity로 파싱하지 않는다.
+[Job-only predefined variable](https://docs.gitlab.com/ci/variables/predefined_variables/)인
+`CI_RUNNER_ID=14`와
+`CI_RUNNER_DESCRIPTION=ubuntu-1-toss-portfolio-lens-release`가 모두 일치해야 한다. `DOCKER_CONFIG`는
+GitLab project·job variable로 중복 선언하지 않고 전용 runner config와 systemd service가 제공하는
+`/home/toss-portfolio-release/.docker`만 허용한다.
+
 Harbor robot은 `toss-portfolio-lens` namespace에서만 `repository:pull/push`, `artifact:read/list`,
 `scan:create/read`, `artifact-addition:read`를 가진다. 마지막 권한은 Trivy vulnerability report 본문을
 읽는 데 필요하며, project 관리·robot 관리·artifact 삭제·다른 namespace 접근은 허용하지 않는다.
 
-1. source gate와 runtime module smoke
-2. web 이미지와 변경된 경우에만 Rust 이미지를 순차적으로 4 GiB build limit 안에서 생성
-3. immutable `git-$CI_COMMIT_SHA` tag push와 local OCI revision 확인
-4. Harbor가 반환한 manifest digest로 후보 release 생성
-5. 후보 web/Rust digest 모두 Harbor Trivy 재검사, fixable Critical/High 0건 확인
-6. digest-pinned web/Rust 서비스만 재기동하고 container/local/public health 검증
-7. 성공 시 current release 승격, 실패 시 직전 digest·Compose snapshot으로 자동 rollback
+1. source·test·integration·security gate 통과
+2. `release-preflight`가 runner identity, mode 600/700 경로, host memory, Docker daemon, canonical Buildx
+   builder/worker, Harbor robot과 current manifest 검증
+3. 실제 `release-production`이 같은 preflight를 다시 실행
+4. web 이미지와 변경된 경우에만 Rust 이미지를 순차적으로 4 GiB build limit 안에서 생성
+5. immutable `git-$CI_COMMIT_SHA` tag push와 local OCI revision 확인
+6. Harbor가 반환한 manifest digest로 후보 release 생성
+7. 후보 web/Rust digest 모두 Harbor Trivy 재검사, Critical/High 0건 확인
+8. digest-pinned web/Rust 서비스만 재기동하고 container/local/public health 검증
+9. 성공 시 current release 승격, 실패 시 직전 digest·Compose snapshot으로 자동 rollback
 
 릴리스 job은 `toss-portfolio-lens-production` resource group과 호스트 `flock`을 함께 사용하고 retry를
 비활성화한다. 따라서 같은 host에서 두 production release가 겹치지 않는다. build는 테스트 stage가 모두
 끝난 뒤 순차 실행하고 시작 시 `MemAvailable` 3 GiB 미만이면 OOM 위험을 감수하지 않고 실패한다.
 
+Docker daemon과 Buildx bootstrap probe는 2초 간격으로 최대 3회 재시도한다. 실패하면 credential이나 command
+본문 대신 `stage=docker-info status=255` 형식의 고정 stage와 exit status를 남긴다. Buildx inspect 출력은
+파이프로 조기 종료하지 않고 전부 수집한 뒤 driver와 worker status를 파싱한다. CI는
+`toss-portfolio-lens-release` builder를 생성·삭제하지 않으며 `docker-container` driver와 running worker를
+요구한다.
+
 FinCast, Chronos-2, TiRex-2와 GPU runtime은 이 job의 build, pull, restart 대상이 아니다. Compose에서도
 오직 `web`과 `compute-ipc` service만 명시적으로 조작한다.
 
-릴리스 상태는 runner checkout이 아니라 `/var/lib/toss-portfolio-lens-release`에 mode 600으로 저장한다.
-GitLab artifact에는 credential이나 production env가 아닌 digest candidate, build metadata, 정제된 Trivy
-결과와 deployment report만 developer 이상에게 90일간 공개한다.
+릴리스 상태는 runner checkout이 아니라 `/var/lib/toss-portfolio-lens-release`의 mode 700 directory와 mode
+600 manifest에 저장한다. `release-preflight`와 실제 release는 schema
+`toss-portfolio-release-preflight/v1`의 `.cache/release/preflight.json`을 각각 생성한다. 이 JSON에는 commit
+SHA, runner ID, Docker/Buildx version, available memory와 단계별 성공 여부만 들어간다. GitLab artifact에는
+credential이나 production env가 아닌 이 preflight, digest candidate, build metadata, 정제된 Trivy 결과와
+deployment report만 developer 이상에게 90일간 공개한다.
 
 ubuntu-1의 service 원본은
 `infra/homelab/gitlab-runner-toss-portfolio-lens-release.service`, 등록용 local 설정은
