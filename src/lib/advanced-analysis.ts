@@ -166,7 +166,10 @@ async function checkedFetch(
   init: RequestInit,
   onUnauthorized?: () => void,
 ): Promise<Record<string, unknown> & ApiFailure> {
-  const response = await fetch(url, init);
+  if (!url.startsWith("/api/portfolio/advanced/") || url.startsWith("//") || url.includes("\\")) {
+    throw new Error("고급 분석 요청은 same-origin API 경로만 사용할 수 있습니다.");
+  }
+  const response = await fetch(url, init); // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
   const payload = await readJson(response);
   if (response.status === 401) {
     onUnauthorized?.();

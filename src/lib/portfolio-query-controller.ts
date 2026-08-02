@@ -78,7 +78,17 @@ export class PortfolioQueryController {
   private disposed = false;
 
   constructor(options: PortfolioQueryControllerOptions) {
-    this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
+    this.fetcher = options.fetcher ?? ((input, init) => {
+      if (
+        typeof input !== "string"
+        || (!input.startsWith("/api/portfolio?") && input !== "/api/portfolio")
+        || input.startsWith("//")
+        || input.includes("\\")
+      ) {
+        throw new Error("Portfolio requests must use the same-origin portfolio API route.");
+      }
+      return fetch(input, init); // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
+    });
     this.onUnauthorized = options.onUnauthorized;
   }
 

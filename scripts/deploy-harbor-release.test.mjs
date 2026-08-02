@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   assertHealthPayload,
   composeArguments,
+  normalizePublicHealthUrl,
   releaseChanges,
 } from "./deploy-harbor-release.mjs";
 
@@ -73,5 +74,16 @@ describe("production Harbor deployment helper", () => {
     assert.throws(() => assertHealthPayload({ ...base, storage: "sqlite" }, release.APP_GIT_SHA));
     assert.throws(() => assertHealthPayload({ ...base, build: { gitSha: "f".repeat(40) } }, release.APP_GIT_SHA));
     assert.throws(() => assertHealthPayload({ ...base, simulation: { realOrder: true } }, release.APP_GIT_SHA));
+  });
+
+  it("accepts only the canonical production health origin", () => {
+    assert.equal(
+      normalizePublicHealthUrl("https://tpl.uaysk.com"),
+      "https://tpl.uaysk.com/api/health",
+    );
+    assert.throws(() => normalizePublicHealthUrl("http://tpl.uaysk.com"));
+    assert.throws(() => normalizePublicHealthUrl("https://tpl.uaysk.com.evil.invalid"));
+    assert.throws(() => normalizePublicHealthUrl("https://tpl.uaysk.com/redirect"));
+    assert.throws(() => normalizePublicHealthUrl("https://user@tpl.uaysk.com"));
   });
 });

@@ -349,10 +349,11 @@ async function firstExecutable(candidates) {
 }
 
 async function waitForServer(url, child, output) {
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/u.test(url)) throw new Error("preview URL must be loopback-only");
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Vite preview 조기 종료\n${output.join("")}`);
-    try { if ((await fetch(url)).ok) return; } catch { /* 준비 대기 */ }
+    try { if ((await fetch(url)).ok) return; } catch { /* 준비 대기 */ } // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Vite preview 준비 시간 초과\n${output.join("")}`);

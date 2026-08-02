@@ -82,6 +82,18 @@ describe("strict production environment", () => {
     expect(() => loadConfig()).toThrow("rust_socket 또는 external");
   });
 
+  it("keeps production Toss provider traffic on approved HTTPS origins", () => {
+    process.env.NODE_ENV = "production";
+    process.env.TOSS_API_BASE_URL = "http://openapi.tossinvest.com";
+    expect(() => loadConfig()).toThrow("HTTPS");
+
+    process.env.TOSS_API_BASE_URL = "https://attacker.invalid";
+    expect(() => loadConfig()).toThrow("공식 토스증권 API origin");
+
+    process.env.TOSS_API_BASE_URL = "https://openapi.tossinvest.com";
+    expect(loadConfig().tossApiBaseUrl).toBe("https://openapi.tossinvest.com");
+  });
+
   it("uses only FinCast and optional Chronos-2 v2 lanes", () => {
     process.env.AI_CHRONOS2_COMPUTE_URL = "ws://chronos2-worker:8767/ws/scalping-ai/v2";
     process.env.AI_CHRONOS2_COMPUTE_AUTH_TOKEN_FILE = "/run/chronos2-auth/token";

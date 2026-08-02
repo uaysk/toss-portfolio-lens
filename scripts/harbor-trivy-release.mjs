@@ -106,6 +106,22 @@ export function isHarborRobotUsername(username) {
   return typeof username === "string" && username.startsWith("robot$") && username.length > 6;
 }
 
+export function assertHarborApiUrl(value) {
+  const parsed = new URL(value);
+  if (
+    parsed.protocol !== "https:"
+    || parsed.hostname !== DEFAULT_REGISTRY
+    || parsed.port
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+    || !parsed.pathname.startsWith("/api/v2.0/projects/")
+  ) {
+    throw new Error("Harbor API requests must stay on the canonical registry API origin");
+  }
+  return parsed.toString();
+}
+
 export function assertReleaseRobotCredential(
   registry = DEFAULT_REGISTRY,
   dockerConfigDirectory = process.env.DOCKER_CONFIG || join(homedir(), ".docker"),
@@ -121,7 +137,8 @@ function basicAuthorization(credential) {
 }
 
 async function harborRequest(url, credential, init = {}) {
-  const response = await fetch(url, {
+  const trustedUrl = assertHarborApiUrl(url);
+  const response = await fetch(trustedUrl, { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     ...init,
     headers: {
       Accept: "application/json",
@@ -131,7 +148,7 @@ async function harborRequest(url, credential, init = {}) {
   });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 500);
-    throw new Error(`Harbor API ${init.method ?? "GET"} ${new URL(url).pathname} returned ${response.status}: ${detail}`);
+    throw new Error(`Harbor API ${init.method ?? "GET"} ${new URL(trustedUrl).pathname} returned ${response.status}: ${detail}`);
   }
   return response;
 }
@@ -212,7 +229,8 @@ async function artifactWithScanOverview(image, credential) {
 }
 
 async function triggerScan(image, credential) {
-  const response = await fetch(artifactApiUrl(image, "/scan"), {
+  const trustedUrl = assertHarborApiUrl(artifactApiUrl(image, "/scan"));
+  const response = await fetch(trustedUrl, { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     method: "POST",
     headers: {
       Accept: "application/json",

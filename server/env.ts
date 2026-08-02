@@ -1028,6 +1028,20 @@ export function loadConfig(): AppConfig {
   const port = readPort();
   const configuredPublicUrl = optional("PUBLIC_APP_URL") || optional("APP_URL");
   const nodeEnv = process.env.NODE_ENV?.trim() || "development";
+  const tossApiBaseUrl = normalizedHttpUrl(
+    optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
+    "TOSS_API_BASE_URL",
+  );
+  const tossApiOrigin = new URL(tossApiBaseUrl).origin;
+  if (nodeEnv === "production" && new URL(tossApiBaseUrl).protocol !== "https:") {
+    throw new Error("production TOSS_API_BASE_URL은 HTTPS여야 합니다.");
+  }
+  if (
+    tossApiAuth.tossApiAuthMode === "oauth_client_credentials"
+    && tossApiOrigin !== "https://openapi.tossinvest.com"
+  ) {
+    throw new Error("OAuth TOSS_API_BASE_URL은 공식 토스증권 API origin이어야 합니다.");
+  }
   const publicAppUrl = configuredPublicUrl
     ? normalizedHttpUrl(configuredPublicUrl, "PUBLIC_APP_URL")
     : `http://localhost:${port}`;
@@ -1047,10 +1061,7 @@ export function loadConfig(): AppConfig {
       1_000,
       300_000,
     ),
-    tossApiBaseUrl: normalizedHttpUrl(
-      optional("TOSS_API_BASE_URL") || "https://openapi.tossinvest.com",
-      "TOSS_API_BASE_URL",
-    ),
+    tossApiBaseUrl,
     postgres,
     candleCacheLatestTtlMs: readBoundedInteger("CANDLE_CACHE_LATEST_TTL_MS", 300_000, 10_000, 86_400_000),
     snapshotRefreshHours: readSnapshotRefreshHours(),

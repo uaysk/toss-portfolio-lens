@@ -33,7 +33,8 @@ async function start(input?: {
 }
 
 async function login(baseUrl: string, password: string, forwardedFor?: string) {
-  return fetch(`${baseUrl}/api/auth/login`, {
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/u.test(baseUrl)) throw new Error("test server must be loopback-only");
+  return fetch(`${baseUrl}/api/auth/login`, { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     method: "POST",
     headers: {
       "Content-Type": "application/json",

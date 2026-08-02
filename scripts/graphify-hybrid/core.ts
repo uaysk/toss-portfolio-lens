@@ -106,6 +106,7 @@ type ApiConfig = {
 const DEFAULT_PROJECT = "toss-portfolio-lens";
 const DEFAULT_GRAPH = "graphify-out/graph.json";
 const EMBEDDING_DIMENSIONS = 2560;
+const ALLOWED_MODEL_API_HOSTS = new Set(["litellm.uaysk.com", "api.openai.com"]);
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -115,9 +116,26 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+export function normalizeOpenAiEndpoint(value: string): string {
+  const parsed = new URL(value);
+  if (
+    parsed.protocol !== "https:"
+    || !ALLOWED_MODEL_API_HOSTS.has(parsed.hostname)
+    || parsed.port
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+  ) {
+    throw new Error("OPENAI_API_ENDPOINT must use an approved HTTPS model API origin");
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
+  return parsed.toString().replace(/\/$/u, "");
+}
+
 export function apiConfigFromEnv(): ApiConfig {
   return {
-    endpoint: requiredEnv("OPENAI_API_ENDPOINT").replace(/\/+$/, ""),
+    endpoint: normalizeOpenAiEndpoint(requiredEnv("OPENAI_API_ENDPOINT")),
     apiKey: requiredEnv("OPENAI_API_KEY"),
     embeddingModel: process.env.GRAPHIFY_EMBEDDING_MODEL?.trim() || "qwen3-embedding-4b",
     rerankerModel: process.env.GRAPHIFY_RERANKER_MODEL?.trim() || "qwen3-reranker-4b",
@@ -355,7 +373,8 @@ async function apiRequest<T>(
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      const response = await fetch(`${config.endpoint}${pathName}`, {
+      // The endpoint is operator-owned mode-600 config normalized above; pathName is internal.
+      const response = await fetch(`${config.endpoint}${pathName}`, { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
         method: "POST",
         headers: {
           authorization: `Bearer ${config.apiKey}`,
