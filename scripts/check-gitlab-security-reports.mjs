@@ -32,26 +32,81 @@ function findingSummary(finding) {
   };
 }
 
+function scanObservability(report, label) {
+  const scan = report?.scan;
+  if (!scan || typeof scan !== "object") {
+    return {
+      available: false,
+      label,
+      status: null,
+      errorCount: 0,
+      notificationCount: 0,
+      timeoutCount: 0,
+      nonZeroExitCodes: [],
+      blocking: false,
+    };
+  }
+  const errors = Array.isArray(scan.errors) ? scan.errors : [];
+  const notifications = Array.isArray(scan.notifications) ? scan.notifications : [];
+  const events = Array.isArray(scan.observability?.events)
+    ? scan.observability.events
+    : [];
+  const timeoutCount = events.filter((event) => (
+    String(JSON.stringify(event) ?? "").toLowerCase().includes("timeout")
+  )).length;
+  const nonZeroExitCodes = events
+    .map((event) => event?.exit_code)
+    .filter((exitCode) => Number.isInteger(exitCode) && exitCode !== 0);
+  const status = typeof scan.status === "string" ? scan.status : "unknown";
+  return {
+    available: true,
+    label,
+    status,
+    errorCount: errors.length,
+    notificationCount: notifications.length,
+    timeoutCount,
+    nonZeroExitCodes,
+    blocking: status !== "success" || errors.length > 0 || timeoutCount > 0,
+  };
+}
+
 export function evaluateGitLabSecurityReports({ sastReport, secretReport }) {
   const sastFindings = vulnerabilities(sastReport, "SAST").map(findingSummary);
   const secretFindings = vulnerabilities(secretReport, "secret detection").map(findingSummary);
   const blockingSast = sastFindings.filter((finding) => (
     BLOCKING_SAST_SEVERITIES.has(finding.severity)
   ));
+  const sastScan = scanObservability(sastReport, "SAST");
+  const secretScan = scanObservability(secretReport, "secret detection");
+  const incompleteScans = [sastScan, secretScan]
+    .filter(({ blocking }) => blocking)
+    .map((scan) => ({
+      id: `${scan.label.toLowerCase().replaceAll(" ", "-")}-scan-incomplete`,
+      name: `${scan.label} scan is incomplete`,
+      severity: "critical",
+      location: null,
+    }));
   return {
     schemaVersion: "gitlab-security-gate/v1",
     generatedAt: new Date().toISOString(),
     policy: {
       sastBlockingSeverities: [...BLOCKING_SAST_SEVERITIES],
       blockAnySecret: true,
+      requireSuccessfulScansWhenMetadataIsPresent: true,
     },
     counts: {
       sast: sastFindings.length,
       blockingSast: blockingSast.length,
       secrets: secretFindings.length,
     },
-    blocking: [...blockingSast, ...secretFindings],
-    passed: blockingSast.length === 0 && secretFindings.length === 0,
+    observability: {
+      sast: sastScan,
+      secretDetection: secretScan,
+    },
+    blocking: [...blockingSast, ...secretFindings, ...incompleteScans],
+    passed: blockingSast.length === 0
+      && secretFindings.length === 0
+      && incompleteScans.length === 0,
   };
 }
 
@@ -82,7 +137,7 @@ function main() {
   if (!result.passed) {
     throw new Error(
       `GitLab security gate blocked ${result.counts.blockingSast} high/critical SAST finding(s)`
-      + ` and ${result.counts.secrets} secret finding(s)`,
+      + `, ${result.counts.secrets} secret finding(s), and incomplete scan metadata where present`,
     );
   }
 }

@@ -27,3 +27,30 @@ test("rejects malformed reports instead of silently passing", () => {
     secretReport: { vulnerabilities: [] },
   }), /SAST report must contain a vulnerabilities array/u);
 });
+
+test("blocks a report that declares an unsuccessful scan or a timeout event", () => {
+  const result = evaluateGitLabSecurityReports({
+    sastReport: {
+      vulnerabilities: [],
+      scan: {
+        status: "failed",
+        errors: [{ message: "scanner failed" }],
+        observability: { events: [{ message: "timeout" }] },
+      },
+    },
+    secretReport: { vulnerabilities: [] },
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.observability.sast.blocking, true);
+  assert.equal(result.observability.sast.timeoutCount, 1);
+  assert.equal(result.blocking[0].id, "sast-scan-incomplete");
+});
+
+test("keeps legacy reports compatible while exposing scan observability", () => {
+  const result = evaluateGitLabSecurityReports({
+    sastReport: { vulnerabilities: [] },
+    secretReport: { vulnerabilities: [] },
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.observability.sast.available, false);
+});

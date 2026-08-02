@@ -64,6 +64,16 @@ export class PGliteDatabase implements RelationalDatabase {
     );
   }
 
+  /**
+   * Reuse the expensive PGlite process between tests while restoring the
+   * isolated empty-schema contract expected by each fixture.
+   */
+  async reset(): Promise<void> {
+    const pglite = await this.ready;
+    await pglite.query(postgresSql("DROP SCHEMA IF EXISTS public CASCADE"));
+    await pglite.query(postgresSql("CREATE SCHEMA public"));
+  }
+
   async close(): Promise<void> {
     await (await this.ready).close();
   }

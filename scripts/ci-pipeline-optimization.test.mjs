@@ -6,9 +6,29 @@ const source = readFileSync(new URL("../.gitlab-ci.yml", import.meta.url), "utf8
 
 test("runner boundary does not spend a checkout and emits cgroup metrics", () => {
   assert.match(source, /runner-boundary:[\s\S]*?GIT_STRATEGY: none/u);
-  assert.match(source, /after_script:[\s\S]*?ci-resource-metrics job=/u);
+  assert.doesNotMatch(source, /^\s*after_script:/mu);
+  assert.match(source, /ci-resource-metrics scope=job-script job=/u);
   assert.match(source, /memory_peak_bytes=/u);
   assert.match(source, /memory_events=/u);
+  assert.match(source, /cpu_usage_usec=/u);
+  assert.match(source, /io_bytes=/u);
+});
+
+test("docs-only changes have a bounded validation lane and code changes keep full gates", () => {
+  assert.match(source, /docs-validation:[\s\S]*?\.ci-docs-only-rules/u);
+  assert.match(source, /node-static:[\s\S]*?\.ci-code-sensitive-rules/u);
+  assert.match(source, /vitest-pglite:[\s\S]*?VITEST_PGLITE_MAX_PARALLEL: "2"/u);
+  assert.match(source, /vitest-pglite:[\s\S]*?VITEST_PGLITE_SERIAL_FILES/u);
+});
+
+test("independent jobs do not download predecessor artifacts", () => {
+  for (const job of ["node-static", "vitest-light", "vitest-heavy", "vitest-pglite", "semgrep-sast", "secret_detection", "rust-quality", "ui-regression"]) {
+    const block = source.match(new RegExp(`${job}:[\\s\\S]*?(?=\\n\\S|$)`, "u"))?.[0] ?? "";
+    assert.match(block, /dependencies: \[\]/u, job);
+  }
+  const postgres = source.match(/postgres-integration:[\s\S]*?security-report-gate:/u)?.[0] ?? "";
+  assert.match(postgres, /needs:[\s\S]*?rust-quality/u);
+  assert.doesNotMatch(postgres, /postgres-integration:[\s\S]*?dependencies: \[\]/u);
 });
 
 test("Node cache has one writer and pull-only consumers", () => {
@@ -41,4 +61,14 @@ test("ephemeral test artifacts have shorter retention while release artifacts st
   assert.match(source, /vitest-pglite:[\s\S]*?expire_in: 14 days/u);
   assert.match(source, /ui-regression:[\s\S]*?expire_in: 7 days/u);
   assert.match(source, /release-production:[\s\S]*?expire_in: 90 days/u);
+  assert.match(source, /ui-regression:[\s\S]*?find "\$UI_VALIDATION_SCREENSHOT_DIR" -type f -name '\*\.png' -delete/u);
+  assert.match(source, /vitest-coverage:[\s\S]*?VITEST_JUNIT_DIR/u);
+  assert.match(source, /vitest-coverage:[\s\S]*?junit: \.cache\/test-reports\/vitest-coverage\/\*\.xml/u);
+});
+
+test("Rust cache writes are restricted to the default branch and incremental state is disabled", () => {
+  assert.match(source, /CARGO_INCREMENTAL: "0"/u);
+  assert.match(source, /prefix: rust-registry-v2[\s\S]*?policy: \$RUST_CACHE_POLICY/u);
+  assert.match(source, /prefix: rust-target-v2[\s\S]*?policy: \$RUST_CACHE_POLICY/u);
+  assert.match(source, /RUST_CACHE_POLICY: pull-push/u);
 });

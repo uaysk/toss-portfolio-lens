@@ -14,6 +14,7 @@ readonly harbor_registry="harbor.uaysk.com"
 readonly harbor_project="toss-portfolio-lens"
 readonly public_url="https://tpl.uaysk.com"
 readonly minimum_available_kib="3145728"
+readonly minimum_available_disk_kib="15728640"
 readonly retry_delay_seconds="2"
 readonly maximum_preflight_retries="3"
 
@@ -26,6 +27,7 @@ readonly -a preflight_artifact_stages=(
   release-lock
   host-memory
   docker-info
+  disk-capacity
   docker-version
   buildx-version
   buildx-inspect
@@ -47,6 +49,9 @@ preflight_artifact=""
 web_tag=""
 rust_tag=""
 available_kib=""
+source_disk_available_kib=""
+docker_disk_available_kib=""
+docker_root_directory=""
 docker_version=""
 buildx_version=""
 buildx_inspect_output=""
@@ -56,7 +61,7 @@ builder_driver=""
 set_stage() {
   case "$1" in
     argument-validation | ci-identity | source-directory | commands | cache-directories \
-      | release-paths | release-lock | host-memory | docker-info | docker-version \
+      | release-paths | release-lock | host-memory | docker-info | disk-capacity | docker-version \
       | buildx-version | buildx-inspect | buildx-driver | buildx-bootstrap \
       | buildx-worker | harbor-credential | current-release | preflight-artifact \
       | web-image | rust-image-decision | rust-image | candidate-release \
@@ -201,7 +206,7 @@ configure_release_paths() {
 require_release_commands() {
   set_stage commands
   local command
-  for command in awk chmod docker flock git mkdir node realpath sleep stat; do
+  for command in awk chmod df docker flock git mkdir node realpath sleep stat; do
     if ! command -v "$command" >/dev/null; then
       fail_check "required release command is unavailable: ${command}"
     fi
@@ -244,6 +249,40 @@ check_host_memory() {
   available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
   if [[ ! "$available_kib" =~ ^[0-9]+$ || "$available_kib" -lt "$minimum_available_kib" ]]; then
     fail_check "less than 3 GiB host memory is available"
+  fi
+}
+
+check_disk_capacity() {
+  set_stage disk-capacity
+  local source_available
+  local docker_available
+
+  if ! source_available="$(df -Pk -- "$source_directory" | awk 'NR == 2 { print $4 }')"; then
+    fail_check "source checkout disk capacity could not be read"
+  fi
+  if [[ ! "$source_available" =~ ^[0-9]+$ ]]; then
+    fail_check "source checkout disk capacity is invalid"
+  fi
+  if ! docker_root_directory="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"; then
+    fail_check "Docker root directory could not be read"
+  fi
+  docker_root_directory="$(trim_whitespace "$docker_root_directory")"
+  if [[ -z "$docker_root_directory" ]]; then
+    fail_check "Docker root directory is empty"
+  fi
+  if ! docker_available="$(df -Pk -- "$docker_root_directory" | awk 'NR == 2 { print $4 }')"; then
+    fail_check "Docker root disk capacity could not be read"
+  fi
+  if [[ ! "$docker_available" =~ ^[0-9]+$ ]]; then
+    fail_check "Docker root disk capacity is invalid"
+  fi
+  source_disk_available_kib="$source_available"
+  docker_disk_available_kib="$docker_available"
+  if (( source_available < minimum_available_disk_kib )); then
+    fail_check "less than 15 GiB is available for the release checkout"
+  fi
+  if (( docker_available < minimum_available_disk_kib )); then
+    fail_check "less than 15 GiB is available for the Docker root"
   fi
 }
 
@@ -337,19 +376,26 @@ validate_buildx_workers() {
 write_preflight_artifact() {
   node -e '
     const { chmodSync, writeFileSync } = require("node:fs");
-    const [path, commitSha, runnerId, dockerVersion, buildxVersion, availableKiB, ...stages] = process.argv.slice(1);
+    const [path, commitSha, runnerId, dockerVersion, buildxVersion, availableKiB,
+      sourceDiskAvailableKiB, dockerDiskAvailableKiB, dockerRootDirectory, ...stages] = process.argv.slice(1);
     const result = {
       schema_version: "toss-portfolio-release-preflight/v1",
       commit_sha: commitSha,
       runner_id: Number(runnerId),
       versions: { docker: dockerVersion, buildx: buildxVersion },
       memory: { available_kib: Number(availableKiB) },
+      disk: {
+        source_available_kib: Number(sourceDiskAvailableKiB),
+        docker_available_kib: Number(dockerDiskAvailableKiB),
+        docker_root_directory: dockerRootDirectory,
+      },
       stages: Object.fromEntries(stages.map((stage) => [stage, true])),
     };
     writeFileSync(path, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
     chmodSync(path, 0o600);
   ' "$preflight_artifact" "$CI_COMMIT_SHA" "$CI_RUNNER_ID" "$docker_version" \
-    "$buildx_version" "$available_kib" "${preflight_artifact_stages[@]}"
+    "$buildx_version" "$available_kib" "$source_disk_available_kib" \
+    "$docker_disk_available_kib" "$docker_root_directory" "${preflight_artifact_stages[@]}"
 }
 
 run_preflight() {
@@ -363,6 +409,7 @@ run_preflight() {
   check_host_memory
 
   retry_preflight docker-info docker info
+  check_disk_capacity
   capture_docker_version
   capture_buildx_version
   capture_buildx_inspect

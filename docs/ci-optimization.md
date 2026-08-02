@@ -85,7 +85,74 @@ canonical TypeScript는 계속 Semgrep 대상이고, Secret Detection은 변경�
 - 일반 test/diagnostic artifact TTL은 14일, UI는 7일, Rust integration binary는
   7일로 줄였고 release/security audit artifact는 90일을 유지했다.
 
-## 4. 안전한 최적화 순서
+## 4. 적용한 2차 최적화
+
+2026-08-02에 첫 slice의 계측 결과를 바탕으로 다음 변경을 적용했다. 각 항목은
+독립적으로 되돌릴 수 있고, protected main·schedule은 계속 full gate를 사용한다.
+
+### 변경 경로와 artifact DAG
+
+- `docs/**/*`, Markdown, LICENSE만 바뀐 MR/branch에는 `docs-validation`만 실행한다.
+  코드·설정 변경이 하나라도 포함되면 node static, Vitest, Semgrep, Secret Detection,
+  Rust, UI, PostgreSQL gate가 다시 열린다. default branch, tag, schedule은 항상
+  complete validation boundary다.
+- predecessor artifact가 필요 없는 job에는 `dependencies: []`를 명시했다. Rust binary가
+  필요한 PostgreSQL job과 security report가 필요한 security gate만 `needs:artifacts`를
+  유지한다. #67 trace에서 제거 가능한 artifact 다운로드는 10.6초였다.
+- Vitest light lane과 coverage lane은 같은 JUnit 결과를 남기며, coverage job은 MR의
+  code path 또는 schedule에서만 실행한다. 따라서 동일 light 테스트를 두 번 실행하는
+  일반 branch 중복을 피하면서 MR coverage는 보존한다.
+
+### 정확한 resource telemetry
+
+공통 `after_script`를 제거하고 각 job의 `before_script`에서 `EXIT` trap을 설치했다.
+로그에는 `scope=job-script`, job/runner ID, 종료 status, cgroup `memory.peak`,
+`memory.current`, `memory.events`, CPU usage, I/O bytes만 출력한다. GitLab runner의
+get-sources/cache 구간은 포함하지 않는다는 범위를 명시하므로, 이를 전체 job peak로
+해석하지 않는다. credential, 환경변수 값, Docker config 내용은 출력하지 않는다.
+
+### PGlite 메모리 인지 스케줄러와 fixture 재사용
+
+`run-vitest-batches.mjs`는 PGlite child 하나에 1,536 MiB를 예약하고 512 MiB headroom을
+제외한 뒤 `VITEST_PGLITE_MAX_PARALLEL`을 clamp한다. CI는 최대 2개 process를 실행하며
+`server/services/run-service.test.ts`는 단독으로 둔다. 각 batch는 여전히 Vitest
+worker 1개와 file parallelism off를 유지한다. RunService, ScalpingRepository,
+TechnicalAnalysisService fixture는 비싼 PGlite process를 file당 하나만 만들고
+`DROP SCHEMA ... CASCADE` reset으로 test 간 격리를 회복한다. 한 테스트에서 두 독립
+database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 유지한다.
+
+실제 로컬 검증(HTTP test를 허용한 runner, 2026-08-02):
+
+| 지표 | 기존 #67 PGlite | 새 scheduler | 변화 |
+|---|---:|---:|---:|
+| 22 batch elapsed | 258.7초 | 130.5초 | 128.2초/49.6% 감소 |
+| peak aggregate child RSS | 2.86 GiB | 2.30 GiB | 0.56 GiB 감소 |
+| 결과 | 22/22 성공 | 22/22 성공 | OOM 0 |
+
+새 pipeline에서도 job trace의 peak와 `memory.events`를 확인한 뒤 2-way 설정을
+승격한다. 4 GiB job envelope에서 peak가 3.75 GiB를 넘거나 OOM이 발생하면
+`VITEST_PGLITE_MAX_PARALLEL=1`로 즉시 rollback한다.
+
+### UI, Rust, Semgrep, release disk guard
+
+- UI regression 성공 시 PNG screenshot을 삭제하고 `report.json`·실패 시 screenshot만
+  artifact로 보존한다. #67 UI archive 4.4 MB 중 약 99.8%가 성공 PNG였으므로, 성공
+  artifact는 약 10 KB 수준으로 줄어든다. shell이 실패하면 삭제 단계에 도달하지 않아
+  debugging evidence가 보존된다.
+- Rust는 registry/git과 `target` cache를 별도 key로 분리하고, MR/feature에서는
+  `policy: pull`, default branch/tag/schedule에서만 `pull-push` writer를 사용한다.
+  `CARGO_INCREMENTAL=0`으로 branch마다 누적 incremental object를 만들지 않는다.
+  lockfile은 두 key 모두에 포함한다.
+- Semgrep analyzer에는 `SAST_SCANNER_ALLOWED_CLI_OPTS=--timeout 15`를 적용한다.
+  security gate는 report의 vulnerabilities뿐 아니라, report에 scan metadata가 있을
+  때 `status`, errors, timeout event를 확인한다. Secret Detection도 metadata가
+  실패하면 통과시키지 않는다. 기존 metadata 없는 unit fixture는 호환성을 유지한다.
+- release preflight는 source checkout과 Docker root 각각 15 GiB 이상의 free disk를
+  확인하고 `docker_root_directory`와 available KiB를 credential 없이 preflight JSON에
+  기록한다. 공유 host에서 `docker system prune`를 자동 실행하지 않는다. threshold
+  미달 시 cleanup 대상과 release lock 상태를 운영자가 확인한 뒤 재시도한다.
+
+## 5. 안전한 최적화 순서
 
 ### 실제 warm 검증 결과
 
@@ -111,10 +178,10 @@ retained-byte-days로 측정한다. 따라서 이번 slice는 artifact/cache wri
 makespan에서는 개선됐지만, PGlite 병목을 해결한 것으로 승격하지 않는다. PGlite batch-size,
 추가 runner, Rust target 축소는 후속 실험으로 남긴다.
 
-현재 Docker executor의 after-script cgroup 파일은 job shell scope(약 5 MiB)를 보고해
-Vitest batch RSS와 일치하지 않았다. 이를 전체 job memory로 해석하지 않는다. 실제 memory
-판정은 각 Vitest batch의 `peak=...MiB`, OOM event와 runner boundary의 5 GiB limit을
-사용하며, 다음 단계에서 runner-level cgroup path 또는 process sampler를 별도로 검증한다.
+기존 Docker executor의 after-script cgroup 파일은 job shell scope(약 5 MiB)를 보고해
+Vitest batch RSS와 일치하지 않았다. 새 trap도 `scope=job-script`로 범위를 명시하며
+이를 전체 job memory로 해석하지 않는다. 실제 memory 판정은 각 Vitest batch의
+`peak=...MiB`, OOM event와 runner boundary의 5 GiB limit을 사용한다.
 
 두 pipeline 모두 Secret Detection은 0건이고 High/Critical SAST는 0건이었다. Semgrep의 전체
 Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으므로, 이를 성능
@@ -140,16 +207,15 @@ Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으
 - artifact retained-byte-days가 70% 이상 감소한다.
 - coverage는 의도하지 않게 0.1 percentage point 이상 낮아지지 않는다.
 
-## 5. 후속 실험과 인프라 의존 항목
+## 6. 후속 실험과 인프라 의존 항목
 
 다음 항목은 첫 slice와 분리해 측정한다.
 
-- PGlite batch size 2 실험: worker 1개·file parallelism 없음은 유지하고, 10% 이상
-  빨라지며 peak RSS 3.75 GiB 미만이고 RSS 증가 누수가 없을 때만 승격한다.
 - `node-static` client bundle을 UI job에 전달하는 artifact/cache 실험: 전송 bytes와
   시간을 build 6~7초 절감분과 비교한다.
-- Rust target cache 축소 또는 `CARGO_INCREMENTAL=0` 실험: cache archive 2 GiB와
-  약 30초 저장 비용을 줄이되 warm Rust job 회귀 5% 이내일 때만 유지한다.
+- Rust target cache의 실제 compressed size와 warm compile 시간을 main writer에서
+  재측정한다. warm Rust job이 기존 대비 5% 넘게 느려지거나 cache archive가 줄지
+  않으면 `CARGO_INCREMENTAL=0` 또는 target cache split을 되돌린다.
 - UI/Rust/PostgreSQL의 MR path gate는 dependency map과 false-negative test를 먼저
   작성한다. protected main과 schedule은 full gate를 유지한다.
 - 추가 runner는 기존 6 GiB host의 `concurrent`만 올려서 해결하지 않는다. 별도
@@ -158,7 +224,7 @@ Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으
 - remote sccache, registry BuildKit cache, digest-pinned Rust CI image는 access
   control·quota·lifecycle 설계를 먼저 확정한다.
 
-## 6. 다른 저장소 적용 checklist
+## 7. 다른 저장소 적용 checklist
 
 - [ ] pipeline DAG와 protected release invariant를 먼저 적는다.
 - [ ] runner별 memory/socket/GPU 경계와 실제 concurrency를 측정한다.
@@ -171,3 +237,21 @@ Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으
 - [ ] 최적화마다 hypothesis, expected range, acceptance, rollback, owner를 기록한다.
 - [ ] 최종 main run에서 immutable artifact, security gate, health와 rollback 기준을
   원래 값과 비교한다.
+
+### 재사용 가능한 적용 순서
+
+1. `.ci-code-paths`와 `.ci-doc-paths`를 저장소의 실제 build/test/security 경계로
+   바꾸고, docs-only positive/negative case를 CI lint로 확인한다.
+2. `dependencies: []`를 artifact graph와 대조해 적용한다. downstream input이 있는
+   `needs:artifacts`는 제거하지 않는다.
+3. 공통 resource trap의 출력 필드를 정하고, credential redaction test를 먼저 만든다.
+4. memory reservation을 실제 peak RSS p95보다 크게 잡고, parallelism을 환경변수로
+   clamp한다. 한 번에 한 fixture pool만 재사용하며 schema reset 후 원래 test count를
+   비교한다.
+5. 성공 artifact와 실패 artifact의 보존 요구를 분리한다. 성공 시 큰 screenshot/log를
+   지우되 실패 경로에서는 삭제하지 않는다.
+6. cache는 lockfile key, 명시적 writer, feature pull-only policy, TTL과 compressed
+   size를 함께 기록한다. release/preflight와 보안 report는 90일 audit 보존을 유지한다.
+7. GitLab CI Lint → unit/release-tool → cold/warm pipeline → protected main release
+   순서로 승격하고, wall time뿐 아니라 queue, RSS, OOM, artifact bytes, finding
+   fingerprint, rollback health를 같은 표로 남긴다.

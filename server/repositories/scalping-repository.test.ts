@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { RelationalDatabase } from "../database.js";
 import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import {
@@ -9,15 +9,19 @@ import {
 } from "./scalping-repository.js";
 
 describe("ScalpingRepository", () => {
-  let database: PGliteDatabase | undefined;
+  let database: PGliteDatabase;
 
+  beforeAll(() => {
+    database = new PGliteDatabase();
+  });
   afterEach(async () => {
-    await database?.close();
-    database = undefined;
+    await database.reset();
+  });
+  afterAll(async () => {
+    await database.close();
   });
 
   async function setup(): Promise<ScalpingRepository> {
-    database = new PGliteDatabase();
     const repository = new ScalpingRepository(database);
     await repository.initialize();
     return repository;
