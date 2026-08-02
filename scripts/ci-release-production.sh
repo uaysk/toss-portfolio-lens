@@ -34,7 +34,15 @@ if [[ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" || "$CI_COMMIT_REF_PROTECTED" 
   echo "production releases require the protected default branch" >&2
   exit 1
 fi
-if [[ ",$CI_RUNNER_TAGS," != *",${expected_release_tag},"* ]]; then
+# GitLab currently exposes CI_RUNNER_TAGS as a JSON-style array (for example
+# ["release","docker"]), while older runners used comma-separated values.
+# Normalize only the JSON punctuation and whitespace, then match a complete
+# comma-delimited token so a similarly prefixed tag cannot satisfy the boundary.
+normalized_runner_tags="${CI_RUNNER_TAGS//\"/}"
+normalized_runner_tags="${normalized_runner_tags//\[/}"
+normalized_runner_tags="${normalized_runner_tags//\]/}"
+normalized_runner_tags="${normalized_runner_tags//[[:space:]]/}"
+if [[ ",$normalized_runner_tags," != *",${expected_release_tag},"* ]]; then
   echo "production release runner tag is missing" >&2
   exit 1
 fi
