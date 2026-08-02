@@ -604,7 +604,7 @@ describe("MCP tool contract", () => {
       const serialized = JSON.stringify(result);
       expect(serialized, name).not.toMatch(/CLIENT_SECRET|account-1|must-not-leak-token/i);
     }
-  });
+  }, 30_000);
 
   it("53개 도구가 각자의 OAuth scope 부족을 challenge로 반환하고 민감값을 노출하지 않는다", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);

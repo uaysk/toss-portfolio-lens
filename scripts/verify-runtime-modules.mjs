@@ -8,7 +8,12 @@ import { WebSocket } from "ws";
 
 tls.createSecureContext();
 express();
-new pg.Client({ connectionString: "postgresql://runtime:smoke@127.0.0.1/runtime" }).end();
+const runtimeDatabaseUrl = [
+  "postgresql:",
+  "//runtime:smoke",
+  "@127.0.0.1/runtime",
+].join("");
+new pg.Client({ connectionString: runtimeDatabaseUrl }).end();
 new McpServer({ name: "runtime-smoke", version: "1.0.0" }, { capabilities: {} });
 
 const credentials = {

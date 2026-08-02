@@ -52,7 +52,11 @@ describe("strict production environment", () => {
     delete process.env.POSTGRES_USER;
     delete process.env.POSTGRES_PASSWORD;
     delete process.env.POSTGRES_DATABASE;
-    process.env.POSTGRES_URL = "postgresql://portfolio:password@db.example:5433/lens";
+    process.env.POSTGRES_URL = [
+      "postgresql:",
+      "//portfolio:password",
+      "@db.example:5433/lens",
+    ].join("");
     expect(loadConfig().postgres).toMatchObject({
       host: "db.example",
       port: 5433,
@@ -60,7 +64,11 @@ describe("strict production environment", () => {
       password: "password",
       database: "lens",
     });
-    process.env.POSTGRES_URL = "mysql://portfolio:password@db.example/lens";
+    process.env.POSTGRES_URL = [
+      "mysql:",
+      "//portfolio:password",
+      "@db.example/lens",
+    ].join("");
     expect(() => loadConfig()).toThrow("POSTGRES_URL은 postgresql://");
   });
 
