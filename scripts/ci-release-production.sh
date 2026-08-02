@@ -8,6 +8,7 @@ readonly expected_release_tag="toss-portfolio-lens-release"
 readonly expected_runtime_directory="/home/uaysk/toss-portfolio-lens"
 readonly expected_state_directory="/var/lib/toss-portfolio-lens-release"
 readonly expected_docker_config="/home/toss-portfolio-release/.docker"
+readonly buildx_builder="toss-portfolio-lens-release"
 readonly harbor_registry="harbor.uaysk.com"
 readonly harbor_project="toss-portfolio-lens"
 readonly public_url="https://tpl.uaysk.com"
@@ -94,6 +95,20 @@ if [[ ! "$available_kib" =~ ^[0-9]+$ || "$available_kib" -lt "$minimum_available
 fi
 
 docker info >/dev/null
+
+if ! docker buildx inspect "$buildx_builder" >/dev/null 2>&1; then
+  docker buildx create \
+    --name "$buildx_builder" \
+    --driver docker-container >/dev/null
+fi
+builder_driver="$(docker buildx inspect "$buildx_builder" \
+  | awk '/^Driver:/ { print $2; exit }')"
+if [[ "$builder_driver" != "docker-container" ]]; then
+  echo "release Buildx builder must use the docker-container driver" >&2
+  exit 1
+fi
+docker buildx inspect "$buildx_builder" --bootstrap >/dev/null
+
 node scripts/harbor-trivy-release.mjs --check-release-credential
 node scripts/verify-harbor-release.mjs "$current_release"
 
@@ -105,6 +120,7 @@ ensure_image() {
     echo "Reusing immutable Harbor image tag: $tag"
   else
     docker buildx build \
+      --builder "$buildx_builder" \
       --file "$dockerfile" \
       --target runtime \
       --build-arg "APP_GIT_SHA=$CI_COMMIT_SHA" \
