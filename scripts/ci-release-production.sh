@@ -8,6 +8,7 @@ readonly expected_release_tag="toss-portfolio-lens-release"
 readonly expected_runtime_directory="/home/uaysk/toss-portfolio-lens"
 readonly expected_state_directory="/var/lib/toss-portfolio-lens-release"
 readonly expected_docker_config="/home/toss-portfolio-release/.docker"
+readonly expected_release_runner_description="ubuntu-1-toss-portfolio-lens-release"
 readonly buildx_builder="toss-portfolio-lens-release"
 readonly harbor_registry="harbor.uaysk.com"
 readonly harbor_project="toss-portfolio-lens"
@@ -23,7 +24,7 @@ require_value() {
 }
 
 for name in CI_PROJECT_DIR CI_PROJECT_ID CI_COMMIT_SHA CI_COMMIT_BRANCH CI_DEFAULT_BRANCH \
-  CI_COMMIT_REF_PROTECTED CI_RUNNER_TAGS DOCKER_CONFIG; do
+  CI_COMMIT_REF_PROTECTED DOCKER_CONFIG; do
   require_value "$name"
 done
 
@@ -35,17 +36,27 @@ if [[ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" || "$CI_COMMIT_REF_PROTECTED" 
   echo "production releases require the protected default branch" >&2
   exit 1
 fi
-# GitLab currently exposes CI_RUNNER_TAGS as a JSON-style array (for example
+# GitLab normally exposes CI_RUNNER_TAGS as a JSON-style array (for example
 # ["release","docker"]), while older runners used comma-separated values.
-# Normalize only the JSON punctuation and whitespace, then match a complete
-# comma-delimited token so a similarly prefixed tag cannot satisfy the boundary.
-normalized_runner_tags="${CI_RUNNER_TAGS//\"/}"
-normalized_runner_tags="${normalized_runner_tags//\[/}"
-normalized_runner_tags="${normalized_runner_tags//\]/}"
-normalized_runner_tags="${normalized_runner_tags//[[:space:]]/}"
-if [[ ",$normalized_runner_tags," != *",${expected_release_tag},"* ]]; then
-  echo "production release runner tag is missing" >&2
-  exit 1
+# The dedicated shell runner currently does not expose that predefined value,
+# so its immutable description is the fallback identity check. Normalize only
+# JSON punctuation and whitespace, then match a complete comma-delimited token
+# so a similarly prefixed tag cannot satisfy the boundary.
+if [[ -n "${CI_RUNNER_TAGS:-}" ]]; then
+  normalized_runner_tags="${CI_RUNNER_TAGS//\"/}"
+  normalized_runner_tags="${normalized_runner_tags//\[/}"
+  normalized_runner_tags="${normalized_runner_tags//\]/}"
+  normalized_runner_tags="${normalized_runner_tags//[[:space:]]/}"
+  if [[ ",$normalized_runner_tags," != *",${expected_release_tag},"* ]]; then
+    echo "production release runner tag is missing" >&2
+    exit 1
+  fi
+else
+  if [[ "${CI_RUNNER_DESCRIPTION:-}" != "$expected_release_runner_description" ]]; then
+    echo "production release runner tag metadata is unavailable and runner description is not canonical" >&2
+    exit 1
+  fi
+  echo "CI_RUNNER_TAGS unavailable; validated canonical release runner description"
 fi
 if [[ ! "$CI_COMMIT_SHA" =~ ^[a-f0-9]{40}$ ]]; then
   echo "CI_COMMIT_SHA must be a full lowercase Git SHA" >&2
