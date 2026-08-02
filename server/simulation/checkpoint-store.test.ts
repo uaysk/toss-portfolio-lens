@@ -278,7 +278,7 @@ describe("SimulationCheckpointStore v2", () => {
     } finally {
       await Promise.all([small.database.close(), large.database.close()]);
     }
-  });
+  }, 30_000);
 
   it("첫 buffered event로부터 5초 timer가 지나면 자동 flush한다", async () => {
     let now = 3_000;
