@@ -7,6 +7,7 @@ import {
   nodeOptionsWithHeapLimit,
   planBatches,
   positiveInteger,
+  vitestArguments,
 } from "./run-vitest-batches.mjs";
 
 test("classifies PGlite before crypto and isolates crypto or large tests as heavy", () => {
@@ -93,4 +94,26 @@ test("replaces inherited heap flags with the fixed 768MB child limit", () => {
     nodeOptionsWithHeapLimit("--max_old_space_size 1024 --enable-source-maps"),
     "--enable-source-maps --max-old-space-size=768",
   );
+});
+
+test("adds isolated JUnit and coverage outputs without increasing Vitest workers", () => {
+  const arguments_ = vitestArguments(
+    { name: "light-2", files: ["src/example.test.ts"] },
+    {
+      junitDirectory: "/tmp/toss-vitest-junit",
+      coverageDirectory: "/tmp/toss-vitest-coverage",
+    },
+  );
+  assert.ok(arguments_.includes("--maxWorkers=1"));
+  assert.ok(arguments_.includes("--no-file-parallelism"));
+  assert.ok(arguments_.includes("--reporter=junit"));
+  assert.ok(arguments_.includes(
+    "--outputFile.junit=/tmp/toss-vitest-junit/light-2.xml",
+  ));
+  assert.ok(arguments_.includes("--coverage.provider=v8"));
+  assert.ok(arguments_.includes("--coverage.all=false"));
+  assert.ok(arguments_.includes("--coverage.reporter=json"));
+  assert.ok(arguments_.includes(
+    "--coverage.reportsDirectory=/tmp/toss-vitest-coverage/light-2",
+  ));
 });

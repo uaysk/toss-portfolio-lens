@@ -1,3 +1,7 @@
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
 workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -32,6 +36,8 @@ variables:
   CARGO_TARGET_DIR: "$CI_PROJECT_DIR/worker/rust/target"
   CARGO_BUILD_JOBS: "2"
   CARGO_TERM_COLOR: "always"
+  AST_ENABLE_MR_PIPELINES: "true"
+  SAST_EXCLUDED_PATHS: "graphify-out,docs/reports,.cache,dist,node_modules,worker/rust/target"
 
 runner-boundary:
   stage: preflight
@@ -105,6 +111,7 @@ vitest-light:
   variables:
     VITEST_MEMORY_BUDGET_MB: "3584"
     VITEST_MAX_PARALLEL: "2"
+    VITEST_JUNIT_DIR: "$CI_PROJECT_DIR/.cache/test-reports/vitest-light"
   script:
     - npm run test:light
   artifacts:
@@ -112,6 +119,9 @@ vitest-light:
     expire_in: 30 days
     paths:
       - .cache/performance/vitest-batches.json
+      - .cache/test-reports/vitest-light/
+    reports:
+      junit: .cache/test-reports/vitest-light/*.xml
 
 vitest-heavy:
   extends: .node-job
@@ -121,6 +131,7 @@ vitest-heavy:
   variables:
     VITEST_MEMORY_BUDGET_MB: "2048"
     VITEST_MAX_PARALLEL: "1"
+    VITEST_JUNIT_DIR: "$CI_PROJECT_DIR/.cache/test-reports/vitest-heavy"
   script:
     - npm run test:heavy
   artifacts:
@@ -128,6 +139,9 @@ vitest-heavy:
     expire_in: 30 days
     paths:
       - .cache/performance/vitest-batches.json
+      - .cache/test-reports/vitest-heavy/
+    reports:
+      junit: .cache/test-reports/vitest-heavy/*.xml
 
 vitest-pglite:
   extends: .node-job
@@ -137,6 +151,7 @@ vitest-pglite:
   variables:
     VITEST_MEMORY_BUDGET_MB: "4096"
     VITEST_MAX_PARALLEL: "1"
+    VITEST_JUNIT_DIR: "$CI_PROJECT_DIR/.cache/test-reports/vitest-pglite"
   script:
     - npm run test:pglite
   artifacts:
@@ -144,6 +159,44 @@ vitest-pglite:
     expire_in: 30 days
     paths:
       - .cache/performance/vitest-batches.json
+      - .cache/test-reports/vitest-pglite/
+    reports:
+      junit: .cache/test-reports/vitest-pglite/*.xml
+
+vitest-coverage:
+  extends: .node-job
+  stage: test
+  timeout: 35 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  variables:
+    VITEST_MEMORY_BUDGET_MB: "3072"
+    VITEST_MAX_PARALLEL: "1"
+    VITEST_COVERAGE_DIR: "$CI_PROJECT_DIR/.cache/coverage/vitest-light"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - when: never
+  script:
+    - npm run test:light
+  coverage: '/Lines\s*:\s*(\d+(?:\.\d+)?)%/'
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - .cache/coverage/vitest-light/
+      - .cache/performance/vitest-batches.json
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: .cache/coverage/vitest-light/cobertura-coverage.xml
+
+semgrep-sast:
+  timeout: 25 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+
+secret_detection:
+  timeout: 15 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
 
 rust-quality:
   stage: test
@@ -246,6 +299,27 @@ postgres-integration:
     - npm run test:worker-queue
     - npm run test:rust-worker-postgres
 
+security-report-gate:
+  stage: integration
+  image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
+  timeout: 5 minutes
+  needs:
+    - job: semgrep-sast
+      artifacts: true
+    - job: secret_detection
+      artifacts: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - when: never
+  script:
+    - node scripts/check-gitlab-security-reports.mjs
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - .cache/security/gitlab-security-summary.json
+
 release-production:
   stage: release
   tags:
@@ -259,7 +333,10 @@ release-production:
     GIT_DEPTH: "0"
     GIT_STRATEGY: fetch
   rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_DEPLOY_FREEZE'
+      when: manual
+      allow_failure: false
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
     - when: never
   environment:
     name: production
@@ -278,3 +355,31 @@ release-production:
       - .cache/release/deployment-report.json
       - .cache/security/harbor-trivy-web.json
       - .cache/security/harbor-trivy-rust-worker.json
+
+publish-gitlab-release:
+  stage: release
+  tags:
+    - toss-portfolio-lens-release
+  timeout: 5 minutes
+  interruptible: false
+  retry: 0
+  needs:
+    - job: release-production
+      artifacts: true
+  variables:
+    GIT_STRATEGY: none
+    GLAB_ENABLE_CI_AUTOLOGIN: "true"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    - when: never
+  script:
+    - node scripts/create-gitlab-release-notes.mjs
+  release:
+    name: "Production $CI_COMMIT_SHORT_SHA"
+    description: .cache/release/gitlab-release.md
+    tag_name: "production-$CI_COMMIT_SHA"
+    ref: "$CI_COMMIT_SHA"
+  artifacts:
+    expire_in: 90 days
+    paths:
+      - .cache/release/gitlab-release.md

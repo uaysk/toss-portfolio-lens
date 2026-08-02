@@ -15,10 +15,25 @@ remote는 이전 검증과 긴급 rollback을 위해 `github`라는 이름으로
 - fixture 기반 Playwright UI 회귀
 - CNPG backup retention Go test와 정적 binary build
 - 보호된 기본 브랜치에서 web/Rust 이미지의 Harbor publish, Trivy gate와 production 배포
+- Vitest batch별 JUnit report와 MR/예약 pipeline의 OOM-safe light-suite Cobertura coverage
+- GitLab Semgrep SAST와 pipeline secret detection, High/Critical SAST·모든 secret의 fail-closed gate
 
 FinCast, Chronos-2, TiRex-2, CUDA/GPU qualification, 모델 다운로드, live market/provider 검증은 일반 CI에서
 실행하지 않는다. 운영 PostgreSQL, Harbor credential, Toss credential과 production Docker socket도 test
 runner에 제공하지 않는다.
+
+`main`은 직접 push를 허용하지 않고 merge request로만 변경한다. pipeline 성공과 모든 discussion 해결을
+병합 조건으로 사용한다. Free tier의 approval은 선택적이므로 유료 tier 도입 전까지 이 두 조건과 보호
+브랜치를 최소 review boundary로 사용한다.
+
+Vitest JUnit 파일은 lane·batch마다 분리해 `.cache/test-reports/`에 기록한다. coverage는 일반 branch
+pipeline에서 중복 수집하지 않고 merge request와 scheduled pipeline에서만 light lane을 worker 1개로
+재실행한다. batch별 V8 JSON을 한 coverage map으로 병합한 단일 Cobertura report와 전체 coverage 비율을
+GitLab MR에 게시한다.
+
+SAST와 secret detection은 GitLab의 pinned instance template을 사용한다. Free tier에서는 JSON report를
+다운로드할 수 있지만 vulnerability management UI가 제한되므로 `security-report-gate`가 report 존재 여부를
+fail-closed로 확인하고 High/Critical SAST 또는 secret 1건 이상이면 integration stage를 실패시킨다.
 
 ## Runner 경계
 
@@ -77,6 +92,15 @@ Docker BuildKit 컨테이너는 별도로 4 GiB 제한을 받는다.
 Docker socket은 root-equivalent 권한이므로 release service에만 `SupplementaryGroups=docker`를 부여한다.
 production env와 MCP secret은 service의 `uaysk` supplementary group에만 읽기를 허용하고, 사용자 Harbor
 admin config·SSH·glab config는 systemd `InaccessiblePaths`로 차단한다.
+
+production deploy freeze 기간에는 `release-production`이 자동 실행되지 않고 blocking manual job으로
+전환된다. 일반 protected-main push는 계속 자동 배포한다. 배포 성공 뒤 `publish-gitlab-release`가
+`CI_JOB_TOKEN` 기반 glab auto-login으로 `production-<full-sha>` tag와 GitLab Release를 만들고 pipeline,
+digest-pinned web/Rust image, rollback 기준을 release notes에 남긴다.
+
+GitLab scheduled pipeline은 production 배포를 실행하지 않는다. nightly schedule은 전체 CPU/DB 회귀와
+coverage·보안 report를 새 코드 변경과 독립적으로 갱신한다. release는 `CI_PIPELINE_SOURCE=push`인 보호된
+기본 브랜치만 허용한다.
 
 ## Rollback
 

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -41,6 +42,11 @@ function argumentValue(arguments_, name) {
   if (assignment) return assignment.slice(name.length + 1);
   const index = arguments_.indexOf(name);
   return index >= 0 ? arguments_[index + 1] : undefined;
+}
+
+function optionalOutputDirectory(arguments_, environment, argumentName, environmentName) {
+  const value = argumentValue(arguments_, argumentName) ?? environment[environmentName];
+  return value?.trim() ? resolve(root, value.trim()) : undefined;
 }
 
 export function positiveInteger(value, label) {
@@ -216,6 +222,62 @@ export function nodeOptionsWithHeapLimit(value, heapLimitMb = HEAP_LIMIT_MB) {
   ].filter(Boolean).join(" ");
 }
 
+export function vitestArguments(batch, {
+  coverageDirectory,
+  junitDirectory,
+} = {}) {
+  const arguments_ = [
+    join(root, "node_modules/vitest/vitest.mjs"),
+    "run",
+    ...batch.files,
+    "--maxWorkers=1",
+    "--minWorkers=1",
+    "--no-file-parallelism",
+    "--reporter=dot",
+  ];
+  if (junitDirectory) {
+    const junitPath = join(junitDirectory, `${batch.name}.xml`);
+    mkdirSync(dirname(junitPath), { recursive: true });
+    arguments_.push("--reporter=junit", `--outputFile.junit=${junitPath}`);
+  }
+  if (coverageDirectory) {
+    const reportsDirectory = join(coverageDirectory, batch.name);
+    mkdirSync(reportsDirectory, { recursive: true });
+    arguments_.push(
+      "--coverage.enabled=true",
+      "--coverage.provider=v8",
+      "--coverage.all=false",
+      "--coverage.reporter=json",
+      `--coverage.reportsDirectory=${reportsDirectory}`,
+    );
+  }
+  return arguments_;
+}
+
+export async function mergeCoverageReports(coverageDirectory) {
+  const [coverageModule, reportModule, reportsModule] = await Promise.all([
+    import("istanbul-lib-coverage"),
+    import("istanbul-lib-report"),
+    import("istanbul-reports"),
+  ]);
+  const { createCoverageMap } = coverageModule.default ?? coverageModule;
+  const { createContext } = reportModule.default ?? reportModule;
+  const reports = reportsModule.default ?? reportsModule;
+  const coverageMap = createCoverageMap({});
+  const paths = readdirSync(coverageDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(coverageDirectory, entry.name, "coverage-final.json"))
+    .filter(existsSync);
+  if (paths.length === 0) throw new Error("coverage was enabled but no batch report was produced");
+  for (const path of paths) coverageMap.merge(JSON.parse(readFileSync(path, "utf8")));
+  const context = createContext({ dir: coverageDirectory, coverageMap });
+  reports.create("text-summary").execute(context);
+  reports.create("cobertura", { file: "cobertura-coverage.xml" }).execute(context);
+  process.stdout.write(
+    `[vitest-batch] merged ${paths.length} coverage report(s) into ${relative(root, coverageDirectory)}\n`,
+  );
+}
+
 function readLinuxProcessRecords() {
   if (process.platform !== "linux") return undefined;
   let entries;
@@ -353,15 +415,7 @@ async function executeBatch(batch, record, context) {
   let spawnError;
   const child = spawn(
     process.execPath,
-    [
-      join(root, "node_modules/vitest/vitest.mjs"),
-      "run",
-      ...batch.files,
-      "--maxWorkers=1",
-      "--minWorkers=1",
-      "--no-file-parallelism",
-      "--reporter=dot",
-    ],
+    vitestArguments(batch, context),
     {
       cwd: root,
       env: {
@@ -435,6 +489,18 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
   const maxParallelValue = argumentValue(arguments_, "--max-parallel")
     ?? environment.VITEST_MAX_PARALLEL;
   const dryRun = arguments_.includes("--dry-run");
+  const junitDirectory = optionalOutputDirectory(
+    arguments_,
+    environment,
+    "--junit-dir",
+    "VITEST_JUNIT_DIR",
+  );
+  const coverageDirectory = optionalOutputDirectory(
+    arguments_,
+    environment,
+    "--coverage-dir",
+    "VITEST_COVERAGE_DIR",
+  );
   const detectedMemory = detectAvailableMemoryBytes();
   const detectedAvailableMb = detectedMemory.effectiveAvailableBytes === undefined
     ? undefined
@@ -472,6 +538,8 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     laneFileCounts,
     totalBatchCount: allBatches.length,
     selectedBatchCount: batches.length,
+    junitDirectory: junitDirectory ? relative(root, junitDirectory) : null,
+    coverageDirectory: coverageDirectory ? relative(root, coverageDirectory) : null,
     batches: batches.map(({ ordinal, name, lane, files: batchFiles }) => ({
       ordinal,
       name,
@@ -504,6 +572,8 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     startBatch,
     totalBatchCount: allBatches.length,
     selectedBatchCount: batches.length,
+    junitDirectory: junitDirectory ? relative(root, junitDirectory) : null,
+    coverageDirectory: coverageDirectory ? relative(root, coverageDirectory) : null,
     memory: {
       ...resolvedMemoryPlan,
       hostAvailableBytes: detectedMemory.hostAvailableBytes ?? null,
@@ -525,6 +595,8 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
   const sampler = new RssSampler(report);
   sampler.start();
   const context = {
+    coverageDirectory,
+    junitDirectory,
     nodeOptions: nodeOptionsWithHeapLimit(environment.NODE_OPTIONS),
     sampler,
     totalBatchCount: allBatches.length,
@@ -541,6 +613,16 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     for (const batch of serialBatches) {
       passed = await executeBatch(batch, batchRecords.get(batch.name), context);
       if (!passed) break;
+    }
+  }
+  if (coverageDirectory) {
+    try {
+      await mergeCoverageReports(coverageDirectory);
+    } catch (error) {
+      process.stderr.write(
+        `[vitest-batch] coverage merge failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      passed = false;
     }
   }
   for (const record of batchRecords.values()) {
