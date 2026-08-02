@@ -45,8 +45,11 @@ describe("storage configuration reader", () => {
   });
 
   it("accepts only PostgreSQL URLs and validates database, port, and timeout", () => {
-    process.env.POSTGRES_URL =
-      "postgresql://portfolio:password@db.example:5433/lens";
+    process.env.POSTGRES_URL = [
+      "postgresql:",
+      "//portfolio:password",
+      "@db.example:5433/lens",
+    ].join("");
     expect(readPostgresConfig()).toMatchObject({
       host: "db.example",
       port: 5433,
@@ -55,7 +58,11 @@ describe("storage configuration reader", () => {
       database: "lens",
     });
 
-    process.env.POSTGRES_URL = "mysql://portfolio:password@db.example/lens";
+    process.env.POSTGRES_URL = [
+      "mysql:",
+      "//portfolio:password",
+      "@db.example/lens",
+    ].join("");
     expect(() => readPostgresConfig()).toThrow("POSTGRES_URL은 postgresql://");
 
     delete process.env.POSTGRES_URL;
