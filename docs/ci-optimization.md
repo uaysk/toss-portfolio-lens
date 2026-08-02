@@ -4,6 +4,9 @@
 구성 원칙, 기준선 측정, 최적화 절차와 안전한 롤백 기준을 정리한다. production
 release의 보안·무결성 gate는 최적화 대상이 아니라 불변 조건이다.
 
+실측값과 첫 번째·두 번째 개선을 카드, 비교 bar, timeline으로 탐색하려면
+[단일 HTML+JS 시각 보고서](reports/ci-pipeline-optimization-report-2026-08-03.html)를 연다.
+
 ## 1. 현재 파이프라인 경계
 
 `.gitlab-ci.yml`의 단계는 `preflight → validate → test → integration →
