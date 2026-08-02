@@ -160,7 +160,7 @@ database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 
 커밋 `6f00b25`의 pipeline #77은 2026-08-02에 동일한 runner #13에서 전체 성공했다.
 기준선 #67과의 비교는 다음과 같다. #77의 전체 wall-clock은 runner가
 `concurrent=1`인 상태에서 CNPG job이 248.1초 대기하고, 새 Rust cache key가 첫
-writer라서 cold compile을 수행한 영향을 받았다. 따라서 queue를 줄이는 것은 별도의
+writer를 아직 거치지 않아 cold compile을 수행한 영향을 받았다. 따라서 queue를 줄이는 것은 별도의
 runner 용량 실험으로 남기고, 이 표에서는 workload·메모리·저장공간 효과를 분리해
 판정한다.
 
@@ -178,9 +178,10 @@ runner 용량 실험으로 남기고, 이 표에서는 workload·메모리·저�
 PGlite는 22/22 batch 성공, `OOM=0`이고, 새 resource trap도
 `memory_peak_bytes=2471448576`, `memory_events=low 0,high 0,max 0,oom 0,oom_kill 0`을
 기록했다. Rust는 #77에서 225.5초에 186개 lib와 10개 main 테스트를 통과했으며, 이는
-분리된 `rust-*-v2` cache의 첫 cold writer 비용이다. protected default branch의
-`pull-push` 실행으로 cache를 채운 뒤 다음 warm run에서 compile 시간을 다시 측정해야
-한다. Semgrep은 `--timeout 5`에서 245.1초, scan status `success`, timeout/error 0,
+분리된 `rust-*-v2` cache를 아직 protected default branch writer가 채우기 전의 첫 cold
+consumer 비용이다. protected default branch의 `pull-push` 실행으로 cache를 채운 뒤
+다음 warm run에서 compile 시간을 다시 측정해야 한다. Semgrep은 `--timeout 5`에서
+245.1초, scan status `success`, timeout/error 0,
 High/Critical 0(전체 SAST 64건)이었다. 이전 실험의 `--timeout 15`는 348.3초까지
 늘었으므로 5초 budget을 유지한다.
 
