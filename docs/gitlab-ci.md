@@ -34,6 +34,8 @@ GitLab MR에 게시한다.
 SAST와 secret detection은 GitLab의 pinned instance template을 사용한다. Free tier에서는 JSON report를
 다운로드할 수 있지만 vulnerability management UI가 제한되므로 `security-report-gate`가 report 존재 여부를
 fail-closed로 확인하고 High/Critical SAST 또는 secret 1건 이상이면 integration stage를 실패시킨다.
+GitLab template이 선택하는 Semgrep 6과 Secrets 7 analyzer는 mutable major tag에 의존하지 않도록 CI job과
+runner allowlist 모두 검증한 OCI index digest로 고정한다.
 
 ## Runner 경계
 

@@ -6,6 +6,7 @@ import {
   normalizeHoldingsPayload,
   normalizeInstrumentsPayload,
   normalizeOrderPage,
+  resolveTossUpstreamUrl,
   TossClient,
 } from "./toss.js";
 
@@ -137,6 +138,21 @@ afterEach(() => {
 });
 
 describe("TossClient 인증", () => {
+  it("provider 요청을 canonical origin의 허용 경로로 제한한다", () => {
+    expect(resolveTossUpstreamUrl("https://openapi.tossinvest.com", "/api/v1/accounts"))
+      .toBe("https://openapi.tossinvest.com/api/v1/accounts");
+    expect(resolveTossUpstreamUrl("https://tpl.uaysk.com", "/oauth2/token"))
+      .toBe("https://tpl.uaysk.com/oauth2/token");
+    expect(() => resolveTossUpstreamUrl("https://user@openapi.tossinvest.com", "/api/v1/accounts"))
+      .toThrow();
+    expect(() => resolveTossUpstreamUrl("https://openapi.tossinvest.com/prefix", "/api/v1/accounts"))
+      .toThrow();
+    expect(() => resolveTossUpstreamUrl("https://openapi.tossinvest.com", "//attacker.invalid/api/v1/accounts"))
+      .toThrow();
+    expect(() => resolveTossUpstreamUrl("https://openapi.tossinvest.com", "/admin"))
+      .toThrow();
+  });
+
   it("기본 OAuth 모드는 Client Credentials 토큰을 발급받아 사용한다", async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "oauth-access-token", expires_in: 3600 }), {
@@ -152,10 +168,12 @@ describe("TossClient 인증", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "https://openapi.tossinvest.com/oauth2/token", expect.objectContaining({
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     }));
     expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("client_id=client-id");
     expect(fetchMock).toHaveBeenNthCalledWith(2, "https://openapi.tossinvest.com/api/v1/accounts", expect.objectContaining({
+      redirect: "error",
       headers: expect.objectContaining({ Authorization: "Bearer oauth-access-token" }),
     }));
   });
@@ -171,6 +189,7 @@ describe("TossClient 인증", () => {
     expect(accounts).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith("https://tpl.uaysk.com/api/v1/accounts", expect.objectContaining({
+      redirect: "error",
       headers: expect.objectContaining({ Authorization: "Bearer local-read-only-token" }),
     }));
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/oauth2/token"))).toBe(false);

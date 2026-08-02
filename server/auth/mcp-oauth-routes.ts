@@ -104,8 +104,15 @@ function stringField(request: Request, name: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function authorizationRedirect(pending: PendingAuthorization, values: Record<string, string>): string {
-  const target = new URL(pending.redirectUri);
+function authorizationRedirect(
+  pending: PendingAuthorization,
+  registeredRedirectUri: string,
+  values: Record<string, string>,
+): string {
+  if (pending.redirectUri !== registeredRedirectUri) {
+    throw new Error("OAuth redirect URI no longer matches the registered client URI.");
+  }
+  const target = new URL(registeredRedirectUri);
   for (const [key, value] of Object.entries(values)) target.searchParams.set(key, value);
   if (pending.state) target.searchParams.set("state", pending.state);
   return target.toString();
@@ -342,7 +349,8 @@ export async function createMcpOAuthRuntime(input: {
     }
     if (action === "deny") {
       sessions.delete(pending.sessionId);
-      response.redirect(302, authorizationRedirect(pending, { error: "access_denied" }));
+      // The authorization request and pending session must both match the startup-validated client URI.
+      response.redirect(302, authorizationRedirect(pending, input.oauth.redirectUri, { error: "access_denied" })); // nosemgrep: nodejs_scan.javascript-redirect-rule-express_open_redirect
       return;
     }
     if (action !== "approve") {
@@ -375,7 +383,8 @@ export async function createMcpOAuthRuntime(input: {
         grantedAt: now,
         expiresAt: now + input.oauth.refreshTokenTtlSeconds,
       });
-      response.redirect(302, authorizationRedirect(pending, { code }));
+      // The authorization request and pending session must both match the startup-validated client URI.
+      response.redirect(302, authorizationRedirect(pending, input.oauth.redirectUri, { code })); // nosemgrep: nodejs_scan.javascript-redirect-rule-express_open_redirect
     } catch {
       oauthError(response, 500, "server_error", "인가 코드를 생성하지 못했습니다.");
     }

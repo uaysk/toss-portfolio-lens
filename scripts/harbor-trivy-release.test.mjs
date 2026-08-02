@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  assertHarborApiUrl,
   isHarborRobotUsername,
   parseHarborImageReference,
   releaseBlockingVulnerabilities,
@@ -38,6 +39,17 @@ describe("Harbor Trivy release helper", () => {
   it("rejects non-Harbor and unqualified references", () => {
     assert.throws(() => parseHarborImageReference("example.com/project/web:latest"));
     assert.throws(() => parseHarborImageReference("harbor.uaysk.com/web:latest"));
+  });
+
+  it("keeps Harbor API requests on the canonical HTTPS registry origin", () => {
+    assert.equal(
+      assertHarborApiUrl("https://harbor.uaysk.com/api/v2.0/projects/toss/artifacts/sha256%3Aabc"),
+      "https://harbor.uaysk.com/api/v2.0/projects/toss/artifacts/sha256%3Aabc",
+    );
+    assert.throws(() => assertHarborApiUrl("http://harbor.uaysk.com/api/v2.0/projects/toss"));
+    assert.throws(() => assertHarborApiUrl("https://harbor.uaysk.com.evil.invalid/api/v2.0/projects/toss"));
+    assert.throws(() => assertHarborApiUrl("https://harbor.uaysk.com:8443/api/v2.0/projects/toss"));
+    assert.throws(() => assertHarborApiUrl("https://harbor.uaysk.com/service/token"));
   });
 
   it("normalizes Trivy severity and fixability", () => {

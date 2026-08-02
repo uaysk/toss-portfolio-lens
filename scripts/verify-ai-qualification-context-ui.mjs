@@ -143,12 +143,13 @@ async function executable() {
 }
 
 async function waitForPreview(url, child, output) {
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/u.test(url)) throw new Error("preview URL must be loopback-only");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`Vite preview exited early.\n${output.join("")}`);
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url); // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
       if (response.ok) return;
     } catch {
       // Retry while Vite starts.

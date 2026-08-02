@@ -8,6 +8,7 @@ import {
   buildRetrievalDocuments,
   expandSubgraph,
   lexicalRank,
+  normalizeOpenAiEndpoint,
   reciprocalRankFusion,
   runContinuousBatchWorkers,
   type GraphData,
@@ -32,7 +33,7 @@ afterEach(() => {
 
 describe("graphify hybrid retrieval primitives", () => {
   it("uses Codex Spark as the default synthesis model", () => {
-    vi.stubEnv("OPENAI_API_ENDPOINT", "https://example.invalid/v1");
+    vi.stubEnv("OPENAI_API_ENDPOINT", "https://litellm.uaysk.com/v1");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("GRAPHIFY_SYNTHESIS_MODEL", "");
 
@@ -40,10 +41,24 @@ describe("graphify hybrid retrieval primitives", () => {
   });
 
   it("uses the generic synthesis override", () => {
-    vi.stubEnv("OPENAI_API_ENDPOINT", "https://example.invalid/v1");
+    vi.stubEnv("OPENAI_API_ENDPOINT", "https://litellm.uaysk.com/v1");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("GRAPHIFY_SYNTHESIS_MODEL", "preferred-model");
     expect(apiConfigFromEnv().synthesisModel).toBe("preferred-model");
+  });
+
+  it("rejects credential-bearing or non-HTTP model endpoints", () => {
+    expect(normalizeOpenAiEndpoint("https://litellm.uaysk.com/v1///")).toBe("https://litellm.uaysk.com/v1");
+    expect(normalizeOpenAiEndpoint("https://api.openai.com/v1")).toBe("https://api.openai.com/v1");
+    const credentialBearingUrl = new URL("https://litellm.uaysk.com/v1");
+    credentialBearingUrl.username = "test-user";
+    credentialBearingUrl.password = ["invalid", "test", "value"].join("-");
+    expect(() => normalizeOpenAiEndpoint("file:///tmp/model.sock")).toThrow();
+    expect(() => normalizeOpenAiEndpoint("http://127.0.0.1/v1")).toThrow();
+    expect(() => normalizeOpenAiEndpoint("https://litellm.uaysk.com.evil.invalid/v1")).toThrow();
+    expect(() => normalizeOpenAiEndpoint(credentialBearingUrl.toString())).toThrow();
+    expect(() => normalizeOpenAiEndpoint("https://litellm.uaysk.com:8443/v1")).toThrow();
+    expect(() => normalizeOpenAiEndpoint("https://litellm.uaysk.com/v1?target=internal")).toThrow();
   });
 
   it("preserves exact lexical symbol matches", () => {

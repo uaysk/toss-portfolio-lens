@@ -577,13 +577,16 @@ async function run(command, args, label) {
 }
 
 async function waitForServer(baseUrl, child, output) {
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/u.test(baseUrl)) {
+    throw new Error("Vite preview URL must be loopback-only.");
+  }
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`Vite preview 조기 종료 (${child.exitCode}).\n${output.join("")}`);
     }
     try {
-      if ((await fetch(baseUrl)).ok) return;
+      if ((await fetch(baseUrl)).ok) return; // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     } catch {
       // Vite preview 준비를 기다린다.
     }

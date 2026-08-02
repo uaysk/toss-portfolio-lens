@@ -191,10 +191,12 @@ vitest-coverage:
         path: .cache/coverage/vitest-light/cobertura-coverage.xml
 
 semgrep-sast:
+  image: registry.gitlab.com/security-products/semgrep:6@sha256:69d311ec0f712f054aa0ea1cb47a5a2bfde6bb7c36d77144c9e189eec83dfa8f
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
 
 secret_detection:
+  image: registry.gitlab.com/security-products/secrets:7@sha256:67653ece880ca76f6e6a468fee1923d59b0f48138aee06199208b4b2bec478ff
   timeout: 15 minutes
   resource_group: toss-portfolio-lens-memory-heavy
 

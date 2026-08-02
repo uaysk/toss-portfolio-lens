@@ -25,6 +25,8 @@ const COMPOSE_FILES = [
 ];
 const DEFAULT_HEALTH_TIMEOUT_MS = 180_000;
 const HEALTH_POLL_INTERVAL_MS = 3_000;
+const LOCAL_HEALTH_URL = "http://127.0.0.1:3200/api/health";
+const PRODUCTION_PUBLIC_ORIGIN = "https://tpl.uaysk.com";
 
 function requiredArgument(arguments_, name) {
   const assignment = arguments_.find((argument) => argument.startsWith(`${name}=`));
@@ -247,7 +249,10 @@ async function waitForContainerHealth(context, sourceDirectory, releaseFile, ser
 }
 
 async function fetchHealth(url, expectedGitSha) {
-  const response = await fetch(url, {
+  if (url !== LOCAL_HEALTH_URL && url !== `${PRODUCTION_PUBLIC_ORIGIN}/api/health`) {
+    throw new Error("release health checks must use the canonical local or public endpoint");
+  }
+  const response = await fetch(url, { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
     headers: { Accept: "application/json", "Cache-Control": "no-cache" },
     signal: AbortSignal.timeout(5_000),
   });
@@ -275,10 +280,19 @@ async function waitForHealthEndpoints(urls, expectedGitSha, timeoutMs) {
   );
 }
 
-function normalizePublicHealthUrl(value) {
+export function normalizePublicHealthUrl(value) {
   const parsed = new URL(value);
-  if (parsed.protocol !== "https:") throw new Error("public URL must use HTTPS");
-  parsed.pathname = `${parsed.pathname.replace(/\/$/u, "")}/api/health`;
+  if (
+    parsed.origin !== PRODUCTION_PUBLIC_ORIGIN
+    || parsed.pathname !== "/"
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+  ) {
+    throw new Error(`public URL must be the canonical ${PRODUCTION_PUBLIC_ORIGIN} origin`);
+  }
+  parsed.pathname = "/api/health";
   parsed.search = "";
   parsed.hash = "";
   return parsed.toString();
@@ -315,7 +329,7 @@ async function activateRelease({
   await waitForContainerHealth(context, sourceDirectory, releaseFile, "web", timeoutMs);
   return waitForHealthEndpoints(
     {
-      local: "http://127.0.0.1:3200/api/health",
+      local: LOCAL_HEALTH_URL,
       public: publicHealthUrl,
     },
     release.APP_GIT_SHA,

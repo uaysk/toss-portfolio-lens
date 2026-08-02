@@ -93,6 +93,31 @@ export type ExchangeRate = {
   timestamp: string;
 };
 
+export function resolveTossUpstreamUrl(baseUrl: string, path: string): string {
+  const base = new URL(baseUrl);
+  if (
+    (base.protocol !== "https:" && base.protocol !== "http:")
+    || base.username
+    || base.password
+    || base.search
+    || base.hash
+    || base.pathname !== "/"
+  ) {
+    throw new Error("Toss API base URL must be a canonical HTTP(S) origin");
+  }
+  if (path !== "/oauth2/token" && !path.startsWith("/api/v1/")) {
+    throw new Error("Toss API request path is outside the read-only provider boundary");
+  }
+  if (path.startsWith("//") || path.includes("\\")) {
+    throw new Error("Toss API request path must not change the configured origin");
+  }
+  const target = new URL(path, base);
+  if (target.origin !== base.origin) {
+    throw new Error("Toss API request resolved outside the configured origin");
+  }
+  return target.toString();
+}
+
 export type CandlePage = {
   candles: DailyCandle[];
   nextBefore?: string;
@@ -549,7 +574,18 @@ export class TossClient {
   private accountsCache?: CacheEntry<Account[]>;
   private readonly portfolioCache = new Map<string, CacheEntry<Portfolio>>();
 
-  constructor(private readonly config: TossClientConfig) {}
+  private readonly upstreamBaseUrl: string;
+
+  constructor(private readonly config: TossClientConfig) {
+    this.upstreamBaseUrl = resolveTossUpstreamUrl(config.tossApiBaseUrl, "/api/v1/health").replace(
+      /\/api\/v1\/health$/u,
+      "",
+    );
+  }
+
+  private upstreamUrl(path: string): string {
+    return resolveTossUpstreamUrl(this.upstreamBaseUrl, path);
+  }
 
   private async getAccessToken(): Promise<string> {
     if (this.config.tossApiAuthMode === "static_bearer") {
@@ -565,8 +601,9 @@ export class TossClient {
       client_id: this.config.clientId,
       client_secret: this.config.clientSecret,
     });
-    const response = await fetch(this.config.tossApiBaseUrl + "/oauth2/token", {
+    const response = await fetch(this.upstreamUrl("/oauth2/token"), { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
       signal: AbortSignal.timeout(10_000),
@@ -648,8 +685,9 @@ export class TossClient {
         };
         if (accountId) headers["X-Tossinvest-Account"] = accountId;
 
-        const response = await fetch(this.config.tossApiBaseUrl + path, {
+        const response = await fetch(this.upstreamUrl(path), { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
           headers,
+          redirect: "error",
           signal: AbortSignal.timeout(15_000),
         });
         const payload = await this.readResponse(response);
