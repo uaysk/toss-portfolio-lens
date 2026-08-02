@@ -87,6 +87,42 @@ canonical TypeScript는 계속 Semgrep 대상이고, Secret Detection은 변경�
 
 ## 4. 안전한 최적화 순서
 
+### 실제 warm 검증 결과
+
+같은 commit `78e70e5a2f962697b78df2bd84a1db0af27c9f86`에서 push pipeline #64(cold)와
+수동 warm pipeline #65를 실행했다. branch pipeline은 release job을 실행하지 않으므로
+`main` #62에서 release-preflight·release-production·publish를 제외한 non-release 구간과
+비교했다.
+
+| 지표 | main #62 non-release | #64 cold | #65 warm | 관찰 |
+|---|---:|---:|---:|---|
+| wall-clock | 986.5초 | 1,100.9초 | 960.4초 | warm 기준 26.2초/2.7% 단축 |
+| job duration 합계 | 963.5초 | 1,075.1초 | 937.4초 | warm 기준 26.1초/2.7% 단축 |
+| queue duration 합계 | 349.4초 | 134.0초 | 370.4초 | runner 직렬화와 시점 영향이 큼 |
+| 압축 artifact | 9,072,068 bytes | 6,418,927 bytes | 6,418,361 bytes | 2,653,707 bytes/29.3% 감소 |
+| `node-static` | 36.5초 | 84.3초 | 39.2초 | 새 cache cold 비용 후 기준선 근접 |
+| `semgrep-sast` | 227.4초 | 265.0초 | 220.3초 | warm 7.0초/3.1% 단축 |
+| `vitest-pglite` | 286.6초 | 302.3초 | 287.7초 | 유의미한 계산 개선 없음 |
+
+warm run의 trace에서 `node-npm-v2`와 `node-build-v2`가 모두 hit했고, Vitest consumer는
+`policy: pull` 때문에 cache를 upload하지 않았다. artifact 감소는 consumer가 없는 CNPG
+binary(2,653,685 bytes) 제거로 설명되며, TTL 단축 효과는 보존 기간이 지나야
+retained-byte-days로 측정한다. 따라서 이번 slice는 artifact/cache write와 warm non-release
+makespan에서는 개선됐지만, PGlite 병목을 해결한 것으로 승격하지 않는다. PGlite batch-size,
+추가 runner, Rust target 축소는 후속 실험으로 남긴다.
+
+현재 Docker executor의 after-script cgroup 파일은 job shell scope(약 5 MiB)를 보고해
+Vitest batch RSS와 일치하지 않았다. 이를 전체 job memory로 해석하지 않는다. 실제 memory
+판정은 각 Vitest batch의 `peak=...MiB`, OOM event와 runner boundary의 5 GiB limit을
+사용하며, 다음 단계에서 runner-level cgroup path 또는 process sampler를 별도로 검증한다.
+
+두 pipeline 모두 Secret Detection은 0건이고 High/Critical SAST는 0건이었다. Semgrep의 전체
+Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으므로, 이를 성능
+개선의 보안 동등성 증거로 사용하지 않는다. release 승격 전에는 동일 analyzer image에서
+재현성 있는 fingerprint 비교를 별도 수행한다.
+
+### 측정·승격 절차
+
 1. 기준선 1회와 warm control 3~5회를 같은 runner/image에서 측정한다.
 2. 하나의 가역적인 변경만 적용하고 GitLab CI Lint, unit/release-tool,
    security-report gate를 통과시킨다.
