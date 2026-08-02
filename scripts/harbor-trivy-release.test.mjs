@@ -78,7 +78,7 @@ describe("Harbor Trivy release helper", () => {
     assert.equal(result.counts.High, 1);
   });
 
-  it("blocks only fixable Critical and High vulnerabilities", () => {
+  it("blocks every Critical and High vulnerability, including entries without a fix", () => {
     const result = summarizeVulnerabilityReport({
       vulnerabilities: [
         { id: "CVE-critical", severity: "CRITICAL", fix_version: "2" },
@@ -90,7 +90,7 @@ describe("Harbor Trivy release helper", () => {
 
     assert.deepEqual(
       releaseBlockingVulnerabilities(result).map((item) => item.id),
-      ["CVE-critical", "CVE-high"],
+      ["CVE-critical", "CVE-high", "CVE-unfixed-high"],
     );
     assert.deepEqual(releaseBlockingVulnerabilities(undefined), []);
   });
