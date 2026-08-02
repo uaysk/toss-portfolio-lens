@@ -35,7 +35,7 @@ test("blocks a report that declares an unsuccessful scan or a timeout event", ()
       scan: {
         status: "failed",
         errors: [{ message: "scanner failed" }],
-        observability: { events: [{ message: "timeout" }] },
+        observability: { events: [{ message: "timeout", time_s: 12, file_count: 3 }] },
       },
     },
     secretReport: { vulnerabilities: [] },
@@ -43,6 +43,8 @@ test("blocks a report that declares an unsuccessful scan or a timeout event", ()
   assert.equal(result.passed, false);
   assert.equal(result.observability.sast.blocking, true);
   assert.equal(result.observability.sast.timeoutCount, 1);
+  assert.equal(result.observability.sast.durationSeconds, 12);
+  assert.equal(result.observability.sast.fileCount, 3);
   assert.equal(result.blocking[0].id, "sast-scan-incomplete");
 });
 

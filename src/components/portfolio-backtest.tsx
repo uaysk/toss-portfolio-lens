@@ -276,10 +276,12 @@ export function PortfolioBacktestView({
 
   const applyTechnicalSource = useCallback(async (analysis: TechnicalStrategyAnalysis, strategy: TechnicalStrategy): Promise<boolean> => {
     setLoadingCurrent(true);
-    setError("");
-    try {
-      const normalized = analysis.symbols.join(",");
-      const response = await fetch(`/api/portfolio/backtest/instruments?symbols=${encodeURIComponent(normalized)}`, {
+      setError("");
+      try {
+        const normalized = analysis.symbols.join(",");
+        // This is a same-origin relative API route, not a navigable URL.
+        // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
+        const response = await fetch(`/api/portfolio/backtest/instruments?symbols=${encodeURIComponent(normalized)}`, {
         headers: { Accept: "application/json" },
       });
       const payload = await response.json().catch(() => ({})) as { instruments?: BacktestInstrument[] } & ApiError;

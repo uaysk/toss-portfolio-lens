@@ -72,3 +72,8 @@ test("Rust cache writes are restricted to the default branch and incremental sta
   assert.match(source, /prefix: rust-target-v2[\s\S]*?policy: \$RUST_CACHE_POLICY/u);
   assert.match(source, /RUST_CACHE_POLICY: pull-push/u);
 });
+
+test("Semgrep keeps a bounded rule timeout and resource telemetry", () => {
+  assert.match(source, /SAST_SCANNER_ALLOWED_CLI_OPTS: "--timeout 5"/u);
+  assert.match(source, /semgrep-sast:[\s\S]*?dependencies: \[\]/u);
+});

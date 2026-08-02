@@ -43,6 +43,9 @@ function scanObservability(report, label) {
       notificationCount: 0,
       timeoutCount: 0,
       nonZeroExitCodes: [],
+      durationSeconds: null,
+      fileCount: null,
+      customExcludePathCount: null,
       blocking: false,
     };
   }
@@ -58,6 +61,7 @@ function scanObservability(report, label) {
     .map((event) => event?.exit_code)
     .filter((exitCode) => Number.isInteger(exitCode) && exitCode !== 0);
   const status = typeof scan.status === "string" ? scan.status : "unknown";
+  const event = events.at(-1);
   return {
     available: true,
     label,
@@ -66,6 +70,11 @@ function scanObservability(report, label) {
     notificationCount: notifications.length,
     timeoutCount,
     nonZeroExitCodes,
+    durationSeconds: Number.isFinite(event?.time_s) ? event.time_s : null,
+    fileCount: Number.isSafeInteger(event?.file_count) ? event.file_count : null,
+    customExcludePathCount: Number.isSafeInteger(event?.custom_exclude_path_count)
+      ? event.custom_exclude_path_count
+      : null,
     blocking: status !== "success" || errors.length > 0 || timeoutCount > 0,
   };
 }

@@ -323,7 +323,9 @@ semgrep-sast:
   dependencies: []
   rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
-    SAST_SCANNER_ALLOWED_CLI_OPTS: "--timeout 15"
+    # Keep per-rule execution bounded at the analyzer default. A higher timeout
+    # makes this runner spend several extra minutes on known complex test files.
+    SAST_SCANNER_ALLOWED_CLI_OPTS: "--timeout 5"
   before_script:
     - *ci_resource_metrics_script
 

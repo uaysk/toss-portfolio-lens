@@ -143,7 +143,10 @@ database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 
   `policy: pull`, default branch/tag/schedule에서만 `pull-push` writer를 사용한다.
   `CARGO_INCREMENTAL=0`으로 branch마다 누적 incremental object를 만들지 않는다.
   lockfile은 두 key 모두에 포함한다.
-- Semgrep analyzer에는 `SAST_SCANNER_ALLOWED_CLI_OPTS=--timeout 15`를 적용한다.
+- Semgrep analyzer에는 `SAST_SCANNER_ALLOWED_CLI_OPTS=--timeout 5`를 적용한다.
+  복잡한 test/tool 파일에서 더 긴 rule timeout을 주면 runner wall time이 급증하므로
+  analyzer default budget을 유지한다. local/ephemeral URL false positive는 근거가 있는
+  좁은 `nosemgrep` 주석으로 차단한다.
   security gate는 report의 vulnerabilities뿐 아니라, report에 scan metadata가 있을
   때 `status`, errors, timeout event를 확인한다. Secret Detection도 metadata가
   실패하면 통과시키지 않는다. 기존 metadata 없는 unit fixture는 호환성을 유지한다.

@@ -2200,6 +2200,9 @@ async function waitForServer(url, child, output) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Vite preview 조기 종료\n${output.join("")}`);
     try {
+      // The URL is constructed from the local ephemeral preview server below;
+      // it is not an application/user supplied URL.
+      // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
       if ((await fetch(url)).ok) return;
     } catch {
       // 준비될 때까지 대기한다.

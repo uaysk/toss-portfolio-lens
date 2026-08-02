@@ -1399,6 +1399,9 @@ async function waitForVite(baseUrl, child, output) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Vite가 조기 종료됐습니다 (${child.exitCode}).\n${output.join("")}`);
     try {
+      // The URL is constructed from the local ephemeral Vite server below; it is
+      // never user-controlled and cannot target an internal production service.
+      // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
       const response = await fetch(baseUrl);
       if (response.ok) return;
     } catch {
