@@ -334,6 +334,7 @@ release-production:
   variables:
     GIT_DEPTH: "0"
     GIT_STRATEGY: fetch
+    DOCKER_CONFIG: "/home/toss-portfolio-release/.docker"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_DEPLOY_FREEZE'
       when: manual
