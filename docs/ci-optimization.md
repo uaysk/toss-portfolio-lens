@@ -155,6 +155,35 @@ database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 
   기록한다. 공유 host에서 `docker system prune`를 자동 실행하지 않는다. threshold
   미달 시 cleanup 대상과 release lock 상태를 운영자가 확인한 뒤 재시도한다.
 
+### 실제 최적화 pipeline 검증
+
+커밋 `6f00b25`의 pipeline #77은 2026-08-02에 동일한 runner #13에서 전체 성공했다.
+기준선 #67과의 비교는 다음과 같다. #77의 전체 wall-clock은 runner가
+`concurrent=1`인 상태에서 CNPG job이 248.1초 대기하고, 새 Rust cache key가 첫
+writer라서 cold compile을 수행한 영향을 받았다. 따라서 queue를 줄이는 것은 별도의
+runner 용량 실험으로 남기고, 이 표에서는 workload·메모리·저장공간 효과를 분리해
+판정한다.
+
+| 지표 | 기준선 #67 | 최적화 #77 | 변화 |
+|---|---:|---:|---:|
+| 전체 wall-clock | 929.3초 | 1,010.8초 | +81.5초 (queue/cold 영향) |
+| job duration 합계 | 903.6초 | 988.1초 | +84.5초 (Rust cold 영향) |
+| queue duration 합계 | 89.5초 | 431.5초 | runner 직렬화 병목 |
+| 압축 artifact 합계 | 6,418,431 bytes | 2,005,288 bytes | 4,413,143 bytes/68.8% 감소 |
+| `vitest-pglite` job | 277.4초 | 151.4초 | 125.9초/45.4% 감소 |
+| PGlite report execution | 258.8초 | 133.7초 | 125.1초/48.3% 감소 |
+| PGlite peak aggregate child RSS | 2,927,951,872 bytes | 2,206,564,352 bytes | 24.6% 감소 |
+| `ui-regression` artifact | 4,409,064 bytes | 1,096 bytes | 99.98% 감소 |
+
+PGlite는 22/22 batch 성공, `OOM=0`이고, 새 resource trap도
+`memory_peak_bytes=2471448576`, `memory_events=low 0,high 0,max 0,oom 0,oom_kill 0`을
+기록했다. Rust는 #77에서 225.5초에 186개 lib와 10개 main 테스트를 통과했으며, 이는
+분리된 `rust-*-v2` cache의 첫 cold writer 비용이다. protected default branch의
+`pull-push` 실행으로 cache를 채운 뒤 다음 warm run에서 compile 시간을 다시 측정해야
+한다. Semgrep은 `--timeout 5`에서 245.1초, scan status `success`, timeout/error 0,
+High/Critical 0(전체 SAST 64건)이었다. 이전 실험의 `--timeout 15`는 348.3초까지
+늘었으므로 5초 budget을 유지한다.
+
 ## 5. 안전한 최적화 순서
 
 ### 실제 warm 검증 결과
