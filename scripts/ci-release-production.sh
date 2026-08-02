@@ -42,11 +42,12 @@ fi
 # so its immutable description is the fallback identity check. Normalize only
 # JSON punctuation and whitespace, then match a complete comma-delimited token
 # so a similarly prefixed tag cannot satisfy the boundary.
-if [[ -n "${CI_RUNNER_TAGS:-}" ]]; then
-  normalized_runner_tags="${CI_RUNNER_TAGS//\"/}"
-  normalized_runner_tags="${normalized_runner_tags//\[/}"
-  normalized_runner_tags="${normalized_runner_tags//\]/}"
-  normalized_runner_tags="${normalized_runner_tags//[[:space:]]/}"
+normalized_runner_tags="${CI_RUNNER_TAGS:-}"
+normalized_runner_tags="${normalized_runner_tags//\"/}"
+normalized_runner_tags="${normalized_runner_tags//\[/}"
+normalized_runner_tags="${normalized_runner_tags//\]/}"
+normalized_runner_tags="${normalized_runner_tags//[[:space:]]/}"
+if [[ -n "$normalized_runner_tags" ]]; then
   if [[ ",$normalized_runner_tags," != *",${expected_release_tag},"* ]]; then
     echo "production release runner tag is missing" >&2
     exit 1
