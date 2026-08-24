@@ -103,7 +103,11 @@ export function releaseChanges(previous, candidate) {
   };
 }
 
-export function assertHealthPayload(payload, expectedGitSha) {
+export function assertHealthPayload(
+  payload,
+  expectedGitSha,
+  { allowMissingWebTopology = false } = {},
+) {
   if (!payload || typeof payload !== "object") throw new Error("health response is not an object");
   if (payload.status !== "ok" || payload.service !== "portfolio-lens") {
     throw new Error("health response has an invalid service status");
@@ -115,6 +119,14 @@ export function assertHealthPayload(payload, expectedGitSha) {
   if (payload.compute?.executionMode !== "rust_socket") {
     throw new Error("health response is not using the Rust socket compute path");
   }
+  const webTopology = payload.topology?.web;
+  const validWebTopology = webTopology?.replicaPolicy === "single"
+    && webTopology.declaredReplicas === 1
+    && webTopology.coordinationScope === "process"
+    && webTopology.horizontalScalingSupported === false;
+  if (!validWebTopology && !(allowMissingWebTopology && webTopology === undefined)) {
+    throw new Error("health response does not preserve the single-replica web topology");
+  }
   if (payload.simulation?.realOrder !== false) {
     throw new Error("health response does not preserve the paper-only order boundary");
   }
@@ -124,6 +136,10 @@ export function assertHealthPayload(payload, expectedGitSha) {
     storage: payload.storage,
     gitSha: payload.build.gitSha,
     executionMode: payload.compute.executionMode,
+    ...(webTopology ? {
+      webReplicaPolicy: webTopology.replicaPolicy,
+      declaredWebReplicas: webTopology.declaredReplicas,
+    } : {}),
     realOrder: payload.simulation.realOrder,
   };
 }
@@ -248,7 +264,7 @@ async function waitForContainerHealth(context, sourceDirectory, releaseFile, ser
   throw new Error(`${service} did not become healthy (last status: ${lastStatus})`);
 }
 
-async function fetchHealth(url, expectedGitSha) {
+async function fetchHealth(url, expectedGitSha, options) {
   if (url !== LOCAL_HEALTH_URL && url !== `${PRODUCTION_PUBLIC_ORIGIN}/api/health`) {
     throw new Error("release health checks must use the canonical local or public endpoint");
   }
@@ -257,17 +273,17 @@ async function fetchHealth(url, expectedGitSha) {
     signal: AbortSignal.timeout(5_000),
   });
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
-  return assertHealthPayload(await response.json(), expectedGitSha);
+  return assertHealthPayload(await response.json(), expectedGitSha, options);
 }
 
-async function waitForHealthEndpoints(urls, expectedGitSha, timeoutMs) {
+async function waitForHealthEndpoints(urls, expectedGitSha, timeoutMs, options) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
     try {
       const results = {};
       for (const [name, url] of Object.entries(urls)) {
-        results[name] = await fetchHealth(url, expectedGitSha);
+        results[name] = await fetchHealth(url, expectedGitSha, options);
       }
       return results;
     } catch (error) {
@@ -306,6 +322,7 @@ async function activateRelease({
   changes,
   publicHealthUrl,
   timeoutMs,
+  allowMissingWebTopology = false,
   onMutation = () => {},
 }) {
   dockerCompose(context, sourceDirectory, releaseFile, ["config", "--quiet"]);
@@ -334,6 +351,7 @@ async function activateRelease({
     },
     release.APP_GIT_SHA,
     timeoutMs,
+    { allowMissingWebTopology },
   );
 }
 
@@ -455,6 +473,9 @@ export async function deployHarborRelease({
           changes,
           publicHealthUrl,
           timeoutMs: healthTimeoutMs,
+          // The previous image may predate the topology field. Rollback must
+          // remain recoverable while the new candidate is still strict.
+          allowMissingWebTopology: true,
         });
         report.rollback.succeeded = true;
         report.result = "rolled-back";

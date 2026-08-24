@@ -11,8 +11,31 @@ import {
   planBatches,
   planPgliteGroups,
   positiveInteger,
+  shouldIgnoreTestDirectory,
+  terminateTestProcesses,
   vitestArguments,
 } from "./run-vitest-batches.mjs";
+
+test("skips generated language and browser caches during test discovery", () => {
+  for (const directory of [
+    ".cache",
+    ".git",
+    ".playwright-mcp",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "coverage",
+    "dist",
+    "graphify-out",
+    "node_modules",
+    "target",
+    "venv",
+  ]) {
+    assert.equal(shouldIgnoreTestDirectory(directory), true, directory);
+  }
+  assert.equal(shouldIgnoreTestDirectory("server"), false);
+  assert.equal(shouldIgnoreTestDirectory("src"), false);
+});
 
 test("classifies PGlite before crypto and isolates crypto or large tests as heavy", () => {
   assert.deepEqual(
@@ -149,4 +172,24 @@ test("adds isolated JUnit and coverage outputs without increasing Vitest workers
   assert.ok(arguments_.includes(
     "--coverage.reportsDirectory=/tmp/toss-vitest-coverage/light-2",
   ));
+});
+
+test("forwards termination only to active Vitest children", () => {
+  const activeSignals = [];
+  const finishedSignals = [];
+  terminateTestProcesses([
+    {
+      exitCode: null,
+      signalCode: null,
+      kill: (signal) => activeSignals.push(signal),
+    },
+    {
+      exitCode: 0,
+      signalCode: null,
+      kill: (signal) => finishedSignals.push(signal),
+    },
+  ], "SIGTERM");
+
+  assert.deepEqual(activeSignals, ["SIGTERM"]);
+  assert.deepEqual(finishedSignals, []);
 });

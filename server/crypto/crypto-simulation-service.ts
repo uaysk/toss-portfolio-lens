@@ -468,9 +468,24 @@ export class CryptoSimulationCoordinator {
         criterion,
         dataRevision,
         controller,
-      }).finally(() => {
+      }).finally(async () => {
+        let release: void | Promise<void> = undefined;
+        try {
+          // Paper idempotency state is scoped to one completed session. Never
+          // release guarded testnet/live reconciliation evidence automatically.
+          if (this.options.execution.mode === "paper") {
+            release = this.options.execution.releaseRun?.(run.id);
+          }
+        } catch {
+          // Cleanup must not overwrite an already-persisted terminal run state.
+        }
         this.active.delete(run.id);
         this.options.runtimeSnapshots?.delete(run.id);
+        try {
+          await release;
+        } catch {
+          // Async paper cleanup follows the same terminal-state isolation rule.
+        }
       });
       const session: ActiveCryptoSession = {
         runId: run.id,

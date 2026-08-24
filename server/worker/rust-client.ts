@@ -34,11 +34,13 @@ function abortReason(signal: AbortSignal): Error {
 class RustSocketChannel {
   private socket?: net.Socket;
   private connecting?: Promise<void>;
+  private cancelConnecting?: (error: Error) => void;
   private chunks: Buffer[] = [];
   private headOffset = 0;
   private bufferedBytes = 0;
   private expectedFrameBytes?: number;
   private readonly pending: Pending[] = [];
+  private closed = false;
 
   constructor(
     private readonly socketPath: string,
@@ -53,6 +55,7 @@ class RustSocketChannel {
     projection: WorkerResultProjectionV1,
     signal?: AbortSignal,
   ): Promise<WorkerOutput> {
+    if (this.closed) throw new Error("Rust compute client closed");
     if (signal?.aborted) throw abortReason(signal);
     await this.connect(signal);
     if (signal?.aborted) {
@@ -130,10 +133,13 @@ class RustSocketChannel {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.reset(new Error("Rust compute client closed"));
   }
 
   private async connect(signal?: AbortSignal): Promise<void> {
+    if (this.closed) throw new Error("Rust compute client closed");
     if (this.socket && !this.socket.destroyed) return;
     if (this.connecting) return this.connecting;
     this.connecting = new Promise<void>((resolve, reject) => {
@@ -142,6 +148,7 @@ class RustSocketChannel {
       const cleanup = () => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
+        if (this.cancelConnecting === fail) this.cancelConnecting = undefined;
       };
       const fail = (error: Error) => {
         if (settled) return;
@@ -155,6 +162,7 @@ class RustSocketChannel {
         fail(new Error(`Rust compute socket 연결 제한 시간 ${this.timeoutMs}ms를 초과했습니다.`));
       }, this.timeoutMs);
       timer.unref();
+      this.cancelConnecting = fail;
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.once("connect", () => {
         if (settled) return;
@@ -261,6 +269,7 @@ class RustSocketChannel {
 
   private reset(error: Error, expectedSocket?: net.Socket): void {
     if (expectedSocket && this.socket !== expectedSocket) return;
+    this.cancelConnecting?.(error);
     const socket = this.socket;
     this.socket = undefined;
     this.chunks = [];

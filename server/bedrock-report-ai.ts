@@ -18,6 +18,8 @@ export type BedrockReportConfig = {
   modelId: string;
   region?: string;
   timeoutMs?: number;
+  maxAttempts?: number;
+  maximumInFlight?: number;
 };
 
 type ConverseClient = {
@@ -36,6 +38,20 @@ const retryableBedrockErrors = new Set([
   "ServiceUnavailableException",
   "ThrottlingException",
 ]);
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return resolved;
+}
 
 function jsonContract(): string {
   return `${REPORT_EVALUATION_INSTRUCTIONS}\n\n반환할 JSON의 정확한 스키마는 다음과 같습니다. JSON 이외의 설명이나 Markdown 코드 펜스를 붙이지 마세요.\n${JSON.stringify(REPORT_NARRATIVE_SCHEMA)}`;
@@ -142,6 +158,8 @@ export class BedrockReportWriter {
   private readonly client: ConverseClient;
   private readonly region: string;
   private readonly timeoutMs: number;
+  private readonly maximumInFlight: number;
+  private active = 0;
 
   constructor(
     private readonly config: BedrockReportConfig,
@@ -149,33 +167,52 @@ export class BedrockReportWriter {
   ) {
     if (!config.modelId.trim()) throw new Error("Bedrock modelId가 필요합니다.");
     this.region = config.region?.trim() || DEFAULT_BEDROCK_REGION;
-    this.timeoutMs = config.timeoutMs ?? 120_000;
-    this.client = client ?? new BedrockRuntimeClient({ region: this.region });
+    this.timeoutMs = boundedInteger(config.timeoutMs, 120_000, 1_000, 180_000, "Bedrock timeoutMs");
+    const maxAttempts = boundedInteger(config.maxAttempts, 3, 1, 10, "Bedrock maxAttempts");
+    this.maximumInFlight = boundedInteger(
+      config.maximumInFlight,
+      8,
+      1,
+      64,
+      "Bedrock maximumInFlight",
+    );
+    this.client = client ?? new BedrockRuntimeClient({ region: this.region, maxAttempts });
   }
 
   async evaluate(input: unknown): Promise<ReportNarrative> {
-    const request: ConverseCommandInput = {
-      modelId: this.config.modelId,
-      system: [{ text: jsonContract() }],
-      messages: [{
-        role: "user",
-        content: [{ text: JSON.stringify(input) }],
-      }],
-      inferenceConfig: {
-        maxTokens: 1_800,
-        temperature: 0.1,
-      },
-    };
-
-    let output: ConverseCommandOutput;
-    try {
-      output = await this.client.send(
-        new ConverseCommand(request),
-        { abortSignal: AbortSignal.timeout(this.timeoutMs) },
+    if (this.active >= this.maximumInFlight) {
+      throw new ReportGenerationError(
+        "AI 평가 생성 요청이 많습니다. 진행 중인 요청이 끝난 뒤 다시 시도해 주세요.",
+        true,
       );
-    } catch (error) {
-      throw bedrockError(error);
     }
-    return parseBedrockNarrativeText(outputText(output));
+    this.active += 1;
+    try {
+      const request: ConverseCommandInput = {
+        modelId: this.config.modelId,
+        system: [{ text: jsonContract() }],
+        messages: [{
+          role: "user",
+          content: [{ text: JSON.stringify(input) }],
+        }],
+        inferenceConfig: {
+          maxTokens: 1_800,
+          temperature: 0.1,
+        },
+      };
+
+      let output: ConverseCommandOutput;
+      try {
+        output = await this.client.send(
+          new ConverseCommand(request),
+          { abortSignal: AbortSignal.timeout(this.timeoutMs) },
+        );
+      } catch (error) {
+        throw bedrockError(error);
+      }
+      return parseBedrockNarrativeText(outputText(output));
+    } finally {
+      this.active -= 1;
+    }
   }
 }

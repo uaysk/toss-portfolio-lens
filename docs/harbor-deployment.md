@@ -39,6 +39,11 @@ resource group과 host lock으로 직렬화된다. 운영 state의 canonical 위
 `compose/<git-sha>/`에 보존된다. 파일은 credential을 포함하지 않지만 변조 방지를 위해 mode 600/700으로
 유지한다.
 
+web control plane은 process-local admission, SSE replay/live hub, simulation session과 snapshot scheduler를
+사용하므로 단일 replica만 지원한다. Compose가 `APP_REPLICA_COUNT=1`을 선언하고 앱도 다른 선언값을
+거부하지만, 이 값은 orchestrator 상태를 자동 탐지하지 않는다. 운영 Compose에서 `web`을 scale하거나 같은
+release를 별도 web container로 병렬 기동하지 말고, 실제 replica 수와 선언값을 항상 일치시킨다.
+
 자동 release는 항상 web 이미지를 build한다. `Dockerfile.worker.rust`와 `worker/rust`가 현재 배포된
 `RUST_WORKER_GIT_SHA` 이후 바뀌지 않았다면 기존 Rust digest를 유지하고, 바뀌었거나 비교할 commit을 찾지
 못하면 Rust 이미지도 build한다. 어느 경우든 후보 release의 두 digest를 최신 Harbor Trivy DB로 다시

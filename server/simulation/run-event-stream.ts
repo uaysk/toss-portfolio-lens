@@ -4,6 +4,7 @@ import {
   type SimulationRunEventType,
   type SimulationRunEventV1,
 } from "./contracts.js";
+import { FixedRing } from "../fixed-ring.js";
 
 const DEFAULT_REPLAY_LIMIT = 128;
 const DEFAULT_RUN_LIMIT = 512;
@@ -53,7 +54,8 @@ export type SimulationRunEventTelemetry = {
 type RunState = {
   ownerSubject: string;
   revision: number;
-  events: SimulationRunEventV1[];
+  events: FixedRing<SimulationRunEventV1>;
+  latestEvent?: SimulationRunEventV1;
   listeners: Set<(event: SimulationRunEventV1) => void>;
   terminal: boolean;
   touchedAt: number;
@@ -162,19 +164,19 @@ export class SimulationRunEventHub implements SimulationRunEventPublisher {
     const state = this.states.get(runId);
     if (!state || state.ownerSubject !== ownerSubject) return [];
     state.touchedAt = this.now();
-    return state.events.filter((event) => event.revision > revision);
+    return state.events.values().filter((event) => event.revision > revision);
   }
 
   latest(runId: string, ownerSubject: string): SimulationRunEventV1 | undefined {
     const state = this.states.get(runId);
     if (!state || state.ownerSubject !== ownerSubject) return undefined;
     state.touchedAt = this.now();
-    return state.events.at(-1);
+    return state.latestEvent;
   }
 
   get telemetry(): SimulationRunEventTelemetry {
     let replayEvents = 0;
-    for (const state of this.states.values()) replayEvents += state.events.length;
+    for (const state of this.states.values()) replayEvents += state.events.size;
     return {
       capacity: this.connectionLimit,
       activeConnections: this.activeConnections,
@@ -229,9 +231,7 @@ export class SimulationRunEventHub implements SimulationRunEventPublisher {
     state.terminal = terminal;
     state.touchedAt = this.now();
     state.events.push(event);
-    if (state.events.length > this.replayLimit) {
-      state.events.splice(0, state.events.length - this.replayLimit);
-    }
+    state.latestEvent = event;
     this.publishedTotal += 1;
     for (const listener of [...state.listeners]) {
       try {
@@ -249,17 +249,20 @@ export class SimulationRunEventHub implements SimulationRunEventPublisher {
     const existing = this.states.get(runId);
     if (existing) return existing;
     if (this.states.size >= this.runLimit) {
-      const evictable = [...this.states.entries()]
-        .filter(([, state]) => state.listeners.size === 0)
-        .sort((left, right) => left[1].touchedAt - right[1].touchedAt)
-        .at(0);
+      let evictable: [string, RunState] | undefined;
+      for (const entry of this.states.entries()) {
+        if (entry[1].listeners.size > 0) continue;
+        if (!evictable || entry[1].touchedAt < evictable[1].touchedAt) {
+          evictable = entry;
+        }
+      }
       if (!evictable) return undefined;
       this.states.delete(evictable[0]);
     }
     const created: RunState = {
       ownerSubject,
       revision: 0,
-      events: [],
+      events: new FixedRing(this.replayLimit),
       listeners: new Set(),
       terminal: false,
       touchedAt: this.now(),

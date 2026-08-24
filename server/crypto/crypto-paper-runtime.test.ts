@@ -19,6 +19,7 @@ import type {
 import { FuturesPaperLedger } from "./futures-paper-ledger.js";
 import type { CryptoRustTechnicalAnalysis } from "./crypto-rust-technical.js";
 import {
+  abortableSleep,
   aggregatePortfolioEquitySeries,
   aggregatePortfolioLaneMetrics,
   aggregatePortfolioLaneProvenance,
@@ -983,6 +984,24 @@ async function runProvenanceSimulation(options: {
 }
 
 describe("CryptoPaperRuntime", () => {
+  it("removes the abort listener after a normal runtime sleep", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const addListener = vi.spyOn(controller.signal, "addEventListener");
+      const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+
+      const sleeping = abortableSleep(1_000, controller.signal);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(sleeping).resolves.toBeUndefined();
+
+      expect(addListener).toHaveBeenCalledOnce();
+      expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds local chart indicators and pattern detection to the causal 240-bar tail", () => {
     const source = finalizedKlineHistory(400);
     const projection = cryptoChartProjection(source);

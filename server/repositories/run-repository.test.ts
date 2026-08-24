@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { PGliteDatabase } from "../../test-support/pglite-database.js";
+import type { DatabaseRow, RelationalDatabase, RunResult } from "../database.js";
 import { RunRepository } from "./run-repository.js";
 
 describe("RunRepository management", () => {
@@ -16,6 +17,77 @@ describe("RunRepository management", () => {
     await repository.initialize();
     return repository;
   }
+
+  it("standalone initialize는 migration을 적용하고 선적용 경로는 DDL을 반복하지 않는다", async () => {
+    database = new PGliteDatabase();
+    await expect(new RunRepository(database).initialize()).resolves.toBeUndefined();
+    expect(await database.query<{ table_name: string }>(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = current_schema()
+        AND table_name IN ('portfolio_backtest_runs', 'portfolio_run_events')
+      ORDER BY table_name
+    `)).toEqual([
+      { table_name: "portfolio_backtest_runs" },
+      { table_name: "portfolio_run_events" },
+    ]);
+
+    const unexpectedSql = (): never => {
+      throw new Error("migration 선적용 경로에서 repository SQL이 실행되었습니다.");
+    };
+    const preinitializedDatabase: RelationalDatabase = {
+      async query<T extends DatabaseRow>(): Promise<T[]> {
+        return unexpectedSql();
+      },
+      async run(): Promise<RunResult> {
+        return unexpectedSql();
+      },
+      async transaction<T>(): Promise<T> {
+        return unexpectedSql();
+      },
+      async close(): Promise<void> {},
+    };
+    await expect(new RunRepository(preinitializedDatabase).initialize({
+      migrationsAlreadyApplied: true,
+    })).resolves.toBeUndefined();
+  });
+
+  it("관리 컬럼이 없는 기존 run 테이블도 migration 후 목록 index를 생성한다", async () => {
+    database = new PGliteDatabase();
+    await database.run(`
+      CREATE TABLE portfolio_backtest_runs (
+        run_id TEXT PRIMARY KEY,
+        run_kind TEXT NOT NULL,
+        owner_subject TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        data_revision TEXT NOT NULL,
+        engine_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress REAL NOT NULL DEFAULT 0,
+        completed_candidates INTEGER NOT NULL DEFAULT 0,
+        total_candidates INTEGER NOT NULL DEFAULT 0,
+        current_validation_window TEXT,
+        input_json TEXT NOT NULL,
+        summary_json TEXT,
+        result_json TEXT,
+        error_json TEXT,
+        warnings_json TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        started_at BIGINT,
+        finished_at BIGINT,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(owner_subject, run_kind, request_hash, data_revision)
+      )
+    `);
+
+    await expect(new RunRepository(database).initialize()).resolves.toBeUndefined();
+    const indexes = await database.query<{ index_name: string }>(`
+      SELECT indexname AS index_name
+      FROM pg_indexes
+      WHERE schemaname = current_schema() AND indexname = 'idx_portfolio_run_list'
+    `);
+    expect(indexes).toEqual([{ index_name: "idx_portfolio_run_list" }]);
+  }, 15_000);
 
   it("이름·tag·archive·cursor 검색과 owner별 event를 제공한다", async () => {
     const repository = await setup();
@@ -165,6 +237,36 @@ describe("RunRepository management", () => {
       config: {},
       name: "가".repeat(201),
     })).rejects.toThrow("200자");
+  });
+
+  it("active/all run 목록의 ORDER BY LIMIT를 partial index scan으로 처리한다", async () => {
+    await setup();
+    await database!.run(`
+      INSERT INTO portfolio_backtest_runs (
+        run_id, run_kind, owner_subject, request_hash, data_revision, engine_version,
+        status, progress, completed_candidates, total_candidates, input_json,
+        warnings_json, tags_json, created_at, updated_at, archived_at, deleted_at
+      )
+      SELECT 'run-' || value, 'backtest', 'owner', 'request-' || value,
+             'revision', 'engine', 'completed', 1, 1, 1, '{}', '[]', '[]',
+             value, FLOOR(value / 4.0)::bigint,
+             CASE WHEN value % 4 = 0 THEN value ELSE NULL END, NULL
+      FROM generate_series(1, 20000) AS value
+    `);
+    await database!.run("ANALYZE portfolio_backtest_runs");
+
+    for (const archivedCondition of ["AND archived_at IS NULL", ""] as const) {
+      const plan = await database!.query<{ "QUERY PLAN": unknown }>(`
+        EXPLAIN (FORMAT JSON)
+        SELECT * FROM portfolio_backtest_runs
+        WHERE owner_subject = 'owner' AND deleted_at IS NULL ${archivedCondition}
+        ORDER BY updated_at DESC, run_id DESC
+        LIMIT 26
+      `);
+      const serialized = JSON.stringify(plan);
+      expect(serialized).toContain("idx_portfolio_run_list");
+      expect(serialized).not.toContain('"Node Type":"Sort"');
+    }
   });
 
   it("재실행 연결은 같은 owner의 존재하는 source에 한 번만 설정한다", async () => {

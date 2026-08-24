@@ -12,6 +12,7 @@ import {
 
 type UnknownRecord = Record<string, unknown>;
 type SignedReadResponse = { data(): unknown | Promise<unknown> };
+const DEFAULT_MAXIMUM_CACHE_ENTRIES = 128;
 
 export type BinanceMaintenanceMarginRestApi = {
   notionalAndLeverageBrackets(input: {
@@ -302,6 +303,7 @@ export class BinanceMaintenanceMarginProvider {
   private readonly rest?: BinanceMaintenanceMarginRestApi;
   private readonly now: () => number;
   private readonly ttlMs: number;
+  private readonly maximumCacheEntries: number;
   private readonly cache = new Map<string, {
     schedule: BinanceMaintenanceMarginSchedule;
     expiresAt: number;
@@ -314,6 +316,7 @@ export class BinanceMaintenanceMarginProvider {
     environment?: "testnet" | "live";
     timeoutMs?: number;
     ttlMs?: number;
+    maximumCacheEntries?: number;
     now?: () => number;
     rest?: BinanceMaintenanceMarginRestApi;
   }) {
@@ -324,6 +327,12 @@ export class BinanceMaintenanceMarginProvider {
     this.ttlMs = input.ttlMs ?? 300_000;
     if (!Number.isSafeInteger(this.ttlMs) || this.ttlMs < 1 || this.ttlMs > 86_400_000) {
       throw new Error("Binance bracket cache TTL must be between 1 and 86400000ms.");
+    }
+    this.maximumCacheEntries = input.maximumCacheEntries ?? DEFAULT_MAXIMUM_CACHE_ENTRIES;
+    if (!Number.isSafeInteger(this.maximumCacheEntries)
+      || this.maximumCacheEntries < 1
+      || this.maximumCacheEntries > 10_000) {
+      throw new Error("Binance bracket cache size must be between 1 and 10000 entries.");
     }
     this.now = input.now ?? Date.now;
     this.state = input.credentials ? "not_ready" : "unconfigured";
@@ -368,8 +377,13 @@ export class BinanceMaintenanceMarginProvider {
     }
     if (!this.rest) this.fail("unconfigured");
     const now = this.now();
+    this.pruneExpiredSchedules(now);
     const cached = this.cache.get(normalizedSymbol!);
     if (!options.forceRefresh && cached && cached.expiresAt > now) {
+      // Refresh insertion order so the bounded cache evicts the least recently
+      // used schedule instead of a frequently selected symbol.
+      this.cache.delete(normalizedSymbol!);
+      this.cache.set(normalizedSymbol!, cached);
       return cached.schedule;
     }
     const active = this.inflight.get(normalizedSymbol!);
@@ -415,14 +429,26 @@ export class BinanceMaintenanceMarginProvider {
       const schedule = normalizeBinanceMaintenanceMarginSchedule(payload, symbol);
       // Retain only the normalized bracket projection, never the raw USER_DATA
       // response or response wrapper.
+      this.cache.delete(symbol);
       this.cache.set(symbol, {
         schedule,
         expiresAt: this.now() + this.ttlMs,
       });
+      while (this.cache.size > this.maximumCacheEntries) {
+        const oldest = this.cache.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.cache.delete(oldest);
+      }
       this.state = "ready";
       return schedule;
     } catch (error) {
       this.fail(failureState(error));
+    }
+  }
+
+  private pruneExpiredSchedules(now: number): void {
+    for (const [symbol, cached] of this.cache) {
+      if (cached.expiresAt <= now) this.cache.delete(symbol);
     }
   }
 

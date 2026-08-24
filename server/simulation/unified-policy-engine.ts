@@ -222,7 +222,6 @@ function evidenceForPlan(
 }
 
 function isEntryHorizonAllowed(
-  simulationCase: SimulationCase,
   symbol: string,
   evidence: ModelEvidence,
 ): boolean {
@@ -243,7 +242,7 @@ function candidateForEvidence(
   rustEvidence: RustMarketEvidenceV2,
   highVolatility: HighVolatilityUnifiedPolicyContext | undefined,
 ): Candidate | undefined {
-  if (!isEntryHorizonAllowed(simulationCase, symbol, evidence)) return undefined;
+  if (!isEntryHorizonAllowed(symbol, evidence)) return undefined;
   const horizonAssessment = simulationCase === "high_vol_crypto"
     ? highVolatility?.horizonAssessments[evidence.horizonMinutes]
     : undefined;

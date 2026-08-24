@@ -1,5 +1,6 @@
 import type { ArtifactDescriptor, ArtifactType } from "../repositories/artifact-repository.js";
 import type { ArtifactRepository } from "../repositories/artifact-repository.js";
+import { canonicalJsonExceedsByteLimit } from "../json-byte-limit.js";
 import { MCP_SCHEMA_VERSION } from "./service-envelope.js";
 
 export class ArtifactService {
@@ -11,7 +12,8 @@ export class ArtifactService {
 
   shouldExternalize(value: unknown, rowCount?: number): boolean {
     const rows = rowCount ?? (Array.isArray(value) ? value.length : 1);
-    return rows > this.inlineMaxRows || Buffer.byteLength(JSON.stringify(value)) > this.inlineMaxBytes;
+    return rows > this.inlineMaxRows
+      || canonicalJsonExceedsByteLimit(value, this.inlineMaxBytes);
   }
 
   put(input: {

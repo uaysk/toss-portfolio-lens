@@ -202,9 +202,13 @@ export type BacktestAdvancedAnalytics = {
     totalTradedAmount: number;
     ongoingTradedAmount: number;
     estimatedTotalCost: number;
+    actualTotalCost: number;
     costDragPercent: number | null;
-    grossReturnPercent: number;
-    netEstimatedReturnPercent: number | null;
+    grossReturnPercent: number | null;
+    netEstimatedReturnPercent: number;
+    netReturnPercent: number;
+    costsDeductedFromPath: boolean;
+    method: "actual_path_deduction";
     averageTradeAmount: number | null;
     buySellAmountRatio: number | null;
     tradeCount: number;

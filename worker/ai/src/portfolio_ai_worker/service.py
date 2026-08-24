@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 import hashlib
 import json
 import threading
@@ -189,6 +190,7 @@ class _EvaluationPoint:
     source: EvaluationSeries
     origin: EvaluationOrigin
     forecast: ForecastSeries
+    bars_by_time: dict[datetime, PriceBar]
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,7 +582,12 @@ class AIService:
         for source in request.series:
             bars_by_time = {bar.timestamp: bar for bar in source.bars}
             for origin in source.origins:
-                context = tuple(bar for bar in source.bars if bar.timestamp <= origin.origin)
+                context_end = bisect_right(
+                    source.bars,
+                    origin.origin,
+                    key=lambda bar: bar.timestamp,
+                )
+                context = source.bars[:context_end]
                 key = _evaluation_key(source.instrument_key, origin.origin, ordinal)
                 ordinal += 1
                 try:
@@ -610,7 +617,14 @@ class AIService:
                         )
                     )
                     continue
-                points.append(_EvaluationPoint(source=source, origin=origin, forecast=forecast))
+                points.append(
+                    _EvaluationPoint(
+                        source=source,
+                        origin=origin,
+                        forecast=forecast,
+                        bars_by_time=bars_by_time,
+                    )
+                )
         return points, rejected
 
     def _observation(
@@ -632,7 +646,7 @@ class AIService:
             technical_signal=origin.technical_signal,
             regime=origin.regime,
         )
-        bars_by_time = {bar.timestamp: bar for bar in source.bars}
+        bars_by_time = point.bars_by_time
         origin_bar = bars_by_time[origin.origin]
         target_bar = bars_by_time.get(target_timestamp)
         next_bar = bars_by_time.get(origin.future_timestamps[0])

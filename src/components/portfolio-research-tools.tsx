@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { Activity, LoaderCircle, Play } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -8,6 +10,7 @@ import { StockSwatch } from "@/components/stock-swatch";
 import { loadAdvancedMarketResource, runAdvancedAnalysis, type AdvancedAnalysisOperation } from "@/lib/advanced-analysis";
 import { normalizedBacktestWeights, parseSymbolList } from "@/lib/backtest-config";
 import { formatMoney, formatPercent } from "@/lib/format";
+import { handleRadioGroupKeyDown } from "@/lib/radio-group";
 import { cn } from "@/lib/utils";
 import type { BacktestRunConfiguration, Theme } from "@/types";
 
@@ -23,6 +26,8 @@ const researchModes: Array<{ value: ResearchMode; label: string }> = [
   { value: "redundant", label: "중복 자산" },
   { value: "rebalance", label: "리밸런싱 계획" },
 ];
+
+const PARETO_RENDER_BATCH_SIZE = 100;
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -58,7 +63,7 @@ function ResearchField({ label, help, children }: { label: string; help?: string
 }
 
 function ModeButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) {
-  return <button type="button" aria-pressed={active} onClick={onClick} className={cn("rounded-full border px-3 py-2 text-[11px] font-black transition-colors", active ? "border-foreground bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground")}>{children}</button>;
+  return <button type="button" role="radio" aria-checked={active} tabIndex={active ? 0 : -1} onKeyDown={handleRadioGroupKeyDown} onClick={onClick} className={cn("rounded-full border px-3 py-2 text-[11px] font-black transition-colors", active ? "border-foreground bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground")}>{children}</button>;
 }
 
 function SymbolLabel({ symbol, theme }: { symbol: string; theme: Theme }) {
@@ -77,14 +82,38 @@ function RegimeResult({ result, onUnauthorized }: { result: unknown; onUnauthori
   const [loadedObservations, setLoadedObservations] = useState<unknown[]>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => { setLoadedObservations(undefined); setError(""); }, [result]);
+  const resourceRequest = useRef<AbortController | undefined>(undefined);
+  useEffect(() => {
+    resourceRequest.current?.abort();
+    resourceRequest.current = undefined;
+    setLoadedObservations(undefined);
+    setLoading(false);
+    setError("");
+    return () => {
+      resourceRequest.current?.abort();
+      resourceRequest.current = undefined;
+    };
+  }, [result]);
   const observations = loadedObservations ?? array(data.observations);
   const loadObservations = async () => {
+    resourceRequest.current?.abort();
+    const controller = new AbortController();
+    resourceRequest.current = controller;
     setLoading(true);
     setError("");
-    try { setLoadedObservations(array(await loadAdvancedMarketResource(descriptor.uri, onUnauthorized))); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "시장 국면 관측값을 불러오지 못했습니다."); }
-    finally { setLoading(false); }
+    try {
+      const next = array(await loadAdvancedMarketResource(descriptor.uri, onUnauthorized, controller.signal));
+      if (!controller.signal.aborted && resourceRequest.current === controller) setLoadedObservations(next);
+    } catch (caught) {
+      if (!controller.signal.aborted && resourceRequest.current === controller) {
+        setError(caught instanceof Error ? caught.message : "시장 국면 관측값을 불러오지 못했습니다.");
+      }
+    } finally {
+      if (resourceRequest.current === controller) {
+        resourceRequest.current = undefined;
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }
   };
   const preview = observations.slice(0, 200).map(record);
   return (
@@ -96,7 +125,7 @@ function RegimeResult({ result, onUnauthorized }: { result: unknown; onUnauthori
         <p className="text-xs text-muted-foreground">관측 {(number(descriptor.row_count) ?? observations.length).toLocaleString("ko-KR")}개{descriptor.uri ? " · 대용량 관측값은 보호된 resource로 분리" : ""}</p>
         {descriptor.uri && !loadedObservations ? <Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadObservations()} disabled={loading}>{loading ? <LoaderCircle className="animate-spin" /> : <Activity />}관측값 불러오기</Button> : null}
         {preview.length ? <details className="mt-3"><summary className="cursor-pointer text-xs font-black">관측값 미리보기 · 최대 200개</summary><div className="mt-3 max-h-[320px] overflow-auto"><table className="w-full min-w-[560px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-2">일자</th><th className="p-2">수익률</th><th className="p-2">변동성</th><th className="p-2">국면</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${String(item.date)}:${index}`} className="border-t border-border"><td className="p-2">{String(item.date ?? "-")}</td><td className="p-2">{decimalPercent(item.return)}</td><td className="p-2">{decimalPercent(item.volatility)}</td><td className="p-2 font-black">{String(item.regime ?? "-")}</td></tr>)}</tbody></table></div></details> : null}
-        {error ? <p className="mt-2 text-xs text-rose-500">{error}</p> : null}
+        {error ? <p className="mt-2 text-xs text-rose-700 dark:text-rose-400">{error}</p> : null}
       </div>
     </div>
   );
@@ -109,10 +138,40 @@ function ContributionResult({ result, theme }: { result: unknown; theme: Theme }
   return <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[760px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">시간연결 기여</th><th className="p-3">현지가격</th><th className="p-3">환율</th><th className="p-3">손익</th><th className="p-3">위험 기여</th></tr></thead><tbody>{contributions.map((item) => { const symbol = String(item.symbol); const risk = risks.get(symbol) ?? {}; return <tr key={symbol} className="border-t border-border"><td className="p-3 font-black"><SymbolLabel symbol={symbol} theme={theme} /></td><td className="p-3">{percent(item.timeLinkedContributionPercent ?? item.contributionPercent)}</td><td className="p-3">{percent(item.localPriceContributionPercent)}</td><td className="p-3">{percent(item.fxContributionPercent)}</td><td className="p-3">{formatMoney(number(item.profitLoss ?? item.estimatedProfitLoss) ?? 0, "KRW")}</td><td className="p-3">{percent(risk.contributionPercent ?? risk.riskContributionPercent ?? risk.contribution)}</td></tr>; })}</tbody></table></div>;
 }
 
-function ParetoResult({ result, theme }: { result: unknown; theme: Theme }) {
-  const candidates = array(record(result).candidates).map(record);
-  return <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[800px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">순위</th><th className="p-3">점수</th><th className="p-3">CAGR</th><th className="p-3">변동성</th><th className="p-3">MDD</th><th className="p-3">비중</th></tr></thead><tbody>{candidates.map((candidate, index) => { const metrics = record(candidate.metrics); const weights = Object.entries(record(candidate.weights)).sort((left, right) => Number(right[1]) - Number(left[1])); return <tr key={String(candidate.id ?? index)} className="border-t border-border"><td className="p-3 font-black">{String(candidate.rank ?? index + 1)}</td><td className="p-3">{ratio(candidate.score)}</td><td className="p-3">{decimalPercent(metrics.cagr)}</td><td className="p-3">{decimalPercent(metrics.volatility)}</td><td className="p-3">{decimalPercent(metrics.maxDrawdown)}</td><td className="p-3"><div className="flex max-w-[380px] flex-wrap gap-1">{weights.map(([symbol, weight]) => <span key={symbol} className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2 py-1 text-[9px] font-black"><StockSwatch symbol={symbol} theme={theme} className="size-2" />{symbol} {formatPercent((number(weight) ?? 0) * 100)}</span>)}</div></td></tr>; })}</tbody></table>{!candidates.length ? <p className="p-4 text-xs text-muted-foreground">저장된 Pareto 후보가 없습니다.</p> : null}</div>;
-}
+const ParetoCandidateRow = memo(function ParetoCandidateRow({
+  candidate,
+  index,
+  theme,
+}: {
+  candidate: Record<string, unknown>;
+  index: number;
+  theme: Theme;
+}) {
+  const metrics = record(candidate.metrics);
+  const weights = Object.entries(record(candidate.weights))
+    .sort((left, right) => Number(right[1]) - Number(left[1]));
+  return <tr data-research-pareto-row="true" className="border-t border-border"><td className="p-3 font-black">{String(candidate.rank ?? index + 1)}</td><td className="p-3">{ratio(candidate.score)}</td><td className="p-3">{decimalPercent(metrics.cagr)}</td><td className="p-3">{decimalPercent(metrics.volatility)}</td><td className="p-3">{decimalPercent(metrics.maxDrawdown)}</td><td className="p-3"><div className="flex max-w-[380px] flex-wrap gap-1">{weights.map(([symbol, weight]) => <span key={symbol} className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2 py-1 text-[9px] font-black"><StockSwatch symbol={symbol} theme={theme} className="size-2" />{symbol} {formatPercent((number(weight) ?? 0) * 100)}</span>)}</div></td></tr>;
+});
+
+export const PortfolioResearchParetoResult = memo(function PortfolioResearchParetoResult({
+  result,
+  theme,
+}: {
+  result: unknown;
+  theme: Theme;
+}) {
+  const candidates = useMemo(() => array(record(result).candidates).map(record), [result]);
+  const [visibility, setVisibility] = useState(() => ({
+    result,
+    count: PARETO_RENDER_BATCH_SIZE,
+  }));
+  const visibleCount = visibility.result === result
+    ? Math.min(visibility.count, candidates.length)
+    : Math.min(PARETO_RENDER_BATCH_SIZE, candidates.length);
+  const visibleCandidates = candidates.slice(0, visibleCount);
+  const remaining = candidates.length - visibleCount;
+  return <div className="space-y-3"><div role="region" aria-label="Pareto 후보 결과 표" tabIndex={0} className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[800px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">순위</th><th className="p-3">점수</th><th className="p-3">CAGR</th><th className="p-3">변동성</th><th className="p-3">MDD</th><th className="p-3">비중</th></tr></thead><tbody>{visibleCandidates.map((candidate, index) => <ParetoCandidateRow key={String(candidate.id ?? index)} candidate={candidate} index={index} theme={theme} />)}</tbody></table>{!candidates.length ? <p className="p-4 text-xs text-muted-foreground">저장된 Pareto 후보가 없습니다.</p> : null}</div>{candidates.length ? <div className="flex flex-wrap items-center justify-between gap-2 px-1"><p role="status" className="text-[10px] font-bold text-muted-foreground">{visibleCount.toLocaleString("ko-KR")} / {candidates.length.toLocaleString("ko-KR")}개 표시</p>{remaining > 0 ? <Button type="button" variant="secondary" size="sm" onClick={() => setVisibility({ result, count: Math.min(candidates.length, visibleCount + PARETO_RENDER_BATCH_SIZE) })}>후보 {Math.min(PARETO_RENDER_BATCH_SIZE, remaining).toLocaleString("ko-KR")}개 더 보기</Button> : null}</div> : null}</div>;
+});
 
 function RedundantResult({ result, theme }: { result: unknown; theme: Theme }) {
   const pairs = array(record(result).pair_details).map(record);
@@ -158,7 +217,8 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
   const [resultLabel, setResultLabel] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState("");
-  const inputFingerprint = JSON.stringify({
+  const analysisRequest = useRef<AbortController | undefined>(undefined);
+  const inputFingerprint = useMemo(() => JSON.stringify({
     baseConfig,
     mode,
     candidateSymbols,
@@ -177,7 +237,26 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
     targetWeights,
     portfolioValue,
     transactionCostBps,
-  });
+  }), [
+    backtestRunId,
+    baseConfig,
+    benchmark,
+    betaTolerance,
+    candidateLimit,
+    candidateSymbols,
+    candidateWeightPercent,
+    correlationThreshold,
+    currentWeights,
+    drawdownCorrelationThreshold,
+    maximumCorrelation,
+    mode,
+    optimizationRunId,
+    paretoLimit,
+    portfolioValue,
+    targetWeights,
+    transactionCostBps,
+    volatilityWindow,
+  ]);
 
   useEffect(() => {
     setBenchmark((current) => current || baseConfig.assets[0]?.symbol || "");
@@ -189,6 +268,10 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
   }, [normalized]);
   useEffect(() => { setBacktestRunId((current) => current || backtestRuns[0]?.runId || ""); }, [backtestRuns]);
   useEffect(() => { setOptimizationRunId((current) => current || optimizationRuns[0]?.runId || ""); }, [optimizationRuns]);
+  useEffect(() => () => {
+    analysisRequest.current?.abort();
+    analysisRequest.current = undefined;
+  }, []);
 
   const submit = async () => {
     const submittedFingerprint = inputFingerprint;
@@ -218,21 +301,30 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
       operation = "rebalance-plan";
       body = { currentWeights: current, targetWeights: target, ...common, ...(portfolioValue !== "" ? { portfolioValue: Number(portfolioValue) } : {}), transactionCostBps };
     }
+    analysisRequest.current?.abort();
+    const controller = new AbortController();
+    analysisRequest.current = controller;
     setRunning(true);
     setResult(undefined);
     setWarnings([]);
     setError("");
     try {
-      const completed = await runAdvancedAnalysis({ operation, body, onUnauthorized });
+      const completed = await runAdvancedAnalysis({ operation, body, onUnauthorized, signal: controller.signal });
+      if (controller.signal.aborted || analysisRequest.current !== controller) return;
       setResult(completed.result);
       setWarnings(completed.warnings);
       setResultMode(mode);
       setResultFingerprint(submittedFingerprint);
       setResultLabel(submittedLabel);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "연구 도구를 실행하지 못했습니다.");
+      if (!controller.signal.aborted && analysisRequest.current === controller) {
+        setError(caught instanceof Error ? caught.message : "연구 도구를 실행하지 못했습니다.");
+      }
     } finally {
-      setRunning(false);
+      if (analysisRequest.current === controller) {
+        analysisRequest.current = undefined;
+        if (!controller.signal.aborted) setRunning(false);
+      }
     }
   };
 
@@ -253,15 +345,15 @@ export function PortfolioResearchTools({ baseConfig, backtestRuns, optimizationR
   const staleResult = Boolean(resultFingerprint && resultFingerprint !== inputFingerprint);
 
   return <div className="mt-5 space-y-4">
-    <div className="flex flex-wrap gap-2" aria-label="연구 도구 선택">{researchModes.map((item) => <ModeButton key={item.value} active={mode === item.value} onClick={() => { setMode(item.value); setError(""); }}>{item.label}</ModeButton>)}</div>
-    {mode === "diversifying" ? <div className="space-y-2"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><ResearchField label="후보 종목 · 선택" help="비우면 캐시에 있는 종목에서 탐색"><Input value={candidateSymbols} onChange={(event) => setCandidateSymbols(event.target.value)} placeholder="SPY, QQQ, GLD" className="bg-secondary" /></ResearchField><ResearchField label="최대 상관"><Input type="number" min={-1} max={1} step={0.01} value={maximumCorrelation} onChange={(event) => setMaximumCorrelation(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="후보 혼합 비중 · %"><Input type="number" min={1} max={50} value={candidateWeightPercent} onChange={(event) => setCandidateWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="결과 수"><Input type="number" min={1} max={19} value={candidateLimit} onChange={(event) => setCandidateLimit(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div>{!diversifyingValid ? <p className="text-xs text-rose-500">분산 후보 탐색은 기준 종목 최대 19개, 기준과 직접 입력한 후보를 합쳐 최대 20개까지 지원합니다.</p> : null}</div> : null}
+    <div role="radiogroup" className="flex flex-wrap gap-2" aria-label="연구 도구 선택">{researchModes.map((item) => <ModeButton key={item.value} active={mode === item.value} onClick={() => { setMode(item.value); setError(""); }}>{item.label}</ModeButton>)}</div>
+    {mode === "diversifying" ? <div className="space-y-2"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><ResearchField label="후보 종목 · 선택" help="비우면 캐시에 있는 종목에서 탐색"><Input value={candidateSymbols} onChange={(event) => setCandidateSymbols(event.target.value)} placeholder="SPY, QQQ, GLD" className="bg-secondary" /></ResearchField><ResearchField label="최대 상관"><Input type="number" min={-1} max={1} step={0.01} value={maximumCorrelation} onChange={(event) => setMaximumCorrelation(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="후보 혼합 비중 · %"><Input type="number" min={1} max={50} value={candidateWeightPercent} onChange={(event) => setCandidateWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="결과 수"><Input type="number" min={1} max={19} value={candidateLimit} onChange={(event) => setCandidateLimit(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div>{!diversifyingValid ? <p className="text-xs text-rose-700 dark:text-rose-400">분산 후보 탐색은 기준 종목 최대 19개, 기준과 직접 입력한 후보를 합쳐 최대 20개까지 지원합니다.</p> : null}</div> : null}
     {mode === "regimes" ? <div className="grid gap-3 md:grid-cols-2"><ResearchField label="벤치마크 종목"><Input value={benchmark} onChange={(event) => setBenchmark(event.target.value.toUpperCase())} className="bg-secondary" /></ResearchField><ResearchField label="변동성 창 · 관측일"><Input type="number" min={5} max={252} value={volatilityWindow} onChange={(event) => setVolatilityWindow(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div> : null}
-    {mode === "contribution" ? <ResearchField label="완료된 백테스트 실행" help="현재 화면의 실행을 고르거나 저장된 run UUID를 붙여넣을 수 있습니다."><div className="space-y-2"><Input aria-label="수익 기여 백테스트 run ID" value={backtestRunId} onChange={(event) => setBacktestRunId(event.target.value.trim())} placeholder="00000000-0000-4000-8000-000000000000" className="bg-secondary" />{backtestRuns.length ? <Select value={backtestRuns.some((item) => item.runId === backtestRunId) ? backtestRunId : undefined} onValueChange={setBacktestRunId}><SelectTrigger className="w-full bg-secondary"><SelectValue placeholder="현재 화면의 실행 선택" /></SelectTrigger><SelectContent>{backtestRuns.map((item) => <SelectItem key={item.runId} value={item.runId}>{item.label}</SelectItem>)}</SelectContent></Select> : null}</div></ResearchField> : null}
-    {mode === "pareto" ? <div className="grid gap-3 md:grid-cols-[1fr_220px]"><ResearchField label="완료된 최적화 실행" help="현재 화면의 실행을 고르거나 저장된 run UUID를 붙여넣을 수 있습니다."><div className="space-y-2"><Input aria-label="Pareto 최적화 run ID" value={optimizationRunId} onChange={(event) => setOptimizationRunId(event.target.value.trim())} placeholder="00000000-0000-4000-8000-000000000000" className="bg-secondary" />{optimizationRuns.length ? <Select value={optimizationRuns.some((item) => item.runId === optimizationRunId) ? optimizationRunId : undefined} onValueChange={setOptimizationRunId}><SelectTrigger className="w-full bg-secondary"><SelectValue placeholder="현재 화면의 실행 선택" /></SelectTrigger><SelectContent>{optimizationRuns.map((item) => <SelectItem key={item.runId} value={item.runId}>{item.label}</SelectItem>)}</SelectContent></Select> : null}</div></ResearchField><ResearchField label="최대 후보 수"><Input type="number" min={1} max={1000} value={paretoLimit} onChange={(event) => setParetoLimit(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div> : null}
+    {mode === "contribution" ? <ResearchField label="완료된 백테스트 실행" help="현재 화면의 실행을 고르거나 저장된 run UUID를 붙여넣을 수 있습니다."><div className="space-y-2"><Input aria-label="수익 기여 백테스트 run ID" value={backtestRunId} onChange={(event) => setBacktestRunId(event.target.value.trim())} placeholder="00000000-0000-4000-8000-000000000000" className="bg-secondary" />{backtestRuns.length ? <Select value={backtestRuns.some((item) => item.runId === backtestRunId) ? backtestRunId : undefined} onValueChange={setBacktestRunId}><SelectTrigger aria-label="수익 기여 백테스트 실행 선택" className="w-full bg-secondary"><SelectValue placeholder="현재 화면의 실행 선택" /></SelectTrigger><SelectContent>{backtestRuns.map((item) => <SelectItem key={item.runId} value={item.runId}>{item.label}</SelectItem>)}</SelectContent></Select> : null}</div></ResearchField> : null}
+    {mode === "pareto" ? <div className="grid gap-3 md:grid-cols-[1fr_220px]"><ResearchField label="완료된 최적화 실행" help="현재 화면의 실행을 고르거나 저장된 run UUID를 붙여넣을 수 있습니다."><div className="space-y-2"><Input aria-label="Pareto 최적화 run ID" value={optimizationRunId} onChange={(event) => setOptimizationRunId(event.target.value.trim())} placeholder="00000000-0000-4000-8000-000000000000" className="bg-secondary" />{optimizationRuns.length ? <Select value={optimizationRuns.some((item) => item.runId === optimizationRunId) ? optimizationRunId : undefined} onValueChange={setOptimizationRunId}><SelectTrigger aria-label="Pareto 최적화 실행 선택" className="w-full bg-secondary"><SelectValue placeholder="현재 화면의 실행 선택" /></SelectTrigger><SelectContent>{optimizationRuns.map((item) => <SelectItem key={item.runId} value={item.runId}>{item.label}</SelectItem>)}</SelectContent></Select> : null}</div></ResearchField><ResearchField label="최대 후보 수"><Input type="number" min={1} max={1000} value={paretoLimit} onChange={(event) => setParetoLimit(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div> : null}
     {mode === "redundant" ? <div className="grid gap-3 md:grid-cols-3"><ResearchField label="상관 임계치"><Input type="number" min={0} max={1} step={0.01} value={correlationThreshold} onChange={(event) => setCorrelationThreshold(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="Beta 1 허용 거리"><Input type="number" min={0} max={2} step={0.01} value={betaTolerance} onChange={(event) => setBetaTolerance(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField><ResearchField label="낙폭 상관 임계치"><Input type="number" min={0} max={1} step={0.01} value={drawdownCorrelationThreshold} onChange={(event) => setDrawdownCorrelationThreshold(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div> : null}
     {mode === "rebalance" ? <div className="space-y-3"><div className="grid gap-3 md:grid-cols-2"><ResearchField label="포트폴리오 평가액 · 선택"><Input type="number" min={1} value={portfolioValue} onChange={(event) => setPortfolioValue(event.target.value)} className="bg-secondary text-right" /></ResearchField><ResearchField label="거래비용 · bp"><Input type="number" min={0} max={500} value={transactionCostBps} onChange={(event) => setTransactionCostBps(Number(event.target.value))} className="bg-secondary text-right" /></ResearchField></div><div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[560px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">현재 비중 %</th><th className="p-3">목표 비중 %</th></tr></thead><tbody>{baseConfig.assets.map((asset) => <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black"><SymbolLabel symbol={asset.symbol} theme={theme} /></td><td className="p-3"><Input aria-label={`${asset.symbol} 현재 비중`} type="number" min={0} max={100} value={currentWeights[asset.symbol] ?? ""} onChange={(event) => setCurrentWeights((current) => ({ ...current, [asset.symbol]: event.target.value }))} className="h-10 bg-secondary text-right" /></td><td className="p-3"><Input aria-label={`${asset.symbol} 목표 비중`} type="number" min={0} max={100} value={targetWeights[asset.symbol] ?? ""} onChange={(event) => setTargetWeights((current) => ({ ...current, [asset.symbol]: event.target.value }))} className="h-10 bg-secondary text-right" /></td></tr>)}</tbody><tfoot><tr className="border-t border-border font-black"><td className="p-3">합계</td><td className="p-3 text-right">{currentTotal.toFixed(2)}%</td><td className="p-3 text-right">{targetTotal.toFixed(2)}%</td></tr></tfoot></table></div></div> : null}
-    {error ? <p role="alert" className="rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
+    {error ? <p role="alert" className="rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-700 dark:text-rose-400">{error}</p> : null}
     <Button type="button" onClick={() => void submit()} disabled={!canSubmit}>{running ? <LoaderCircle className="animate-spin" /> : <Play />}{running ? "분석 중" : "연구 도구 실행"}</Button>
-    {result !== undefined ? <div className="border-t border-border pt-5"><div className="mb-4 flex flex-wrap items-center gap-2"><Activity className="size-4" /><p className="text-xs font-black tracking-[0.12em]">RESEARCH RESULT</p>{staleResult ? <span className="rounded-full bg-foreground px-2 py-1 text-[9px] font-black text-background">현재 입력과 다른 실행</span> : null}<p className="w-full text-[10px] text-muted-foreground">실행 설정 · {resultLabel}</p></div>{resultMode === "diversifying" ? <DiversifyingResult result={result} theme={theme} /> : resultMode === "regimes" ? <RegimeResult result={result} onUnauthorized={onUnauthorized} /> : resultMode === "contribution" ? <ContributionResult result={result} theme={theme} /> : resultMode === "pareto" ? <ParetoResult result={result} theme={theme} /> : resultMode === "redundant" ? <RedundantResult result={result} theme={theme} /> : <RebalanceResult result={result} theme={theme} />}{warnings.length ? <div className="mt-3 rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}<LazyJsonDetails value={result} className="mt-3 rounded-[18px] bg-card p-4" /></div> : null}
+    {result !== undefined ? <div className="border-t border-border pt-5"><div className="mb-4 flex flex-wrap items-center gap-2"><Activity className="size-4" /><p className="text-xs font-black tracking-[0.12em]">RESEARCH RESULT</p>{staleResult ? <span className="rounded-full bg-foreground px-2 py-1 text-[9px] font-black text-background">현재 입력과 다른 실행</span> : null}<p className="w-full text-[10px] text-muted-foreground">실행 설정 · {resultLabel}</p></div>{resultMode === "diversifying" ? <DiversifyingResult result={result} theme={theme} /> : resultMode === "regimes" ? <RegimeResult result={result} onUnauthorized={onUnauthorized} /> : resultMode === "contribution" ? <ContributionResult result={result} theme={theme} /> : resultMode === "pareto" ? <PortfolioResearchParetoResult result={result} theme={theme} /> : resultMode === "redundant" ? <RedundantResult result={result} theme={theme} /> : <RebalanceResult result={result} theme={theme} />}{warnings.length ? <div className="mt-3 rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}<LazyJsonDetails value={result} className="mt-3 rounded-[18px] bg-card p-4" /></div> : null}
   </div>;
 }

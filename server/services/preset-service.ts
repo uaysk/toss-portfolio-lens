@@ -1,5 +1,6 @@
 import {
   PresetRepository,
+  type PresetRepositoryInitializeOptions,
   type PortfolioPresetListInput,
   type PortfolioPresetListResult,
   type PortfolioPresetRecord,
@@ -120,8 +121,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 export class PresetService {
   constructor(private readonly repository: PresetRepository) {}
 
-  initialize(): Promise<void> {
-    return this.repository.initialize();
+  initialize(options?: PresetRepositoryInitializeOptions): Promise<void> {
+    return this.repository.initialize(options);
   }
 
   create(input: {

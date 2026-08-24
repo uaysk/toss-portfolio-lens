@@ -95,6 +95,16 @@ type LoadedCheckpoint<TState, TScalar> = {
   baseState: TState;
 };
 
+export type SimulationCheckpointStateReplayV2<TState = unknown, TScalar = unknown> = Omit<
+  SimulationCheckpointReplayV2<TState, TScalar>,
+  "events"
+>;
+
+type InternalCheckpointReplay<TState, TScalar> =
+  SimulationCheckpointStateReplayV2<TState, TScalar> & {
+    events?: SimulationCheckpointEventV2[];
+  };
+
 function checksum(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -609,7 +619,7 @@ export class SimulationCheckpointStore {
     runId: string,
     onError?: (error: unknown) => void,
   ): Promise<SimulationCheckpointSession<TState, TScalar> | undefined> {
-    const replay = await this.replay<TState, TScalar>(runId);
+    const replay = await this.replayState<TState, TScalar>(runId);
     if (!replay) return undefined;
     return new SimulationCheckpointSession(
       this,
@@ -629,6 +639,28 @@ export class SimulationCheckpointStore {
   async replay<TState = unknown, TScalar = unknown>(
     runId: string,
   ): Promise<SimulationCheckpointReplayV2<TState, TScalar> | undefined> {
+    const replay = await this.replayInternal<TState, TScalar>(runId, true);
+    if (!replay) return undefined;
+    return {
+      manifest: replay.manifest,
+      state: replay.state,
+      events: replay.events!,
+    };
+  }
+
+  async replayState<TState = unknown, TScalar = unknown>(
+    runId: string,
+  ): Promise<SimulationCheckpointStateReplayV2<TState, TScalar> | undefined> {
+    const replay = await this.replayInternal<TState, TScalar>(runId, false);
+    return replay
+      ? { manifest: replay.manifest, state: replay.state }
+      : undefined;
+  }
+
+  private async replayInternal<TState, TScalar>(
+    runId: string,
+    collectEvents: boolean,
+  ): Promise<InternalCheckpointReplay<TState, TScalar> | undefined> {
     const loaded = await this.load<TScalar>(runId);
     if (!loaded) return undefined;
     const rows = await this.database.query<CheckpointChunkRow>(`
@@ -642,7 +674,8 @@ export class SimulationCheckpointStore {
       throw new Error("simulation checkpoint chunk 수가 manifest와 일치하지 않습니다.");
     }
     let state: unknown = loaded.baseState;
-    const events: SimulationCheckpointEventV2[] = [];
+    const events = collectEvents ? [] as SimulationCheckpointEventV2[] : undefined;
+    let eventCount = 0;
     let expectedRevision = 1;
     let previousChunkChecksum: string | null = null;
     for (let index = 0; index < rows.length; index += 1) {
@@ -679,18 +712,19 @@ export class SimulationCheckpointStore {
           throw new Error(`simulation checkpoint event revision ${expectedRevision}이 올바르지 않습니다.`);
         }
         state = applyEvent(state, event);
-        events.push(event);
+        events?.push(event);
+        eventCount += 1;
         expectedRevision += 1;
       }
       previousChunkChecksum = actual.checksum;
     }
-    if (events.length !== loaded.manifest.revision) {
+    if (eventCount !== loaded.manifest.revision) {
       throw new Error("simulation checkpoint replay revision이 manifest와 일치하지 않습니다.");
     }
     return {
       manifest: loaded.manifest,
       state: state as TState,
-      events,
+      ...(events ? { events } : {}),
     };
   }
 

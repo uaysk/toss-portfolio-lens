@@ -764,11 +764,12 @@ describe("AI trading simulation service", () => {
       persistedState = clone(input.baseState);
       return { appendPatch, capture, close };
     });
+    const replayState = vi.fn(async () => (
+      persistedState === undefined ? undefined : { state: clone(persistedState) }
+    ));
     const checkpointStore = {
       startSession,
-      replay: vi.fn(async () => (
-        persistedState === undefined ? undefined : { state: clone(persistedState) }
-      )),
+      replayState,
     } as unknown as ConstructorParameters<typeof AiTradingSimulationService>[6];
     const setup = harness({ checkpointStore });
     const started = await setup.service.start(request(1), "owner");
@@ -2412,6 +2413,40 @@ describe("AI trading simulation service", () => {
     expect(closeSettled).toBe(true);
   });
 
+  it("coalesces progress ticks while the prior progress task is still running", async () => {
+    const progressGate = deferred<boolean>();
+    const setup = harness();
+    const started = await setup.service.start(request(1), "owner");
+    await waitForPhase(setup, started.runId, "running");
+    const initialCancellationReads = setup.repository.isCancellationRequested.mock.calls.length;
+    setup.repository.isCancellationRequested.mockImplementationOnce(() => progressGate.promise);
+
+    const internals = setup.service as unknown as {
+      active: Map<string, { progressTask?: Promise<void> }>;
+      progressTasks: Set<Promise<void>>;
+      queueProgress(session: unknown): void;
+    };
+    const session = internals.active.get(started.runId)!;
+    internals.queueProgress(session);
+    internals.queueProgress(session);
+
+    await vi.waitFor(() => expect(
+      setup.repository.isCancellationRequested,
+    ).toHaveBeenCalledTimes(initialCancellationReads + 1));
+    expect(internals.progressTasks.size).toBe(1);
+    expect(session.progressTask).toBeDefined();
+
+    progressGate.resolve(false);
+    await vi.waitFor(() => expect(internals.progressTasks.size).toBe(0));
+    expect(session.progressTask).toBeUndefined();
+
+    internals.queueProgress(session);
+    await vi.waitFor(() => expect(
+      setup.repository.isCancellationRequested,
+    ).toHaveBeenCalledTimes(initialCancellationReads + 2));
+    await setup.service.close("test_shutdown");
+  });
+
   it("does not install end or progress timers when cancellation races initial checkpoint persistence", async () => {
     const gate = deferred();
     const setup = harness({ artifactGate: gate.promise });
@@ -2713,7 +2748,7 @@ describe("AI trading simulation service", () => {
 
   it("fails closed when AI is unavailable without fabricating trades or changing cash", async () => {
     const setup = harness({ aiAvailable: false });
-    const started = await setup.service.start(request(1), "owner");
+    await setup.service.start(request(1), "owner");
     await eventually(
       setup.run,
       (run) => run?.status === "failed",

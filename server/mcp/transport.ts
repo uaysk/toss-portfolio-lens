@@ -5,15 +5,18 @@ import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/p
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { BoundedFixedWindowRateLimiter } from "../auth/fixed-window-rate-limiter.js";
+import { normalizeClientIp } from "../auth/login-attempt-limiter.js";
 import type { McpAuditRepository } from "../repositories/mcp-audit-repository.js";
 import { anonymizedAuditValue, persistMcpAudit, protocolRequestId } from "./audit.js";
 import { toolSchemas, type ToolName } from "./schemas.js";
 
 type Session = {
-  server: McpServer;
   transport: StreamableHTTPServerTransport;
+  close: () => Promise<void>;
   principal: string;
   lastSeenAt: number;
+  activeRequests: number;
 };
 
 export type McpHttpRuntime = {
@@ -22,7 +25,12 @@ export type McpHttpRuntime = {
   activeSessionCount: () => number;
 };
 
-type RateBucket = { count: number; resetAt: number };
+const DEFAULT_MAXIMUM_STATEFUL_SESSIONS = 128;
+const DEFAULT_MAXIMUM_STATELESS_REQUESTS = 128;
+const DEFAULT_SESSION_TTL_MS = 60 * 60_000;
+const DEFAULT_SESSION_CLEANUP_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_MAXIMUM_RATE_BUCKETS = 2_000;
+const RATE_BUCKET_WINDOW_MS = 60_000;
 
 function principal(request: Request): string {
   const subject = typeof request.auth?.extra?.sub === "string" ? request.auth.extra.sub : "local-owner";
@@ -35,23 +43,25 @@ function sessionId(request: Request): string | undefined {
 }
 
 function jsonRpcError(response: Response, status: number, code: number, message: string): void {
+  response.setHeader("Cache-Control", "no-store");
   response.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
 }
 
 function requestIp(request: Request): string {
-  return request.socket.remoteAddress ?? "unknown";
+  return normalizeClientIp(request.ip || request.socket.remoteAddress);
 }
 
 function corsMiddleware(allowedOrigins: ReadonlySet<string>): RequestHandler {
   return (request, response, next) => {
     const origin = request.get("origin");
     if (origin) {
+      response.vary("Origin");
       if (!allowedOrigins.has(origin)) {
+        response.setHeader("Cache-Control", "no-store");
         response.status(403).json({ error: "origin_not_allowed" });
         return;
       }
       response.setHeader("Access-Control-Allow-Origin", origin);
-      response.setHeader("Vary", "Origin");
       response.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
       response.setHeader(
         "Access-Control-Allow-Headers",
@@ -67,28 +77,29 @@ function corsMiddleware(allowedOrigins: ReadonlySet<string>): RequestHandler {
   };
 }
 
-function rateLimitMiddleware(maxRequestsPerMinute: number): RequestHandler {
-  const buckets = new Map<string, RateBucket>();
+function rateLimitMiddleware(maxRequestsPerMinute: number, maximumBuckets: number): RequestHandler {
+  const limiter = new BoundedFixedWindowRateLimiter({
+    maximumRequests: maxRequestsPerMinute,
+    windowMs: RATE_BUCKET_WINDOW_MS,
+    maximumEntries: maximumBuckets,
+  });
   return (request, response, next) => {
-    const now = Date.now();
     const key = `${requestIp(request)}:${principal(request)}`;
-    const previous = buckets.get(key);
-    const bucket = previous && previous.resetAt > now
-      ? previous
-      : { count: 0, resetAt: now + 60_000 };
-    bucket.count += 1;
-    buckets.set(key, bucket);
-    if (bucket.count > maxRequestsPerMinute) {
-      response.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1_000))));
+    const decision = limiter.check(key);
+    if (!decision.allowed) {
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Retry-After", String(decision.retryAfterSeconds));
       response.status(429).json({
         jsonrpc: "2.0",
-        error: { code: -32000, message: "Too many MCP requests" },
+        error: {
+          code: -32000,
+          message: decision.reason === "source-capacity"
+            ? "Too many MCP request sources"
+            : "Too many MCP requests",
+        },
         id: null,
       });
       return;
-    }
-    if (buckets.size > 2_000) {
-      for (const [bucketKey, value] of buckets) if (value.resetAt <= now) buckets.delete(bucketKey);
     }
     next();
   };
@@ -101,6 +112,11 @@ export function createMcpHttpRuntime(input: {
   resourceMetadataUrl: string;
   allowedOrigins: string[];
   maxRequestsPerMinute: number;
+  maximumStatefulSessions?: number;
+  maximumStatelessRequests?: number;
+  statefulSessionTtlMs?: number;
+  statefulSessionCleanupIntervalMs?: number;
+  maximumRateBuckets?: number;
   audit?: McpAuditRepository;
   auditSubjectSalt?: string;
 }): McpHttpRuntime {
@@ -108,9 +124,28 @@ export function createMcpHttpRuntime(input: {
     throw new Error("OAuth MCP transport requires a token verifier.");
   }
 
+  const maximumStatefulSessions = input.maximumStatefulSessions ?? DEFAULT_MAXIMUM_STATEFUL_SESSIONS;
+  const maximumStatelessRequests = input.maximumStatelessRequests ?? DEFAULT_MAXIMUM_STATELESS_REQUESTS;
+  const sessionTtlMs = input.statefulSessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  const sessionCleanupIntervalMs = input.statefulSessionCleanupIntervalMs ?? DEFAULT_SESSION_CLEANUP_INTERVAL_MS;
+  const maximumRateBuckets = input.maximumRateBuckets ?? DEFAULT_MAXIMUM_RATE_BUCKETS;
+  if (
+    !Number.isInteger(maximumStatefulSessions) || maximumStatefulSessions < 1
+    || !Number.isInteger(maximumStatelessRequests) || maximumStatelessRequests < 1
+    || !Number.isInteger(sessionTtlMs) || sessionTtlMs < 1
+    || !Number.isInteger(sessionCleanupIntervalMs) || sessionCleanupIntervalMs < 1
+    || !Number.isInteger(maximumRateBuckets) || maximumRateBuckets < 1
+  ) {
+    throw new Error("MCP transport capacity configuration is invalid.");
+  }
+
   const router = Router();
   const sessions = new Map<string, Session>();
-  const sessionTtlMs = 60 * 60_000;
+  const sessionInitializationTasks = new Set<Promise<void>>();
+  let pendingSessionInitializations = 0;
+  let activeStatelessRequests = 0;
+  let closed = false;
+  let closeTask: Promise<void> | undefined;
   const bearer = input.authMode === "oauth"
     ? requireBearerAuth({
         verifier: input.verifier!,
@@ -119,7 +154,7 @@ export function createMcpHttpRuntime(input: {
     : ((_request: Request, _response: Response, next: NextFunction) => next());
 
   const cors = corsMiddleware(new Set(input.allowedOrigins));
-  const rateLimit = rateLimitMiddleware(input.maxRequestsPerMinute);
+  const rateLimit = rateLimitMiddleware(input.maxRequestsPerMinute, maximumRateBuckets);
   const auditRejectedToolCall: RequestHandler = (request, _response, next) => {
     void (async () => {
       const messages = Array.isArray(request.body) ? request.body : [request.body];
@@ -161,27 +196,84 @@ export function createMcpHttpRuntime(input: {
   };
 
   async function handleStateless(request: Request, response: Response): Promise<void> {
-    const server = input.serverFactory();
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    if (activeStatelessRequests >= maximumStatelessRequests) {
+      response.setHeader("Retry-After", "1");
+      jsonRpcError(response, 503, -32000, "MCP stateless request capacity reached");
+      return;
+    }
+    activeStatelessRequests += 1;
+    let server: McpServer | undefined;
+    let transport: StreamableHTTPServerTransport | undefined;
     try {
+      server = input.serverFactory();
+      transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await server.connect(transport);
       await transport.handleRequest(request, response, request.body);
     } catch (error) {
       console.error("[mcp] stateless transport failed:", error instanceof Error ? error.message : "unknown error");
       if (!response.headersSent) jsonRpcError(response, 500, -32603, "Internal server error");
     } finally {
-      await transport.close().catch(() => undefined);
-      await server.close().catch(() => undefined);
+      await transport?.close().catch(() => undefined);
+      await server?.close().catch(() => undefined);
+      activeStatelessRequests -= 1;
     }
   }
 
-  async function handleNewSession(request: Request, response: Response): Promise<void> {
+  function finishSessionRequest(session: Session): void {
+    session.activeRequests = Math.max(0, session.activeRequests - 1);
+    session.lastSeenAt = Date.now();
+  }
+
+  async function handleSessionRequest(session: Session, handler: () => Promise<void>): Promise<void> {
+    session.activeRequests += 1;
+    session.lastSeenAt = Date.now();
+    try {
+      await handler();
+    } finally {
+      finishSessionRequest(session);
+    }
+  }
+
+  function cleanupExpiredSessions(now: number): void {
+    const cutoff = now - sessionTtlMs;
+    for (const [id, session] of sessions) {
+      if (session.activeRequests > 0 || session.lastSeenAt > cutoff) continue;
+      sessions.delete(id);
+      void session.close();
+    }
+  }
+
+  async function initializeNewSession(
+    request: Request,
+    response: Response,
+    releaseInitializationReservation: () => void,
+  ): Promise<void> {
     const server = input.serverFactory();
+    let initializedSession: Session | undefined;
     let transport: StreamableHTTPServerTransport;
+    let resourceCloseTask: Promise<void> | undefined;
+    const closeResources = () => {
+      resourceCloseTask ??= (async () => {
+        await transport.close().catch(() => undefined);
+        await server.close().catch(() => undefined);
+      })();
+      return resourceCloseTask;
+    };
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { server, transport, principal: principal(request), lastSeenAt: Date.now() });
+        initializedSession = {
+          transport,
+          close: closeResources,
+          principal: principal(request),
+          lastSeenAt: Date.now(),
+          activeRequests: 1,
+        };
+        if (!closed) sessions.set(id, initializedSession);
+        // The initialized session now occupies the slot that was reserved for
+        // it. Release the pending reservation immediately so the same slot is
+        // not counted twice while handleRequest finishes writing its response.
+        releaseInitializationReservation();
       },
     });
     transport.onclose = () => {
@@ -190,18 +282,56 @@ export function createMcpHttpRuntime(input: {
     };
     try {
       await server.connect(transport);
+      if (closed) {
+        jsonRpcError(response, 503, -32000, "MCP transport is shutting down");
+        await closeResources();
+        return;
+      }
       await transport.handleRequest(request, response, request.body);
-      if (!transport.sessionId) {
-        await transport.close().catch(() => undefined);
-        await server.close().catch(() => undefined);
+      if (!transport.sessionId || closed) {
+        const id = transport.sessionId;
+        if (id) sessions.delete(id);
+        await closeResources();
       }
     } catch (error) {
       console.error("[mcp] session initialization failed:", error instanceof Error ? error.message : "unknown error");
       const id = transport.sessionId;
       if (id) sessions.delete(id);
-      await transport.close().catch(() => undefined);
-      await server.close().catch(() => undefined);
+      await closeResources();
       if (!response.headersSent) jsonRpcError(response, 500, -32603, "Internal server error");
+    } finally {
+      if (initializedSession) finishSessionRequest(initializedSession);
+    }
+  }
+
+  async function handleNewSession(request: Request, response: Response): Promise<void> {
+    if (closed) {
+      jsonRpcError(response, 503, -32000, "MCP transport is shutting down");
+      return;
+    }
+    if (sessions.size + pendingSessionInitializations >= maximumStatefulSessions) {
+      cleanupExpiredSessions(Date.now());
+    }
+    if (sessions.size + pendingSessionInitializations >= maximumStatefulSessions) {
+      response.setHeader("Retry-After", "60");
+      jsonRpcError(response, 503, -32000, "MCP session capacity reached");
+      return;
+    }
+
+    pendingSessionInitializations += 1;
+    let reservationHeld = true;
+    const releaseInitializationReservation = () => {
+      if (!reservationHeld) return;
+      reservationHeld = false;
+      pendingSessionInitializations -= 1;
+    };
+    const initializationTask = initializeNewSession(request, response, releaseInitializationReservation);
+    sessionInitializationTasks.add(initializationTask);
+    try {
+      await initializationTask;
+    } finally {
+      sessionInitializationTasks.delete(initializationTask);
+      releaseInitializationReservation();
     }
   }
 
@@ -217,8 +347,10 @@ export function createMcpHttpRuntime(input: {
         jsonRpcError(response, 403, -32003, "MCP session principal mismatch");
         return;
       }
-      session.lastSeenAt = Date.now();
-      await session.transport.handleRequest(request, response, request.body);
+      await handleSessionRequest(
+        session,
+        () => session.transport.handleRequest(request, response, request.body),
+      );
       return;
     }
 
@@ -246,19 +378,12 @@ export function createMcpHttpRuntime(input: {
       jsonRpcError(response, 403, -32003, "MCP session principal mismatch");
       return;
     }
-    session.lastSeenAt = Date.now();
-    await session.transport.handleRequest(request, response);
+    await handleSessionRequest(session, () => session.transport.handleRequest(request, response));
   }
 
   const cleanupTimer = setInterval(() => {
-    const cutoff = Date.now() - sessionTtlMs;
-    for (const [id, session] of sessions) {
-      if (session.lastSeenAt > cutoff) continue;
-      sessions.delete(id);
-      void session.transport.close().catch(() => undefined);
-      void session.server.close().catch(() => undefined);
-    }
-  }, 5 * 60_000);
+    cleanupExpiredSessions(Date.now());
+  }, sessionCleanupIntervalMs);
   cleanupTimer.unref();
 
   const route = (handler: (request: Request, response: Response) => Promise<void>): RequestHandler => (
@@ -279,14 +404,18 @@ export function createMcpHttpRuntime(input: {
   return {
     router,
     activeSessionCount: () => sessions.size,
-    close: async () => {
+    close: () => {
+      closed = true;
+      if (closeTask) return closeTask;
       clearInterval(cleanupTimer);
       const active = [...sessions.values()];
       sessions.clear();
-      await Promise.all(active.map(async ({ server, transport }) => {
-        await transport.close().catch(() => undefined);
-        await server.close().catch(() => undefined);
-      }));
+      const initializing = [...sessionInitializationTasks];
+      closeTask = Promise.all([
+        Promise.all(active.map((session) => session.close())),
+        Promise.allSettled(initializing),
+      ]).then(() => undefined);
+      return closeTask;
     },
   };
 }

@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AiRequestSchema } from "./ai-contract.js";
 
-type JsonObject = Record<string, unknown>;
 type PathPart = string | number;
 type Mutation =
   | { op: "set"; path: PathPart[]; value: unknown }

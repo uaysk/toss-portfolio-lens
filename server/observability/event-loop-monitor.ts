@@ -1,4 +1,6 @@
 import { performance } from "node:perf_hooks";
+import { durationQuantiles } from "./duration-quantiles.js";
+import { FixedRing } from "../fixed-ring.js";
 
 export type EventLoopLagSnapshot = {
   sampleCount: number;
@@ -7,26 +9,20 @@ export type EventLoopLagSnapshot = {
   maxMs: number;
 };
 
-function percentile(values: number[], ratio: number): number {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
-  return sorted[index]!;
-}
-
-function rounded(value: number): number {
-  return Math.round(value * 1_000) / 1_000;
-}
-
 export class EventLoopLagMonitor {
-  private readonly samples: number[] = [];
+  private readonly samples: FixedRing<number>;
   private timer: NodeJS.Timeout | undefined;
   private expectedAt = 0;
 
   constructor(
     private readonly intervalMs = 250,
     private readonly maximumSamples = 1_200,
-  ) {}
+  ) {
+    if (!Number.isFinite(this.intervalMs) || this.intervalMs < 1) {
+      throw new TypeError("Event loop sample interval must be a positive number.");
+    }
+    this.samples = new FixedRing(this.maximumSamples);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -34,9 +30,6 @@ export class EventLoopLagMonitor {
     this.timer = setInterval(() => {
       const now = performance.now();
       this.samples.push(Math.max(0, now - this.expectedAt));
-      if (this.samples.length > this.maximumSamples) {
-        this.samples.splice(0, this.samples.length - this.maximumSamples);
-      }
       this.expectedAt = now + this.intervalMs;
     }, this.intervalMs);
     this.timer.unref();
@@ -48,11 +41,15 @@ export class EventLoopLagMonitor {
   }
 
   snapshot(): EventLoopLagSnapshot {
+    const { sampleCount, p95Ms, p99Ms, maxMs } = durationQuantiles(
+      this.samples.values(),
+      (sample) => sample,
+    );
     return {
-      sampleCount: this.samples.length,
-      p95Ms: rounded(percentile(this.samples, 0.95)),
-      p99Ms: rounded(percentile(this.samples, 0.99)),
-      maxMs: rounded(this.samples.length ? Math.max(...this.samples) : 0),
+      sampleCount,
+      p95Ms,
+      p99Ms,
+      maxMs,
     };
   }
 }

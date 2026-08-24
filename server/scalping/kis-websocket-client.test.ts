@@ -71,6 +71,7 @@ class FakeWebSocket implements WebSocketLike {
   readyState = 0;
   readonly sent: string[] = [];
   readonly closes: Array<{ code?: number; reason?: string }> = [];
+  terminations = 0;
   private readonly listeners = new Map<WebSocketEventName, Set<WebSocketListener>>();
 
   addEventListener(type: WebSocketEventName, listener: WebSocketListener): void {
@@ -92,6 +93,12 @@ class FakeWebSocket implements WebSocketLike {
     this.closes.push({ code, reason });
     this.readyState = 3;
     this.emit("close", { code, reason });
+  }
+
+  terminate(): void {
+    this.terminations += 1;
+    this.readyState = 3;
+    this.emit("close", { code: 1_006, reason: "terminated" });
   }
 
   open(): void {
@@ -203,6 +210,7 @@ function dataFrame(trId: KisMarketTrId, values: string[], count = 1): string {
 function testHarness(overrides: {
   config?: Partial<KisWebSocketConfig>;
   fetchImpl?: typeof fetch;
+  sleepImpl?: (milliseconds: number) => Promise<void>;
 } = {}) {
   const clock = new TestClock();
   const sockets: FakeWebSocket[] = [];
@@ -218,7 +226,7 @@ function testHarness(overrides: {
       sockets.push(socket);
       return socket;
     },
-    sleepImpl: vi.fn().mockResolvedValue(undefined),
+    sleepImpl: overrides.sleepImpl ?? vi.fn().mockResolvedValue(undefined),
     now: () => clock.value,
     random: () => 0.5,
     setTimeoutImpl: clock.setTimeout,
@@ -239,6 +247,83 @@ describe("KisWebSocketClient", () => {
     const { client } = testHarness({ config: { maxSubscriptions: 1 } });
     expect(client.subscribe({ trId: "H0STCNT0", symbol: "005930" })).toBe(true);
     expect(() => client.subscribe({ trId: "H0STASP0", symbol: "005930" })).toThrow("capacity (1)");
+  });
+
+  it("approval body timeout을 연결 timeout으로 오분류하지 않고 정리한다", async () => {
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () => new Promise<unknown>((_resolve, reject) => {
+          const onAbort = () => {
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          };
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener("abort", onAbort, { once: true });
+        }),
+      } as Response;
+    }) as unknown as typeof fetch;
+    const { client, clock, sockets } = testHarness({
+      config: { approvalMaxAttempts: 1 },
+      fetchImpl,
+    });
+
+    const connecting = client.connect();
+    expect(clock.runNext()).toBe(config.approvalTimeoutMs);
+
+    await expect(connecting).rejects.toMatchObject({
+      code: "approval-timeout",
+      retryable: true,
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("oversized approval response를 본문 적재 전에 거부한다", async () => {
+    let bodyRead = false;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        "content-type": "application/json",
+        "content-length": String(1024 * 1024 + 1),
+      }),
+      body: {
+        cancel: async () => undefined,
+        getReader() {
+          bodyRead = true;
+          throw new Error("body must not be read");
+        },
+      },
+    } as unknown as Response)) as unknown as typeof fetch;
+    const { client, sockets } = testHarness({ fetchImpl });
+
+    await expect(client.connect()).rejects.toMatchObject({
+      code: "approval-response-too-large",
+      retryable: false,
+    });
+    expect(bodyRead).toBe(false);
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("disconnect during approval backoff prevents another external request", async () => {
+    let releaseSleep!: () => void;
+    const sleepImpl = vi.fn(() => new Promise<void>((resolve) => {
+      releaseSleep = resolve;
+    }));
+    const fetchImpl = vi.fn(async () => json({ error_code: "EGW00201" }, 503)) as unknown as typeof fetch;
+    const { client } = testHarness({ fetchImpl, sleepImpl });
+
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(sleepImpl).toHaveBeenCalledOnce());
+    client.disconnect();
+    releaseSleep();
+
+    await expect(connecting).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("gets an approval key, paces subscribe/unsubscribe frames, acknowledges subscriptions, and echoes PINGPONG", async () => {
@@ -461,6 +546,22 @@ describe("KisWebSocketClient", () => {
     }));
   });
 
+  it("closes an oversized market-data frame before JSON or field parsing", async () => {
+    const { client, sockets, events } = testHarness();
+    await client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+
+    socket.message("x".repeat(1024 * 1024 + 1));
+
+    expect(socket.closes).toContainEqual({ code: 1_009, reason: "message too big" });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "parse_error",
+      reason: "KIS WebSocket frame exceeded the configured byte limit.",
+    }));
+    expect(events.filter((event) => event.type === "execution" || event.type === "orderbook")).toHaveLength(0);
+  });
+
   it("reconnects with configured backoff, resubscribes, and ignores stale socket generations", async () => {
     const { client, clock, sockets, events } = testHarness();
     client.subscribe({ trId: "H0UNCNT0", symbol: "005930" });
@@ -553,5 +654,19 @@ describe("KisWebSocketClient", () => {
     const before = events.length;
     socket.message(dataFrame("H0STCNT0", executionValues()));
     expect(events).toHaveLength(before);
+  });
+
+  it("force-terminates a socket that is still connecting during shutdown", async () => {
+    const { client, sockets, clock } = testHarness();
+    await client.connect();
+    const socket = sockets[0]!;
+    expect(socket.readyState).toBe(0);
+
+    client.disconnect();
+
+    expect(socket.terminations).toBe(1);
+    expect(socket.closes).toHaveLength(0);
+    expect(client.connectionState).toBe("closed");
+    expect(clock.tasks.size).toBe(0);
   });
 });

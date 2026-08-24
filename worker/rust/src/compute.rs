@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::backtest;
@@ -45,6 +46,13 @@ fn array_artifact(artifact_type: &str, content: Value) -> OutputArtifact {
         content,
         row_count,
     }
+}
+
+fn truncated_array_clone(value: &Value, maximum_rows: usize) -> Value {
+    value.as_array().map_or_else(
+        || value.clone(),
+        |rows| Value::Array(rows.iter().take(maximum_rows).cloned().collect()),
+    )
 }
 
 fn artifact_with_row_count(
@@ -270,9 +278,8 @@ fn compute_backtest(
         .payload
         .get("simulation")
         .context("backtest payload.simulation must be an object")?;
-    let simulation_input: BacktestSimulationInput =
-        serde_json::from_value(simulation_value.clone())
-            .context("invalid backtest simulation input")?;
+    let simulation_input = BacktestSimulationInput::deserialize(simulation_value)
+        .context("invalid backtest simulation input")?;
     let simulation =
         serde_json::to_value(backtest::simulate_with_control(&simulation_input, control)?)?;
     checkpoint(control)?;
@@ -299,7 +306,7 @@ fn compute_technical_analysis(
         .payload
         .get("technical_analysis")
         .context("technical analysis payload.technical_analysis must be an object")?;
-    let request: TechnicalAnalysisRequest = serde_json::from_value(request_value.clone())
+    let request = TechnicalAnalysisRequest::deserialize(request_value)
         .context("invalid technical analysis request")?;
     let technical = analyze_technical_indicators(&request, control)?;
     checkpoint(control)?;
@@ -421,7 +428,7 @@ fn compute_scalping_analysis(
         .payload
         .get("scalping_analysis")
         .context("scalping analysis payload.scalping_analysis must be an object")?;
-    let request: ScalpingAnalysisRequest = serde_json::from_value(request_value.clone())
+    let request = ScalpingAnalysisRequest::deserialize(request_value)
         .context("invalid scalping analysis request")?;
     let analysis = analyze_scalping(&request, control)?;
     checkpoint(control)?;
@@ -430,16 +437,23 @@ fn compute_scalping_analysis(
         .iter()
         .map(|instrument| instrument.indicators.len())
         .sum::<usize>();
-    let signals = analysis
-        .instruments
-        .iter()
-        .flat_map(|instrument| {
+    let signals = || {
+        analysis.instruments.iter().flat_map(|instrument| {
             instrument
                 .signals
                 .iter()
                 .flat_map(|series| series.points.iter().flatten().chain(series.latest.iter()))
         })
-        .collect::<Vec<_>>();
+    };
+    let (signal_count, entry_candidate_count, hold_count, exit_candidate_count) =
+        signals().fold((0, 0, 0, 0), |counts, signal| {
+            (
+                counts.0 + 1,
+                counts.1 + usize::from(signal.status == AssistanceStatus::EntryCandidate),
+                counts.2 + usize::from(signal.status == AssistanceStatus::Hold),
+                counts.3 + usize::from(signal.status == AssistanceStatus::ExitCandidate),
+            )
+        });
     let summary = json!({
         "scalping_engine_version": analysis.scalping_engine_version,
         "indicator_engine_version": analysis.indicator_engine_version,
@@ -447,10 +461,10 @@ fn compute_scalping_analysis(
         "interval_minutes": analysis.interval_minutes,
         "instrument_count": analysis.instruments.len(),
         "indicator_calculation_count": indicator_count,
-        "signal_count": signals.len(),
-        "entry_candidate_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::EntryCandidate).count(),
-        "hold_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::Hold).count(),
-        "exit_candidate_count": signals.iter().filter(|signal| signal.status == AssistanceStatus::ExitCandidate).count(),
+        "signal_count": signal_count,
+        "entry_candidate_count": entry_candidate_count,
+        "hold_count": hold_count,
+        "exit_candidate_count": exit_candidate_count,
         "total_bar_count": analysis.diagnostics.total_bar_count,
     });
     let artifacts = if include_artifacts {
@@ -461,7 +475,10 @@ fn compute_scalping_analysis(
             .collect::<Vec<_>>();
         vec![
             array_artifact("technical-indicators", serde_json::to_value(indicators)?),
-            array_artifact("technical-signals", serde_json::to_value(signals)?),
+            array_artifact(
+                "technical-signals",
+                serde_json::to_value(signals().collect::<Vec<_>>())?,
+            ),
             array_artifact(
                 "technical-diagnostics",
                 serde_json::to_value(&analysis.diagnostics)?,
@@ -524,38 +541,21 @@ fn compute_optimization(
             .filter_map(Value::as_str)
             .map(str::to_owned),
     );
-    let candidates = output
-        .get("candidates")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
     let ledger_validated_candidates = output
         .get("ledgerValidatedCandidates")
         .cloned()
         .unwrap_or_else(|| json!([]));
-    let frontier = output
+    let pareto_count = output
         .get("paretoFrontier")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let regime_policy_artifact = output.get("regimePolicyArtifact").cloned();
-    let mut result = output.clone();
-    if let Some(object) = result.as_object_mut() {
-        object.remove("regimePolicyArtifact");
-        if let Some(values) = object.get_mut("candidates").and_then(Value::as_array_mut) {
-            values.truncate(20);
-        }
-        if let Some(values) = object
-            .get_mut("paretoFrontier")
-            .and_then(Value::as_array_mut)
-        {
-            values.truncate(100);
-        }
-    }
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
     let summary = json!({
         "best": best,
         "candidate_count": output.get("candidateCount").cloned().unwrap_or_else(|| json!(0)),
         "screening_candidate_count": output.get("screeningCandidateCount").cloned().unwrap_or_else(|| json!(0)),
         "baseline_candidate_count": output.get("baselineCandidateCount").cloned().unwrap_or_else(|| json!(0)),
-        "pareto_count": frontier.as_array().map(Vec::len).unwrap_or(0),
+        "pareto_count": pareto_count,
         "algorithm": output.get("algorithm").cloned().unwrap_or_else(|| json!("random_search")),
         "ledger_validation_requested_count": output.pointer("/ledgerValidation/selectedCount").cloned().unwrap_or_else(|| json!(0)),
         "ledger_validated_count": output.pointer("/ledgerValidation/completedCount").cloned().unwrap_or_else(|| json!(0)),
@@ -563,12 +563,39 @@ fn compute_optimization(
         "stages": {
             "screening": {
                 "candidateCount": output.get("screeningCandidateCount").cloned().unwrap_or_else(|| json!(0)),
-                "paretoCount": frontier.as_array().map(Vec::len).unwrap_or(0),
+                "paretoCount": pareto_count,
             },
             "ledgerValidation": output.get("ledgerValidation").cloned().unwrap_or_else(|| json!({"status": "not_requested"})),
             "regimePolicySearch": output.get("regimePolicySearch").cloned().unwrap_or_else(|| json!({"enabled": false, "status": "not_requested"})),
         },
     });
+    // Move the potentially large arrays out of the optimizer output before
+    // constructing the inline result. Only the documented previews are
+    // cloned back into the wire result; the complete values move to artifacts.
+    let mut result = output;
+    let (candidates, frontier, regime_policy_artifact) =
+        if let Some(object) = result.as_object_mut() {
+            let candidates = object.get_mut("candidates").map(Value::take);
+            if let Some(candidates) = &candidates {
+                object.insert(
+                    "candidates".to_owned(),
+                    truncated_array_clone(candidates, 20),
+                );
+            }
+            let frontier = object.get_mut("paretoFrontier").map(Value::take);
+            if let Some(frontier) = &frontier {
+                object.insert(
+                    "paretoFrontier".to_owned(),
+                    truncated_array_clone(frontier, 100),
+                );
+            }
+            let regime_policy_artifact = object.remove("regimePolicyArtifact");
+            (candidates, frontier, regime_policy_artifact)
+        } else {
+            (None, None, None)
+        };
+    let candidates = candidates.unwrap_or_else(|| json!([]));
+    let frontier = frontier.unwrap_or_else(|| json!([]));
     let artifacts = if include_artifacts {
         let mut artifacts = vec![
             array_artifact("candidates", candidates.clone()),
@@ -591,20 +618,18 @@ fn compute_technical_strategy(
     include_artifacts: bool,
     control: Option<&dyn ComputeControl>,
 ) -> Result<WorkerOutput> {
-    let technical_request: TechnicalAnalysisRequest = serde_json::from_value(
+    let technical_request = TechnicalAnalysisRequest::deserialize(
         input
             .payload
             .get("technical_analysis")
-            .context("technical strategy payload.technical_analysis must be an object")?
-            .clone(),
+            .context("technical strategy payload.technical_analysis must be an object")?,
     )
     .context("invalid technical strategy technical_analysis input")?;
-    let strategy: TechnicalStrategyDefinition = serde_json::from_value(
+    let strategy = TechnicalStrategyDefinition::deserialize(
         input
             .payload
             .get("strategy")
-            .context("technical strategy payload.strategy must be an object")?
-            .clone(),
+            .context("technical strategy payload.strategy must be an object")?,
     )
     .context("invalid technical strategy definition")?;
     let simulation = input
@@ -612,7 +637,7 @@ fn compute_technical_strategy(
         .get("simulation")
         .filter(|value| !value.is_null())
         .map(|value| {
-            serde_json::from_value::<BacktestSimulationInput>(value.clone())
+            BacktestSimulationInput::deserialize(value)
                 .context("invalid technical strategy simulation input")
         })
         .transpose()?;
@@ -634,8 +659,7 @@ fn compute_technical_strategy(
         .get("safe_trade_dates")
         .filter(|value| !value.is_null())
         .map(|value| {
-            serde_json::from_value::<Vec<String>>(value.clone())
-                .context("invalid technical strategy safe_trade_dates")
+            Vec::<String>::deserialize(value).context("invalid technical strategy safe_trade_dates")
         })
         .transpose()?;
     let evaluation_start_date = input
@@ -643,8 +667,7 @@ fn compute_technical_strategy(
         .get("evaluation_start_date")
         .filter(|value| !value.is_null())
         .map(|value| {
-            serde_json::from_value::<String>(value.clone())
-                .context("invalid technical strategy evaluation_start_date")
+            String::deserialize(value).context("invalid technical strategy evaluation_start_date")
         })
         .transpose()?;
     let evaluation_end_date = input
@@ -652,8 +675,7 @@ fn compute_technical_strategy(
         .get("evaluation_end_date")
         .filter(|value| !value.is_null())
         .map(|value| {
-            serde_json::from_value::<String>(value.clone())
-                .context("invalid technical strategy evaluation_end_date")
+            String::deserialize(value).context("invalid technical strategy evaluation_end_date")
         })
         .transpose()?;
     let TechnicalStrategyRunResult {
@@ -2067,7 +2089,7 @@ mod tests {
             payload: json!({
                 "optimization": {
                     "priceSeries": [return_series("A", 0.0, 40), return_series("B", 1.0, 40)],
-                    "candidateBudget": 8,
+                    "candidateBudget": 32,
                     "minimumSamples": 10,
                     "seed": 42,
                 }
@@ -2075,6 +2097,45 @@ mod tests {
             projection: Default::default(),
         };
         let output = compute(&input).unwrap();
+        let result_candidates = output.result.as_ref().unwrap()["candidates"]
+            .as_array()
+            .unwrap();
+        let full_candidates = output
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|artifact| artifact.artifact_type == "candidates")
+            .unwrap()
+            .content
+            .as_array()
+            .unwrap();
+        assert!(full_candidates.len() > 20);
+        assert_eq!(result_candidates.len(), 20);
+        assert_eq!(
+            full_candidates.len() as u64,
+            output.summary.as_ref().unwrap()["candidate_count"]
+                .as_u64()
+                .unwrap(),
+        );
+        assert_eq!(
+            output
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact.artifact_type == "screening-candidates")
+                .unwrap()
+                .content,
+            output
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact.artifact_type == "candidates")
+                .unwrap()
+                .content,
+        );
         let artifact_types = output
             .artifacts
             .as_ref()

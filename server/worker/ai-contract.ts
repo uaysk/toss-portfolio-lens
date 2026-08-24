@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 
 export const SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v2" as const;
@@ -1079,8 +1080,8 @@ export const AiResponseSchema = z.object({
         message: "top-level model identity must match the independent model lane",
       });
     }
-    if (JSON.stringify(response.model) !== JSON.stringify(independentRun.model)
-      || JSON.stringify(response.series) !== JSON.stringify(independentRun.raw_series)
+    if (!isDeepStrictEqual(response.model, independentRun.model)
+      || !isDeepStrictEqual(response.series, independentRun.raw_series)
       || response.status !== independentRun.status) {
       context.addIssue({
         code: "custom",

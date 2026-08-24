@@ -86,6 +86,28 @@ describe("production CI release entrypoint", () => {
     assert.doesNotMatch(source, /fincast-worker|chronos2-worker|nvidia|cuda/iu);
   });
 
+  it("makes the published runtime depend on the production module smoke check", () => {
+    const dockerfile = readFileSync("Dockerfile", "utf8");
+    const runtimeSmoke = readFileSync("scripts/verify-runtime-modules.mjs", "utf8");
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+    assert.match(dockerfile, /find dist\/server -type f -name '\*\.d\.ts' -delete/u);
+    assert.match(dockerfile, /^RUN npm prune --omit=dev --no-audit --no-fund \\/mu);
+    assert.match(dockerfile, /-name '\*\.d\.mts' -o -name '\*\.d\.cts'/u);
+    assert.match(dockerfile, /apk add --no-cache ca-certificates icu-data-full libstdc\+\+ nodejs/u);
+    assert.match(dockerfile, /process\.versions\.node\.split\("\."\)\[0\].*= "22"/u);
+    assert.doesNotMatch(dockerfile, /^FROM deps AS node-runtime$/mu);
+    assert.doesNotMatch(dockerfile, /binutils|strip --strip-unneeded/u);
+    assert.doesNotMatch(dockerfile, /^COPY --from=node-runtime/mu);
+    assert.match(dockerfile, /^FROM runtime-base AS runtime-verify$/mu);
+    assert.match(dockerfile, /^RUN node scripts\/verify-runtime-modules\.mjs$/mu);
+    assert.match(dockerfile, /^FROM runtime-verify AS runtime$/mu);
+    assert.doesNotMatch(dockerfile, /^FROM runtime-base AS runtime$/mu);
+    for (const dependency of Object.keys(packageJson.dependencies)) {
+      const escaped = dependency.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      assert.match(runtimeSmoke, new RegExp(`["']${escaped}(?:/[^"']*)?["']`, "u"));
+    }
+  });
+
   it("wires a separate protected-main preflight without a CI-level Docker config", () => {
     const source = readFileSync(".gitlab-ci.yml", "utf8");
     assert.match(source, /\n  - release-preflight\n  - release\n/u);

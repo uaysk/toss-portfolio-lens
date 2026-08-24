@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { assertClientBuildFresh } from "./client-build.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const contexts = [512, 1024, 2048, 4096, 8192];
@@ -172,6 +173,7 @@ async function stop(child) {
 let preview;
 let browser;
 try {
+  await assertClientBuildFresh(projectRoot);
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];

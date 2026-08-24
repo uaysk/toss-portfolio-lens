@@ -384,29 +384,158 @@ describe("mergeRecoveredSessionCloseRows", () => {
 describe("ScalpingLiveRuntime", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("retains the newest replay events in ascending id order at capacity", () => {
+    const socket = new FakeSocket();
+    const runtime = new ScalpingLiveRuntime(socket as never, {
+      getCurrentDayMinutes: vi.fn(),
+      getOverseasMinutes: vi.fn(),
+    }, {
+      ingest: vi.fn().mockReturnValue({ accepted: true, updates: [] }),
+      advanceWatermark: vi.fn().mockReturnValue([]),
+      recentFinalBars: vi.fn().mockReturnValue([]),
+    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+      replayEventLimit: 3,
+      disconnectWhenIdle: false,
+      watermarkAdvanceMs: 60_000,
+      recoveryMaximumRequests: 3,
+      recoveryBarLimit: 500,
+      now: () => Date.parse("2026-07-21T00:00:10.000Z"),
+    });
+
+    for (let index = 0; index < 5; index += 1) {
+      socket.emit({
+        type: "execution",
+        trId: "H0UNCNT0",
+        market: "INTEGRATED",
+        marketCountry: "KR",
+        symbol: "005930",
+        eventId: `trade-${index}`,
+        providerTimestamp: `2026-07-21T09:00:0${index}+09:00`,
+        receivedAt: `2026-07-21T00:00:0${index}.000Z`,
+        sessionDate: "20260721",
+        tradeTime: `09000${index}`,
+        price: 100 + index,
+        executionVolume: 1,
+        accumulatedVolume: index + 1,
+        accumulatedTradingAmount: (index + 1) * 100,
+        askPrice1: 101 + index,
+        bidPrice1: 99 + index,
+        tradingHalted: false,
+      });
+    }
+
+    const replay = runtime.eventsAfter(0);
+    expect(replay).toHaveLength(3);
+    expect(replay.map(({ id }) => id)).toEqual([3, 4, 5]);
+    expect(replay.map(({ payload }) => (payload as { eventId: string }).eventId))
+      .toEqual(["trade-2", "trade-3", "trade-4"]);
+    runtime.close();
+  });
+
   it("reference-counts two provider subscriptions per symbol", async () => {
     const socket = new FakeSocket();
+    const aggregator = {
+      ingest: vi.fn().mockReturnValue({ accepted: true, updates: [] }),
+      advanceWatermark: vi.fn().mockReturnValue([]),
+      recentFinalBars: vi.fn().mockReturnValue([]),
+      releaseSymbol: vi.fn(),
+    };
     const runtime = new ScalpingLiveRuntime(socket as never, {
       getCurrentDayMinutes: vi.fn().mockRejectedValue(new Error("offline")),
       getOverseasMinutes: vi.fn(),
-    }, {
-      ingest: vi.fn(), advanceWatermark: vi.fn(), recentFinalBars: vi.fn(),
-    } as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
+    }, aggregator as never, { putBars: vi.fn(), listBars: vi.fn() } as never, {
       replayEventLimit: 10,
       disconnectWhenIdle: true,
       watermarkAdvanceMs: 60_000,
       recoveryMaximumRequests: 3,
       recoveryBarLimit: 500,
-      now: () => Date.parse("2026-07-21T01:00:00.000Z"),
+      now: () => Date.parse("2026-07-21T00:00:11.000Z"),
     });
     const first = await runtime.retain(["005930"]);
     const second = await runtime.retain(["005930"]);
     expect(socket.subscriptionCount).toBe(2);
+    const trade = {
+      type: "execution" as const,
+      trId: "H0UNCNT0" as const,
+      market: "INTEGRATED" as const,
+      marketCountry: "KR" as const,
+      symbol: "005930",
+      eventId: "before-release",
+      providerTimestamp: "2026-07-21T09:00:10+09:00",
+      receivedAt: "2026-07-21T00:00:10.000Z",
+      sessionDate: "20260721",
+      tradeTime: "090010",
+      price: 100,
+      executionVolume: 1,
+      accumulatedVolume: 1,
+      accumulatedTradingAmount: 100,
+      askPrice1: 101,
+      bidPrice1: 99,
+      tradingHalted: true,
+    };
+    socket.emit(trade);
+    socket.emit({
+      type: "orderbook",
+      trId: "H0UNASP0",
+      market: "INTEGRATED",
+      marketCountry: "KR",
+      symbol: "005930",
+      providerTimestamp: "2026-07-21T09:00:10+09:00",
+      receivedAt: "2026-07-21T00:00:10.000Z",
+      sessionDate: "20260721",
+      quoteTime: "090010",
+      timestampDateSource: "received-session-date",
+      depth: "ten_level",
+      asks: [{ level: 1, price: 101, quantity: 1 }],
+      bids: [{ level: 1, price: 99, quantity: 1 }],
+      totalAskQuantity: 1,
+      totalBidQuantity: 1,
+    });
+    expect(runtime.snapshot("005930")).toMatchObject({
+      trade: { price: 100 },
+      orderbook: { asks: [{ price: 101 }] },
+      tradingHalted: true,
+    });
     first();
     expect(socket.subscriptionCount).toBe(2);
+    expect(aggregator.releaseSymbol).not.toHaveBeenCalled();
+    expect(runtime.snapshot("005930").trade).toMatchObject({ price: 100 });
     second();
     expect(socket.subscriptionCount).toBe(0);
+    expect(aggregator.releaseSymbol).toHaveBeenCalledOnce();
+    expect(aggregator.releaseSymbol).toHaveBeenCalledWith("005930", "KR");
+    expect(runtime.snapshot("005930")).toEqual({});
     expect(runtime.state.connection).toBe("idle");
+
+    // Provider frames already queued at unsubscribe must not recreate state
+    // for an unowned symbol.
+    socket.emit({ ...trade, eventId: "after-release", price: 103 });
+    socket.emit({
+      type: "orderbook",
+      trId: "H0UNASP0",
+      market: "INTEGRATED",
+      marketCountry: "KR",
+      symbol: "005930",
+      providerTimestamp: "2026-07-21T09:00:11+09:00",
+      receivedAt: "2026-07-21T00:00:11.000Z",
+      sessionDate: "20260721",
+      quoteTime: "090011",
+      timestampDateSource: "received-session-date",
+      depth: "ten_level",
+      asks: [{ level: 1, price: 104, quantity: 1 }],
+      bids: [{ level: 1, price: 102, quantity: 1 }],
+      totalAskQuantity: 1,
+      totalBidQuantity: 1,
+    });
+    expect(runtime.snapshot("005930")).toEqual({});
+    expect(aggregator.ingest).toHaveBeenCalledOnce();
+
+    const resubscribed = await runtime.retain(["005930"]);
+    socket.emit({ ...trade, eventId: "after-resubscribe", price: 105 });
+    expect(runtime.snapshot("005930").trade).toMatchObject({ price: 105 });
+    expect(aggregator.ingest).toHaveBeenCalledTimes(2);
+    resubscribed();
+    expect(aggregator.releaseSymbol).toHaveBeenCalledTimes(2);
     runtime.close();
   });
 

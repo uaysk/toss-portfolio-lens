@@ -41,15 +41,68 @@ type SseEntry = {
   close: () => void;
 };
 
+const DEFAULT_MAXIMUM_SSE_CONNECTIONS = 256;
+const MAXIMUM_SSE_CONNECTIONS = 10_000;
+
+export type SseConnectionTrackerOptions = {
+  maximumConnections?: number;
+  logger?: LifecycleLogger;
+};
+
+export type SseConnectionTelemetry = {
+  capacity: number;
+  activeConnections: number;
+  acceptedConnectionsTotal: number;
+  rejectedConnectionsTotal: number;
+  closing: boolean;
+};
+
+export class SseConnectionBusyError extends Error {
+  readonly code = "SSE_CONNECTION_BUSY";
+  readonly retryable = true;
+
+  constructor(readonly capacity: number) {
+    super("The server-wide SSE connection limit has been reached.");
+    this.name = "SseConnectionBusyError";
+  }
+}
+
+function isLifecycleLogger(
+  value: LifecycleLogger | SseConnectionTrackerOptions,
+): value is LifecycleLogger {
+  return typeof (value as Partial<LifecycleLogger>).info === "function"
+    && typeof (value as Partial<LifecycleLogger>).warn === "function"
+    && typeof (value as Partial<LifecycleLogger>).error === "function";
+}
+
 export class SseConnectionTracker {
   private readonly entries = new Set<SseEntry>();
+  private readonly logger: LifecycleLogger;
+  private readonly maximumConnections: number;
   private closing = false;
+  private acceptedConnectionsTotal = 0;
+  private rejectedConnectionsTotal = 0;
 
-  constructor(private readonly logger: LifecycleLogger = console) {}
+  constructor(optionsOrLogger: SseConnectionTrackerOptions | LifecycleLogger = {}) {
+    const options = isLifecycleLogger(optionsOrLogger)
+      ? { logger: optionsOrLogger }
+      : optionsOrLogger;
+    this.maximumConnections = options.maximumConnections ?? DEFAULT_MAXIMUM_SSE_CONNECTIONS;
+    if (
+      !Number.isSafeInteger(this.maximumConnections)
+      || this.maximumConnections < 1
+      || this.maximumConnections > MAXIMUM_SSE_CONNECTIONS
+    ) {
+      throw new Error(
+        `SSE connection limit must be an integer in 1..=${MAXIMUM_SSE_CONNECTIONS}.`,
+      );
+    }
+    this.logger = options.logger ?? console;
+  }
 
   track(response: TrackedSseResponse, cleanup: () => void): () => void {
     let active = true;
-    const onClose = () => unregister();
+    const onClose = () => entry.close();
     const unregister = () => {
       if (!active) return;
       active = false;
@@ -82,12 +135,23 @@ export class SseConnectionTracker {
       },
     };
 
-    if (this.closing || response.writableEnded || response.destroyed) {
+    if (response.writableEnded || response.destroyed) {
       entry.close();
       return () => undefined;
     }
+    if (this.closing || this.entries.size >= this.maximumConnections) {
+      this.rejectedConnectionsTotal += 1;
+      throw new SseConnectionBusyError(this.maximumConnections);
+    }
     this.entries.add(entry);
-    response.once("close", onClose);
+    try {
+      response.once("close", onClose);
+    } catch (error) {
+      active = false;
+      this.entries.delete(entry);
+      throw error;
+    }
+    this.acceptedConnectionsTotal += 1;
     return unregister;
   }
 
@@ -98,6 +162,16 @@ export class SseConnectionTracker {
 
   get size(): number {
     return this.entries.size;
+  }
+
+  get telemetry(): SseConnectionTelemetry {
+    return {
+      capacity: this.maximumConnections,
+      activeConnections: this.entries.size,
+      acceptedConnectionsTotal: this.acceptedConnectionsTotal,
+      rejectedConnectionsTotal: this.rejectedConnectionsTotal,
+      closing: this.closing,
+    };
   }
 }
 
@@ -147,6 +221,12 @@ export class GracefulLifecycle {
       this.signalHandlersInstalled = true;
     }
     return () => this.removeSignalHandlers();
+  }
+
+  /** Releases listeners when application assembly fails before this lifecycle owns shutdown. */
+  dispose(): void {
+    this.options.server.off("connection", this.onConnection);
+    this.removeSignalHandlers();
   }
 
   shutdown(reason: string): Promise<void> {
@@ -209,8 +289,7 @@ export class GracefulLifecycle {
       for (const socket of this.sockets) socket.destroy();
     }
 
-    this.options.server.off("connection", this.onConnection);
-    this.removeSignalHandlers();
+    this.dispose();
     const finalization = (async () => {
       if (shutdownStartSettled) {
         try {

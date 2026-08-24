@@ -67,6 +67,10 @@ type VersionRow = {
   created_at: number | string;
 };
 
+export type PresetRepositoryInitializeOptions = {
+  migrationsAlreadyApplied?: boolean;
+};
+
 export class PresetRevisionConflictError extends Error {
   constructor(
     readonly presetId: string,
@@ -144,8 +148,8 @@ function snapshot(value: PortfolioPresetRecord): string {
 export class PresetRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
-  async initialize(): Promise<void> {
-    await applyPortfolioMigrations(this.database);
+  async initialize(options: PresetRepositoryInitializeOptions = {}): Promise<void> {
+    if (!options.migrationsAlreadyApplied) await applyPortfolioMigrations(this.database);
   }
 
   async create(input: {

@@ -59,10 +59,11 @@ credential이나 환경변수 값을 출력하지 않는다.
 
 ### 단일 cache writer
 
-`.node-job`은 npm download cache만 `policy: pull`로 읽는다. `node-static`만
-`node-npm-v2`와 별도 `node-build-v2` cache를 `pull-push`한다. 따라서 다섯 개의
-test/integration consumer가 TypeScript build output을 복원하거나 같은 cache를
-다시 업로드하지 않는다. `node_modules`는 cache/artifact로 저장하지 않는다.
+`.node-job`은 npm download cache만 `policy: pull`로 읽는다. 보호된 ref의 기본 브랜치·tag·schedule에서
+실행되는 `node-static`만 `node-npm-v3`와 별도 `node-build-v3` cache를 `pull-push`하며, MR·feature와
+비보호 tag·schedule의 같은 job은 pull-only다. 따라서 다섯 개의 test/integration consumer가 TypeScript
+build output을 복원하거나 같은 cache를 다시 업로드하지 않고, 비보호 ref가 검증 cache를 덮어쓰지도 않는다.
+`node_modules`는 cache/artifact로 저장하지 않는다.
 
 새 cache key를 도입할 때는 lockfile을 key에 포함하고, writer를 한 job으로 명시한다.
 cold cache와 lockfile 변경 cache를 각각 검증한다.
@@ -78,6 +79,18 @@ byte-for-byte 결과를 비교한다. `scripts/verify-qualification-tools.test.m
 
 재현성 gate가 통과한 뒤에만 `qualification-tools`를 `SAST_EXCLUDED_PATHS`에 둔다.
 canonical TypeScript는 계속 Semgrep 대상이고, Secret Detection은 변경하지 않는다.
+
+### 검증된 client bundle 재사용
+
+`node-static`이 만든 `dist/client`를 `ui-regression`의 명시적 `needs:artifacts` 입력으로 사용한다. 현재
+production client build는 8.00초, peak RSS 677,240KB였고 전달 artifact는 556,200 bytes이므로, 작은
+전송으로 UI lane의 두 번째 Vite compilation과 약 661MiB peak를 제거한다. 두 job은 같은 code-sensitive
+rules를 사용해 producer 없이 consumer만 실행되는 조합을 막고, UI job은 `dist/client/index.html` 존재를
+fail-closed로 확인한다.
+
+Python AI worker는 별도 job에서 lock 기반 all-extras 환경을 CPU PyTorch backend로 한 번 설치한 뒤 Ruff와
+250개 Pytest를 `--no-sync`로 실행한다. GPU lock의 수 GiB CUDA wheel은 일반 CI에 설치하지 않으며, 해당
+job도 memory-heavy resource group으로 직렬화한다.
 
 ### 불필요한 checkout·작은 artifact·변경 경로
 
@@ -143,7 +156,7 @@ database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 
   artifact는 약 10 KB 수준으로 줄어든다. shell이 실패하면 삭제 단계에 도달하지 않아
   debugging evidence가 보존된다.
 - Rust는 registry/git과 `target` cache를 별도 key로 분리하고, MR/feature에서는
-  `policy: pull`, default branch/tag/schedule에서만 `pull-push` writer를 사용한다.
+  `policy: pull`, protected default branch/tag/schedule에서만 `pull-push` writer를 사용한다.
   `CARGO_INCREMENTAL=0`으로 branch마다 누적 incremental object를 만들지 않는다.
   lockfile은 두 key 모두에 포함한다.
 - Semgrep analyzer에는 `SAST_SCANNER_ALLOWED_CLI_OPTS=--timeout 5`를 적용한다.
@@ -157,6 +170,26 @@ database가 동시에 필요한 checkpoint fixture는 기존 per-test 수명을 
   확인하고 `docker_root_directory`와 available KiB를 credential 없이 preflight JSON에
   기록한다. 공유 host에서 `docker system prune`를 자동 실행하지 않는다. threshold
   미달 시 cleanup 대상과 release lock 상태를 운영자가 확인한 뒤 재시도한다.
+
+### Production 런타임 이미지 축소
+
+2026-08-24 로컬 후보 빌드에서는 official Node builder의 실행 파일을 별도 stage에서
+복사하던 구조를 제거하고, digest-pinned Alpine runtime에 `nodejs`, `libstdc++`,
+`icu-data-full`, `ca-certificates`만 설치했다. 저장소 패키지 버전이 이동할 수 있으므로
+빌드 중 Node major가 22인지 fail-closed하게 검사하고, runtime stage에서 production
+dependency 전체 import smoke를 통과해야만 최종 이미지를 만들도록 했다. 전체 ICU를
+유지해 `ko-KR`, `en-CA`, `en-US` locale과 서울 시간대 포맷도 확인했다.
+
+| 로컬 이미지 | 압축 전 image size | 비교 |
+|---|---:|---:|
+| 이전 official Node 복사 후보 | 143,266,498 bytes | 기준 |
+| Alpine `nodejs` 후보 | 126,909,569 bytes | 16,356,929 bytes/11.42% 감소 |
+| 현재 Harbor production | 160,927,293 bytes | 후보가 34,017,724 bytes/21.14% 작음 |
+
+후보 이미지는 UID 10001 non-root, Node 22.23.2, production module import와 locale
+smoke를 통과했다. 이 값은 로컬 측정이며 배포 완료를 뜻하지 않는다. release 승격 시에는
+기존과 동일하게 immutable SHA, Trivy Critical/High 0, health SHA와 rollback gate를
+통과한 실제 registry digest 크기를 다시 기록한다.
 
 ### 실제 최적화 pipeline 검증
 
@@ -247,8 +280,6 @@ Medium finding 수는 analyzer timeout 변동으로 #62=44, #64=42, #65=45였으
 
 다음 항목은 첫 slice와 분리해 측정한다.
 
-- `node-static` client bundle을 UI job에 전달하는 artifact/cache 실험: 전송 bytes와
-  시간을 build 6~7초 절감분과 비교한다.
 - Rust target cache의 실제 compressed size와 warm compile 시간을 main writer에서
   재측정한다. warm Rust job이 기존 대비 5% 넘게 느려지거나 cache archive가 줄지
   않으면 `CARGO_INCREMENTAL=0` 또는 target cache split을 되돌린다.

@@ -46,6 +46,42 @@ describe("strict production environment", () => {
     expect(() => loadConfig()).toThrow("POSTGRES_HOST");
   });
 
+  it("bounds the configurable server-wide SSE connection limit", () => {
+    expect(loadConfig().sseMaximumConnections).toBe(256);
+
+    process.env.SSE_MAX_CONNECTIONS = "1024";
+    expect(loadConfig().sseMaximumConnections).toBe(1_024);
+
+    process.env.SSE_MAX_CONNECTIONS = "0";
+    expect(() => loadConfig()).toThrow("SSE_MAX_CONNECTIONS는 1~10000");
+
+    process.env.SSE_MAX_CONNECTIONS = "10001";
+    expect(() => loadConfig()).toThrow("SSE_MAX_CONNECTIONS는 1~10000");
+  });
+
+  it("accepts only the declared single web replica topology", () => {
+    expect(loadConfig().appReplicaCount).toBe(1);
+
+    process.env.APP_REPLICA_COUNT = " 1 ";
+    expect(loadConfig().appReplicaCount).toBe(1);
+
+    for (const value of ["0", "2", "many"]) {
+      process.env.APP_REPLICA_COUNT = value;
+      expect(() => loadConfig()).toThrow("APP_REPLICA_COUNT");
+    }
+  });
+
+  it("bounds S3 report storage requests", () => {
+    process.env.S3_BUCKET = "reports";
+    expect(loadConfig().reportStorage).toMatchObject({ kind: "s3", timeoutMs: 30_000 });
+
+    process.env.S3_TIMEOUT_MS = "180000";
+    expect(loadConfig().reportStorage).toMatchObject({ kind: "s3", timeoutMs: 180_000 });
+
+    process.env.S3_TIMEOUT_MS = "4999";
+    expect(() => loadConfig()).toThrow("S3_TIMEOUT_MS는 5000~180000");
+  });
+
   it("accepts a canonical POSTGRES_URL and rejects non-PostgreSQL URLs", () => {
     delete process.env.POSTGRES_HOST;
     delete process.env.POSTGRES_PORT;

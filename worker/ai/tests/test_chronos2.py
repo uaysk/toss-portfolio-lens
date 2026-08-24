@@ -319,6 +319,48 @@ def test_chronos2_adapter_preserves_720_step_output_without_truncation() -> None
     assert tuple(prediction.close_quantiles) == (5, 15, 30, 60)
 
 
+def test_chronos2_adapter_materializes_only_fixed_horizons_on_cpu() -> None:
+    selected_horizon_indices: list[tuple[int, ...]] = []
+
+    class TrackingPrediction:
+        shape = (1, len(CHRONOS2_NATIVE_QUANTILES), 240)
+
+        def __getitem__(self, key: object) -> torch.Tensor:
+            task_slice, quantile_slice, horizon_indices = key  # type: ignore[misc]
+            assert task_slice == slice(None)
+            assert quantile_slice == slice(None)
+            selected_horizon_indices.append(tuple(horizon_indices))
+            values = torch.arange(
+                len(CHRONOS2_NATIVE_QUANTILES),
+                dtype=torch.float32,
+            )
+            return values[None, :, None].expand(1, -1, len(horizon_indices)).clone()
+
+    class TrackingPipeline:
+        def predict(self, _inputs: object, **kwargs: object) -> list[TrackingPrediction]:
+            assert kwargs["prediction_length"] == 240
+            return [TrackingPrediction()]
+
+    adapter = object.__new__(Chronos2Adapter)
+    adapter._runtime = RuntimeDevice(
+        "cpu",
+        SimpleNamespace(
+            float32=torch.float32,
+            inference_mode=lambda: nullcontext(),
+        ),
+    )
+    adapter._pipeline = TrackingPipeline()
+    adapter._profile = "close_only"
+    adapter._batch_size = 1
+    adapter._settings = SimpleNamespace()
+
+    prediction = adapter.predict_batch([_series(candle_seconds=15)], seed=123)[0]
+
+    assert selected_horizon_indices == [(19, 59, 119, 239)]
+    assert prediction.close_quantiles is not None
+    assert tuple(prediction.close_quantiles) == (5, 15, 30, 60)
+
+
 def test_chronos2_adapter_reuses_only_the_active_cuda_graph_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

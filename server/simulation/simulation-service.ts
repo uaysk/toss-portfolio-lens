@@ -927,6 +927,7 @@ type ActiveSession = SimulationRuntimeHandles & {
   lastArtifactPersistedAtMs?: number;
   analysisRunning: boolean;
   persistenceTail: Promise<void>;
+  progressTask?: Promise<void>;
   checkpoint?: SimulationCheckpointSession<unknown, SimulationCheckpointScalarState>;
   checkpointCursor?: SimulationCheckpointCursor;
   projectionArtifactsInitialized?: boolean;
@@ -956,6 +957,18 @@ function executionSymbols(session: ActiveSession): string[] {
   ];
 }
 
+const NEW_YORK_HOUR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+const NEW_YORK_HOUR_MINUTE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
 function retainedSymbols(session: ActiveSession): string[] {
   return Array.from(new Set([
     ...selectedSymbols(session),
@@ -969,6 +982,7 @@ function pairReturnHistory(
   originAt: string,
 ): PairReturnObservation[] {
   if (!session.pair) return [];
+  const originTimestamp = Date.parse(originAt);
   const required = [
     session.pair.catalog.modelTargetSymbol,
     session.pair.catalog.bull.executionSymbol,
@@ -981,7 +995,7 @@ function pairReturnHistory(
       (chart?.bars ?? [])
         .filter((bar) => (
           bar.status === "final"
-          && Date.parse(bar.timestamp) < Date.parse(originAt)
+          && Date.parse(bar.timestamp) < originTimestamp
           && Number.isFinite(bar.close)
           && bar.close > 0
         ))
@@ -1004,11 +1018,7 @@ function pairReturnHistory(
       targetReturn: returns[0]!,
       bullReturn: returns[1]!,
       bearReturn: returns[2]!,
-      timeOfDayBucket: new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/New_York",
-        hour: "2-digit",
-        hourCycle: "h23",
-      }).format(new Date(observedAt)),
+      timeOfDayBucket: NEW_YORK_HOUR_FORMATTER.format(new Date(observedAt)),
       volatilityRegime: absoluteTarget >= 0.004
         ? "high"
         : absoluteTarget <= 0.001 ? "low" : "normal",
@@ -1043,12 +1053,7 @@ function newYorkSessionMinutes(value: string): {
   if (pairSessionAt(value) !== "regular") {
     return { minutesFromOpen: null, minutesToClose: null };
   }
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(value));
+  const parts = NEW_YORK_HOUR_MINUTE_FORMATTER.formatToParts(new Date(value));
   const hour = Number(parts.find((part) => part.type === "hour")?.value);
   const minute = Number(parts.find((part) => part.type === "minute")?.value);
   if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
@@ -1901,7 +1906,7 @@ export class AiTradingSimulationService {
   private async replayedCheckpointState(runId: string): Promise<UnknownRecord | undefined> {
     if (!this.checkpoints) return undefined;
     try {
-      return record((await this.checkpoints.replay<UnknownRecord>(runId))?.state);
+      return record((await this.checkpoints.replayState<UnknownRecord>(runId))?.state);
     } catch (error) {
       console.warn(
         `[simulation] v2 checkpoint replay 실패 (${runId}):`,
@@ -3209,11 +3214,7 @@ export class AiTradingSimulationService {
     const mappingHistory = isUnifiedEtf
       ? pairReturnHistory(session, originForMapping)
       : [];
-    const timeOfDayBucket = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      hourCycle: "h23",
-    }).format(new Date(originForMapping));
+    const timeOfDayBucket = NEW_YORK_HOUR_FORMATTER.format(new Date(originForMapping));
     const volatilityRegime = mappingHistory.at(-1)?.volatilityRegime ?? "normal";
     const mappedCandidates = normalizedCandidates.map((candidate) => {
       const model = candidate.models.chronos2;
@@ -4263,7 +4264,7 @@ export class AiTradingSimulationService {
   }
 
   private queueProgress(session: ActiveSession): void {
-    if (this.closed || session.phase !== "running") return;
+    if (this.closed || session.phase !== "running" || session.progressTask) return;
     const task = this.progress(session).catch((error) => {
       if (session.phase === "running") {
         this.warn(
@@ -4272,8 +4273,12 @@ export class AiTradingSimulationService {
         );
       }
     });
+    session.progressTask = task;
     this.progressTasks.add(task);
-    void task.finally(() => this.progressTasks.delete(task));
+    void task.finally(() => {
+      if (session.progressTask === task) session.progressTask = undefined;
+      this.progressTasks.delete(task);
+    });
   }
 
   private snapshot(session: ActiveSession) {

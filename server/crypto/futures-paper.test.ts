@@ -588,6 +588,28 @@ describe("futures paper execution and risk", () => {
     expect(() => createConfiguredFuturesExecution({ mode: "live" })).toThrow("paper-only");
   });
 
+  it("releases paper order identity state by terminal run without touching other runs", async () => {
+    const execution = createConfiguredFuturesExecution();
+    await execution.submit(request);
+    await execution.submit({
+      ...request,
+      runId: "run-2",
+      clientOrderId: "order-2",
+    });
+    expect(await execution.reconcileUnknown("order-1", "BTCUSDT"))
+      .toMatchObject({ status: "ACCEPTED" });
+    expect(await execution.reconcileUnknown("order-2", "BTCUSDT"))
+      .toMatchObject({ status: "ACCEPTED" });
+
+    await execution.releaseRun?.("run-1");
+
+    expect(await execution.reconcileUnknown("order-1", "BTCUSDT"))
+      .toMatchObject({ status: "UNKNOWN" });
+    expect(await execution.reconcileUnknown("order-2", "BTCUSDT"))
+      .toMatchObject({ status: "ACCEPTED" });
+    await expect(execution.submit(request)).resolves.toMatchObject({ status: "ACCEPTED" });
+  });
+
   it("maps the official SDK transport to isolated market orders without retries", async () => {
     const response = (value: unknown) => ({ data: vi.fn().mockResolvedValue(value) });
     const rest: BinanceOfficialRestApi = {

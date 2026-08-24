@@ -190,6 +190,51 @@ describe("RustComputeScheduler", () => {
     scheduler.close();
   });
 
+  it("unlinks cancelled middle and tail waiters while preserving neighbor FIFO", async () => {
+    const scheduler = new RustComputeScheduler({
+      maxActive: 1,
+      maxQueued: 4,
+      queueTimeoutMs: 1_000,
+    });
+    const gate = deferred();
+    const started: string[] = [];
+    const active = scheduler.schedule(async () => {
+      started.push("active");
+      await gate.promise;
+    });
+    const first = scheduler.schedule(async () => {
+      started.push("first");
+      return "first";
+    });
+    const middleController = new AbortController();
+    const middle = scheduler.schedule(async () => "middle", {
+      signal: middleController.signal,
+    });
+    const tailController = new AbortController();
+    const tail = scheduler.schedule(async () => "tail", {
+      signal: tailController.signal,
+    });
+
+    const middleCancellation = new Error("cancel middle");
+    const tailCancellation = new Error("cancel tail");
+    middleController.abort(middleCancellation);
+    tailController.abort(tailCancellation);
+    await expect(middle).rejects.toBe(middleCancellation);
+    await expect(tail).rejects.toBe(tailCancellation);
+
+    const last = scheduler.schedule(async () => {
+      started.push("last");
+      return "last";
+    });
+    expect(scheduler.snapshot().queued).toBe(2);
+
+    gate.resolve();
+    await active;
+    await expect(Promise.all([first, last])).resolves.toEqual(["first", "last"]);
+    expect(started).toEqual(["active", "first", "last"]);
+    scheduler.close();
+  });
+
   it("rejects queued work on close and bounds rolling telemetry samples", async () => {
     let now = 1_000;
     const scheduler = new RustComputeScheduler({
@@ -213,5 +258,21 @@ describe("RustComputeScheduler", () => {
     await first;
     now += 11;
     expect(scheduler.snapshot().queueDelayMs.sampleCount).toBe(0);
+  });
+
+  it("retains only the newest bounded queue-delay samples", async () => {
+    const scheduler = new RustComputeScheduler({
+      maxActive: 1,
+      maxTelemetrySamples: 2,
+      telemetryWindowMs: 1_000,
+      now: () => 100,
+    });
+
+    await scheduler.schedule(async () => 1);
+    await scheduler.schedule(async () => 2);
+    await scheduler.schedule(async () => 3);
+
+    expect(scheduler.snapshot().queueDelayMs.sampleCount).toBe(2);
+    scheduler.close();
   });
 });

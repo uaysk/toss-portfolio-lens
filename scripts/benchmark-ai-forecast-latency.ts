@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { AiComputeClient } from "../server/worker/ai-client.js";
 import {
   AiForecastRequestSchema,

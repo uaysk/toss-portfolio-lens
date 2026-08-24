@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
+import { assertClientBuildFresh } from "./client-build.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDirectory = process.env.SIMULATION_UI_SCREENSHOT_DIR
@@ -1407,23 +1408,48 @@ async function verify(browser, baseUrl, viewport, theme) {
     ));
     check(actualTheme === theme, `${viewport.width}px 테마가 ${theme}가 아니라 ${actualTheme}입니다.`);
 
-    const assetClassControl = page.getByRole("tablist", { name: "시뮬레이션 전략 케이스" });
-    const caseTabs = assetClassControl.getByRole("tab");
-    check(await caseTabs.count() === 3, "시뮬레이션 최상위 전략 케이스가 3개가 아닙니다.");
-    await assetClassControl.getByRole("tab", { name: /BTC·ETH/ }).waitFor();
-    await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ }).waitFor();
-    await assetClassControl.getByRole("tab", { name: /미국 ETF 페어/ }).waitFor();
-    await assetClassControl.getByRole("tab", { name: /BTC·ETH/ }).focus();
+    const assetClassControl = page.getByRole("radiogroup", { name: "시뮬레이션 전략 케이스" });
+    const caseOptions = assetClassControl.getByRole("radio");
+    const assetClassControlCount = await assetClassControl.count();
+    const caseOptionCount = await caseOptions.count();
+    check(
+      assetClassControlCount === 1 && caseOptionCount === 3,
+      `시뮬레이션 최상위 전략 케이스가 3개가 아닙니다: groups=${assetClassControlCount}, options=${caseOptionCount}`,
+    );
+    await assetClassControl.getByRole("radio", { name: /BTC·ETH/ }).waitFor();
+    await assetClassControl.getByRole("radio", { name: /고변동성 암호화폐/ }).waitFor();
+    await assetClassControl.getByRole("radio", { name: /미국 ETF 페어/ }).waitFor();
+    await assetClassControl.getByRole("radio", { name: /BTC·ETH/ }).focus();
+    const candidateResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/portfolio/simulation/candidates"
+        && response.status() === 200;
+    });
     await page.keyboard.press("ArrowRight");
-    await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ })
+    await assetClassControl.getByRole("radio", { name: /고변동성 암호화폐/ })
       .waitFor({ state: "attached" });
     check(
-      await assetClassControl.getByRole("tab", { name: /고변동성 암호화폐/ })
-        .getAttribute("aria-selected") === "true",
-      "전략 케이스 탭의 ArrowRight 키보드 전환이 동작하지 않습니다.",
+      await assetClassControl.getByRole("radio", { name: /고변동성 암호화폐/ })
+        .getAttribute("aria-checked") === "true",
+      "전략 케이스 option의 ArrowRight 키보드 전환이 동작하지 않습니다.",
     );
+    await candidateResponse;
     await page.keyboard.press("ArrowLeft");
-    await page.getByRole("radiogroup", { name: "BTC ETH 실행 종목" }).waitFor();
+    const cryptoSymbolGroup = page.getByRole("radiogroup", { name: "BTC ETH 실행 종목" });
+    await cryptoSymbolGroup.waitFor();
+    const bothCryptoOption = cryptoSymbolGroup.getByRole("radio", { name: "둘 다", exact: true });
+    await bothCryptoOption.focus();
+    await page.keyboard.press("ArrowLeft");
+    check(
+      await cryptoSymbolGroup.getByRole("radio", { name: "ETH", exact: true })
+        .getAttribute("aria-checked") === "true",
+      "BTC ETH 실행 종목 option의 ArrowLeft 키보드 전환이 동작하지 않습니다.",
+    );
+    await page.keyboard.press("ArrowRight");
+    check(
+      await bothCryptoOption.getAttribute("aria-checked") === "true",
+      "BTC ETH 실행 종목 option의 ArrowRight 키보드 전환이 동작하지 않습니다.",
+    );
     await page.getByRole("combobox", { name: "암호화폐 판단 프리셋" }).waitFor();
     await page.getByRole("slider", { name: "암호화폐 공격 방어 성향" }).waitFor();
     await page.getByText("서버가 v9 canonical plan을 확정합니다", { exact: true }).waitFor();
@@ -1599,12 +1625,30 @@ async function verify(browser, baseUrl, viewport, theme) {
       document.querySelector('[data-ai-simulation-chart="BTCUSDT"]')
         ?.getAttribute("data-ai-simulation-chart-expanded") === "true"
     ));
+    const expandedChart = cryptoCharts.first();
+    const stableExpandButton = expandedChart.locator('button[aria-haspopup="dialog"]');
+    check(await expandedChart.getAttribute("role") === "dialog", "전체화면 차트가 dialog로 노출되지 않았습니다.");
+    check(await expandedChart.getAttribute("aria-modal") === "true", "전체화면 차트가 modal dialog로 노출되지 않았습니다.");
+    check(await stableExpandButton.getAttribute("aria-expanded") === "true", "전체화면 버튼의 확장 상태가 노출되지 않았습니다.");
     await cryptoCharts.first().locator('[data-ai-simulation-indicator-badge="rsi"]').waitFor();
+    const lastDialogControl = expandedChart.locator("button:not([disabled]), summary").last();
+    await lastDialogControl.focus();
+    await page.keyboard.press("Tab");
+    check(
+      await stableExpandButton.evaluate((element) => document.activeElement === element),
+      "전체화면 차트의 Tab focus가 dialog 밖으로 이동했습니다.",
+    );
+    await lastDialogControl.focus();
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => (
       document.querySelector('[data-ai-simulation-chart="BTCUSDT"]')
         ?.getAttribute("data-ai-simulation-chart-expanded") === "false"
     ));
+    check(await stableExpandButton.getAttribute("aria-expanded") === "false", "축소 후 버튼의 확장 상태가 초기화되지 않았습니다.");
+    check(
+      await stableExpandButton.evaluate((element) => document.activeElement === element),
+      "Escape로 차트를 닫은 후 focus가 확대 버튼으로 복귀하지 않았습니다.",
+    );
     for (const lane of ["chronos2", "fincast"]) {
       await cryptoCharts.first().locator(
         `[data-ai-simulation-model-forecast="${lane}"][data-ai-simulation-model-forecast-origin="exact-final"]`,
@@ -2031,7 +2075,7 @@ async function verify(browser, baseUrl, viewport, theme) {
 
     const startsBeforeEtf = state.starts.length;
     const cancelsBeforeEtf = state.cancels.length;
-    await assetClassControl.getByRole("tab", { name: /미국 ETF 페어/ }).click();
+    await assetClassControl.getByRole("radio", { name: /미국 ETF 페어/ }).click();
     await page.getByText("실주문 없음, 투자 지시 아님, 다음 유효 체결만.", { exact: true }).waitFor();
     await page.locator('[data-model-role="primary"]').filter({ hasText: "Chronos-2" }).waitFor();
     await page.locator('[data-model-role="shadow"]').filter({ hasText: "FinCast" }).waitFor();
@@ -2226,6 +2270,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   let preview;
   let browser;
   try {
+  await assertClientBuildFresh(projectRoot);
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];

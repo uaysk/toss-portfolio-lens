@@ -63,6 +63,13 @@ describe("OpenAI report evaluation", () => {
   });
 
   it("Responses API 미지원 모델은 Chat Completions strict JSON schema로 전환한다", async () => {
+    let inputSerializations = 0;
+    const input = {
+      toJSON: () => {
+        inputSerializations += 1;
+        return { synthetic: true };
+      },
+    };
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => String(input).endsWith("/responses")
       ? new Response(JSON.stringify({
           error: {
@@ -81,15 +88,63 @@ describe("OpenAI report evaluation", () => {
       timeoutMs: 5_000,
     }, fetcher);
 
-    await expect(writer.evaluate({ synthetic: true })).resolves.toEqual(narrative);
+    await expect(writer.evaluate(input)).resolves.toEqual(narrative);
+    expect(inputSerializations).toBe(1);
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(String(fetcher.mock.calls[1][0])).toBe("https://gateway.example/v1/chat/completions");
     const request = JSON.parse(String((fetcher.mock.calls[1] as unknown as [string, RequestInit])[1].body));
     expect(request.model).toBe("moonshotai.kimi-k2.5");
+    expect(JSON.parse(request.messages[1].content)).toEqual({ synthetic: true });
     expect(request.response_format.json_schema).toMatchObject({
       name: "portfolio_evaluation",
       strict: true,
     });
     expect(request.response_format.json_schema.schema.additionalProperties).toBe(false);
+  });
+
+  it("선언된 OpenAI 응답 크기가 상한을 넘으면 본문을 읽기 전에 중단한다", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { "Content-Length": String(2 * 1024 * 1024 + 1) },
+    }));
+    const writer = new OpenAiReportWriter({
+      endpoint: "https://gateway.example/v1",
+      apiKey: "secret-key",
+      model: "gpt-test",
+      timeoutMs: 5_000,
+    }, fetcher);
+
+    await expect(writer.evaluate({ synthetic: true })).rejects.toMatchObject({
+      message: "AI 응답 크기가 허용 범위를 초과했습니다.",
+      retryable: true,
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+  });
+
+  it("Content-Length가 없는 chunked OpenAI 응답도 실제 바이트 상한에서 중단한다", async () => {
+    const cancel = vi.fn();
+    const oversizedHalf = new Uint8Array(1024 * 1024 + 1);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(oversizedHalf);
+        controller.enqueue(oversizedHalf);
+      },
+      cancel,
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    const writer = new OpenAiReportWriter({
+      endpoint: "https://gateway.example/v1",
+      apiKey: "secret-key",
+      model: "gpt-test",
+      timeoutMs: 5_000,
+    }, fetcher);
+
+    await expect(writer.evaluate({ synthetic: true })).rejects.toMatchObject({
+      message: "AI 응답 크기가 허용 범위를 초과했습니다.",
+      retryable: true,
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
   });
 });

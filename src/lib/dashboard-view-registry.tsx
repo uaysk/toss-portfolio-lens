@@ -1,16 +1,13 @@
 import { lazy, type ReactNode } from "react";
-import {
-  Activity,
-  BarChart3,
-  Bot,
-  CandlestickChart,
-  FlaskConical,
-  LayoutDashboard,
-  LibraryBig,
-  Sparkles,
-  TimerReset,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import Bot from "lucide-react/dist/esm/icons/bot.js";
+import CandlestickChart from "lucide-react/dist/esm/icons/chart-candlestick.js";
+import FlaskConical from "lucide-react/dist/esm/icons/flask-conical.js";
+import LayoutDashboard from "lucide-react/dist/esm/icons/layout-dashboard.js";
+import LibraryBig from "lucide-react/dist/esm/icons/library-big.js";
+import Sparkles from "lucide-react/dist/esm/icons/sparkles.js";
+import TimerReset from "lucide-react/dist/esm/icons/timer-reset.js";
 import type { TechnicalStrategyHandoff } from "@/lib/technical-strategy";
 import type { Portfolio, Theme } from "@/types";
 
@@ -31,6 +28,8 @@ export type DashboardViewContentContext = {
   onTechnicalStrategyHandoffConsumed: () => void;
 };
 
+type DashboardIcon = typeof Activity;
+
 type DashboardViewDefinitionShape = {
   value: string;
   hash: `#${string}`;
@@ -39,7 +38,7 @@ type DashboardViewDefinitionShape = {
   eyebrow: string;
   title: string;
   loadingLabel: string;
-  icon: LucideIcon;
+  icon: DashboardIcon;
   navigation: {
     desktop: boolean;
     mobile: boolean;

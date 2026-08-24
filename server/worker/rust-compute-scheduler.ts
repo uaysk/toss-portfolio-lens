@@ -1,4 +1,6 @@
 import { ServiceError } from "../services/service-envelope.js";
+import { durationQuantiles, type DurationQuantiles } from "../observability/duration-quantiles.js";
+import { FixedRing } from "../fixed-ring.js";
 
 const DEFAULT_TELEMETRY_WINDOW_MS = 5 * 60_000;
 const DEFAULT_MAX_TELEMETRY_SAMPLES = 4_096;
@@ -15,15 +17,12 @@ type QueuedOperation = {
   cleanupAbort?: () => void;
   start: () => void;
   reject: (error: Error) => void;
+  previous?: QueuedOperation;
+  next?: QueuedOperation;
+  queued: boolean;
 };
 
-export type RustComputeQueueDelaySnapshot = {
-  sampleCount: number;
-  p50Ms: number;
-  p95Ms: number;
-  p99Ms: number;
-  maxMs: number;
-};
+export type RustComputeQueueDelaySnapshot = DurationQuantiles;
 
 export type RustComputeSchedulerSnapshot = {
   capacity: number;
@@ -59,27 +58,15 @@ function abortReason(signal: AbortSignal): Error {
     : new Error("Rust compute 요청이 취소되었습니다.");
 }
 
-function percentile(values: readonly number[], ratio: number): number {
-  if (!values.length) return 0;
-  const index = Math.min(
-    values.length - 1,
-    Math.max(0, Math.ceil(values.length * ratio) - 1),
-  );
-  return values[index]!;
-}
-
-function rounded(value: number): number {
-  return Math.round(value * 1_000) / 1_000;
-}
-
 export class RustComputeScheduler {
-  private readonly queue: QueuedOperation[] = [];
-  private readonly queueDelaySamples: QueueDelaySample[] = [];
+  private queueHead: QueuedOperation | undefined;
+  private queueTail: QueuedOperation | undefined;
+  private queuedCount = 0;
+  private readonly queueDelaySamples: FixedRing<QueueDelaySample>;
   private readonly capacity: number;
   private readonly maxQueued: number;
   private readonly queueTimeoutMs: number;
   private readonly telemetryWindowMs: number;
-  private readonly maxTelemetrySamples: number;
   private readonly now: () => number;
   private active = 0;
   private rejectedTotal = 0;
@@ -100,10 +87,11 @@ export class RustComputeScheduler {
       1,
       Math.trunc(input.telemetryWindowMs ?? DEFAULT_TELEMETRY_WINDOW_MS),
     );
-    this.maxTelemetrySamples = Math.max(
+    const maxTelemetrySamples = Math.max(
       1,
       Math.trunc(input.maxTelemetrySamples ?? DEFAULT_MAX_TELEMETRY_SAMPLES),
     );
+    this.queueDelaySamples = new FixedRing(maxTelemetrySamples);
     this.now = input.now ?? Date.now;
   }
 
@@ -121,19 +109,14 @@ export class RustComputeScheduler {
       this.recordQueueDelay(0);
       return this.start(operation);
     }
-    if (this.queue.length >= this.maxQueued) {
+    if (this.queuedCount >= this.maxQueued) {
       this.rejectedTotal += 1;
       return Promise.reject(new RustComputeBusyError("queue_full"));
     }
 
     return new Promise<T>((resolve, reject) => {
       let queued!: QueuedOperation;
-      const remove = (): boolean => {
-        const index = this.queue.indexOf(queued);
-        if (index < 0) return false;
-        this.queue.splice(index, 1);
-        return true;
-      };
+      const remove = (): boolean => this.removeQueued(queued);
       const timer = setTimeout(() => {
         if (!remove()) return;
         queued.cleanupAbort?.();
@@ -146,6 +129,7 @@ export class RustComputeScheduler {
         signal: options.signal,
         timer,
         reject,
+        queued: false,
         start: () => {
           clearTimeout(timer);
           queued.cleanupAbort?.();
@@ -166,7 +150,7 @@ export class RustComputeScheduler {
         options.signal.addEventListener("abort", onAbort, { once: true });
         queued.cleanupAbort = () => options.signal!.removeEventListener("abort", onAbort);
       }
-      this.queue.push(queued);
+      this.enqueue(queued);
       if (options.signal?.aborted) {
         const error = abortReason(options.signal);
         if (remove()) {
@@ -179,30 +163,23 @@ export class RustComputeScheduler {
   }
 
   snapshot(): RustComputeSchedulerSnapshot {
-    this.pruneQueueDelaySamples();
-    const values = this.queueDelaySamples
-      .map((sample) => sample.delayMs)
-      .sort((left, right) => left - right);
+    const minimumAt = this.now() - this.telemetryWindowMs;
+    const queueDelaySamples = this.queueDelaySamples.values()
+      .filter((sample) => sample.at >= minimumAt);
     return {
       capacity: this.capacity,
       active: this.active,
-      queued: this.queue.length,
+      queued: this.queuedCount,
       maxQueued: this.maxQueued,
       rejectedTotal: this.rejectedTotal,
-      queueDelayMs: {
-        sampleCount: values.length,
-        p50Ms: rounded(percentile(values, 0.5)),
-        p95Ms: rounded(percentile(values, 0.95)),
-        p99Ms: rounded(percentile(values, 0.99)),
-        maxMs: rounded(values.at(-1) ?? 0),
-      },
+      queueDelayMs: durationQuantiles(queueDelaySamples, (sample) => sample.delayMs),
     };
   }
 
   close(error = new Error("Rust compute scheduler closed")): void {
     if (this.closed) return;
     this.closed = true;
-    for (const queued of this.queue.splice(0)) {
+    for (let queued = this.shiftQueued(); queued; queued = this.shiftQueued()) {
       clearTimeout(queued.timer);
       queued.cleanupAbort?.();
       queued.reject(error);
@@ -220,8 +197,8 @@ export class RustComputeScheduler {
   }
 
   private drain(): void {
-    while (!this.closed && this.active < this.capacity && this.queue.length) {
-      const queued = this.queue.shift()!;
+    while (!this.closed && this.active < this.capacity && this.queuedCount > 0) {
+      const queued = this.shiftQueued()!;
       queued.start();
     }
   }
@@ -229,24 +206,34 @@ export class RustComputeScheduler {
   private recordQueueDelay(delayMs: number): void {
     const now = this.now();
     this.queueDelaySamples.push({ at: now, delayMs });
-    this.pruneQueueDelaySamples(now);
-    if (this.queueDelaySamples.length > this.maxTelemetrySamples) {
-      this.queueDelaySamples.splice(
-        0,
-        this.queueDelaySamples.length - this.maxTelemetrySamples,
-      );
-    }
   }
 
-  private pruneQueueDelaySamples(now = this.now()): void {
-    const minimumAt = now - this.telemetryWindowMs;
-    let expired = 0;
-    while (
-      expired < this.queueDelaySamples.length
-      && this.queueDelaySamples[expired]!.at < minimumAt
-    ) {
-      expired += 1;
-    }
-    if (expired > 0) this.queueDelaySamples.splice(0, expired);
+  private enqueue(queued: QueuedOperation): void {
+    queued.previous = this.queueTail;
+    queued.next = undefined;
+    queued.queued = true;
+    if (this.queueTail) this.queueTail.next = queued;
+    else this.queueHead = queued;
+    this.queueTail = queued;
+    this.queuedCount += 1;
+  }
+
+  private shiftQueued(): QueuedOperation | undefined {
+    const queued = this.queueHead;
+    if (queued) this.removeQueued(queued);
+    return queued;
+  }
+
+  private removeQueued(queued: QueuedOperation): boolean {
+    if (!queued.queued) return false;
+    if (queued.previous) queued.previous.next = queued.next;
+    else this.queueHead = queued.next;
+    if (queued.next) queued.next.previous = queued.previous;
+    else this.queueTail = queued.previous;
+    queued.previous = undefined;
+    queued.next = undefined;
+    queued.queued = false;
+    this.queuedCount -= 1;
+    return true;
   }
 }

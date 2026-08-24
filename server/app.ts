@@ -5,6 +5,8 @@ import express, {
   type RequestHandler,
   type Response,
 } from "express";
+import compression from "compression";
+import { randomUUID } from "node:crypto";
 
 export type CreateAppOptions = {
   trustProxy: readonly string[];
@@ -42,10 +44,31 @@ const BODY_ROUTES: readonly BodyRoute[] = [
   { method: "POST", path: /^\/oauth\/(?:authorize|token|revoke)$/ },
 ];
 
+const responseCompression = compression({
+  threshold: 1_024,
+  filter: (request, response) => {
+    // `send` resolves byte ranges before this middleware chooses a content
+    // coding. Compressing that slice afterwards would make Content-Range refer
+    // to different representation bytes than the response body.
+    if (response.statusCode === 206 || response.getHeader("Content-Range") !== undefined) {
+      return false;
+    }
+    const contentType = response.getHeader("Content-Type");
+    if (
+      typeof contentType === "string"
+      && /^text\/event-stream(?:\s*;|$)/iu.test(contentType)
+    ) {
+      return false;
+    }
+    return compression.filter(request, response);
+  },
+});
+
 function bodyRoute(request: Request): BodyRoute | undefined {
-  const requestPath = request.path.length > 1 && request.path.endsWith("/")
-    ? request.path.slice(0, -1)
-    : request.path;
+  // Express routes are case-insensitive and accept a trailing slash by
+  // default. Normalize the parser lookup the same way so an alternate route
+  // spelling cannot reach a handler without the configured size bound.
+  const requestPath = (request.path.replace(/\/+$/u, "") || "/").toLowerCase();
   return BODY_ROUTES.find(({ method, path }) => (
     request.method === method && path.test(requestPath)
   ));
@@ -83,11 +106,46 @@ function bodyParserError(
   next(error);
 }
 
+function apiErrorBoundary(
+  error: unknown,
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): void {
+  // Express matches routes case-insensitively by default. Keep the error
+  // boundary aligned so alternate casing cannot fall through to its default
+  // HTML error response after an API handler throws.
+  const normalizedPath = request.path.toLowerCase();
+  const isApiRequest = normalizedPath === "/api" || normalizedPath.startsWith("/api/");
+  if (!isApiRequest || response.headersSent) {
+    next(error);
+    return;
+  }
+  const correlationId = randomUUID();
+  const diagnosticError = error instanceof Error
+    ? error
+    : new Error("Non-Error value reached the API error boundary", { cause: error });
+  console.error(
+    `[http] unhandled ${request.method} ${request.path} (${correlationId}):`,
+    diagnosticError,
+  );
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Request-ID", correlationId);
+  response.status(500).json({
+    error: {
+      code: "internal-error",
+      message: "요청을 처리하는 중 오류가 발생했습니다.",
+      requestId: correlationId,
+    },
+  });
+}
+
 export function createApp(options: CreateAppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   if (options.trustProxy.length) app.set("trust proxy", [...options.trustProxy]);
   if (options.requestTelemetry) app.use(options.requestTelemetry);
+  app.use(responseCompression);
 
   app.use((request, response, next) => {
     const comparisonReport = request.path
@@ -149,5 +207,6 @@ export function createApp(options: CreateAppOptions): Express {
   });
   for (const registerRoutes of options.routeRegistrars ?? []) registerRoutes(app);
   app.use(bodyParserError);
+  app.use(apiErrorBoundary);
   return app;
 }

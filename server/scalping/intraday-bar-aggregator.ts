@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FixedRing } from "../fixed-ring.js";
 import {
   MarketCountrySchema,
   isoTimestampSchema,
@@ -91,7 +92,7 @@ type SymbolState = {
   seenEventIds: Map<string, number>;
   openMinutes: Map<string, MutableBar>;
   higher: Map<number, Map<string, MutableBar>>;
-  finalized: Map<number, AggregatedIntradayBar[]>;
+  finalized: Map<number, FixedRing<AggregatedIntradayBar>>;
   pendingPartialMinuteStartMs?: number;
 };
 
@@ -163,9 +164,8 @@ function snapshot(bar: MutableBar, status: "forming" | "final"): AggregatedIntra
 
 function rememberFinal(state: SymbolState, bar: AggregatedIntradayBar, maximum: number): void {
   const interval = Number.parseInt(bar.interval, 10);
-  const values = state.finalized.get(interval) ?? [];
+  const values = state.finalized.get(interval) ?? new FixedRing<AggregatedIntradayBar>(maximum);
   values.push(bar);
-  if (values.length > maximum) values.splice(0, values.length - maximum);
   state.finalized.set(interval, values);
 }
 
@@ -351,7 +351,17 @@ export class IntradayBarAggregator {
     const state = this.states.get(stateKey(parsedSymbol, MarketCountrySchema.parse(marketCountry)));
     if (!state) return [];
     const minutes = Number.parseInt(interval, 10);
-    return [...(state.finalized.get(minutes) ?? [])];
+    return state.finalized.get(minutes)?.values() ?? [];
+  }
+
+  releaseSymbol(
+    symbol: string,
+    marketCountry: MarketCountry = "KR",
+  ): boolean {
+    return this.states.delete(stateKey(
+      marketSymbolSchema.parse(symbol),
+      MarketCountrySchema.parse(marketCountry),
+    ));
   }
 
   private finalizeThrough(state: SymbolState, watermarkMs: number): BarUpdate[] {

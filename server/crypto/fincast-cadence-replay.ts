@@ -19,7 +19,6 @@ import {
 } from "./binance-market-data.js";
 import {
   loadFinCastCadenceMarketData,
-  type FinCastCadenceMarketData,
 } from "./fincast-cadence-market-data.js";
 import {
   writeFinCastRawInputArtifact,

@@ -26,6 +26,10 @@ const routeBudgets = {
     maximumGzipBytes: 251_503,
   },
 };
+const initialAppBudget = {
+  baselineGzipBytes: 99_676,
+  maximumGzipBytes: 80_000,
+};
 const maximumPageChunkBytes = 250 * 1_024;
 
 function findRouteEntry(name) {
@@ -61,6 +65,26 @@ function fileMetrics(file) {
 }
 
 const failures = [];
+const initialEntry = Object.entries(manifest).find(([, item]) => item.isEntry);
+if (!initialEntry) throw new Error("Vite manifest entry not found");
+const initialFiles = staticClosure(initialEntry[0]).map((key) => fileMetrics(manifest[key].file));
+const initialApp = {
+  entry: initialEntry[1].file,
+  rawBytes: initialFiles.reduce((sum, file) => sum + file.rawBytes, 0),
+  gzipBytes: initialFiles.reduce((sum, file) => sum + file.gzipBytes, 0),
+  baselineGzipBytes: initialAppBudget.baselineGzipBytes,
+  maximumGzipBytes: initialAppBudget.maximumGzipBytes,
+  files: initialFiles,
+};
+initialApp.reductionPercent = Number((
+  ((initialApp.baselineGzipBytes - initialApp.gzipBytes) / initialApp.baselineGzipBytes) * 100
+).toFixed(2));
+if (initialApp.gzipBytes > initialApp.maximumGzipBytes) {
+  failures.push(
+    `initial app gzip ${initialApp.gzipBytes} > ${initialApp.maximumGzipBytes}`,
+  );
+}
+
 const routes = Object.fromEntries(Object.entries(routeBudgets).map(([route, budget]) => {
   const [entryKey, entry] = findRouteEntry(budget.manifestName);
   const files = staticClosure(entryKey).map((key) => fileMetrics(manifest[key].file));
@@ -108,6 +132,7 @@ const report = {
   generatedAt: new Date().toISOString(),
   manifest: ".vite/manifest.json",
   maximumPageChunkBytes,
+  initialApp,
   routes,
   oversizedDynamicChunks,
   passed: failures.length === 0,
@@ -116,6 +141,11 @@ const report = {
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
 
+console.log(
+  `initial: ${initialApp.gzipBytes} gzip bytes `
+  + `(${initialApp.reductionPercent.toFixed(2)}% below baseline), `
+  + `${initialApp.entry}`,
+);
 for (const [route, metrics] of Object.entries(routes)) {
   console.log(
     `${route}: ${metrics.gzipBytes} gzip bytes `

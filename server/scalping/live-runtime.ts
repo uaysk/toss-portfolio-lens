@@ -19,8 +19,10 @@ import type {
   ScalpingInterval,
   ScalpingRepository,
 } from "../repositories/scalping-repository.js";
+import { FixedRing } from "../fixed-ring.js";
 import type { MarketCountry, NormalizedOrderbook, NormalizedTrade } from "./contracts.js";
 import { BarWriteBuffer } from "./bar-write-buffer.js";
+import { TtlCache } from "./rate-limiter.js";
 import {
   marketLocalParts,
   marketSessionAnchor,
@@ -43,6 +45,8 @@ export const SCALPING_LIVE_EVENT_VERSION = "scalping-live-event/v1" as const;
 
 const MINUTE_MS = 60_000;
 const SUPPORTED_INTERVALS = [1, 5, 15, 30, 60] as const;
+const RECENTLY_RELEASED_REFERENCE_TTL_MS = 60_000;
+const MAXIMUM_RECENTLY_RELEASED_REFERENCES = 512;
 
 export type ScalpingLiveEvent = {
   schemaVersion: typeof SCALPING_LIVE_EVENT_VERSION;
@@ -79,7 +83,7 @@ type SocketClient = Pick<
 >;
 type RestClient = Pick<KisRestClient, "getCurrentDayMinutes" | "getOverseasMinutes">;
 type BarAggregator = Pick<IntradayBarAggregator, "ingest" | "advanceWatermark" | "recentFinalBars">
-  & Partial<Pick<IntradayBarAggregator, "markDiscontinuity">>;
+  & Partial<Pick<IntradayBarAggregator, "markDiscontinuity" | "releaseSymbol">>;
 type BarStore = Pick<ScalpingRepository, "putBars" | "listBars">;
 
 function expandedSessionDate(compact: string): string {
@@ -555,7 +559,7 @@ function isDayExecutionSubscription(subscription: KisSubscription): boolean {
 
 export class ScalpingLiveRuntime {
   private readonly listeners = new Set<(event: ScalpingLiveEvent) => void>();
-  private readonly replay: ScalpingLiveEvent[] = [];
+  private readonly replay: FixedRing<ScalpingLiveEvent>;
   private readonly references = new Map<string, LiveReference>();
   private readonly latestBooks = new Map<string, NormalizedOrderbook>();
   private readonly latestTrades = new Map<string, NormalizedTrade>();
@@ -563,6 +567,7 @@ export class ScalpingLiveRuntime {
   private readonly recoveryInFlight = new Map<string, Promise<void>>();
   private readonly sessionCloseRecoveryInFlight = new Map<string, Promise<void>>();
   private readonly observedSessionCloses = new Map<string, number>();
+  private readonly recentlyReleasedReferences: TtlCache<string, true>;
   private readonly now: () => number;
   private readonly snapshotStaleAfterMs: number;
   private readonly krSessionWindows: readonly MarketSessionWindow[];
@@ -583,6 +588,7 @@ export class ScalpingLiveRuntime {
     if (!Number.isInteger(config.replayEventLimit) || config.replayEventLimit < 1) {
       throw new Error("replayEventLimit must be a positive integer.");
     }
+    this.replay = new FixedRing(config.replayEventLimit);
     if (!Number.isInteger(config.watermarkAdvanceMs) || config.watermarkAdvanceMs < 250 || config.watermarkAdvanceMs > 60_000) {
       throw new Error("watermarkAdvanceMs must be in 250..=60000.");
     }
@@ -601,6 +607,10 @@ export class ScalpingLiveRuntime {
     this.krSessionWindows = config.krSessionWindows ?? DEFAULT_KR_INTEGRATED_SESSION_WINDOWS;
     validateSessionWindows(this.krSessionWindows);
     this.now = config.now ?? Date.now;
+    this.recentlyReleasedReferences = new TtlCache({
+      maximumEntries: MAXIMUM_RECENTLY_RELEASED_REFERENCES,
+      now: this.now,
+    });
     this.barWrites = new BarWriteBuffer(
       (records) => this.bars.putBars(records),
       {
@@ -669,7 +679,7 @@ export class ScalpingLiveRuntime {
 
   eventsAfter(lastEventId?: number): ScalpingLiveEvent[] {
     if (lastEventId === undefined || !Number.isSafeInteger(lastEventId) || lastEventId < 0) return [];
-    return this.replay.filter((event) => event.id > lastEventId);
+    return this.replay.values().filter((event) => event.id > lastEventId);
   }
 
   onEvent(listener: (event: ScalpingLiveEvent) => void): () => void {
@@ -762,6 +772,7 @@ export class ScalpingLiveRuntime {
       if (created) {
         newlyAdded.push(reference);
         this.references.set(key, reference);
+        this.recentlyReleasedReferences.delete(key);
       }
       retained.push({ key, profile, reference, created, addedSubscriptions });
     }
@@ -789,7 +800,10 @@ export class ScalpingLiveRuntime {
         }
         acquisition.reference.count -= 1;
         if (acquisition.profile === "all") acquisition.reference.allFeedCount -= 1;
-        if (acquisition.created) this.references.delete(acquisition.key);
+        if (acquisition.created) {
+          this.references.delete(acquisition.key);
+          this.releaseReferenceState(acquisition.reference);
+        }
       }
       if (cleanupErrors.length) {
         throw new AggregateError(
@@ -818,6 +832,7 @@ export class ScalpingLiveRuntime {
             continue;
           }
           this.references.delete(key);
+          this.releaseReferenceState(reference);
           for (const closeKey of this.observedSessionCloses.keys()) {
             if (closeKey.startsWith(`${key}:`)) this.observedSessionCloses.delete(closeKey);
           }
@@ -915,7 +930,14 @@ export class ScalpingLiveRuntime {
     this.removeSocketListener();
     this.socket.disconnect();
     this.listeners.clear();
+    for (const reference of this.references.values()) {
+      this.aggregator.releaseSymbol?.(reference.symbol, reference.marketCountry);
+    }
     this.references.clear();
+    this.latestBooks.clear();
+    this.latestTrades.clear();
+    this.tradingHalted.clear();
+    this.recentlyReleasedReferences.clear();
     this.sessionCloseRecoveryInFlight.clear();
     this.observedSessionCloses.clear();
   }
@@ -953,8 +975,9 @@ export class ScalpingLiveRuntime {
       }
       const hasExecution = reference.subscriptions.some(({ trId }) => trId.endsWith("CNT0"));
       if (!hasExecution) {
-        this.references.delete(key);
         this.unsubscribeReference(reference);
+        this.references.delete(key);
+        this.releaseReferenceState(reference);
       }
       this.emit("diagnostic", event.symbol, event.marketCountry, {
         code: event.usFeed === "day" ? "us-day-feed-rejected" : "subscription-rejected",
@@ -970,6 +993,10 @@ export class ScalpingLiveRuntime {
     if (event.type === "execution") {
       const trade = adaptKisExecution(event);
       const key = marketSymbolKey(trade.symbol, event.marketCountry);
+      // Preserve the existing diagnostic behavior for unsolicited provider
+      // frames, but suppress frames already queued when a known reference was
+      // released. The tombstones are both TTL- and capacity-bounded.
+      if (!this.references.has(key) && this.recentlyReleasedReferences.get(key)) return;
       this.latestTrades.set(key, trade);
       if (event.tradingHalted !== undefined) this.tradingHalted.set(key, event.tradingHalted);
       this.emit("trade", trade.symbol, event.marketCountry, trade);
@@ -1044,7 +1071,9 @@ export class ScalpingLiveRuntime {
     }
     if (event.type === "orderbook") {
       const book = adaptKisOrderbook(event);
-      this.latestBooks.set(marketSymbolKey(book.symbol, event.marketCountry), book);
+      const key = marketSymbolKey(book.symbol, event.marketCountry);
+      if (!this.references.has(key) && this.recentlyReleasedReferences.get(key)) return;
+      this.latestBooks.set(key, book);
       this.emit("orderbook", book.symbol, event.marketCountry, book);
       return;
     }
@@ -1127,6 +1156,15 @@ export class ScalpingLiveRuntime {
 
   private unsubscribeReference(reference: LiveReference): void {
     this.unsubscribeSubscriptions(reference, [...reference.subscriptions]);
+  }
+
+  private releaseReferenceState(reference: LiveReference): void {
+    const key = marketSymbolKey(reference.symbol, reference.marketCountry);
+    this.latestBooks.delete(key);
+    this.latestTrades.delete(key);
+    this.tradingHalted.delete(key);
+    this.aggregator.releaseSymbol?.(reference.symbol, reference.marketCountry);
+    this.recentlyReleasedReferences.set(key, true, RECENTLY_RELEASED_REFERENCE_TTL_MS);
   }
 
   private unsubscribeSubscriptions(
@@ -1333,9 +1371,6 @@ export class ScalpingLiveRuntime {
       payload,
     };
     this.replay.push(event);
-    if (this.replay.length > this.config.replayEventLimit) {
-      this.replay.splice(0, this.replay.length - this.config.replayEventLimit);
-    }
     for (const listener of this.listeners) {
       try {
         listener(event);

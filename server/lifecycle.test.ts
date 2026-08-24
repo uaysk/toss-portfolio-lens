@@ -1,4 +1,5 @@
 import express from "express";
+import { EventEmitter } from "node:events";
 import {
   createServer,
   get,
@@ -9,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GracefulLifecycle,
   ShutdownGate,
+  SseConnectionBusyError,
   SseConnectionTracker,
 } from "./lifecycle.js";
 import { createScalpingRouter } from "./scalping/router.js";
@@ -46,7 +48,124 @@ afterEach(async () => {
   }
 });
 
+function trackedResponse() {
+  const response = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    end: vi.fn(),
+  });
+  return response;
+}
+
+describe("SSE connection tracker", () => {
+  it("atomically bounds admissions and releases slots on disconnect and unregister", () => {
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const first = trackedResponse();
+    const firstCleanup = vi.fn();
+    tracker.track(first as never, firstCleanup);
+
+    expect(tracker.telemetry).toEqual({
+      capacity: 1,
+      activeConnections: 1,
+      acceptedConnectionsTotal: 1,
+      rejectedConnectionsTotal: 0,
+      closing: false,
+    });
+
+    const rejected = trackedResponse();
+    const rejectedCleanup = vi.fn();
+    expect(() => tracker.track(rejected as never, rejectedCleanup))
+      .toThrow(SseConnectionBusyError);
+    expect(rejected.listenerCount("close")).toBe(0);
+    expect(rejectedCleanup).not.toHaveBeenCalled();
+    expect(tracker.telemetry.rejectedConnectionsTotal).toBe(1);
+
+    first.destroyed = true;
+    first.emit("close");
+    expect(firstCleanup).toHaveBeenCalledTimes(1);
+    expect(tracker.size).toBe(0);
+
+    const disconnected = trackedResponse();
+    disconnected.destroyed = true;
+    const disconnectedCleanup = vi.fn();
+    const disconnectedUnregister = tracker.track(
+      disconnected as never,
+      disconnectedCleanup,
+    );
+    disconnectedUnregister();
+    expect(disconnectedCleanup).toHaveBeenCalledTimes(1);
+    expect(disconnected.end).not.toHaveBeenCalled();
+    expect(tracker.telemetry.acceptedConnectionsTotal).toBe(1);
+
+    const next = trackedResponse();
+    const nextCleanup = vi.fn();
+    const unregister = tracker.track(next as never, nextCleanup);
+    expect(tracker.telemetry.acceptedConnectionsTotal).toBe(2);
+    unregister();
+    unregister();
+    expect(nextCleanup).not.toHaveBeenCalled();
+    expect(tracker.size).toBe(0);
+  });
+
+  it("closes admitted streams once and reports shutdown state", () => {
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const response = trackedResponse();
+    const cleanup = vi.fn();
+    tracker.track(response as never, cleanup);
+
+    tracker.closeAll();
+    tracker.closeAll();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(response.end).toHaveBeenCalledTimes(1);
+    expect(tracker.telemetry).toMatchObject({
+      capacity: 1,
+      activeConnections: 0,
+      acceptedConnectionsTotal: 1,
+      rejectedConnectionsTotal: 0,
+      closing: true,
+    });
+
+    const lateResponse = trackedResponse();
+    const lateCleanup = vi.fn();
+    expect(() => tracker.track(lateResponse as never, lateCleanup))
+      .toThrow(SseConnectionBusyError);
+    expect(lateCleanup).not.toHaveBeenCalled();
+    expect(lateResponse.end).not.toHaveBeenCalled();
+    expect(tracker.telemetry.rejectedConnectionsTotal).toBe(1);
+  });
+});
+
 describe("graceful server lifecycle", () => {
+  it("disposes constructor and signal listeners after pre-start assembly failure", () => {
+    const server = createServer();
+    const connectionListeners = server.listenerCount("connection");
+    const sigtermListeners = process.listenerCount("SIGTERM");
+    const sigintListeners = process.listenerCount("SIGINT");
+    const lifecycle = new GracefulLifecycle({
+      server,
+      gate: new ShutdownGate(),
+      sseConnections: new SseConnectionTracker(),
+      deadlineMs: 500,
+    });
+
+    try {
+      expect(server.listenerCount("connection")).toBe(connectionListeners + 1);
+      lifecycle.installSignalHandlers();
+      expect(process.listenerCount("SIGTERM")).toBe(sigtermListeners + 1);
+      expect(process.listenerCount("SIGINT")).toBe(sigintListeners + 1);
+
+      lifecycle.dispose();
+      lifecycle.dispose();
+
+      expect(server.listenerCount("connection")).toBe(connectionListeners);
+      expect(process.listenerCount("SIGTERM")).toBe(sigtermListeners);
+      expect(process.listenerCount("SIGINT")).toBe(sigintListeners);
+    } finally {
+      lifecycle.dispose();
+    }
+  });
+
   it("ends an active scalping SSE stream, releases it and shuts down exactly once", async () => {
     const gate = new ShutdownGate();
     const sseConnections = new SseConnectionTracker();

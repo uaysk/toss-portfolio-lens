@@ -7,22 +7,20 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  AlertTriangle,
-  BarChart3,
-  Bot,
-  BrainCircuit,
-  Check,
-  Clock,
-  LoaderCircle,
-  Plus,
-  Play,
-  Search,
-  ShieldCheck,
-  Square,
-  Wallet,
-  X,
-} from "lucide-react";
+import AlertTriangle from "lucide-react/dist/esm/icons/triangle-alert.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import Bot from "lucide-react/dist/esm/icons/bot.js";
+import BrainCircuit from "lucide-react/dist/esm/icons/brain-circuit.js";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import Clock from "lucide-react/dist/esm/icons/clock.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
+import Search from "lucide-react/dist/esm/icons/search.js";
+import ShieldCheck from "lucide-react/dist/esm/icons/shield-check.js";
+import Square from "lucide-react/dist/esm/icons/square.js";
+import Wallet from "lucide-react/dist/esm/icons/wallet.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import {
   AiSimulationAssetClassControl,
   AiSimulationCryptoSetup,
@@ -62,6 +60,7 @@ import {
   type AiSimulationSnapshot,
   type AiSimulationStatus,
 } from "@/lib/ai-simulation";
+import { handleRadioGroupKeyDown } from "@/lib/radio-group";
 import { groupByNormalizedSymbol } from "@/lib/chart-interaction";
 import { formatMoney, formatQuantity } from "@/lib/format";
 import {
@@ -213,6 +212,15 @@ const PATTERN_LABELS: Record<string, string> = {
   bearish_channel_breakout: "하락 채널 돌파",
 };
 
+const SIMULATION_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 function requestedSymbolCount(request: AiSimulationRequest): number {
   return request.selection.mode === "manual"
     ? request.selection.symbols.length
@@ -268,14 +276,7 @@ function formatTimestamp(value?: string): string {
   if (!value) return "unavailable";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "unavailable";
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return SIMULATION_TIMESTAMP_FORMATTER.format(date);
 }
 
 function formatRatio(value?: number, signed = false): string {
@@ -595,11 +596,13 @@ export function AiSimulationStrategySettings({
             type="button"
             role="radio"
             aria-checked={request.strategy.mode === "single"}
+            tabIndex={request.strategy.mode === "single" ? 0 : -1}
             className={cn(
               "rounded-lg px-3 py-2 text-[10px] font-black transition-colors",
               request.strategy.mode === "single" ? "bg-primary text-primary-foreground" : "text-muted-foreground",
             )}
             disabled={disabled || etfOnly}
+            onKeyDown={handleRadioGroupKeyDown}
             onClick={() => onModeChange("single")}
           >
             단일 종목
@@ -608,12 +611,14 @@ export function AiSimulationStrategySettings({
             type="button"
             role="radio"
             aria-checked={request.strategy.mode === "pair"}
+            tabIndex={request.strategy.mode === "pair" ? 0 : -1}
             className={cn(
               "rounded-lg px-3 py-2 text-[10px] font-black transition-colors",
               request.strategy.mode === "pair" ? "bg-primary text-primary-foreground" : "text-muted-foreground",
             )}
             disabled={disabled || !pairEnabled}
             aria-disabled={disabled || !pairEnabled}
+            onKeyDown={handleRadioGroupKeyDown}
             onClick={() => onModeChange("pair")}
           >
             ETF 페어
@@ -667,23 +672,6 @@ export function AiSimulationStrategySettings({
           </p>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  emphasis = false,
-}: {
-  label: string;
-  value: string;
-  emphasis?: boolean;
-}) {
-  return (
-    <div className="min-w-0 rounded-2xl bg-secondary p-4">
-      <p className="text-[10px] font-black tracking-[0.08em] text-muted-foreground">{label}</p>
-      <p className={cn("mt-2 truncate text-base font-black", emphasis && "text-xl tracking-[-0.04em]")}>{value}</p>
     </div>
   );
 }
@@ -1757,7 +1745,7 @@ export function AiSimulation({ onUnauthorized }: AiSimulationProps) {
               <Bot className="size-4" />
               PAPER TRADING ONLY
             </div>
-            <h2 className="mt-6 max-w-3xl text-[clamp(2rem,5vw,4.7rem)] font-black leading-[0.95] tracking-[-0.07em]">
+            <h2 className="mt-6 max-w-3xl break-keep text-[clamp(2rem,5vw,4.7rem)] font-black leading-[0.95] tracking-[-0.07em]">
               {assetClass !== "us_etf_pair"
                 ? <>선물 방향을 읽고,<br />격리 원장으로 검증합니다.</>
                 : <>AI가 고르고,<br />가상 원장으로 검증합니다.</>}

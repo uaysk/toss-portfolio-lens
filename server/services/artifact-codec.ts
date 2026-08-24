@@ -5,9 +5,11 @@ import {
   Worker,
   workerData,
 } from "node:worker_threads";
+import { canonicalJsonExceedsByteLimit } from "../json-byte-limit.js";
 import { canonicalJson } from "../worker/canonical-json.js";
 
 export const ARTIFACT_CODEC_OFFLOAD_THRESHOLD_BYTES = 1024 * 1024;
+export const ARTIFACT_CODEC_MAX_PENDING_ENCODINGS = 256;
 
 const ARTIFACT_CODEC_WORKER_MARKER = "toss-portfolio-lens-artifact-codec/v1";
 
@@ -21,12 +23,7 @@ export type EncodedArtifact = {
 type ArtifactCodecOptions = {
   offloadThresholdBytes?: number;
   workerIdleMs?: number;
-};
-
-type SizeCounter = {
-  bytes: number;
-  threshold: number;
-  ancestors: WeakSet<object>;
+  maximumPendingEncodings?: number;
 };
 
 type CodecWorkerRequest = {
@@ -49,125 +46,12 @@ type PendingEncoding = {
   reject: (reason: unknown) => void;
 };
 
-function addBytes(counter: SizeCounter, byteCount: number): boolean {
-  counter.bytes += byteCount;
-  return counter.bytes >= counter.threshold;
-}
-
-function countJsonString(value: string, counter: SizeCounter): boolean {
-  if (addBytes(counter, 2)) return true;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c) {
-      if (addBytes(counter, 2)) return true;
-      continue;
-    }
-    if (code < 0x20) {
-      const escapedBytes = code === 0x08
-        || code === 0x09
-        || code === 0x0a
-        || code === 0x0c
-        || code === 0x0d
-        ? 2
-        : 6;
-      if (addBytes(counter, escapedBytes)) return true;
-      continue;
-    }
-    if (code < 0x80) {
-      if (addBytes(counter, 1)) return true;
-      continue;
-    }
-    if (code < 0x800) {
-      if (addBytes(counter, 2)) return true;
-      continue;
-    }
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        index += 1;
-        if (addBytes(counter, 4)) return true;
-      } else if (addBytes(counter, 6)) {
-        return true;
-      }
-      continue;
-    }
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      if (addBytes(counter, 6)) return true;
-      continue;
-    }
-    if (addBytes(counter, 3)) return true;
-  }
-  return false;
-}
-
-function countCanonicalJson(value: unknown, counter: SizeCounter, path = "$"): boolean {
-  if (value === null) return addBytes(counter, 4);
-  if (typeof value === "string") return countJsonString(value, counter);
-  if (typeof value === "boolean") return addBytes(counter, value ? 4 : 5);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`worker payload의 ${path} 값은 유한한 숫자여야 합니다.`);
-    return addBytes(counter, String(Object.is(value, -0) ? 0 : value).length);
-  }
-  if (Array.isArray(value)) {
-    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
-    counter.ancestors.add(value);
-    try {
-      if (addBytes(counter, 1)) return true;
-      for (let index = 0; index < value.length; index += 1) {
-        if (index > 0 && addBytes(counter, 1)) return true;
-        if (countCanonicalJson(value[index], counter, `${path}[${index}]`)) return true;
-      }
-      return addBytes(counter, 1);
-    } finally {
-      counter.ancestors.delete(value);
-    }
-  }
-  if (value instanceof Map) {
-    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
-    counter.ancestors.add(value);
-    try {
-      const normalized = new Map<string, unknown>();
-      for (const [key, item] of value.entries()) normalized.set(String(key), item);
-      const entries = [...normalized.entries()];
-      if (addBytes(counter, 1)) return true;
-      for (let index = 0; index < entries.length; index += 1) {
-        const [key, item] = entries[index]!;
-        if (index > 0 && addBytes(counter, 1)) return true;
-        if (countJsonString(key, counter) || addBytes(counter, 1)) return true;
-        if (countCanonicalJson(item, counter, `${path}.${key}`)) return true;
-      }
-      return addBytes(counter, 1);
-    } finally {
-      counter.ancestors.delete(value);
-    }
-  }
-  if (typeof value === "object" && value) {
-    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
-    counter.ancestors.add(value);
-    try {
-      const entries = Object.entries(value as Record<string, unknown>)
-        .filter(([, item]) => item !== undefined);
-      if (addBytes(counter, 1)) return true;
-      for (let index = 0; index < entries.length; index += 1) {
-        const [key, item] = entries[index]!;
-        if (index > 0 && addBytes(counter, 1)) return true;
-        if (countJsonString(key, counter) || addBytes(counter, 1)) return true;
-        if (countCanonicalJson(item, counter, `${path}.${key}`)) return true;
-      }
-      return addBytes(counter, 1);
-    } finally {
-      counter.ancestors.delete(value);
-    }
-  }
-  throw new Error(`worker payload의 ${path} 값은 JSON으로 직렬화할 수 없습니다.`);
-}
+type QueuedEncoding = PendingEncoding & {
+  value: unknown;
+};
 
 function shouldOffload(value: unknown, threshold: number): boolean {
-  return countCanonicalJson(value, {
-    bytes: 0,
-    threshold,
-    ancestors: new WeakSet(),
-  });
+  return canonicalJsonExceedsByteLimit(value, threshold - 1);
 }
 
 function encodeCanonicalArtifact(value: unknown): Omit<EncodedArtifact, "offloaded"> {
@@ -223,7 +107,9 @@ if (!isMainThread && workerData === ARTIFACT_CODEC_WORKER_MARKER) {
 export class ArtifactCodec {
   private readonly offloadThresholdBytes: number;
   private readonly workerIdleMs: number;
+  private readonly maximumPendingEncodings: number;
   private readonly pending = new Map<number, PendingEncoding>();
+  private readonly queue: QueuedEncoding[] = [];
   private worker?: Worker;
   private idleTimer?: NodeJS.Timeout;
   private nextRequestId = 0;
@@ -233,11 +119,17 @@ export class ArtifactCodec {
     this.offloadThresholdBytes = options.offloadThresholdBytes
       ?? ARTIFACT_CODEC_OFFLOAD_THRESHOLD_BYTES;
     this.workerIdleMs = options.workerIdleMs ?? 1_000;
+    this.maximumPendingEncodings = options.maximumPendingEncodings
+      ?? ARTIFACT_CODEC_MAX_PENDING_ENCODINGS;
     if (!Number.isSafeInteger(this.offloadThresholdBytes) || this.offloadThresholdBytes < 1) {
       throw new Error("artifact codec offload threshold must be a positive safe integer");
     }
     if (!Number.isSafeInteger(this.workerIdleMs) || this.workerIdleMs < 0) {
       throw new Error("artifact codec worker idle timeout must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(this.maximumPendingEncodings)
+      || this.maximumPendingEncodings < 1) {
+      throw new Error("artifact codec pending encoding limit must be a positive safe integer");
     }
   }
 
@@ -262,25 +154,55 @@ export class ArtifactCodec {
     const error = new Error("artifact codec closed before encoding completed");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const queued of this.queue) queued.reject(error);
+    this.queue.length = 0;
     if (worker) await worker.terminate();
   }
 
   private encodeInWorker(value: unknown): Promise<EncodedArtifact> {
-    const worker = this.ensureWorker();
+    if (this.pending.size + this.queue.length >= this.maximumPendingEncodings) {
+      return Promise.reject(new Error(
+        `artifact codec pending encoding limit (${this.maximumPendingEncodings}) exceeded`,
+      ));
+    }
+    return new Promise<EncodedArtifact>((resolve, reject) => {
+      this.queue.push({ value, resolve, reject });
+      this.pumpWorker();
+    });
+  }
+
+  private pumpWorker(): void {
+    // A single worker executes this CPU-bound handler synchronously. Posting
+    // more than one request only fills the MessagePort with structured-cloned
+    // copies; it does not add throughput. Keep exactly one cloned request in
+    // flight and retain the remaining caller-owned values in the bounded queue.
+    if (this.closed || this.pending.size > 0 || this.queue.length === 0) return;
+    const queued = this.queue.shift()!;
+    const { value, resolve, reject } = queued;
+    let worker: Worker;
+    try {
+      worker = this.ensureWorker();
+    } catch (error) {
+      reject(error);
+      for (const remaining of this.queue) remaining.reject(error);
+      this.queue.length = 0;
+      return;
+    }
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
     worker.ref();
     const id = ++this.nextRequestId;
-    return new Promise<EncodedArtifact>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      try {
-        worker.postMessage({ id, value } satisfies CodecWorkerRequest);
-      } catch (error) {
-        this.pending.delete(id);
-        reject(error);
+    this.pending.set(id, { resolve, reject });
+    try {
+      worker.postMessage({ id, value } satisfies CodecWorkerRequest);
+    } catch (error) {
+      this.pending.delete(id);
+      reject(error);
+      this.pumpWorker();
+      if (this.pending.size === 0 && this.queue.length === 0) {
         this.scheduleWorkerIdle(worker);
       }
-    });
+    }
   }
 
   private ensureWorker(): Worker {
@@ -312,7 +234,10 @@ export class ArtifactCodec {
       } else {
         pending.reject(new Error("artifact codec worker returned an invalid response"));
       }
-      this.scheduleWorkerIdle(worker);
+      this.pumpWorker();
+      if (this.pending.size === 0 && this.queue.length === 0) {
+        this.scheduleWorkerIdle(worker);
+      }
     });
     worker.on("error", (error) => this.resetWorker(worker, error));
     worker.on("exit", (code) => {
@@ -328,7 +253,10 @@ export class ArtifactCodec {
   }
 
   private scheduleWorkerIdle(worker: Worker): void {
-    if (this.worker !== worker || this.pending.size > 0) return;
+    if (this.worker !== worker
+      || this.pending.size > 0
+      || this.queue.length > 0
+      || this.idleTimer) return;
     worker.unref();
     if (this.workerIdleMs === 0) {
       this.worker = undefined;
@@ -337,7 +265,7 @@ export class ArtifactCodec {
     }
     this.idleTimer = setTimeout(() => {
       this.idleTimer = undefined;
-      if (this.worker !== worker || this.pending.size > 0) return;
+      if (this.worker !== worker || this.pending.size > 0 || this.queue.length > 0) return;
       this.worker = undefined;
       void worker.terminate();
     }, this.workerIdleMs);
@@ -351,5 +279,7 @@ export class ArtifactCodec {
     this.idleTimer = undefined;
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const queued of this.queue) queued.reject(error);
+    this.queue.length = 0;
   }
 }

@@ -16,8 +16,10 @@ function result(value: unknown): Record<string, unknown> {
 
 describe("management MCP handlers", () => {
   let database: PGliteDatabase | undefined;
+  const runServices: RunService[] = [];
 
   afterEach(async () => {
+    await Promise.all(runServices.splice(0).map((service) => service.close("test_cleanup")));
     await database?.close();
     database = undefined;
   });
@@ -34,6 +36,7 @@ describe("management MCP handlers", () => {
     await optimization.initialize();
     const artifacts = new ArtifactService(artifactRepository, 10, 10_000);
     const runService = new RunService(runs, artifacts, 1, 10, { optimizationRepository: optimization });
+    runServices.push(runService);
     const handlers = createToolHandlers({
       runRepository: runs,
       presets,

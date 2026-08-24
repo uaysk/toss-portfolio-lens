@@ -32,6 +32,37 @@ describe("MCP OAuth HTTP routes", () => {
     await database?.close();
   });
 
+  it("RS256에 너무 짧은 signing key를 DB 초기화 전에 거절한다", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 1_024,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+
+    await expect(createMcpOAuthRuntime({
+      // The invalid key must be rejected before the repository can touch DB.
+      database: {} as unknown as PGliteDatabase,
+      oauth: {
+        issuer: "https://portfolio.example",
+        clientId: "chatgpt-client",
+        clientName: "Toss Portfolio Lens ChatGPT",
+        clientSecret: "client-secret",
+        redirectUri: "https://chatgpt.example/oauth/callback",
+        signingPrivateKeyPem: privateKey,
+        autoApprove: false,
+        accessTokenTtlSeconds: 3_600,
+        refreshTokenTtlSeconds: 2_592_000,
+        authorizationCodeTtlSeconds: 300,
+        loginSessionTtlSeconds: 900,
+      },
+      resourceUrl: "https://portfolio.example/mcp",
+      dashboardPassword: "owner-password",
+      dashboardSessionSecret: "dashboard-session-secret-that-is-at-least-32-characters",
+      publicAppUrl: "https://portfolio.example",
+      maxRequestsPerMinute: 20,
+    })).rejects.toThrow("RSA key of at least 2048 bits");
+  });
+
   it("metadata부터 PKCE token, rotation, reuse detection, revocation까지 수행한다", async () => {
     const { privateKey } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -62,6 +93,7 @@ describe("MCP OAuth HTTP routes", () => {
       dashboardSessionSecret: "dashboard-session-secret-that-is-at-least-32-characters",
       publicAppUrl: issuer,
       maxRequestsPerMinute: 20,
+      maximumPendingAuthorizations: 2,
     });
     const app = express();
     app.use(express.json({ limit: "16kb" }));
@@ -124,6 +156,15 @@ describe("MCP OAuth HTTP routes", () => {
     ownerCookie = overlappingCookie.split(";", 1)[0];
     const overlappingLoginHtml = await overlappingLoginPage.text();
     expect(authorizationSession(overlappingLoginHtml)).not.toBe(authorizationSession(loginHtml));
+
+    const overCapacity = await fetch(authorize, {
+      redirect: "manual",
+      headers: { cookie: ownerCookie },
+    });
+    expect(overCapacity.status).toBe(503);
+    expect(await overCapacity.json()).toMatchObject({
+      error: "temporarily_unavailable",
+    });
 
     const login = await fetch(`${base}/oauth/authorize`, {
       method: "POST",
@@ -224,5 +265,16 @@ describe("MCP OAuth HTTP routes", () => {
     const wrongRedirect = new URL(authorize);
     wrongRedirect.searchParams.set("redirect_uri", `${redirectUri}/wrong`);
     expect((await fetch(wrongRedirect, { redirect: "manual" })).status).toBe(400);
+
+    let exhaustedStatus = 0;
+    for (let requestIndex = 0; requestIndex < 20; requestIndex += 1) {
+      exhaustedStatus = (await fetch(`${base}/oauth/jwks.json`)).status;
+      if (exhaustedStatus === 429) break;
+    }
+    expect(exhaustedStatus).toBe(429);
+    const alternateSpelling = await fetch(`${base}/OAUTH/JWKS.JSON/`);
+    expect(alternateSpelling.status).toBe(429);
+    expect(alternateSpelling.headers.get("retry-after")).toBeTruthy();
+    expect(alternateSpelling.headers.get("cache-control")).toContain("no-store");
   });
 });

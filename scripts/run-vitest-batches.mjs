@@ -20,6 +20,20 @@ export const MEMORY_HEADROOM_MB = 512;
 export const MAX_LIGHT_PARALLELISM = 4;
 
 const TEST_FILE = /\.test\.(?:ts|tsx)$/u;
+const TEST_WALK_IGNORED_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".playwright-mcp",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "coverage",
+  "dist",
+  "graphify-out",
+  "node_modules",
+  "target",
+  "venv",
+]);
 const PGLITE_MARKERS =
   /@electric-sql\/pglite|\bPGlite\b|createTestDatabase|PGliteDatabase|openTestHistoryStore|test-support\/history-store/u;
 const HEAVY_PATH =
@@ -30,6 +44,7 @@ const HEAVY_FILE_BYTES = 64 * 1_024;
 const REPORT_PATH = ".cache/performance/vitest-batches.json";
 const RSS_SAMPLE_INTERVAL_MS = 250;
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const activeTestProcesses = new Set();
 const GROUP_LANES = Object.freeze({
   all: Object.freeze(["light", "heavy", "pglite"]),
   unit: Object.freeze(["light", "heavy"]),
@@ -74,13 +89,19 @@ export function classifyTestFile(path, contents) {
   return { lane: "light", reason: "default" };
 }
 
+export function shouldIgnoreTestDirectory(name) {
+  return TEST_WALK_IGNORED_DIRECTORIES.has(name);
+}
+
+export function terminateTestProcesses(processes, signal) {
+  for (const child of processes) {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  }
+}
+
 function walk(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.name === "node_modules"
-      || entry.name === "dist"
-      || entry.name === ".git"
-      || entry.name === "graphify-out"
-      || entry.name === ".cache") {
+    if (entry.isDirectory() && shouldIgnoreTestDirectory(entry.name)) {
       return [];
     }
     const path = join(directory, entry.name);
@@ -472,6 +493,7 @@ async function executeBatch(batch, record, context) {
       stdio: "inherit",
     },
   );
+  activeTestProcesses.add(child);
   if (child.pid) context.sampler.add(batch.name, child.pid);
   child.once("error", (error) => {
     spawnError = error;
@@ -479,6 +501,7 @@ async function executeBatch(batch, record, context) {
   const result = await new Promise((resolveResult) => {
     child.once("close", (exitCode, signal) => resolveResult({ exitCode, signal }));
   });
+  activeTestProcesses.delete(child);
   const elapsedMs = Math.round(performance.now() - started);
   record.finishedAt = new Date().toISOString();
   record.elapsedMs = elapsedMs;
@@ -713,6 +736,14 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
 if (invokedPath === fileURLToPath(import.meta.url)) {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const handler = () => {
+      terminateTestProcesses(activeTestProcesses, signal);
+      process.removeListener(signal, handler);
+      process.kill(process.pid, signal);
+    };
+    process.once(signal, handler);
+  }
   main().then(
     (exitCode) => {
       process.exitCode = exitCode;

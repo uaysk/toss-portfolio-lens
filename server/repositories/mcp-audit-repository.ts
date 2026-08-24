@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RelationalDatabase } from "../database.js";
+import { applyPortfolioMigrations } from "../migrations.js";
 
 export type McpAuditStatus = "ok" | "error" | "insufficient_scope";
 
@@ -56,49 +57,8 @@ function asRecord(row: McpAuditRow): McpAuditRecord {
 export class McpAuditRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
-  async initialize(): Promise<void> {
-    await this.database.run(`
-      CREATE TABLE IF NOT EXISTS mcp_tool_audit_log (
-        audit_id TEXT PRIMARY KEY,
-        request_id TEXT NOT NULL UNIQUE,
-        protocol_request_id TEXT,
-        session_hash TEXT,
-        tool_name TEXT NOT NULL,
-        subject_hash TEXT NOT NULL,
-        auth_mode TEXT NOT NULL CHECK (auth_mode IN ('oauth', 'none')),
-        status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'insufficient_scope')),
-        error_code TEXT,
-        run_id TEXT,
-        started_at BIGINT NOT NULL,
-        finished_at BIGINT NOT NULL,
-        duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0)
-      )
-    `);
-    await this.database.run(`
-      CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_started
-      ON mcp_tool_audit_log(started_at, tool_name)
-    `);
-    await this.database.run(`
-      CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_subject
-      ON mcp_tool_audit_log(subject_hash, started_at)
-    `);
-    await this.ensureCorrelationColumns();
-  }
-
-  private async ensureCorrelationColumns(): Promise<void> {
-    const rows = await this.database.query<{ column_name: string }>(`
-      SELECT column_name FROM information_schema.columns
-      WHERE table_schema = current_schema() AND table_name = 'mcp_tool_audit_log'
-    `);
-    const names = new Set(rows.map((row) => row.column_name));
-    if (!names.has("protocol_request_id")) {
-      await this.database.run(
-        "ALTER TABLE mcp_tool_audit_log ADD COLUMN protocol_request_id TEXT NULL",
-      );
-    }
-    if (!names.has("session_hash")) {
-      await this.database.run("ALTER TABLE mcp_tool_audit_log ADD COLUMN session_hash TEXT NULL");
-    }
+  async initialize(options: { migrationsAlreadyApplied?: boolean } = {}): Promise<void> {
+    if (!options.migrationsAlreadyApplied) await applyPortfolioMigrations(this.database);
   }
 
   async record(input: Omit<McpAuditRecord, "id">): Promise<McpAuditRecord> {
@@ -128,13 +88,15 @@ export class McpAuditRepository {
       Math.trunc(record.finishedAt),
       record.durationMs,
     ];
-    await this.database.run(`
+    const [inserted] = await this.database.query<McpAuditRow>(`
       INSERT INTO mcp_tool_audit_log (
         audit_id, request_id, protocol_request_id, session_hash, tool_name, subject_hash, auth_mode, status,
         error_code, run_id, started_at, finished_at, duration_ms
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(request_id) DO NOTHING
+      RETURNING *
     `, values);
+    if (inserted) return asRecord(inserted);
     const stored = await this.getByRequestId(record.requestId);
     if (!stored) throw new Error("MCP 호출 감사 로그를 저장하지 못했습니다.");
     return stored;

@@ -1,28 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import {
-  Activity,
-  Archive,
-  ArchiveRestore,
-  Ban,
-  BookCopy,
-  Download,
-  FileClock,
-  FileJson,
-  FileText,
-  History,
-  LibraryBig,
-  LoaderCircle,
-  Pencil,
-  Play,
-  Plus,
-  RefreshCw,
-  Save,
-  Search,
-  Tags,
-  Trash2,
-  Upload,
-  X,
-} from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import Archive from "lucide-react/dist/esm/icons/archive.js";
+import ArchiveRestore from "lucide-react/dist/esm/icons/archive-restore.js";
+import Ban from "lucide-react/dist/esm/icons/ban.js";
+import BookCopy from "lucide-react/dist/esm/icons/book-copy.js";
+import Download from "lucide-react/dist/esm/icons/download.js";
+import FileClock from "lucide-react/dist/esm/icons/file-clock.js";
+import FileJson from "lucide-react/dist/esm/icons/file-json.js";
+import FileText from "lucide-react/dist/esm/icons/file-text.js";
+import History from "lucide-react/dist/esm/icons/history.js";
+import LibraryBig from "lucide-react/dist/esm/icons/library-big.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Pencil from "lucide-react/dist/esm/icons/pencil.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Save from "lucide-react/dist/esm/icons/save.js";
+import Search from "lucide-react/dist/esm/icons/search.js";
+import Tags from "lucide-react/dist/esm/icons/tags.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
+import Upload from "lucide-react/dist/esm/icons/upload.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import { LazyJsonDetails } from "@/components/lazy-json-details";
 import { SavedResearchRunResults } from "@/components/portfolio-research-results";
 import { Button } from "@/components/ui/button";
@@ -54,6 +52,7 @@ import {
 } from "@/lib/research-library";
 import { cancelAdvancedAnalysis, loadAdvancedRunSnapshot } from "@/lib/advanced-analysis";
 import { cn } from "@/lib/utils";
+import { preferredScrollBehavior } from "@/lib/motion-preference";
 import type { AdvancedRunSnapshot, Portfolio, Theme } from "@/types";
 
 type LibraryTab = "runs" | "presets";
@@ -128,7 +127,7 @@ function PresetLazyHistory({ presetId, onUnauthorized }: { presetId: string; onU
     <details className="mt-3 rounded-2xl bg-card p-3">
       <summary className="cursor-pointer text-[10px] font-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">변경 이력</summary>
       {history === undefined ? <Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>{loading ? <LoaderCircle className="animate-spin" /> : <History />}이력 불러오기</Button> : <LazyJsonDetails value={history} className="mt-3 rounded-2xl bg-secondary p-3" />}
-      {error ? <p role="alert" className="mt-2 text-xs text-rose-500">{error}</p> : null}
+      {error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{error}</p> : null}
     </details>
   );
 }
@@ -141,6 +140,13 @@ function RunLazyDetails({ runId, completed, onUnauthorized }: { runId: string; c
   const [error, setError] = useState("");
   const [reportFormat, setReportFormat] = useState<"markdown" | "json">("markdown");
   const [reportTitle, setReportTitle] = useState("");
+  const reportController = useRef<AbortController | undefined>(undefined);
+
+  useEffect(() => () => {
+    const controller = reportController.current;
+    reportController.current = undefined;
+    controller?.abort();
+  }, [runId]);
 
   const load = async (kind: "events" | "manifest") => {
     setLoading(kind);
@@ -159,18 +165,30 @@ function RunLazyDetails({ runId, completed, onUnauthorized }: { runId: string; c
   };
 
   const generateReport = async () => {
+    reportController.current?.abort();
+    const controller = new AbortController();
+    reportController.current = controller;
     setLoading("report");
     setError("");
     try {
-      setReport(await generateLibraryResearchReport(runId, reportFormat, {
+      const generated = await generateLibraryResearchReport(runId, reportFormat, {
         onUnauthorized,
         title: reportTitle,
         executionMode: "async",
-      }));
+        signal: controller.signal,
+      });
+      if (reportController.current === controller && !controller.signal.aborted) {
+        setReport(generated);
+      }
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (reportController.current === controller && !controller.signal.aborted) {
+        setError(errorMessage(caught));
+      }
     } finally {
-      setLoading(undefined);
+      if (reportController.current === controller) {
+        reportController.current = undefined;
+        setLoading(undefined);
+      }
     }
   };
 
@@ -191,7 +209,7 @@ function RunLazyDetails({ runId, completed, onUnauthorized }: { runId: string; c
         </Button>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_140px]"><Input aria-label="연구 보고서 제목" value={reportTitle} onChange={(event) => setReportTitle(event.target.value)} placeholder="보고서 제목 · 선택" className="bg-card" /><Select value={reportFormat} onValueChange={(value) => setReportFormat(value as "markdown" | "json")}><SelectTrigger aria-label="연구 보고서 형식" className="w-full bg-card"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="markdown">Markdown</SelectItem><SelectItem value="json">JSON</SelectItem></SelectContent></Select></div>
-      {error ? <p role="alert" className="mt-3 text-xs font-bold text-rose-500">{error}</p> : null}
+      {error ? <p role="alert" className="mt-3 text-xs font-bold text-rose-700 dark:text-rose-400">{error}</p> : null}
       {events !== undefined ? <LazyJsonDetails value={events} className="mt-3 rounded-2xl bg-card p-3" /> : null}
       {manifest !== undefined ? <LazyJsonDetails value={manifest} className="mt-3 rounded-2xl bg-card p-3" /> : null}
       {report !== undefined ? <LazyJsonDetails value={report} className="mt-3 rounded-2xl bg-card p-3" /> : null}
@@ -215,23 +233,31 @@ function RunLibrary({ theme, onUnauthorized }: { theme: Theme; onUnauthorized: (
   const [editTags, setEditTags] = useState("");
   const [deletePendingId, setDeletePendingId] = useState<string>();
   const requestSequence = useRef(0);
+  const listRequest = useRef<AbortController | undefined>(undefined);
 
   const load = useCallback(async (cursor?: string) => {
+    listRequest.current?.abort();
+    const controller = new AbortController();
+    listRequest.current = controller;
     const sequence = ++requestSequence.current;
     if (cursor) setLoadingMore(true);
     else setLoading(true);
     setError("");
     try {
-      const page = await listLibraryRuns({ ...filters, ...(cursor ? { cursor } : {}) }, { onUnauthorized });
-      if (sequence !== requestSequence.current) return;
+      const page = await listLibraryRuns(
+        { ...filters, ...(cursor ? { cursor } : {}) },
+        { onUnauthorized, signal: controller.signal },
+      );
+      if (controller.signal.aborted || sequence !== requestSequence.current) return;
       setRuns((current) => cursor
         ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]
         : page.items);
       setNextCursor(page.nextCursor);
     } catch (caught) {
-      if (sequence === requestSequence.current) setError(errorMessage(caught));
+      if (!controller.signal.aborted && sequence === requestSequence.current) setError(errorMessage(caught));
     } finally {
-      if (sequence === requestSequence.current) {
+      if (listRequest.current === controller) {
+        listRequest.current = undefined;
         setLoading(false);
         setLoadingMore(false);
       }
@@ -240,6 +266,11 @@ function RunLibrary({ theme, onUnauthorized }: { theme: Theme; onUnauthorized: (
 
   useEffect(() => {
     void load();
+    return () => {
+      requestSequence.current += 1;
+      listRequest.current?.abort();
+      listRequest.current = undefined;
+    };
   }, [load]);
 
   const applyFilters = (event: FormEvent) => {
@@ -597,20 +628,34 @@ function PresetLibrary({ portfolio, onUnauthorized }: { portfolio: Portfolio; on
   const [currentName, setCurrentName] = useState(`현재 포트폴리오 · ${portfolio.account.label}`);
   const [deletePendingId, setDeletePendingId] = useState<string>();
   const [importText, setImportText] = useState("");
+  const listRequest = useRef<AbortController | undefined>(undefined);
 
   const load = useCallback(async () => {
+    listRequest.current?.abort();
+    const controller = new AbortController();
+    listRequest.current = controller;
     setLoading(true);
     setError("");
     try {
-      setPresets((await listLibraryPresets({ onUnauthorized })).items);
+      const page = await listLibraryPresets({ onUnauthorized, signal: controller.signal });
+      if (!controller.signal.aborted && listRequest.current === controller) setPresets(page.items);
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (!controller.signal.aborted && listRequest.current === controller) setError(errorMessage(caught));
     } finally {
-      setLoading(false);
+      if (listRequest.current === controller) {
+        listRequest.current = undefined;
+        setLoading(false);
+      }
     }
   }, [onUnauthorized]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => {
+      listRequest.current?.abort();
+      listRequest.current = undefined;
+    };
+  }, [load]);
   useEffect(() => { setCurrentName(`현재 포트폴리오 · ${portfolio.account.label}`); }, [portfolio.account.label]);
 
   const visible = useMemo(() => {
@@ -760,7 +805,7 @@ function PresetLibrary({ portfolio, onUnauthorized }: { portfolio: Portfolio; on
                   <Button size="sm" onClick={() => void executePreset(preset, "run_portfolio_backtest")} disabled={Boolean(busy)}><Play />백테스트</Button>
                   <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "optimize_portfolio")} disabled={Boolean(busy)}><Activity />최적화</Button>
                   <Button size="sm" variant="secondary" onClick={() => void executePreset(preset, "walk_forward_optimize")} disabled={Boolean(busy)}><Play />Walk-forward</Button>
-                  <Button size="sm" variant="secondary" onClick={() => { setEditingId(preset.id); setDraft(draftFromPreset(preset)); window.scrollTo({ top: 0, behavior: "smooth" }); }} disabled={Boolean(busy)}><Pencil />수정</Button>
+                  <Button size="sm" variant="secondary" onClick={() => { setEditingId(preset.id); setDraft(draftFromPreset(preset)); window.scrollTo({ top: 0, behavior: preferredScrollBehavior() }); }} disabled={Boolean(busy)}><Pencil />수정</Button>
                 </> : null}
                 <Button size="sm" variant="secondary" onClick={() => void duplicate(preset)} disabled={Boolean(busy)}><BookCopy />복제</Button>
                 <Button size="sm" variant="secondary" onClick={() => void exportPreset(preset)} disabled={Boolean(busy)}><Download />내보내기</Button>

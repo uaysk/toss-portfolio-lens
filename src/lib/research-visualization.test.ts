@@ -4,6 +4,7 @@ import {
   buildQuantileSeries,
   candidateMetric,
   chartCandidates,
+  downsampleRows,
   normalizeOptimizationCandidates,
   parseFactorDraft,
 } from "./research-visualization";
@@ -50,6 +51,16 @@ describe("research visualization normalization", () => {
     expect(paths.keys).toEqual([{ key: "q500", quantile: 0.05 }, { key: "q5000", quantile: 0.5 }]);
     expect(paths.points[1]).toMatchObject({ q500: 90, q5000: 110 });
     expect(buildOosEquitySeries([{ date: "a", equity: 1 }, { date: "b", equity: 1.1 }], 2)).toHaveLength(2);
+  });
+
+  it("bounds long chart paths while retaining both endpoints", () => {
+    const rows = Array.from({ length: 25_200 }, (_, step) => ({ step }));
+    const sampled = downsampleRows(rows, 500);
+
+    expect(sampled).toHaveLength(500);
+    expect(sampled[0]).toEqual({ step: 0 });
+    expect(sampled.at(-1)).toEqual({ step: 25_199 });
+    expect(() => downsampleRows(rows, 0)).toThrow(/positive safe integer/u);
   });
 
   it("parses only finite factor metadata supplied by the user", () => {

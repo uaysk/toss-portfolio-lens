@@ -3,6 +3,7 @@ import type { PortfolioBacktestService } from "../backtest.js";
 import type { RelationalDatabase } from "../database.js";
 import type { AppConfig } from "../env.js";
 import type { PortfolioHistoryStore } from "../history.js";
+import { applyPortfolioMigrations } from "../migrations.js";
 import type { RuntimeTelemetry } from "../observability/runtime-telemetry.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { McpAuditRepository } from "../repositories/mcp-audit-repository.js";
@@ -50,7 +51,9 @@ export async function initializeCorePersistence(input: {
   database: RelationalDatabase;
   runtimeTelemetry: RuntimeTelemetry;
   scalpingEnabled: boolean;
+  migrationsAlreadyApplied?: boolean;
 }): Promise<CorePersistenceRuntime> {
+  if (!input.migrationsAlreadyApplied) await applyPortfolioMigrations(input.database);
   const runRepository = new RunRepository(input.database);
   const presetRepository = new PresetRepository(input.database);
   const artifactRepository = new ArtifactRepository(
@@ -67,16 +70,19 @@ export async function initializeCorePersistence(input: {
     : undefined;
   const simulationCheckpoints = new SimulationCheckpointStore(input.database);
 
-  await runRepository.initialize();
+  // Migrations are owned by this composition boundary, so repositories do not
+  // repeat the same ledger scan during a single startup.
+  const initializedSchema = { migrationsAlreadyApplied: true } as const;
+  await runRepository.initialize(initializedSchema);
   await simulationCheckpoints.initialize();
   const presetService = new PresetService(presetRepository);
-  await presetService.initialize();
+  await presetService.initialize(initializedSchema);
   await artifactRepository.initialize();
   await optimizationRepository.initialize();
   await reportRepository.initialize();
   await runJobRepository.initialize();
-  await mcpAuditRepository.initialize();
-  await scalpingRepository?.initialize();
+  await mcpAuditRepository.initialize(initializedSchema);
+  await scalpingRepository?.initialize(initializedSchema);
 
   return {
     runRepository,

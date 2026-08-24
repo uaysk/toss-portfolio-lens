@@ -1,20 +1,18 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  BarChart3,
-  CalendarDays,
-  CircleDollarSign,
-  Info,
-  LoaderCircle,
-  Plus,
-  RefreshCw,
-  Scale,
-  Sparkles,
-  Trash2,
-  TrendingDown,
-  TrendingUp,
-  WalletCards,
-} from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
+import CircleDollarSign from "lucide-react/dist/esm/icons/circle-dollar-sign.js";
+import Info from "lucide-react/dist/esm/icons/info.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Scale from "lucide-react/dist/esm/icons/scale.js";
+import Sparkles from "lucide-react/dist/esm/icons/sparkles.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
+import TrendingDown from "lucide-react/dist/esm/icons/trending-down.js";
+import TrendingUp from "lucide-react/dist/esm/icons/trending-up.js";
+import WalletCards from "lucide-react/dist/esm/icons/wallet-cards.js";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -184,7 +182,7 @@ export function PortfolioBacktestView({
   technicalStrategyHandoff?: TechnicalStrategyHandoff;
   onTechnicalStrategyHandoffConsumed?: () => void;
 }) {
-  const today = useMemo(() => seoulDateString(), []);
+  const today = seoulDateString();
   const [assets, setAssets] = useState<BacktestAsset[]>([]);
   const [symbol, setSymbol] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -239,14 +237,24 @@ export function PortfolioBacktestView({
   const manuallyEditedStart = useRef(false);
   const handoffInitializationStarted = useRef(Boolean(technicalStrategyHandoff));
   const runController = useRef(new BacktestRunController({ strategyMode, fingerprint: "" }));
+  const portfolioLoadRequest = useRef<AbortController | undefined>(undefined);
+  const validationRequest = useRef<AbortController | undefined>(undefined);
+  const backtestRequest = useRef<AbortController | undefined>(undefined);
 
   const loadCurrentPortfolio = useCallback(async () => {
+    portfolioLoadRequest.current?.abort();
+    const controller = new AbortController();
+    portfolioLoadRequest.current = controller;
     setLoadingCurrent(true);
     setError("");
     try {
       const params = new URLSearchParams({ account: portfolio.selectedAccountId });
-      const response = await fetch(`/api/portfolio/backtest/current?${params.toString()}`, { headers: { Accept: "application/json" } });
+      const response = await fetch(`/api/portfolio/backtest/current?${params.toString()}`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
       const payload = await response.json().catch(() => ({})) as CurrentBacktestPortfolio & ApiError;
+      if (controller.signal.aborted || portfolioLoadRequest.current !== controller) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -268,23 +276,33 @@ export function PortfolioBacktestView({
       setResult(undefined);
       setResultOrigin(undefined);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "현재 포트폴리오를 불러오지 못했습니다.");
+      if (!controller.signal.aborted && portfolioLoadRequest.current === controller) {
+        setError(caught instanceof Error ? caught.message : "현재 포트폴리오를 불러오지 못했습니다.");
+      }
     } finally {
-      setLoadingCurrent(false);
+      if (portfolioLoadRequest.current === controller) {
+        portfolioLoadRequest.current = undefined;
+        setLoadingCurrent(false);
+      }
     }
   }, [onUnauthorized, portfolio.selectedAccountId]);
 
   const applyTechnicalSource = useCallback(async (analysis: TechnicalStrategyAnalysis, strategy: TechnicalStrategy): Promise<boolean> => {
+    portfolioLoadRequest.current?.abort();
+    const controller = new AbortController();
+    portfolioLoadRequest.current = controller;
     setLoadingCurrent(true);
-      setError("");
-      try {
-        const normalized = analysis.symbols.join(",");
-        // This is a same-origin relative API route, not a navigable URL.
-        // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
-        const response = await fetch(`/api/portfolio/backtest/instruments?symbols=${encodeURIComponent(normalized)}`, {
+    setError("");
+    try {
+      const normalized = analysis.symbols.join(",");
+      // This is a same-origin relative API route, not a navigable URL.
+      // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
+      const response = await fetch(`/api/portfolio/backtest/instruments?symbols=${encodeURIComponent(normalized)}`, {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({})) as { instruments?: BacktestInstrument[] } & ApiError;
+      if (controller.signal.aborted || portfolioLoadRequest.current !== controller) return false;
       if (response.status === 401) {
         onUnauthorized();
         return false;
@@ -316,12 +334,26 @@ export function PortfolioBacktestView({
       manuallyEditedStart.current = true;
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "기술 신호 전략 종목 정보를 불러오지 못했습니다.");
+      if (!controller.signal.aborted && portfolioLoadRequest.current === controller) {
+        setError(caught instanceof Error ? caught.message : "기술 신호 전략 종목 정보를 불러오지 못했습니다.");
+      }
       return false;
     } finally {
-      setLoadingCurrent(false);
+      if (portfolioLoadRequest.current === controller) {
+        portfolioLoadRequest.current = undefined;
+        setLoadingCurrent(false);
+      }
     }
   }, [onUnauthorized]);
+
+  useEffect(() => () => {
+    portfolioLoadRequest.current?.abort();
+    portfolioLoadRequest.current = undefined;
+    validationRequest.current?.abort();
+    validationRequest.current = undefined;
+    backtestRequest.current?.abort();
+    backtestRequest.current = undefined;
+  }, []);
 
   useEffect(() => {
     if (technicalStrategyHandoff) {
@@ -334,9 +366,15 @@ export function PortfolioBacktestView({
 
   useEffect(() => {
     if (mode !== "backtest") return;
-    listLibraryPresets({ onUnauthorized })
-      .then((page) => setTechnicalPresets(page.items.filter((item) => normalizeTechnicalStrategyPresetConfig(item.config) !== undefined)))
+    const controller = new AbortController();
+    listLibraryPresets({ onUnauthorized, signal: controller.signal })
+      .then((page) => {
+        if (!controller.signal.aborted) {
+          setTechnicalPresets(page.items.filter((item) => normalizeTechnicalStrategyPresetConfig(item.config) !== undefined));
+        }
+      })
       .catch(() => undefined);
+    return () => controller.abort();
   }, [mode, onUnauthorized]);
 
   const addInstrument = async () => {
@@ -594,6 +632,9 @@ export function PortfolioBacktestView({
 
   const validateTechnical = async () => {
     if (!technicalEndpointRequest || technicalStrategyErrors.length || !technicalSourceMatchesBase) return;
+    validationRequest.current?.abort();
+    const controller = new AbortController();
+    validationRequest.current = controller;
     setValidatingTechnical(true);
     setError("");
     try {
@@ -601,8 +642,10 @@ export function PortfolioBacktestView({
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify(technicalEndpointRequest),
+        signal: controller.signal,
       });
       const raw = await response.json().catch(() => ({}));
+      if (controller.signal.aborted || validationRequest.current !== controller) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -614,16 +657,24 @@ export function PortfolioBacktestView({
       setTechnicalValidationFingerprint(technicalRequestFingerprint);
       if (!payload.valid) setError("기술 신호 전략의 서버 검증 오류를 확인해 주세요.");
     } catch (caught) {
-      setTechnicalValidation(undefined);
-      setTechnicalValidationFingerprint("");
-      setError(caught instanceof Error ? caught.message : "기술 신호 전략을 검증하지 못했습니다.");
+      if (!controller.signal.aborted && validationRequest.current === controller) {
+        setTechnicalValidation(undefined);
+        setTechnicalValidationFingerprint("");
+        setError(caught instanceof Error ? caught.message : "기술 신호 전략을 검증하지 못했습니다.");
+      }
     } finally {
-      setValidatingTechnical(false);
+      if (validationRequest.current === controller) {
+        validationRequest.current = undefined;
+        setValidatingTechnical(false);
+      }
     }
   };
 
   const runBacktest = async () => {
     if (!canRun) return;
+    backtestRequest.current?.abort();
+    const controller = new AbortController();
+    backtestRequest.current = controller;
     const runToken = runController.current.begin();
     setRunning(true);
     setError("");
@@ -639,8 +690,10 @@ export function PortfolioBacktestView({
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify(technicalRequest ?? baseConfig),
+        signal: controller.signal,
       });
       const raw = await response.json().catch(() => ({}));
+      if (controller.signal.aborted || backtestRequest.current !== controller) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -665,11 +718,15 @@ export function PortfolioBacktestView({
         setBacktestRuns((current) => [{ runId: payload.runId!, label }, ...current.filter((item) => item.runId !== payload.runId)].slice(0, 20));
       }
     } catch (caught) {
-      if (runController.current.accepts(runToken)) {
+      if (!controller.signal.aborted && backtestRequest.current === controller
+        && runController.current.accepts(runToken)) {
         setError(caught instanceof Error ? caught.message : "백테스트를 실행하지 못했습니다.");
       }
     } finally {
-      if (runController.current.isLatest(runToken)) setRunning(false);
+      if (backtestRequest.current === controller) {
+        backtestRequest.current = undefined;
+        if (runController.current.isLatest(runToken)) setRunning(false);
+      }
     }
   };
 
@@ -678,6 +735,14 @@ export function PortfolioBacktestView({
     point.return20d !== null || point.return60d !== null || point.volatility60d !== null
   )) ?? [];
   const hasRolling60 = rollingData.some((point) => point.volatility60d !== null);
+  const riskContributionMaximum = useMemo(() => {
+    let maximum = 1;
+    for (const contribution of advanced?.riskContributions ?? []) {
+      const value = contribution.riskContributionPercent;
+      if (Number.isFinite(value)) maximum = Math.max(maximum, Math.abs(value as number));
+    }
+    return maximum;
+  }, [advanced?.riskContributions]);
   const monthlyYears = useMemo(() => {
     const years = new Map<string, Record<number, number>>();
     for (const item of advanced?.monthlyReturns ?? []) {
@@ -829,7 +894,7 @@ export function PortfolioBacktestView({
 
         <div className="mt-3 flex items-center justify-between rounded-[18px] bg-card px-4 py-3 text-xs font-bold">
           <span className="text-muted-foreground">총 {assets.length}종목 · 주식 {weightTotal.toFixed(2)}% + 현금 {effectiveCashTargetPercent.toFixed(2)}%</span>
-          <span className={cn(Math.abs(weightTotal + effectiveCashTargetPercent - 100) > 0.01 && "text-rose-500")}>{(weightTotal + effectiveCashTargetPercent).toFixed(2)}%</span>
+          <span className={cn(Math.abs(weightTotal + effectiveCashTargetPercent - 100) > 0.01 && "text-rose-700 dark:text-rose-400")}>{(weightTotal + effectiveCashTargetPercent).toFixed(2)}%</span>
         </div>
 
         {mode === "backtest" && strategyMode === "technical_signal" && technicalAnalysis && technicalStrategy ? (
@@ -1006,7 +1071,7 @@ export function PortfolioBacktestView({
             <p><strong className="text-foreground">데이터 공급자 한계:</strong> 현재 공급자는 현금배당 이벤트, 과거 거래량, 상장폐지 및 지수·universe 편입 이력을 제공하지 않습니다. 엔진은 이를 추정하지 않으며, 현금배당·시장충격은 관측이 없으면 unavailable/품질 경고로 반환합니다. PIT 날짜는 아래에서 명시한 값만 강제하며 공급자 검증값으로 표시하지 않습니다.</p>
           </div>
           {!realismCostsValid || !pointInTimeMetadataValid || targetWeightSchedule.error ? (
-            <p role="alert" className="mt-3 rounded-[18px] bg-card px-4 py-3 text-xs font-semibold text-rose-500">현실성 옵션의 비용 범위, PIT 날짜 또는 목표비중 JSON을 확인해 주세요. 상세 오류는 옵션을 열면 표시됩니다.</p>
+            <p role="alert" className="mt-3 rounded-[18px] bg-card px-4 py-3 text-xs font-semibold text-rose-700 dark:text-rose-400">현실성 옵션의 비용 범위, PIT 날짜 또는 목표비중 JSON을 확인해 주세요. 상세 오류는 옵션을 열면 표시됩니다.</p>
           ) : null}
 
           {showRealismControls ? (
@@ -1095,7 +1160,7 @@ export function PortfolioBacktestView({
                     </fieldset>
                   ))}
                 </div>
-                {enforcePointInTimeUniverse && !pointInTimeMetadataValid ? <p role="alert" className="mt-3 text-xs font-semibold text-rose-500">PIT 강제 시 모든 종목에 분석 기간과 겹치는 [편입일, 제외일) 구간이 필요합니다. 상장폐지일은 편입일보다 늦어야 합니다.</p> : null}
+                {enforcePointInTimeUniverse && !pointInTimeMetadataValid ? <p role="alert" className="mt-3 text-xs font-semibold text-rose-700 dark:text-rose-400">PIT 강제 시 모든 종목에 분석 기간과 겹치는 [편입일, 제외일) 구간이 필요합니다. 상장폐지일은 편입일보다 늦어야 합니다.</p> : null}
               </div>
 
               {strategyMode !== "technical_signal" ? <div className="rounded-[22px] bg-card p-4 sm:p-5">
@@ -1114,7 +1179,7 @@ export function PortfolioBacktestView({
                   placeholder={'[{\n  "date": "2024-01-02",\n  "weights": { "005930": 60, "AAPL": 35 },\n  "cashTargetPercent": 5,\n  "regime": "optional",\n  "action": "optional"\n}]'}
                   className="mt-3 w-full resize-y rounded-2xl border border-input bg-secondary px-4 py-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 />
-                {targetWeightSchedule.error ? <p role="alert" className="mt-2 text-xs font-semibold text-rose-500">{targetWeightSchedule.error}</p> : <p className="mt-2 text-[10px] text-muted-foreground">검증된 일정 {targetWeightSchedule.value?.length ?? 0}개 · 빈 입력은 기존 단일 목표비중 경로를 유지합니다.</p>}
+                {targetWeightSchedule.error ? <p role="alert" className="mt-2 text-xs font-semibold text-rose-700 dark:text-rose-400">{targetWeightSchedule.error}</p> : <p className="mt-2 text-[10px] text-muted-foreground">검증된 일정 {targetWeightSchedule.value?.length ?? 0}개 · 빈 입력은 기존 단일 목표비중 경로를 유지합니다.</p>}
               </div> : <div className="rounded-[22px] bg-card p-4 text-xs leading-5 text-muted-foreground"><strong className="text-foreground">기술 신호 일정:</strong> 수동 목표비중 JSON은 사용하지 않습니다. Rust가 종가 조건을 평가하고 다음 안전 거래일의 targetWeightSchedule을 만든 뒤 기존 ledger에 전달합니다.</div>}
             </div>
           ) : null}
@@ -1138,7 +1203,7 @@ export function PortfolioBacktestView({
           </div>
         </div>
 
-        {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
+        {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-700 dark:text-rose-400">{error}</p> : null}
         <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void runBacktest()} disabled={!canRun || running}>
           {running ? <LoaderCircle className="animate-spin" /> : <TrendingUp />}
           {running ? (strategyMode === "technical_signal" ? "지표·신호·ledger를 계산하는 중" : "수정주가를 수집하고 계산하는 중") : mode === "backtest" ? (strategyMode === "technical_signal" ? "기술 신호 백테스트 실행" : "백테스트 실행") : "비교 기준 백테스트 저장"}
@@ -1473,14 +1538,13 @@ export function PortfolioBacktestView({
                   <p className="mt-2 text-sm leading-6 text-muted-foreground">시뮬레이션 평균 비중과 종목 공분산으로 전체 변동성 기여를 계산합니다.</p>
                   <div className="mt-5 space-y-3">
                     {advanced.riskContributions.map((item) => {
-                      const maximum = Math.max(...advanced.riskContributions.map((candidate) => Math.abs(candidate.riskContributionPercent ?? 0)), 1);
                       return (
                         <div key={item.key} className="rounded-[18px] bg-card p-4">
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">평균 {formatPercent(item.averageWeightPercent)} · 종료 {formatPercent(item.endingWeightPercent)} · 변동성 {metricValue(item.annualizedVolatilityPercent)}</p></div>
                             <p className="text-sm font-black">{metricValue(item.riskContributionPercent)}</p>
                           </div>
-                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
+                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / riskContributionMaximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
                           <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricValue(item.correlationToPortfolio, "ratio")}</p>
                         </div>
                       );

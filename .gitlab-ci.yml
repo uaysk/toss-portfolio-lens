@@ -52,8 +52,33 @@ workflow:
   - '*.md'
   - LICENSE*
 
+# Keep the Python worker gate focused on code and integration surfaces that can
+# change its runtime or cross-language contract. Default-branch, tag, and
+# scheduled pipelines still run the job unconditionally below.
+.ci-python-ai-paths: &ci_python_ai_paths
+  - .gitlab-ci.yml
+  - Dockerfile.worker.*
+  - compose.yaml
+  - compose.ai*.yaml
+  - worker/ai/**/*
+  - contracts/scalping-ai/**/*
+  - server/config/crypto-ai.ts
+  - server/crypto/chronos2-*
+  - server/crypto/fincast-*
+  - server/scalping/fincast-*
+  - server/services/scalping-ai-service*
+  - server/worker/ai-*
+  - scripts/**/*.py
+  - scripts/**/*chronos2*
+  - scripts/**/*fincast*
+  - scripts/verify-ai-compose-profiles.mjs
+  - qualification-tools/**/*
+
 .ci-code-sensitive-rules:
   rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+      variables:
+        NODE_STATIC_CACHE_POLICY: pull-push
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
     - changes: *ci_code_paths
     - changes: *ci_doc_paths
@@ -148,7 +173,7 @@ runner-boundary:
     - key:
         files:
           - package-lock.json
-        prefix: node-npm-v2
+        prefix: node-npm-v3
       policy: pull
       paths:
         - .cache/npm/
@@ -160,6 +185,8 @@ node-static:
   resource_group: toss-portfolio-lens-memory-heavy
   dependencies: []
   rules: !reference [.ci-code-sensitive-rules, rules]
+  variables:
+    NODE_STATIC_CACHE_POLICY: pull
   before_script:
     - *ci_resource_metrics_script
     - apt-get update -qq
@@ -169,15 +196,15 @@ node-static:
     - key:
         files:
           - package-lock.json
-        prefix: node-npm-v2
-      policy: pull-push
+        prefix: node-npm-v3
+      policy: $NODE_STATIC_CACHE_POLICY
       paths:
         - .cache/npm/
     - key:
         files:
           - package-lock.json
-        prefix: node-build-v2
-      policy: pull-push
+        prefix: node-build-v3
+      policy: $NODE_STATIC_CACHE_POLICY
       paths:
         - .cache/types/
         - .cache/tsbuildinfo/
@@ -207,6 +234,9 @@ node-static:
     paths:
       - typescript-diagnostics.txt
       - .cache/performance/bundle-report.json
+      # The browser lane consumes this exact production build. Its compressed
+      # artifact is substantially cheaper than a second Vite compilation.
+      - dist/client/
 
 docs-validation:
   extends: .node-job
@@ -338,6 +368,53 @@ secret_detection:
   before_script:
     - *ci_resource_metrics_script
 
+python-ai-quality:
+  stage: test
+  image: ghcr.io/astral-sh/uv:0.7.19-python3.12-bookworm-slim@sha256:235c2e8419851c1d539e2b19033d56aaf82670bfaaa155e20ac6b21260dc0be9
+  timeout: 15 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+      variables:
+        PYTHON_AI_CACHE_POLICY: pull-push
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - changes: *ci_python_ai_paths
+    - when: never
+  variables:
+    PYTHON_AI_CACHE_POLICY: pull
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+    UV_LINK_MODE: copy
+    UV_PYTHON_DOWNLOADS: never
+  cache:
+    - key:
+        files:
+          - worker/ai/pyproject.toml
+          - worker/ai/uv.lock
+        prefix: python-ai-uv-v2
+      policy: $PYTHON_AI_CACHE_POLICY
+      paths:
+        - .cache/uv/
+  before_script:
+    - *ci_resource_metrics_script
+    - cd worker/ai
+    - uv export --quiet --all-extras --locked --no-hashes --no-emit-project --output-file /tmp/python-ai-constraints.txt
+    - uv venv --python 3.12
+    # The full GPU lock pulls several GiB of CUDA wheels that these CPU-only
+    # tests never exercise. Install the declared test and runtime extras once,
+    # selecting uv's CPU PyTorch backend while preserving locked versions for
+    # all compatible packages, then keep every command sync-free.
+    - uv pip install --requirements pyproject.toml --all-extras --torch-backend cpu --constraints /tmp/python-ai-constraints.txt --strict
+  script:
+    - uv run --no-sync ruff check
+    - mkdir -p "$CI_PROJECT_DIR/.cache/test-reports/python-ai"
+    - uv run --no-sync pytest --junitxml="$CI_PROJECT_DIR/.cache/test-reports/python-ai/pytest.xml"
+  artifacts:
+    when: always
+    expire_in: 14 days
+    reports:
+      junit: .cache/test-reports/python-ai/pytest.xml
+
 rust-quality:
   stage: test
   image: rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
@@ -345,9 +422,10 @@ rust-quality:
   resource_group: toss-portfolio-lens-memory-heavy
   dependencies: []
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
       variables:
         RUST_CACHE_POLICY: pull-push
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
     - changes: *ci_code_paths
     - changes: *ci_doc_paths
       when: never
@@ -359,7 +437,7 @@ rust-quality:
     - key:
         files:
           - worker/rust/Cargo.lock
-        prefix: rust-registry-v2
+        prefix: rust-registry-v3
       policy: $RUST_CACHE_POLICY
       paths:
         - .cache/cargo/registry/
@@ -367,7 +445,7 @@ rust-quality:
     - key:
         files:
           - worker/rust/Cargo.lock
-        prefix: rust-target-v2
+        prefix: rust-target-v3
       policy: $RUST_CACHE_POLICY
       paths:
         - worker/rust/target/
@@ -410,13 +488,15 @@ ui-regression:
   image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
-  dependencies: []
+  needs:
+    - job: node-static
+      artifacts: true
   rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
     UI_VALIDATION_SKIP_BUILD: "1"
     UI_VALIDATION_SCREENSHOT_DIR: "$CI_PROJECT_DIR/.cache/ui-regression"
   script:
-    - npm run build:client
+    - test -f dist/client/index.html
     - npm run test:ui-regression
     - |
       if [[ -d "$UI_VALIDATION_SCREENSHOT_DIR" ]]; then

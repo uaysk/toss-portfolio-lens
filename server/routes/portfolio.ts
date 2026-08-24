@@ -1,6 +1,7 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
 import { setNoStore } from "../auth.js";
 import type { SseConnectionTracker } from "../lifecycle.js";
+import { admitSseConnection } from "./sse-admission.js";
 import {
   PORTFOLIO_EVENT_SCHEMA_VERSION,
   type PortfolioEventV1,
@@ -12,6 +13,7 @@ import {
 } from "../portfolio/live-hub.js";
 import type { Portfolio } from "../toss.js";
 import { TossApiError } from "../toss.js";
+import { createTurnScopedFrameSerializer } from "./sse-frame-cache.js";
 
 export type PortfolioRouteDependencies = {
   authenticate: RequestHandler;
@@ -42,10 +44,21 @@ function requestedRevision(request: Request): number | undefined {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
+const serializePortfolioEventFrame = createTurnScopedFrameSerializer(
+  (event: PortfolioEventV1) => (
+    `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+  ),
+);
+
+function portfolioEventFrame(event: PortfolioEventV1): string {
+  if (event.type === "heartbeat") {
+    return `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  }
+  return serializePortfolioEventFrame(event);
+}
+
 function writePortfolioEvent(response: Response, event: PortfolioEventV1): boolean {
-  return response.write(
-    `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-  );
+  return response.write(portfolioEventFrame(event));
 }
 
 function sendPortfolioError(
@@ -120,7 +133,7 @@ export function createPortfolioRouter(dependencies: PortfolioRouteDependencies):
     let replaying = true;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let untrack: () => void = () => undefined;
-    let subscription: PortfolioLiveSubscription;
+    let subscription: PortfolioLiveSubscription | undefined;
     const pending: PortfolioEventV1[] = [];
     const queuedDuringReplay: PortfolioEventV1[] = [];
 
@@ -131,7 +144,9 @@ export function createPortfolioRouter(dependencies: PortfolioRouteDependencies):
       request.off("close", cleanup);
       response.off("close", cleanup);
       response.off("drain", drain);
-      subscription.release();
+      const activeSubscription = subscription;
+      subscription = undefined;
+      activeSubscription?.release();
       const unregister = untrack;
       untrack = () => undefined;
       unregister();
@@ -166,9 +181,19 @@ export function createPortfolioRouter(dependencies: PortfolioRouteDependencies):
       while (!blocked && pending.length) send(pending.shift()!);
     };
 
+    const registration = admitSseConnection(
+      dependencies.sseConnections,
+      response,
+      cleanup,
+    );
+    if (!registration) return;
+    untrack = registration;
+    if (ended) return;
+
     try {
       subscription = dependencies.live.subscribe(ownerSubject, accountId, sendLive);
     } catch (error) {
+      cleanup();
       if (error instanceof PortfolioLiveBusyError) {
         response.setHeader("Retry-After", "5");
         response.status(503).json({
@@ -187,12 +212,13 @@ export function createPortfolioRouter(dependencies: PortfolioRouteDependencies):
     try {
       await subscription.ready;
     } catch (error) {
-      subscription.release();
-      sendPortfolioError(response, error, logError);
+      const disconnected = ended || request.destroyed || response.destroyed;
+      cleanup();
+      if (!disconnected) sendPortfolioError(response, error, logError);
       return;
     }
-    if (request.destroyed || response.destroyed) {
-      subscription.release();
+    if (ended || request.destroyed || response.destroyed) {
+      cleanup();
       return;
     }
 
@@ -205,7 +231,6 @@ export function createPortfolioRouter(dependencies: PortfolioRouteDependencies):
     response.on("drain", drain);
     request.on("close", cleanup);
     response.on("close", cleanup);
-    untrack = dependencies.sseConnections?.track(response, cleanup) ?? (() => undefined);
 
     const snapshot = dependencies.live.snapshotAfter(ownerSubject, accountId, lastEventId);
     if (snapshot) {

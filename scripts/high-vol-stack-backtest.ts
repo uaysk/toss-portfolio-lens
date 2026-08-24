@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --import tsx
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   access,
   appendFile,
@@ -67,7 +67,6 @@ import {
 } from "./high-vol-rust-concurrency.js";
 
 const SCHEMA_VERSION = "high-vol-model-stack-backtest/v2" as const;
-const HORIZONS = [5, 15, 30, 60] as const;
 const INITIAL_EQUITY = 1_000_000;
 const SEED = 17;
 const MINUTE_MS = 60_000;

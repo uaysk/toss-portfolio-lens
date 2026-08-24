@@ -77,18 +77,26 @@ const WorkerOutputBaseSchema = z.object({
   payload_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 
-function deprecatedReturnMetricPath(value: unknown, path: Array<string | number> = []): Array<string | number> | undefined {
+function deprecatedReturnMetricPath(
+  value: unknown,
+  path: Array<string | number> = [],
+): Array<string | number> | undefined {
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
-      const found = deprecatedReturnMetricPath(value[index], [...path, index]);
+      path.push(index);
+      const found = deprecatedReturnMetricPath(value[index], path);
+      path.pop();
       if (found) return found;
     }
     return undefined;
   }
   if (!value || typeof value !== "object") return undefined;
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (key === "return") return [...path, key];
-    const found = deprecatedReturnMetricPath(item, [...path, key]);
+  const record = value as Record<string, unknown>;
+  if (Object.hasOwn(record, "return")) return [...path, "return"];
+  for (const key of Object.keys(record)) {
+    path.push(key);
+    const found = deprecatedReturnMetricPath(record[key], path);
+    path.pop();
     if (found) return found;
   }
   return undefined;

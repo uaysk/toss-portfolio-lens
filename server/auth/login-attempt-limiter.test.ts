@@ -45,23 +45,39 @@ describe("LoginAttemptLimiter", () => {
     expect(limiter.check("2001:db8::1")).toEqual({ allowed: true });
   });
 
-  it("never grows beyond the configured maximum under unique-IP traffic", () => {
+  it("fails closed at capacity without evicting an already blocked source", () => {
     const limiter = new LoginAttemptLimiter({
-      maximumAttempts: 5,
+      maximumAttempts: 2,
       windowMs: 60_000,
       maximumEntries: 3,
       now: () => 0,
     });
+
+    limiter.recordFailure("blocked-client");
+    limiter.recordFailure("blocked-client");
+    limiter.recordFailure("client-1");
+    limiter.recordFailure("client-2");
     for (let index = 0; index < 1_000; index += 1) {
-      limiter.recordFailure(`client-${index}`);
+      expect(limiter.check(`churn-${index}`)).toEqual({
+        allowed: false,
+        retryAfterSeconds: 60,
+      });
+      limiter.recordFailure(`churn-${index}`);
       expect(limiter.size).toBeLessThanOrEqual(3);
     }
+
     expect(limiter.size).toBe(3);
+    expect(limiter.check("blocked-client")).toEqual({
+      allowed: false,
+      retryAfterSeconds: 60,
+    });
   });
 
   it("normalizes IPv4, IPv4-mapped IPv6 and equivalent IPv6 spellings", () => {
     expect(normalizeClientIp("127.0.0.1")).toBe("127.0.0.1");
     expect(normalizeClientIp("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeClientIp("::ffff:7f00:1")).toBe("127.0.0.1");
+    expect(normalizeClientIp("0:0:0:0:0:ffff:c000:0201")).toBe("192.0.2.1");
     expect(normalizeClientIp("2001:0db8:0:0:0:0:0:1")).toBe("2001:db8::1");
     expect(normalizeClientIp("[2001:db8::1]")).toBe("2001:db8::1");
     expect(normalizeClientIp("not-an-ip")).toBe("unknown");

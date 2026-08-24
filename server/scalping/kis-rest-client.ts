@@ -1,3 +1,9 @@
+import { localPartsAt, zonedTimestamp } from "./market-time.js";
+import {
+  readBoundedResponseText,
+  ResponseBodyLimitError,
+} from "../bounded-response.js";
+
 type UnknownRecord = Record<string, unknown>;
 
 export type KisEnvironment = "real" | "demo";
@@ -188,6 +194,7 @@ const OVERSEAS_MINUTE_PATH = "/uapi/overseas-price/v1/quotations/inquire-time-it
 const OVERSEAS_VOLUME_RANK_TR_ID = "HHDFS76310010";
 const OVERSEAS_TRADING_AMOUNT_RANK_TR_ID = "HHDFS76320010";
 const OVERSEAS_MINUTE_TR_ID = "HHDFS76950200";
+const MAXIMUM_KIS_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MARKET_CODES = new Set<KisMarketDivisionCode>(["J", "NX", "UN"]);
 const US_EXCHANGE_CODES = new Set<KisUsExchangeCode>(["NAS", "NYS", "AMS"]);
 const VOLUME_BASIS_CODES = new Set(["0", "1", "2", "3", "4"]);
@@ -254,52 +261,6 @@ function seoulCompactDate(timestamp: number): string {
 
 function minuteTimestamp(date: string, time: string): string {
   return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:00+09:00`;
-}
-
-function localParts(timestamp: number, timeZone: string): { date: string; time: string } {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(timestamp));
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return {
-    date: `${values.year}${values.month}${values.day}`,
-    time: `${values.hour}${values.minute}${values.second}`,
-  };
-}
-
-function zonedTimestamp(date: string, time: string, timeZone: string): string | undefined {
-  if (!isCompactDate(date) || !isCompactTime(time)) return undefined;
-  const targetAsUtc = Date.UTC(
-    Number(date.slice(0, 4)),
-    Number(date.slice(4, 6)) - 1,
-    Number(date.slice(6, 8)),
-    Number(time.slice(0, 2)),
-    Number(time.slice(2, 4)),
-    Number(time.slice(4, 6)),
-  );
-  let candidate = targetAsUtc;
-  for (let index = 0; index < 3; index += 1) {
-    const observed = localParts(candidate, timeZone);
-    const observedAsUtc = Date.UTC(
-      Number(observed.date.slice(0, 4)),
-      Number(observed.date.slice(4, 6)) - 1,
-      Number(observed.date.slice(6, 8)),
-      Number(observed.time.slice(0, 2)),
-      Number(observed.time.slice(2, 4)),
-      Number(observed.time.slice(4, 6)),
-    );
-    candidate += targetAsUtc - observedAsUtc;
-  }
-  const resolved = localParts(candidate, timeZone);
-  if (resolved.date !== date || resolved.time !== time) return undefined;
-  return new Date(candidate).toISOString();
 }
 
 function marketSource(code: KisMarketDivisionCode): KisMarketSource {
@@ -373,8 +334,21 @@ export class KisRestClient {
   private async parseResponse(response: Response): Promise<UnknownRecord> {
     let body: unknown;
     try {
-      body = await response.json();
-    } catch {
+      // Real Fetch responses always expose a body. Retain response.json() only
+      // for narrow test doubles and alternate Fetch implementations.
+      body = response.body
+        ? JSON.parse(await readBoundedResponseText(response, MAXIMUM_KIS_RESPONSE_BYTES)) as unknown
+        : await response.json();
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      if (error instanceof ResponseBodyLimitError) {
+        throw new KisRestError(
+          "KIS response exceeded the configured byte limit.",
+          response.status,
+          "response-too-large",
+          false,
+        );
+      }
       throw new KisRestError(
         "KIS returned invalid JSON.",
         response.status,
@@ -401,12 +375,17 @@ export class KisRestClient {
     return body;
   }
 
-  private async fetchWithTimeout(url: string | URL, init: RequestInit): Promise<Response> {
+  private async fetchWithTimeout(
+    url: string | URL,
+    init: RequestInit,
+  ): Promise<{ response: Response; body: UnknownRecord }> {
     const controller = new AbortController();
     const timeout = this.setTimeoutImpl(() => controller.abort(), this.config.timeoutMs);
     try {
-      return await this.fetchImpl(url, { ...init, signal: controller.signal });
+      const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
+      return { response, body: await this.parseResponse(response) };
     } catch (error) {
+      if (error instanceof KisRestError) throw error;
       const timedOut = error instanceof Error && error.name === "AbortError";
       throw new KisRestError(
         timedOut ? "KIS request timed out." : "KIS network request failed.",
@@ -428,7 +407,7 @@ export class KisRestClient {
     for (let attempt = 0; attempt < this.config.maxAttempts; attempt += 1) {
       try {
         await this.pace();
-        const response = await this.fetchWithTimeout(`${this.baseUrl}${TOKEN_PATH}`, {
+        const { response, body } = await this.fetchWithTimeout(`${this.baseUrl}${TOKEN_PATH}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -437,7 +416,6 @@ export class KisRestClient {
             appsecret: this.config.appSecret,
           }),
         });
-        const body = await this.parseResponse(response);
         const value = stringValue(body.access_token);
         if (!value) throw new KisRestError("KIS access token is empty.", response.status, "invalid-token", false);
         const expiresInSeconds = finiteNumber(body.expires_in);
@@ -496,7 +474,7 @@ export class KisRestClient {
         await this.pace();
         const url = new URL(`${this.baseUrl}${path}`);
         url.search = params.toString();
-        const response = await this.fetchWithTimeout(url, {
+        const { body } = await this.fetchWithTimeout(url, {
           headers: {
             authorization: `Bearer ${token}`,
             appkey: this.config.appKey,
@@ -505,7 +483,7 @@ export class KisRestClient {
             custtype: "P",
           },
         });
-        return await this.parseResponse(response);
+        return body;
       } catch (error) {
         const normalized = error instanceof KisRestError
           ? error
@@ -834,7 +812,7 @@ export class KisRestClient {
     if (!isCompactDate(request.sessionDate)) {
       throw new KisRestValidationError("sessionDate must be a valid YYYYMMDD date.");
     }
-    const currentNewYorkDate = localParts(this.now(), "America/New_York").date;
+    const currentNewYorkDate = localPartsAt(this.now(), "America/New_York").date;
     if (request.sessionDate !== currentNewYorkDate) {
       throw new KisRestValidationError("KIS overseas minute recovery only supports the current New York trading date.");
     }

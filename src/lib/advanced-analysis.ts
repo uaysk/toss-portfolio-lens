@@ -250,12 +250,20 @@ function errorMessage(value: unknown): string {
 }
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("요청이 취소되었습니다.", "AbortError"));
+  }
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, milliseconds);
-    signal?.addEventListener("abort", () => {
-      window.clearTimeout(timer);
+    const onAbort = () => {
+      globalThis.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       reject(new DOMException("요청이 취소되었습니다.", "AbortError"));
-    }, { once: true });
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

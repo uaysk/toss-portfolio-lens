@@ -3,6 +3,7 @@ import type { BinanceMarketEvent } from "./binance-market-data.js";
 import {
   AsyncMarketEventQueue,
   MAX_MARKET_EVENT_QUEUE_DEPTH,
+  MAX_PRESERVED_MARK_RISK_BARRIERS,
 } from "./market-event-queue.js";
 
 function book(eventTime: number, bidPrice = eventTime): BinanceMarketEvent {
@@ -33,6 +34,20 @@ function trade(
     executedAt: ingressSequence,
     buyerWasMaker: false,
     receivedAt: ingressSequence,
+  };
+}
+
+function mark(eventTime: number): BinanceMarketEvent {
+  return {
+    kind: "mark_price",
+    source: "binance_ws",
+    symbol: "BTCUSDT",
+    markPrice: 100,
+    indexPrice: 100,
+    fundingRate: 0,
+    nextFundingTime: eventTime + 1,
+    eventTime,
+    receivedAt: eventTime,
   };
 }
 
@@ -119,5 +134,24 @@ describe("AsyncMarketEventQueue", () => {
       error: expect.objectContaining({ message: "stream disconnected" }),
     });
     expect(queue.stats().currentDepth).toBe(0);
+  });
+
+  it("bounds remembered risk barriers and safely preserves an evicted active key again", async () => {
+    const queue = new AsyncMarketEventQueue();
+    const signal = new AbortController().signal;
+    const clock = { sleep: async () => undefined };
+    for (let index = 0; index <= MAX_PRESERVED_MARK_RISK_BARRIERS; index += 1) {
+      expect(queue.push(mark(index), { markRiskBarrierKey: `risk-${index}` })).toBe(true);
+      await expect(queue.next(0, clock, signal)).resolves.toMatchObject({ kind: "mark_price" });
+    }
+    expect(queue.stats().preservedCriticalMarkPrices)
+      .toBe(MAX_PRESERVED_MARK_RISK_BARRIERS + 1);
+
+    expect(queue.push(mark(MAX_PRESERVED_MARK_RISK_BARRIERS + 1), {
+      markRiskBarrierKey: "risk-0",
+    })).toBe(true);
+    await expect(queue.next(0, clock, signal)).resolves.toMatchObject({ kind: "mark_price" });
+    expect(queue.stats().preservedCriticalMarkPrices)
+      .toBe(MAX_PRESERVED_MARK_RISK_BARRIERS + 2);
   });
 });

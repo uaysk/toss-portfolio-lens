@@ -10,6 +10,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { canonicalJsonExceedsByteLimit } from "../json-byte-limit.js";
 
 const RAW_INPUT_SCHEMA = "fincast-raw-input/v1" as const;
 const RAW_CONTEXT_BARS = 512 as const;
@@ -215,7 +216,7 @@ export async function writeFinCastRawInputArtifact(input: {
   }
   const metadata = input.metadata ?? {};
   validateMetadata(metadata);
-  if (Buffer.byteLength(JSON.stringify(metadata), "utf8") > MAXIMUM_METADATA_BYTES) {
+  if (canonicalJsonExceedsByteLimit(metadata, MAXIMUM_METADATA_BYTES)) {
     throw new Error("FinCast raw artifact metadata exceeds its size bound.");
   }
   const directory = await prepareOutputDirectory(input.directory);

@@ -116,18 +116,20 @@ type ItemRow = {
   weight_percent: number;
 };
 
+const KST_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 function round(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
 }
 
 export function kstDateString(date: Date): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
+  const parts = KST_DATE_FORMATTER.formatToParts(date);
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
 }
@@ -165,49 +167,6 @@ export class PortfolioHistoryStore {
 
   private async initialize(): Promise<void> {
     await applyPortfolioMigrations(this.db);
-    await this.backfillCommonCandles();
-  }
-
-  private async backfillCommonCandles(): Promise<void> {
-    await this.db.run(`
-      INSERT INTO portfolio_market_candles (
-        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, volume, updated_at
-      )
-      SELECT 'stock', instruments.symbol, '1d', 0, prices.price_date, prices.timestamp, prices.currency,
-             COALESCE(prices.open_price, prices.close_price),
-             COALESCE(prices.high_price, prices.close_price),
-             COALESCE(prices.low_price, prices.close_price),
-             prices.close_price, NULL, prices.updated_at
-      FROM portfolio_daily_prices AS prices
-      JOIN portfolio_instruments AS instruments ON instruments.instrument_key = prices.instrument_key
-      ON CONFLICT DO NOTHING
-    `);
-
-    await this.db.run(`
-      INSERT INTO portfolio_market_candles (
-        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, volume, updated_at
-      )
-      SELECT 'stock', SPLIT_PART(prices.instrument_key, ':', 2), '1d', 1,
-             prices.price_date, prices.timestamp, prices.currency,
-             prices.close_price, prices.close_price, prices.close_price, prices.close_price, NULL, prices.updated_at
-      FROM portfolio_backtest_prices AS prices
-      ON CONFLICT DO NOTHING
-    `);
-
-    await this.db.run(`
-      INSERT INTO portfolio_market_candles (
-        source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
-        open_price, high_price, low_price, close_price, volume, updated_at
-      )
-      SELECT CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 'indicator' ELSE 'stock' END,
-             CASE benchmark_key WHEN 'NASDAQ100' THEN 'QQQ' WHEN 'SP500' THEN 'SPY' ELSE benchmark_key END,
-             '1d', CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 0 ELSE 1 END,
-             price_date, timestamp, '', close_price, close_price, close_price, close_price, NULL, updated_at
-      FROM portfolio_benchmark_prices
-      ON CONFLICT DO NOTHING
-    `);
   }
 
   close(): Promise<void> {
@@ -275,6 +234,7 @@ export class PortfolioHistoryStore {
     candles: DailyCandle[],
     updatedAt = Date.now(),
   ): Promise<number> {
+    if (!candles.length) return 0;
     await this.db.transaction((database) => (
       this.writeMarketCandles(database, source, symbol, interval, adjusted, candles, updatedAt)
     ));
@@ -357,18 +317,13 @@ export class PortfolioHistoryStore {
     );
 
     await this.db.transaction(async (database) => {
-      await database.run(`
+      const [snapshot] = await database.query<SnapshotRow & DatabaseRow>(`
         INSERT INTO portfolio_snapshots (account_id, snapshot_date, captured_at, origin)
         VALUES (?, ?, ?, 'LIVE')
         ON CONFLICT(account_id, snapshot_date)
         DO UPDATE SET captured_at = excluded.captured_at, origin = 'LIVE'
+        RETURNING id, snapshot_date, captured_at
       `, [portfolio.selectedAccountId, snapshotDate, capturedAtMs]);
-
-      const [snapshot] = await database.query<SnapshotRow & DatabaseRow>(`
-        SELECT id, snapshot_date, captured_at
-        FROM portfolio_snapshots
-        WHERE account_id = ? AND snapshot_date = ?
-      `, [portfolio.selectedAccountId, snapshotDate]);
       if (!snapshot) throw new Error("일별 포트폴리오 스냅샷을 생성하지 못했습니다.");
 
       await database.run("DELETE FROM portfolio_snapshot_items WHERE snapshot_id = ?", [snapshot.id]);
@@ -400,6 +355,7 @@ export class PortfolioHistoryStore {
   }
 
   async upsertOrders(accountId: string, orders: HistoricalOrder[], fetchedAt = Date.now()): Promise<number> {
+    if (!orders.length) return 0;
     const rows = orders.map((order) => [
       accountId,
       order.orderId,
@@ -474,6 +430,7 @@ export class PortfolioHistoryStore {
   }
 
   async upsertInstruments(instruments: InstrumentInfo[], updatedAt = Date.now()): Promise<number> {
+    if (!instruments.length) return 0;
     const rows = instruments.map((instrument) => [
       `${instrument.currency}:${instrument.symbol}`,
       instrument.symbol,
@@ -504,6 +461,7 @@ export class PortfolioHistoryStore {
   }
 
   async upsertDailyPrices(instrumentKey: string, candles: DailyCandle[], updatedAt = Date.now()): Promise<number> {
+    if (!candles.length) return 0;
     const rows = candles.map((candle) => [
       instrumentKey,
       candle.date,
@@ -539,15 +497,16 @@ export class PortfolioHistoryStore {
             updated_at = excluded.updated_at
         `, postgresUnnestParameters(batch, 9));
       }
+      await this.writeMarketCandles(
+        database,
+        "stock",
+        instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
+        "1d",
+        false,
+        candles,
+        updatedAt,
+      );
     });
-    await this.upsertMarketCandles(
-      "stock",
-      instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
-      "1d",
-      false,
-      candles,
-      updatedAt,
-    );
     return candles.length;
   }
 
@@ -565,19 +524,49 @@ export class PortfolioHistoryStore {
     return row?.earliest ?? undefined;
   }
 
+  async getDailyPriceCoverage(instrumentKeys: readonly string[]): Promise<Map<string, {
+    earliest?: string;
+    latest?: string;
+    incompleteOhlc: boolean;
+  }>> {
+    const keys = Array.from(new Set(instrumentKeys));
+    if (!keys.length) return new Map();
+    const rows = await this.db.query<{
+      instrument_key: string;
+      earliest: string | null;
+      latest: string | null;
+      incomplete_ohlc: boolean | number;
+    }>(`
+      SELECT instrument_key,
+             MIN(price_date) AS earliest,
+             MAX(price_date) AS latest,
+             BOOL_OR(open_price IS NULL OR high_price IS NULL OR low_price IS NULL) AS incomplete_ohlc
+      FROM portfolio_daily_prices
+      WHERE instrument_key = ANY(?::text[])
+      GROUP BY instrument_key
+    `, [keys]);
+    return new Map(rows.map((row) => [row.instrument_key, {
+      ...(row.earliest ? { earliest: row.earliest } : {}),
+      ...(row.latest ? { latest: row.latest } : {}),
+      incompleteOhlc: Boolean(row.incomplete_ohlc),
+    }]));
+  }
+
   async hasIncompleteDailyOhlc(instrumentKey?: string): Promise<boolean> {
     const [row] = instrumentKey
-      ? await this.db.query<{ count: number }>(`
-          SELECT COUNT(*) AS count
+      ? await this.db.query<{ found: number }>(`
+          SELECT 1 AS found
           FROM portfolio_daily_prices
           WHERE instrument_key = ? AND (open_price IS NULL OR high_price IS NULL OR low_price IS NULL)
+          LIMIT 1
         `, [instrumentKey])
-      : await this.db.query<{ count: number }>(`
-          SELECT COUNT(*) AS count
+      : await this.db.query<{ found: number }>(`
+          SELECT 1 AS found
           FROM portfolio_daily_prices
           WHERE open_price IS NULL OR high_price IS NULL OR low_price IS NULL
+          LIMIT 1
         `);
-    return Number(row?.count ?? 0) > 0;
+    return row !== undefined;
   }
 
   async getDailyPrices(
@@ -611,6 +600,7 @@ export class PortfolioHistoryStore {
     candles: DailyCandle[],
     updatedAt = Date.now(),
   ): Promise<number> {
+    if (!candles.length) return 0;
     const rows = candles.map((candle) => [
       instrumentKey,
       candle.date,
@@ -635,15 +625,16 @@ export class PortfolioHistoryStore {
             updated_at = excluded.updated_at
         `, postgresUnnestParameters(batch, 6));
       }
+      await this.writeMarketCandles(
+        database,
+        "stock",
+        instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
+        "1d",
+        true,
+        candles,
+        updatedAt,
+      );
     });
-    await this.upsertMarketCandles(
-      "stock",
-      instrumentKey.includes(":") ? instrumentKey.slice(instrumentKey.indexOf(":") + 1) : instrumentKey,
-      "1d",
-      true,
-      candles,
-      updatedAt,
-    );
     return candles.length;
   }
 
@@ -766,6 +757,7 @@ export class PortfolioHistoryStore {
     candles: DailyCandle[],
     updatedAt = Date.now(),
   ): Promise<number> {
+    if (!candles.length) return 0;
     const rows = candles.map((candle) => [
       benchmarkKey,
       candle.date,
@@ -788,18 +780,47 @@ export class PortfolioHistoryStore {
             updated_at = excluded.updated_at
         `, postgresUnnestParameters(batch, 5));
       }
+      const indicator = benchmarkKey === "KOSPI" || benchmarkKey === "KOSDAQ";
+      const symbol = benchmarkKey === "NASDAQ100" ? "QQQ" : benchmarkKey === "SP500" ? "SPY" : benchmarkKey;
+      await this.writeMarketCandles(
+        database,
+        indicator ? "indicator" : "stock",
+        symbol,
+        "1d",
+        !indicator,
+        candles,
+        updatedAt,
+      );
     });
-    const indicator = benchmarkKey === "KOSPI" || benchmarkKey === "KOSDAQ";
-    const symbol = benchmarkKey === "NASDAQ100" ? "QQQ" : benchmarkKey === "SP500" ? "SPY" : benchmarkKey;
-    await this.upsertMarketCandles(
-      indicator ? "indicator" : "stock",
-      symbol,
-      "1d",
-      !indicator,
-      candles,
-      updatedAt,
-    );
     return candles.length;
+  }
+
+  async upsertExchangeRates(
+    rates: readonly { date: string; rate: number; timestamp: string }[],
+    updatedAt = Date.now(),
+  ): Promise<number> {
+    const rows = rates.map((item) => [
+      item.date,
+      item.rate,
+      item.timestamp,
+      updatedAt,
+    ] as const);
+    for (const batch of postgresWriteBatches(rows, (row) => row[0])) {
+      await this.db.run(`
+        INSERT INTO portfolio_exchange_rates (
+          rate_date, base_currency, quote_currency, rate, timestamp, updated_at
+        )
+        SELECT rate_date, 'USD', 'KRW', rate, timestamp, updated_at
+        FROM UNNEST(
+          ?::text[], ?::float8[], ?::text[], ?::bigint[]
+        ) AS input(rate_date, rate, timestamp, updated_at)
+        ON CONFLICT(rate_date, base_currency, quote_currency) DO UPDATE SET
+          rate = excluded.rate,
+          timestamp = excluded.timestamp,
+          updated_at = excluded.updated_at
+      `, postgresUnnestParameters(batch, 4));
+    }
+    return rates.length;
   }
 
   upsertExchangeRate(
@@ -808,15 +829,8 @@ export class PortfolioHistoryStore {
     timestamp: string,
     updatedAt = Date.now(),
   ): Promise<void> {
-    return this.db.run(`
-      INSERT INTO portfolio_exchange_rates (
-        rate_date, base_currency, quote_currency, rate, timestamp, updated_at
-      ) VALUES (?, 'USD', 'KRW', ?, ?, ?)
-      ON CONFLICT(rate_date, base_currency, quote_currency) DO UPDATE SET
-        rate = excluded.rate,
-        timestamp = excluded.timestamp,
-        updated_at = excluded.updated_at
-    `, [rateDate, rate, timestamp, updatedAt]).then(() => undefined);
+    return this.upsertExchangeRates([{ date: rateDate, rate, timestamp }], updatedAt)
+      .then(() => undefined);
   }
 
   async getExchangeRates(fromDate: string, toDate: string): Promise<Map<string, number>> {

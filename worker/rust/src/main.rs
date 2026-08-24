@@ -557,9 +557,32 @@ fn start_heartbeat(
     })
 }
 
+#[derive(Default)]
+struct JsonByteCounter(usize);
+
+impl Write for JsonByteCounter {
+    fn write(&mut self, source: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(source.len())
+            .ok_or_else(|| std::io::Error::other("serialized JSON byte count overflow"))?;
+        Ok(source.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_size(value: &impl serde::Serialize) -> serde_json::Result<usize> {
+    let mut counter = JsonByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 fn append_metrics(output: &mut WorkerOutput, started: Instant, claim: &JobClaim) {
     let serialization_started = Instant::now();
-    let serialized_result_bytes = serde_json::to_vec(&output).ok().map(|value| value.len());
+    let serialized_result_bytes = serialized_json_size(&output).ok();
     let serialization_ms = serialization_started.elapsed().as_secs_f64() * 1000.0;
     let artifact = OutputArtifact {
         artifact_type: "worker-metrics".into(),
@@ -694,6 +717,18 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_byte_counter_matches_materialized_serialization_size() {
+        let value = json!({
+            "nested": [{"a": 1, "b": "한글"}, null, true],
+            "escaped": "line\nquote\"",
+        });
+        assert_eq!(
+            serialized_json_size(&value).unwrap(),
+            serde_json::to_vec(&value).unwrap().len()
+        );
+    }
 
     fn test_socket_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

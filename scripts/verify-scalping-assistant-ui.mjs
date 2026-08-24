@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
+import { assertClientBuildFresh } from "./client-build.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDirectory = process.env.SCALPING_UI_SCREENSHOT_DIR
@@ -370,6 +371,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   let preview;
   let browser;
   try {
+  await assertClientBuildFresh(projectRoot);
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];

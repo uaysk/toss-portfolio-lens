@@ -1,5 +1,9 @@
-import { FormEvent, useState } from "react";
-import { ArrowRight, Eye, EyeOff, LoaderCircle, LockKeyhole } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import ArrowRight from "lucide-react/dist/esm/icons/arrow-right.js";
+import Eye from "lucide-react/dist/esm/icons/eye.js";
+import EyeOff from "lucide-react/dist/esm/icons/eye-off.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import LockKeyhole from "lucide-react/dist/esm/icons/lock-keyhole.js";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -18,10 +22,19 @@ export function LoginPage({ onAuthenticated, theme, onToggleTheme }: LoginPagePr
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const request = useRef<AbortController | undefined>(undefined);
+
+  useEffect(() => () => {
+    request.current?.abort();
+    request.current = undefined;
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!password || submitting) return;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     setSubmitting(true);
     setError("");
 
@@ -30,20 +43,27 @@ export function LoginPage({ onAuthenticated, theme, onToggleTheme }: LoginPagePr
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
+        signal: controller.signal,
       });
       const payload = (await response.json().catch(() => ({}))) as {
         authenticated?: boolean;
         error?: { message?: string };
       };
+      if (controller.signal.aborted || request.current !== controller) return;
       if (!response.ok || !payload.authenticated) {
         throw new Error(payload.error?.message || "로그인할 수 없습니다.");
       }
       setPassword("");
       onAuthenticated();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "로그인할 수 없습니다.");
+      if (!controller.signal.aborted && request.current === controller) {
+        setError(caught instanceof Error ? caught.message : "로그인할 수 없습니다.");
+      }
     } finally {
-      setSubmitting(false);
+      if (request.current === controller) {
+        request.current = undefined;
+        setSubmitting(false);
+      }
     }
   }
 

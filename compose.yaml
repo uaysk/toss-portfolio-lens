@@ -14,6 +14,9 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3200"
+      # Web admission, live streams, simulation sessions, and snapshot scheduling
+      # are process-local. Any declared value other than one fails startup.
+      APP_REPLICA_COUNT: ${APP_REPLICA_COUNT:-1}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-https://tpl.uaysk.com}
       APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
       POSTGRES_URL: ${POSTGRES_URL:-}

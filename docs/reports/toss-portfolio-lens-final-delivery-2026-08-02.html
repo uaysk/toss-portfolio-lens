@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>toss-portfolio-lens 최종 작업·배포 보고서</title>
+  <style>
+    :root{color-scheme:dark;--bg:#090b10;--panel:#11151d;--line:#252c39;--text:#f5f7fb;--muted:#9aa4b4;--blue:#6fa3ff;--red:#ff6b7a;--green:#43d6b2;--violet:#c4a8ff;--gold:#ffca47;--ok:#45df9a;--warn:#ffbd5d}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 80% 0,#14213c 0,transparent 32rem),var(--bg);color:var(--text);font:14px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}a{color:var(--blue)}code{font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.wrap{width:min(1180px,calc(100% - 32px));margin:auto;padding:48px 0 80px}.hero,.card{border:1px solid var(--line);border-radius:24px;background:color-mix(in srgb,var(--panel) 94%,transparent);box-shadow:0 24px 80px #0006}.hero{padding:42px}.eyebrow,.label{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.hero h1{max-width:850px;margin:12px 0;font-size:clamp(36px,7vw,78px);line-height:.96;letter-spacing:-.055em}.hero p{max-width:820px;color:var(--muted)}.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}.badge{padding:6px 10px;border:1px solid var(--line);border-radius:999px;font-size:11px}.badge.ok{border-color:#45df9a55;background:#45df9a12;color:var(--ok)}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}.card{grid-column:span 6;padding:24px}.card.full{grid-column:1/-1}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{padding:18px;border:1px solid var(--line);border-radius:16px;background:#0b0e14}.metric strong{display:block;margin-top:8px;font-size:clamp(20px,3vw,34px);letter-spacing:-.04em}.metric small{color:var(--muted)}h2{margin:0 0 6px;font-size:23px;letter-spacing:-.03em}h3{margin:18px 0 6px;font-size:14px}.sub{margin:0 0 20px;color:var(--muted)}.bar-row{display:grid;grid-template-columns:150px 1fr 130px;gap:12px;align-items:center;margin:14px 0}.track{height:9px;overflow:hidden;border-radius:99px;background:#222936}.bar{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--blue),var(--violet))}.bar.red{background:linear-gradient(90deg,var(--red),var(--gold))}.bar.green{background:linear-gradient(90deg,var(--green),var(--blue))}.palette{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}.swatch{min-height:92px;padding:12px;border-radius:15px;color:#071018;font-weight:850}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:11px}.status{color:var(--ok);font-weight:800}.warn{color:var(--warn)}.tabs{display:flex;gap:7px;margin:16px 0}.tabs button{padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:#0b0e14;color:var(--muted);cursor:pointer}.tabs button[aria-selected=true]{background:var(--text);color:#0a0d12}.tab-panel[hidden]{display:none}.footer{margin-top:20px;color:var(--muted);font-size:12px}@media(max-width:800px){.hero{padding:26px}.card{grid-column:1/-1}.metrics{grid-template-columns:repeat(2,1fr)}.palette{grid-template-columns:repeat(3,1fr)}.bar-row{grid-template-columns:105px 1fr}.bar-row output{grid-column:2}}@media print{body{background:#fff;color:#111}.hero,.card,.metric{box-shadow:none;background:#fff}.sub,.label,.eyebrow,.footer{color:#555}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow">Final delivery · 2026-08-02 KST</div>
+    <h1>차트 재설계부터<br>Harbor 실배포까지</h1>
+    <p>토스증권 계열의 밀도와 대비로 모든 금융 차트를 통일하고, Bollinger 상·하단 선을 범위 밴드로 바꿨다. GitLab 보호 파이프라인은 OOM-safe 테스트, 독립 release preflight, SBOM/provenance 이미지 빌드, Harbor Trivy 게이트, 실서비스 헬스와 자동 롤백을 한 흐름으로 실행한다.</p>
+    <div class="badges"><span class="badge ok">Pipeline 62 success</span><span class="badge ok">Production healthy</span><span class="badge ok">Critical / High 0</span><span class="badge">GPU·AI model excluded</span></div>
+  </section>
+
+  <section class="grid">
+    <article class="card full">
+      <div class="metrics">
+        <div class="metric"><span class="label">Release SHA</span><strong>a78fe44b</strong><small>protected main</small></div>
+        <div class="metric"><span class="label">Code bytes</span><strong>−2.40%</strong><small>−673,108 B</small></div>
+        <div class="metric"><span class="label">Main images</span><strong>−33.12%</strong><small>−93,529,582 B</small></div>
+        <div class="metric"><span class="label">Trivy gate</span><strong>0 / 0</strong><small>Critical / High</small></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2>차트 디자인</h2><p class="sub">17개 파일, 공통 semantic theme, 라이트·다크 대비.</p>
+      <div class="palette" aria-label="차트 팔레트">
+        <div class="swatch" style="background:hsl(216 100% 71%)">Primary</div><div class="swatch" style="background:hsl(355 100% 70%)">Rise</div><div class="swatch" style="background:hsl(168 67% 55%)">Series</div><div class="swatch" style="background:hsl(258 100% 81%)">RSI</div><div class="swatch" style="background:hsl(44 100% 64%)">Band</div><div class="swatch" style="background:hsl(190 85% 60%)">Volume</div>
+      </div>
+      <h3>Bollinger / RSI</h3><p class="sub">Bollinger는 upper/lower 두 선 대신 하나의 가격 범위 band와 middle line으로 표시한다. RSI는 0–100 고정 축, 30/50/70 기준과 과매수·과매도 음영을 사용해 가격 흐름과 함께 빠르게 읽힌다.</p>
+    </article>
+
+    <article class="card">
+      <h2>크기 비교</h2><p class="sub">tracked snapshot과 Docker image inspect의 실제 byte 기준.</p>
+      <div id="size-bars"></div>
+      <div class="tabs" role="tablist"><button data-unit="bytes" aria-selected="true">Bytes</button><button data-unit="mib" aria-selected="false">MiB</button></div>
+      <p class="sub">코드 파일 수는 819→836(+17)이지만 계약·테스트·CI 안전장치를 추가하면서도 전체 bytes와 선택 text lines는 감소했다. 직전 배포 대비 이미지 합계는 3,049B(+0.0016%) 증가했다.</p>
+    </article>
+
+    <article class="card full">
+      <h2>GitLab → Harbor → Production</h2><p class="sub">실패 시 배포 전 중단, 헬스 실패 시 직전 digest 자동 롤백.</p>
+      <div class="table-wrap"><table><thead><tr><th>Gate</th><th>결과</th><th>관찰값</th></tr></thead><tbody id="gates"></tbody></table></div>
+    </article>
+
+    <article class="card">
+      <h2>배포 artifact</h2>
+      <p><b>Web</b><br><code>sha256:475a62d6ba6263502441b5644773653bd9e4c5145e8c58834032f082286ad776</code></p>
+      <p><b>Rust compute</b><br><code>sha256:82e2a33460381968861b46b2ac868aa38b3581a4c37a263fcbe902aaa646cf4d</code></p>
+      <p class="sub">Web 160,927,293B · Rust 27,926,178B · 합계 188,853,471B. Rust 소스 불변으로 기존 검증 digest를 유지했다.</p>
+    </article>
+
+    <article class="card">
+      <h2>Graphify</h2>
+      <p><b>12,226 nodes · 32,681 links</b></p>
+      <p class="sub">source commit 05ce311 기준 graph와 pgvector index가 12,226 nodes로 일치한다. production merge a78fe44b는 같은 source tree이며 release preflight 함수와 테스트까지 graph에 반영됐다.</p>
+      <p><a href="https://gitlab.uaysk.com/uaysk/toss-portfolio-lens/-/pipelines/62">GitLab pipeline 62</a></p>
+    </article>
+
+    <article class="card full">
+      <h2>추가 진행 항목</h2>
+      <div class="tabs" role="tablist"><button data-tab="ops" aria-selected="true">운영 후속</button><button data-tab="excluded" aria-selected="false">명시적 제외</button></div>
+      <div class="tab-panel" data-panel="ops"><ul><li>Rust 이미지의 Medium 4 / Low 13은 모두 fixed version이 없어 현재 수정 불가다. Debian/Trivy DB 갱신 시 자동 재검사한다.</li><li>전체 CI의 PGlite lane은 OOM 없이 287초지만 기존 35초 성능 목표에는 미달한다. 테스트 격리·fixture 공유 최적화는 별도 성능 작업으로 남는다.</li><li>BuildKit builder가 사용하는 <code>moby/buildkit:buildx-stable-1</code>의 digest pinning을 정기 업그레이드 절차와 함께 추가하면 공급망 재현성을 더 높일 수 있다.</li></ul></div>
+      <div class="tab-panel" data-panel="excluded" hidden><ul><li>GPU worker, TiRex-2/P40, FinCast·Chronos-2 추론 튜닝과 모델 품질 비교.</li><li>AI 모델 이미지 빌드·스캔·재배포. 이번 release는 web만 변경하고 검증된 Rust digest는 유지했다.</li></ul></div>
+    </article>
+  </section>
+  <p class="footer">보고서 자체는 측정값을 오염시키지 않도록 untracked artifact로 작성했다. 민감한 token, robot secret, 환경변수 값은 포함하지 않았다.</p>
+</main>
+<script>
+  const data={sizes:[{label:"Codebase",before:28081504,after:27408396,color:"green"},{label:"Main images",before:282383053,after:188853471,color:""},{label:"Comparable images",before:189086486,after:188853471,color:"red"}],gates:[
+    ["Runner boundary","PASS","project 13 · protected main · dedicated scheduling tags"],["Node/static","PASS","37s · release-tool tests와 bundle budgets 통과"],["Vitest light / heavy / PGlite","PASS","56s / 104s / 287s · OOM 없음"],["Rust quality","PASS","92s · fmt/clippy/test/benchmark"],["UI regression","PASS","69s · chart/tooltip/keyboard"],["PostgreSQL integration","PASS","38s · migration/locking/queue/checkpoint"],["Release preflight","PASS","2.61s · runner 14 · Docker 29.6.2 · Buildx 0.35.0"],["Harbor Trivy web","PASS","0 vulnerabilities"],["Harbor Trivy Rust","PASS","17 total · Critical/High 0"],["Production release","PASS","79.61s · immutable SHA tag · GitLab Release published"],["Production health","PASS","SHA 일치 · postgres · rust_socket · paper=true · realOrder=false"],["Rollback","NOT USED","health gate 통과 · rollback attempted=false"]]};
+  const fmt=(n,u)=>u==="mib"?`${(n/1048576).toFixed(2)} MiB`:new Intl.NumberFormat("ko-KR").format(n)+" B";
+  function renderSizes(unit="bytes"){document.querySelector("#size-bars").innerHTML=data.sizes.map(x=>{const pct=x.after/x.before*100;const delta=(x.after-x.before)/x.before*100;return `<div class="bar-row"><b>${x.label}</b><div class="track"><div class="bar ${x.color}" style="width:${Math.max(5,pct)}%"></div></div><output>${fmt(x.after,unit)}<br><small>${delta.toFixed(2)}%</small></output></div>`}).join("")}
+  renderSizes();document.querySelectorAll("[data-unit]").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("[data-unit]").forEach(x=>x.setAttribute("aria-selected",String(x===b)));renderSizes(b.dataset.unit)}));
+  document.querySelector("#gates").innerHTML=data.gates.map(([a,b,c])=>`<tr><td><b>${a}</b></td><td class="${b==="PASS"?"status":"warn"}">${b}</td><td>${c}</td></tr>`).join("");
+  document.querySelectorAll("[data-tab]").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("[data-tab]").forEach(x=>x.setAttribute("aria-selected",String(x===b)));document.querySelectorAll("[data-panel]").forEach(p=>p.hidden=p.dataset.panel!==b.dataset.tab)}));
+</script>
+</body>
+</html>

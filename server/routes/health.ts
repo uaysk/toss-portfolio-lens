@@ -9,11 +9,13 @@ export type HealthRouteDependencies = {
   kisEnvironment?: string;
   mcpEnabled: boolean;
   mcpAuthMode: McpAuthMode;
+  appReplicaCount: 1;
   buildInfo: () => unknown;
   executionMode: ComputeExecutionMode;
   rustSocketPath: string;
   rustSchedulerSnapshot: () => unknown;
   eventLoopLagSnapshot: () => unknown;
+  sseConnectionSnapshot?: () => unknown;
   simulationSseSnapshot?: () => unknown;
   portfolioLiveSnapshot?: () => unknown;
   runtimeTelemetrySnapshot?: () => unknown;
@@ -37,8 +39,17 @@ export function createHealthRouter(dependencies: HealthRouteDependencies): Route
       mcpAuth: !dependencies.mcpEnabled
         ? "disabled"
         : dependencies.mcpAuthMode === "oauth" ? "oauth" : "local-none",
+      topology: {
+        web: {
+          replicaPolicy: "single",
+          declaredReplicas: dependencies.appReplicaCount,
+          coordinationScope: "process",
+          horizontalScalingSupported: false,
+        },
+      },
       build: dependencies.buildInfo(),
       runtime: dependencies.runtimeTelemetrySnapshot?.(),
+      sseConnections: dependencies.sseConnectionSnapshot?.(),
       compute: {
         executionMode: dependencies.executionMode,
         rustSocket: dependencies.executionMode === "rust_socket"

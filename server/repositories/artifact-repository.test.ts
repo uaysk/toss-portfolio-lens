@@ -118,7 +118,7 @@ describe("ArtifactRepository canonical checksum", () => {
     }
   });
 
-  it("put 이후 descriptor metadata만 조회하고 content_json을 다시 읽지 않는다", async () => {
+  it("INSERT RETURNING 한 번으로 descriptor를 반환하고 content_json을 다시 읽지 않는다", async () => {
     const database = new PGliteDatabase();
     try {
       const runs = new RunRepository(database);
@@ -146,8 +146,9 @@ describe("ArtifactRepository canonical checksum", () => {
 
       expect(query).toHaveBeenCalledTimes(1);
       const sql = String(query.mock.calls[0]?.[0]).replace(/\s+/g, " ").trim();
-      expect(sql).toMatch(/^SELECT artifact_id, run_id, artifact_type, row_count, byte_count,/);
-      expect(sql).not.toContain("content_json");
+      expect(sql).toMatch(/^INSERT INTO portfolio_backtest_artifacts/);
+      expect(sql).toContain("RETURNING artifact_id, run_id, artifact_type, row_count, byte_count,");
+      expect(sql.slice(sql.indexOf("RETURNING"))).not.toContain("content_json");
       expect(sql).not.toMatch(/SELECT \*/i);
     } finally {
       await database.close();

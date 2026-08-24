@@ -52,6 +52,7 @@ export type RunLibraryFilters = {
 export type LibraryRequestOptions = {
   fetcher?: typeof fetch;
   onUnauthorized?: () => void;
+  signal?: AbortSignal;
 };
 
 export type SpecializedPresetPresentation = {
@@ -245,6 +246,7 @@ async function requestJson(
   const fetcher = options.fetcher ?? fetch;
   const response = await fetcher(url, {
     ...init,
+    signal: init.signal ?? options.signal,
     headers: {
       Accept: "application/json",
       ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
@@ -295,7 +297,6 @@ export async function generateLibraryResearchReport(
     title?: string;
     executionMode?: "sync" | "async";
     pollIntervalMs?: number;
-    signal?: AbortSignal;
     onProgress?: (run: UnknownRecord) => void;
   },
 ): Promise<unknown> {

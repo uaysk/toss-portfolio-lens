@@ -4,12 +4,20 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useReducer,
   useState,
 } from "react";
-import { LoaderCircle } from "lucide-react";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import WifiOff from "lucide-react/dist/esm/icons/wifi-off.js";
 import { LoginPage } from "@/components/login-page";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
+import {
+  checkAuthSession,
+  invalidateAuthenticationSessionMemory,
+  reduceAuthenticationState,
+} from "@/lib/auth-session";
 import { safeLocalStorage } from "@/lib/safe-storage";
 import type { Theme } from "@/types";
 
@@ -45,10 +53,52 @@ function AppLoading({
   );
 }
 
+export function SessionUnavailable({
+  theme,
+  onToggleTheme,
+  onRetry,
+}: {
+  theme: Theme;
+  onToggleTheme: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <main className="relative grid min-h-screen place-items-center bg-[var(--shell)] px-5">
+      <div className="absolute right-5 top-5">
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+      </div>
+      <section
+        className="w-full max-w-md rounded-[28px] border border-border bg-card p-7 text-center shadow-xl shadow-black/5 sm:p-9"
+        aria-labelledby="session-error-title"
+        role="alert"
+      >
+        <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-secondary">
+          <WifiOff className="size-5" aria-hidden="true" />
+        </div>
+        <h1 id="session-error-title" className="mt-5 text-2xl font-black tracking-[-0.035em]">
+          서버에 연결할 수 없습니다
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+          로그인 상태를 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mx-auto mt-6 inline-flex h-11 items-center gap-2 rounded-full bg-primary px-5 text-sm font-bold text-primary-foreground transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <RefreshCw className="size-4" aria-hidden="true" />
+          다시 시도
+        </button>
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const reportRoute = window.location.pathname.match(/^\/reports(?:\/([^/]+))?\/?$/);
   const reportId = reportRoute?.[1];
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [authentication, dispatchAuthentication] = useReducer(reduceAuthenticationState, "checking");
+  const [sessionAttempt, setSessionAttempt] = useState(0);
   const [theme, setTheme] = useState<Theme>(() =>
     safeLocalStorage.getItem("portfolio-theme") === "light" ? "light" : "dark",
   );
@@ -63,24 +113,27 @@ export default function App() {
   const toggleTheme = useCallback(() => {
     setTheme((value) => value === "dark" ? "light" : "dark");
   }, []);
-  const markAuthenticated = useCallback(() => setAuthenticated(true), []);
-  const markUnauthenticated = useCallback(() => setAuthenticated(false), []);
+  const markAuthenticated = useCallback(() => {
+    invalidateAuthenticationSessionMemory();
+    dispatchAuthentication({ type: "signed-in" });
+  }, []);
+  const markUnauthenticated = useCallback(() => {
+    invalidateAuthenticationSessionMemory();
+    dispatchAuthentication({ type: "signed-out" });
+  }, []);
+  const retrySession = useCallback(() => {
+    dispatchAuthentication({ type: "retry" });
+    setSessionAttempt((attempt) => attempt + 1);
+  }, []);
 
   useEffect(() => {
     if (reportRoute) return;
-    let active = true;
-    fetch("/api/auth/session", { headers: { Accept: "application/json" } })
-      .then((response) => response.json())
-      .then((payload: { authenticated?: boolean }) => {
-        if (active) setAuthenticated(Boolean(payload.authenticated));
-      })
-      .catch(() => {
-        if (active) setAuthenticated(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [Boolean(reportRoute)]);
+    const controller = new AbortController();
+    void checkAuthSession(controller.signal).then((event) => {
+      if (!controller.signal.aborted) dispatchAuthentication(event);
+    });
+    return () => controller.abort();
+  }, [Boolean(reportRoute), sessionAttempt]);
 
   if (reportRoute) {
     return (
@@ -98,11 +151,21 @@ export default function App() {
     );
   }
 
-  if (authenticated === null) {
+  if (authentication === "checking") {
     return <AppLoading theme={theme} onToggleTheme={toggleTheme} />;
   }
 
-  if (!authenticated) {
+  if (authentication === "unavailable") {
+    return (
+      <SessionUnavailable
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onRetry={retrySession}
+      />
+    );
+  }
+
+  if (authentication === "unauthenticated") {
     return <LoginPage onAuthenticated={markAuthenticated} theme={theme} onToggleTheme={toggleTheme} />;
   }
 

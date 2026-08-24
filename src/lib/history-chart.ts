@@ -6,6 +6,10 @@ export type ValueChartPoint = {
   [key: string]: string | number;
 };
 
+export const HISTORY_BACKFILL_RUNNING_POLL_MS = 2_000;
+export const HISTORY_BACKFILL_IDLE_POLL_MS = 5_000;
+export const HISTORY_BACKFILL_MAX_RETRY_MS = 30_000;
+
 function round(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
@@ -13,8 +17,25 @@ function round(value: number, digits = 6): number {
 
 export function shouldPollPortfolioHistoryBackfill(
   status: BackfillStatus["status"],
+  visibilityState: DocumentVisibilityState = "visible",
 ): boolean {
-  return status === "idle" || status === "running";
+  return visibilityState === "visible" && (status === "idle" || status === "running");
+}
+
+export function portfolioHistoryBackfillPollDelay(
+  status: BackfillStatus["status"],
+): number | undefined {
+  if (status === "running") return HISTORY_BACKFILL_RUNNING_POLL_MS;
+  if (status === "idle") return HISTORY_BACKFILL_IDLE_POLL_MS;
+  return undefined;
+}
+
+export function portfolioHistoryBackfillRetryDelay(consecutiveFailures: number): number {
+  const exponent = Math.max(0, Math.trunc(consecutiveFailures) - 1);
+  return Math.min(
+    HISTORY_BACKFILL_MAX_RETRY_MS,
+    HISTORY_BACKFILL_IDLE_POLL_MS * (2 ** exponent),
+  );
 }
 
 export function filterPortfolioHistory(

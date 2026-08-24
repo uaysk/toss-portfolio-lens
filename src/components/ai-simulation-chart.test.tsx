@@ -364,6 +364,9 @@ describe("AiSimulationChart", () => {
     expect(markup).toContain("data-ai-simulation-hover-metrics");
     expect(markup).toContain("rsi 55.5");
     expect(markup).toContain('aria-label="BTCUSDT 차트 전체화면 확대"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain('aria-haspopup="dialog"');
+    expect(markup).toMatch(/aria-controls="[^"]+"/);
     expect(markup).toContain('data-ai-simulation-chart-expanded="false"');
   });
 

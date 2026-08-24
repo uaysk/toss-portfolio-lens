@@ -117,5 +117,17 @@ describe("dashboard authentication routes", () => {
     });
     expect((await login(trusted.baseUrl, "wrong", "198.51.100.1")).status).toBe(401);
     expect((await login(trusted.baseUrl, "wrong", "198.51.100.2")).status).toBe(401);
+
+    const mappedLimiter = new LoginAttemptLimiter({
+      maximumAttempts: 1,
+      windowMs: 60_000,
+      maximumEntries: 10,
+    });
+    const mapped = await start({
+      limiter: mappedLimiter,
+      trustProxy: ["127.0.0.1"],
+    });
+    expect((await login(mapped.baseUrl, "wrong", "::ffff:127.0.0.1")).status).toBe(401);
+    expect((await login(mapped.baseUrl, "wrong", "::ffff:7f00:1")).status).toBe(429);
   });
 });

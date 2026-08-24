@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
+import { assertClientBuildFresh, buildClient } from "./client-build.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDirectory = process.env.TECHNICAL_UI_SCREENSHOT_DIR
@@ -1277,6 +1278,22 @@ async function verifyViewport(browser, baseUrl, { viewport, theme, exerciseMutat
     const actualTheme = await page.evaluate(() => document.documentElement.classList.contains("dark") ? "dark" : "light");
     check(actualTheme === theme, `${viewport.width}px 테마가 ${theme}가 아니라 ${actualTheme}입니다.`);
     check(await page.locator("[data-technical-symbol]").count() >= 22, `${viewport.width}px에서 22개 종목 카드를 렌더링하지 못했습니다.`);
+    const firstIndicatorDisclosure = page.locator("[data-technical-symbol]").first().locator("[data-technical-indicator-disclosure]");
+    const firstSymbol = await page.locator("[data-technical-symbol]").first().getAttribute("data-technical-symbol");
+    const disclosureAccessibility = await firstIndicatorDisclosure.ariaSnapshot();
+    check(
+      Boolean(
+        firstSymbol
+        && disclosureAccessibility.includes(firstSymbol)
+        && disclosureAccessibility.includes("종목별 지표 공통 설정"),
+      ),
+      "종목별 지표 disclosure의 접근 가능한 이름이 없거나 종목과 연결되지 않았습니다.",
+    );
+    const disclosureBox = await firstIndicatorDisclosure.boundingBox();
+    check(
+      Boolean(disclosureBox && disclosureBox.height >= 40),
+      `종목별 지표 disclosure의 터치 높이가 40px 미만입니다: ${JSON.stringify(disclosureBox)}`,
+    );
     check(state.analyzeRequests.length === 1, "초기 분석이 단일 batch 요청이 아닙니다.");
     check(state.analyzeRequests[0].symbols.length === 22, "초기 batch 요청에 22개 종목이 모두 포함되지 않았습니다.");
     check(state.tradeRequests[0]?.length === 22, "거래 marker 요청에 22개 종목이 모두 포함되지 않았습니다.");
@@ -1412,21 +1429,6 @@ async function waitForVite(baseUrl, child, output) {
   throw new Error(`Vite 준비 시간이 초과됐습니다.\n${output.join("")}`);
 }
 
-async function buildClient(viteEntry) {
-  const output = [];
-  const child = spawn(process.execPath, [viteEntry, "build"], {
-    cwd: projectRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child.stdout.on("data", (chunk) => output.push(chunk.toString()));
-  child.stderr.on("data", (chunk) => output.push(chunk.toString()));
-  const exit = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-  if (exit.code !== 0) throw new Error(`Vite production build가 실패했습니다 (${exit.code ?? exit.signal}).\n${output.join("")}`);
-}
-
 async function stopProcess(child) {
   if (!child || child.exitCode !== null) return;
   child.kill("SIGTERM");
@@ -1445,7 +1447,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   let baseUrl = process.env.TECHNICAL_UI_BASE_URL?.replace(/\/$/, "");
   if (!baseUrl) {
     const viteEntry = path.join(projectRoot, "node_modules", "vite", "bin", "vite.js");
-    if (process.env.TECHNICAL_UI_SKIP_BUILD !== "1") await buildClient(viteEntry);
+    if (process.env.TECHNICAL_UI_SKIP_BUILD !== "1") await buildClient(projectRoot);
+    else await assertClientBuildFresh(projectRoot);
     const port = await availablePort();
     baseUrl = `http://127.0.0.1:${port}`;
     const output = [];

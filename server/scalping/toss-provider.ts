@@ -31,6 +31,7 @@ import {
   DEFAULT_US_EXTENDED_SESSION_WINDOWS,
   marketTradingSessionDate,
 } from "./market-session.js";
+import { marketLocalParts } from "./market-time.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -164,14 +165,8 @@ function timestamp(value: unknown, feature: string, field: string): string {
 }
 
 function sessionDateAt(value: string, marketCountry: MarketCountry): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: marketCountry === "US" ? "America/New_York" : "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(value));
-  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${fields.year}-${fields.month}-${fields.day}`;
+  const compact = marketLocalParts(Date.parse(value), marketCountry).date;
+  return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
 }
 
 function calendarDayOffset(value: string, sessionDate: string, marketCountry: MarketCountry): number {

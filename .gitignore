@@ -4,10 +4,7 @@ worker/ai/.ruff_cache
 worker/ai/.mypy_cache
 worker/ai/models
 worker/ai/model-cache
-.cache/huggingface
-.cache/tsbuildinfo
-.cache/types
-.cache/performance
+.cache
 ai-model-cache
 worker/rust/target
 __pycache__/
@@ -28,6 +25,10 @@ secrets/
 .DS_Store
 .idea
 .vscode
+*.code-workspace
+.claude
+CLAUDE.md
+opencode.json
 *.db
 *.sqlite
 *.sqlite3

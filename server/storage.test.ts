@@ -51,11 +51,30 @@ describe("configured PostgreSQL history storage", () => {
       .rejects.toBe(connectionFailure);
     expect(mocks.openHistoryStore).not.toHaveBeenCalled();
 
-    const database = { kind: "postgres-database" };
+    const database = {
+      kind: "postgres-database",
+      close: vi.fn().mockResolvedValue(undefined),
+    };
     const migrationFailure = new Error("migration checksum mismatch");
     mocks.openPostgresDatabase.mockResolvedValue(database);
     mocks.openHistoryStore.mockRejectedValue(migrationFailure);
     await expect(openConfiguredHistoryStore({ postgres } as AppConfig))
       .rejects.toBe(migrationFailure);
+    expect(database.close).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the migration error when cleanup also fails", async () => {
+    const migrationFailure = new Error("migration checksum mismatch");
+    const closeFailure = new Error("pool close failed");
+    const database = {
+      kind: "postgres-database",
+      close: vi.fn().mockRejectedValue(closeFailure),
+    };
+    mocks.openPostgresDatabase.mockResolvedValue(database);
+    mocks.openHistoryStore.mockRejectedValue(migrationFailure);
+
+    await expect(openConfiguredHistoryStore({ postgres } as AppConfig))
+      .rejects.toBe(migrationFailure);
+    expect(database.close).toHaveBeenCalledOnce();
   });
 });

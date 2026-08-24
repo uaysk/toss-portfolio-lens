@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, CalendarDays, Check, Database, EyeOff, LoaderCircle, RefreshCw } from "lucide-react";
+import AlertCircle from "lucide-react/dist/esm/icons/circle-alert.js";
+import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import Database from "lucide-react/dist/esm/icons/database.js";
+import EyeOff from "lucide-react/dist/esm/icons/eye-off.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import {
   Area,
   AreaChart,
@@ -14,7 +20,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { CHART_UPDATE_INTERVAL_MS } from "@/lib/chart-update";
 import {
   isValidCalendarRange,
   presetCalendarRange,
@@ -26,6 +31,8 @@ import { formatMoney } from "@/lib/format";
 import {
   buildValueChartData,
   filterPortfolioHistory,
+  portfolioHistoryBackfillPollDelay,
+  portfolioHistoryBackfillRetryDelay,
   shouldPollPortfolioHistoryBackfill,
   type ValueChartPoint,
 } from "@/lib/history-chart";
@@ -47,6 +54,18 @@ const ranges: Array<{ value: HistoryRange; label: string }> = [
   { value: "90d", label: "90일" },
   { value: "all", label: "전체" },
 ];
+
+const HISTORY_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  month: "short",
+  day: "numeric",
+});
+const HISTORY_DATE_WITH_YEAR_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
 
 type ActiveAreaLabelsProps = {
   hoveredPoint?: { index: number; x: number };
@@ -124,12 +143,7 @@ function ActiveAreaLabels({
 
 function displayDate(value: string, withYear = false): string {
   const date = new Date(`${value}T00:00:00+09:00`);
-  return new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    ...(withYear ? { year: "numeric" } : {}),
-    month: "short",
-    day: "numeric",
-  }).format(date);
+  return (withYear ? HISTORY_DATE_WITH_YEAR_FORMATTER : HISTORY_DATE_FORMATTER).format(date);
 }
 
 export function AllocationHistoryChart({
@@ -145,7 +159,7 @@ export function AllocationHistoryChart({
   onUnauthorized: () => void;
   onSeriesChange: (series: PortfolioHistorySeries[]) => void;
 }) {
-  const today = useMemo(() => seoulDateString(), []);
+  const today = seoulDateString();
   const [period, setPeriod] = useState<HistoryRange | "custom">("30d");
   const [draftDateRange, setDraftDateRange] = useState<CalendarDateRange>(
     () => presetCalendarRange("30d", today),
@@ -162,21 +176,51 @@ export function AllocationHistoryChart({
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
+    let statusController: AbortController | undefined;
+    let loadingStatus = false;
+    let consecutiveFailures = 0;
     let previousStatus: BackfillStatus["status"] | undefined;
 
+    const clearTimer = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+    };
+
+    const abortStatusRequest = () => {
+      const controller = statusController;
+      statusController = undefined;
+      loadingStatus = false;
+      controller?.abort();
+    };
+
+    const scheduleNext = (delayMs: number) => {
+      clearTimer();
+      if (!active || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void loadStatus();
+      }, delayMs);
+    };
+
     const loadStatus = async () => {
+      if (!active || loadingStatus || document.visibilityState !== "visible") return;
+      loadingStatus = true;
+      const controller = new AbortController();
+      statusController = controller;
       const params = new URLSearchParams({ account: portfolio.selectedAccountId });
       try {
         const response = await fetch(`/api/portfolio/history/status?${params.toString()}`, {
           headers: { Accept: "application/json" },
+          signal: controller.signal,
         });
         const payload = await response.json().catch(() => ({})) as BackfillStatus & ApiError;
-        if (!active) return;
+        if (!active || controller.signal.aborted || statusController !== controller) return;
         if (response.status === 401) {
           onUnauthorized();
           return;
         }
         if (!response.ok) throw new Error(payload.error?.message || "과거 기록 상태를 불러오지 못했습니다.");
+        consecutiveFailures = 0;
         setBackfill(payload);
         if (
           (previousStatus === "running" || previousStatus === "idle")
@@ -185,18 +229,38 @@ export function AllocationHistoryChart({
           setRetryKey((value) => value + 1);
         }
         previousStatus = payload.status;
-        if (shouldPollPortfolioHistoryBackfill(payload.status)) {
-          timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
-        }
+        const delay = portfolioHistoryBackfillPollDelay(payload.status);
+        if (
+          delay !== undefined
+          && shouldPollPortfolioHistoryBackfill(payload.status, document.visibilityState)
+        ) scheduleNext(delay);
       } catch {
-        if (active) timer = window.setTimeout(loadStatus, CHART_UPDATE_INTERVAL_MS);
+        if (controller.signal.aborted || statusController !== controller) return;
+        consecutiveFailures += 1;
+        scheduleNext(portfolioHistoryBackfillRetryDelay(consecutiveFailures));
+      } finally {
+        if (statusController === controller) {
+          statusController = undefined;
+          loadingStatus = false;
+        }
       }
     };
 
-    void loadStatus();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void loadStatus();
+      else {
+        clearTimer();
+        abortStatusRequest();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    if (document.visibilityState === "visible") void loadStatus();
     return () => {
       active = false;
-      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearTimer();
+      abortStatusRequest();
     };
   }, [onUnauthorized, portfolio.selectedAccountId, statusRefreshKey]);
 

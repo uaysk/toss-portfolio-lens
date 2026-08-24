@@ -13,6 +13,13 @@ export type ReportMetadataRecord = {
   createdAt: string;
 };
 
+type ReportPutOptions = {
+  // The caller has already verified that this exact linked report is absent
+  // from durable storage. The conditional update prevents replacing a newer
+  // link won by another process while recovery was running.
+  replaceMissingReportId?: string;
+};
+
 type ReportRow = {
   report_id: string;
   run_id: string;
@@ -85,7 +92,8 @@ export class ReportRepository {
     return row ? mapRow(row) : undefined;
   }
 
-  async put(input: ReportMetadataRecord): Promise<ReportMetadataRecord> {
+  async put(input: ReportMetadataRecord, options: ReportPutOptions = {}): Promise<ReportMetadataRecord> {
+    const replaceMissingReportId = options.replaceMissingReportId;
     const values = [
       input.reportId,
       input.runId,
@@ -97,15 +105,35 @@ export class ReportRepository {
       input.reportConfigHash,
       input.model,
       input.createdAt,
+      ...(replaceMissingReportId ? [replaceMissingReportId] : []),
     ];
-    await this.database.run(`
+    const [stored] = await this.database.query<ReportRow>(`
       INSERT INTO portfolio_report_links (
         report_id, run_id, owner_subject, request_hash, data_revision, engine_version,
         report_schema_version, report_config_hash, model_name, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT DO NOTHING
+      ON CONFLICT (
+        owner_subject, request_hash, data_revision, engine_version,
+        report_schema_version, report_config_hash
+      ) DO UPDATE SET
+        ${replaceMissingReportId ? `
+          report_id = excluded.report_id,
+          run_id = excluded.run_id,
+          model_name = excluded.model_name,
+          created_at = excluded.created_at
+        WHERE portfolio_report_links.report_id = ?
+        ` : "report_id = portfolio_report_links.report_id"}
+      RETURNING *
     `, values);
-    return (await this.findReusable(input)) ?? input;
+    if (stored) return mapRow(stored);
+
+    // A concurrent process replaced the stale link first. Return its winner
+    // instead of overwriting it or failing a request whose report is reusable.
+    if (replaceMissingReportId) {
+      const concurrent = await this.findReusable(input);
+      if (concurrent) return concurrent;
+    }
+    throw new Error("보고서 메타데이터를 저장하지 못했습니다.");
   }
 
   async get(reportId: string, ownerSubject?: string): Promise<ReportMetadataRecord | undefined> {

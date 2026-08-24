@@ -173,16 +173,27 @@ export class MarketDataRepository {
   }
 
   async dataRevision(): Promise<string> {
-    const [candle] = await this.database.query<{ count: number; revision: number; volume_sum: number }>(`
-      SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision,
-             COALESCE(SUM(volume), 0) AS volume_sum
-      FROM portfolio_market_candles
-    `);
-    const [fx] = await this.database.query<{ count: number; revision: number }>(`
-      SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision FROM portfolio_exchange_rates
+    const [snapshot] = await this.database.query<{
+      candle_count: number;
+      candle_revision: number;
+      volume_sum: number;
+      fx_count: number;
+      fx_revision: number;
+    }>(`
+      SELECT candle.count AS candle_count, candle.revision AS candle_revision,
+             candle.volume_sum, fx.count AS fx_count, fx.revision AS fx_revision
+      FROM (
+        SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision,
+               COALESCE(SUM(volume), 0) AS volume_sum
+        FROM portfolio_market_candles
+      ) AS candle
+      CROSS JOIN (
+        SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), 0) AS revision
+        FROM portfolio_exchange_rates
+      ) AS fx
     `);
     return createHash("sha256")
-      .update(`${Number(candle?.count ?? 0)}:${Number(candle?.revision ?? 0)}:${Number(candle?.volume_sum ?? 0)}:${Number(fx?.count ?? 0)}:${Number(fx?.revision ?? 0)}`)
+      .update(`${Number(snapshot?.candle_count ?? 0)}:${Number(snapshot?.candle_revision ?? 0)}:${Number(snapshot?.volume_sum ?? 0)}:${Number(snapshot?.fx_count ?? 0)}:${Number(snapshot?.fx_revision ?? 0)}`)
       .digest("hex");
   }
 }

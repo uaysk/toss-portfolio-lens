@@ -84,4 +84,25 @@ describe("RuntimeTelemetry", () => {
     expect(telemetry.snapshot().artifacts.writes).toBe(0);
     expect(telemetry.snapshot().http.latencyMs.sampleCount).toBe(0);
   });
+
+  it("retains the newest samples at capacity without changing the time window", () => {
+    const telemetry = new RuntimeTelemetry({
+      windowMs: 1_000,
+      maxSamples: 2,
+      wallNow: () => 1_000,
+    });
+    for (const byteCount of [1, 2, 4]) {
+      telemetry.recordArtifactWrite({
+        byteCount,
+        serializationMs: byteCount,
+        storageMs: byteCount,
+        offloaded: false,
+      });
+    }
+
+    expect(telemetry.snapshot().artifacts).toMatchObject({
+      writes: 2,
+      bytes: 6,
+    });
+  });
 });

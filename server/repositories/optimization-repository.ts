@@ -70,9 +70,14 @@ export class OptimizationRepository {
       ALTER COLUMN score TYPE DOUBLE PRECISION
     `);
     await this.database.run(`
-      CREATE INDEX IF NOT EXISTS idx_optimization_candidate_rank
-      ON portfolio_optimization_candidates(run_id, candidate_rank)
+      CREATE INDEX IF NOT EXISTS idx_optimization_candidate_order
+      ON portfolio_optimization_candidates(
+        run_id, candidate_rank ASC NULLS LAST, score DESC
+      )
     `);
+    // The ordering index is a strict superset of the legacy rank index. Keep
+    // one candidate-write index rather than paying for both on large searches.
+    await this.database.run("DROP INDEX IF EXISTS idx_optimization_candidate_rank");
   }
 
   async createRun(input: {
@@ -170,8 +175,7 @@ export class OptimizationRepository {
              score, pareto, created_at
       FROM portfolio_optimization_candidates
       WHERE run_id = ?
-      ORDER BY CASE WHEN candidate_rank IS NULL THEN 1 ELSE 0 END,
-               candidate_rank ASC, score DESC
+      ORDER BY candidate_rank ASC NULLS LAST, score DESC
       LIMIT ${safeLimit}
     `, [runId]);
     return rows.map(parseCandidate);
@@ -191,8 +195,7 @@ export class OptimizationRepository {
              score, pareto, created_at
       FROM portfolio_optimization_candidates
       WHERE run_id = ? AND pareto = 1
-      ORDER BY CASE WHEN candidate_rank IS NULL THEN 1 ELSE 0 END,
-               candidate_rank ASC, score DESC
+      ORDER BY candidate_rank ASC NULLS LAST, score DESC
       LIMIT ${safeLimit}
     `, [runId]);
     return rows.map(parseCandidate);
@@ -205,8 +208,7 @@ export class OptimizationRepository {
              score, pareto, created_at
       FROM portfolio_optimization_candidates
       WHERE run_id = ?${paretoOnly ? " AND pareto = 1" : ""}
-      ORDER BY CASE WHEN candidate_rank IS NULL THEN 1 ELSE 0 END,
-               candidate_rank ASC, score DESC
+      ORDER BY candidate_rank ASC NULLS LAST, score DESC
       LIMIT 1 OFFSET ${index}
     `, [runId]);
     return row ? parseCandidate(row) : undefined;

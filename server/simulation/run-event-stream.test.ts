@@ -79,6 +79,7 @@ describe("SimulationRunEventHub", () => {
       .toEqual([3, 4, 5]);
     expect(hub.eventsAfter(RUN_ID, "owner", 3).map((event) => event.revision))
       .toEqual([4, 5]);
+    expect(hub.latest(RUN_ID, "owner")?.revision).toBe(5);
     expect(hub.telemetry).toMatchObject({
       replayRuns: 1,
       replayEventCapacityPerRun: 3,
@@ -129,5 +130,32 @@ describe("SimulationRunEventHub", () => {
 
     releaseFailed();
     releaseHealthy();
+  });
+
+  it("evicts the least-recently-touched idle run without sorting all states", () => {
+    let now = 1;
+    const hub = new SimulationRunEventHub({
+      replayLimit: 2,
+      runLimit: 2,
+      now: () => now,
+    });
+    const publish = (runId: string) => hub.publishProgress({
+      runId,
+      ownerSubject: "owner",
+      status: "running",
+      payload: {},
+    });
+
+    publish("run-1");
+    now = 2;
+    publish("run-2");
+    now = 3;
+    expect(hub.latest("run-1", "owner")).toBeDefined();
+    now = 4;
+    publish("run-3");
+
+    expect(hub.latest("run-1", "owner")).toBeDefined();
+    expect(hub.latest("run-2", "owner")).toBeUndefined();
+    expect(hub.latest("run-3", "owner")).toBeDefined();
   });
 });

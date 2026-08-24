@@ -1,3 +1,8 @@
+import WebSocket from "ws";
+import {
+  readBoundedResponseText,
+  ResponseBodyLimitError,
+} from "../bounded-response.js";
 import type { MarketCountry } from "./contracts.js";
 import type { KisEnvironment, KisMarketSource, KisUsExchangeCode } from "./kis-rest-client.js";
 import { zonedTimestamp } from "./market-time.js";
@@ -147,6 +152,7 @@ export interface WebSocketLike {
   readonly readyState: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
+  terminate?(): void;
   addEventListener(type: WebSocketEventName, listener: WebSocketListener): void;
   removeEventListener?(type: WebSocketEventName, listener: WebSocketListener): void;
 }
@@ -185,11 +191,15 @@ const REST_BASE_URLS: Record<KisEnvironment, string> = {
   real: "https://openapi.koreainvestment.com:9443",
   demo: "https://openapivts.koreainvestment.com:29443",
 };
+// KIS execution/orderbook records are small delimited frames. One MiB leaves
+// substantial provider headroom while bounding configurable WS endpoints.
+const MAXIMUM_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
 const WEB_SOCKET_URLS: Record<KisEnvironment, string> = {
   real: "ws://ops.koreainvestment.com:21000",
   demo: "ws://ops.koreainvestment.com:31000",
 };
 const APPROVAL_PATH = "/oauth2/Approval";
+const MAXIMUM_APPROVAL_RESPONSE_BYTES = 1024 * 1024;
 const OPEN_READY_STATE = 1;
 
 const EXECUTION_TR_IDS = new Set<KisExecutionTrId>(["H0STCNT0", "H0NXCNT0", "H0UNCNT0", "HDFSCNT0"]);
@@ -330,13 +340,23 @@ function defaultSleep(milliseconds: number): Promise<void> {
 }
 
 function defaultWebSocketFactory(url: string): WebSocketLike {
-  const constructor = (globalThis as unknown as {
-    WebSocket?: new (address: string) => WebSocketLike;
-  }).WebSocket;
-  if (!constructor) {
-    throw new KisWebSocketError("No WebSocket implementation is available.", "websocket-unavailable", false);
+  return new WebSocket(url, {
+    maxPayload: MAXIMUM_WEBSOCKET_FRAME_BYTES,
+    perMessageDeflate: false,
+  }) as unknown as WebSocketLike;
+}
+
+function closeSocket(socket: WebSocketLike, code: number, reason: string): void {
+  try {
+    if (socket.readyState !== OPEN_READY_STATE && socket.terminate) socket.terminate();
+    else socket.close(code, reason);
+  } catch {
+    try {
+      socket.terminate?.();
+    } catch {
+      // Generation checks discard late events even when best-effort teardown fails.
+    }
   }
-  return new constructor(url);
 }
 
 function eventData(event: unknown): unknown {
@@ -350,6 +370,13 @@ function textFrame(value: unknown): string | undefined {
   if (ArrayBuffer.isView(value)) {
     return new TextDecoder().decode(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
   }
+  return undefined;
+}
+
+function frameByteLength(value: unknown): number | undefined {
+  if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return value.byteLength;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value.byteLength;
   return undefined;
 }
 
@@ -502,13 +529,7 @@ export class KisWebSocketClient {
     this.approvalController?.abort();
     this.approvalController = undefined;
     this.pendingControlActions.clear();
-    if (socket) {
-      try {
-        socket.close(1_000, "client disconnect");
-      } catch {
-        // Closing is best effort; generation checks discard late events.
-      }
-    }
+    if (socket) closeSocket(socket, 1_000, "client disconnect");
     this.transition("closed", this.generation, "client disconnect");
   }
 
@@ -578,6 +599,9 @@ export class KisWebSocketClient {
 
   private async issueApproval(): Promise<string> {
     for (let attempt = 0; attempt < this.config.approvalMaxAttempts; attempt += 1) {
+      if (this.manuallyStopped) {
+        throw new KisWebSocketError("KIS approval request was cancelled.", "approval-cancelled", false);
+      }
       const controller = new AbortController();
       this.approvalController = controller;
       const timeout = this.setTimeoutImpl(() => controller.abort(), this.config.approvalTimeoutMs);
@@ -594,8 +618,18 @@ export class KisWebSocketClient {
         });
         let body: unknown;
         try {
-          body = await response.json();
-        } catch {
+          body = response.body
+            ? JSON.parse(await readBoundedResponseText(response, MAXIMUM_APPROVAL_RESPONSE_BYTES)) as unknown
+            : await response.json();
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") throw error;
+          if (error instanceof ResponseBodyLimitError) {
+            throw new KisWebSocketError(
+              "KIS approval response exceeded the configured byte limit.",
+              "approval-response-too-large",
+              false,
+            );
+          }
           throw new KisWebSocketError("KIS approval response was not valid JSON.", "invalid-approval-response", response.status >= 500);
         }
         if (!isRecord(body)) {
@@ -633,6 +667,9 @@ export class KisWebSocketClient {
           this.config.approvalRetryBaseMs * 2 ** attempt,
         );
         await this.sleepImpl(delay);
+        if (this.manuallyStopped) {
+          throw new KisWebSocketError("KIS approval request was cancelled.", "approval-cancelled", false);
+        }
       } finally {
         this.clearTimeoutImpl(timeout);
         if (this.approvalController === controller) this.approvalController = undefined;
@@ -649,7 +686,7 @@ export class KisWebSocketClient {
       if (this.manuallyStopped || generation !== this.generation) return;
       const socket = this.webSocketFactory(this.webSocketUrl);
       if (this.manuallyStopped || generation !== this.generation) {
-        socket.close(1_000, "stale connection");
+        closeSocket(socket, 1_000, "stale connection");
         return;
       }
       this.socket = socket;
@@ -659,11 +696,7 @@ export class KisWebSocketClient {
         if (!this.isCurrent(socket, generation) || this.state === "connected") return;
         this.transition("error", generation, "connection timeout");
         this.socket = undefined;
-        try {
-          socket.close(4_000, "connection timeout");
-        } catch {
-          // Reconnection below remains authoritative.
-        }
+        closeSocket(socket, 4_000, "connection timeout");
         this.scheduleReconnect(generation, "connection timeout");
       }, this.config.connectionTimeoutMs);
     } catch (error) {
@@ -698,11 +731,7 @@ export class KisWebSocketClient {
       this.clearConnectionTimer();
       this.clearControlQueue();
       this.socket = undefined;
-      try {
-        socket.close(4_001, "websocket error");
-      } catch {
-        // Reconnection below remains authoritative.
-      }
+      closeSocket(socket, 4_001, "websocket error");
       this.scheduleReconnect(generation, "websocket error");
     });
     socket.addEventListener("close", (event) => {
@@ -825,7 +854,14 @@ export class KisWebSocketClient {
   }
 
   private handleMessage(socket: WebSocketLike, event: unknown): void {
-    const raw = textFrame(eventData(event));
+    const data = eventData(event);
+    const byteLength = frameByteLength(data);
+    if (byteLength !== undefined && byteLength > MAXIMUM_WEBSOCKET_FRAME_BYTES) {
+      this.emitParseError("KIS WebSocket frame exceeded the configured byte limit.");
+      closeSocket(socket, 1_009, "message too big");
+      return;
+    }
+    const raw = textFrame(data);
     if (raw === undefined) {
       this.emitParseError("Unsupported KIS WebSocket message type.");
       return;

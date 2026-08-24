@@ -143,12 +143,6 @@ function generateFamilyId(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function rowValue<T extends string | number | null | undefined>(value: unknown, _default: T): T {
-  if (value == null) return _default;
-  if (typeof value === "string" || typeof value === "number") return value as T;
-  return _default;
-}
-
 function rowString(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${fieldName} should be a non-empty string.`);
@@ -693,27 +687,10 @@ export class OAuthRepository {
         WHERE expires_at <= ?
       `, [now]);
 
-      const familyRows = await database.query<AnyRow>(`
-        SELECT DISTINCT family_id
-        FROM mcp_oauth_refresh_tokens
-        WHERE revoked_at IS NOT NULL
-      `);
-      for (const family of familyRows) {
-        const familyId = String(family.family_id);
-        if (!familyId) continue;
-        const activeRows = await database.query<AnyRow>(`
-          SELECT 1
-          FROM mcp_oauth_refresh_tokens
-          WHERE family_id = ? AND expires_at > ?
-          LIMIT 1
-        `, [familyId, now]);
-        if (activeRows.length === 0) {
-          await database.run(`
-            DELETE FROM mcp_oauth_revocations
-            WHERE revocation_type = 'refresh_family' AND identifier = ?
-          `, [familyId]);
-        }
-      }
+      // Family revocations use the family's maximum token expiry. The deletes
+      // above therefore remove both sides once a family expires; every refresh
+      // token still present is active, so probing each revoked family again is
+      // redundant and turns cleanup into an unbounded N+1 query loop.
 
       return {
         authorizationCodesDeleted: authCode.affectedRows,

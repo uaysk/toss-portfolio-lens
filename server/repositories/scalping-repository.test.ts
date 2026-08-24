@@ -694,6 +694,38 @@ describe("ScalpingRepository", () => {
     }]);
   });
 
+  it("예측 저장 결과를 INSERT RETURNING 한 statement로 반환한다", async () => {
+    const repository = await setup();
+    const query = vi.spyOn(database, "query");
+    const run = vi.spyOn(database, "run");
+
+    await expect(repository.putPrediction({
+      id: "single-statement-prediction",
+      marketCountry: "US",
+      symbol: "AAPL",
+      modelName: "model",
+      modelVersion: "v1",
+      inputEndedAt: "2026-07-21T13:30:00.000Z",
+      generatedAt: "2026-07-21T13:30:01.000Z",
+      status: "available",
+      dataQuality: "complete",
+      retrospective: false,
+      payload: { p50: 0.01 },
+      createdAt: 100,
+    })).resolves.toMatchObject({
+      id: "single-statement-prediction",
+      marketCountry: "US",
+      symbol: "AAPL",
+      payload: { p50: 0.01 },
+    });
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+    expect(String(query.mock.calls[0]?.[0])).toContain("RETURNING *");
+    query.mockRestore();
+    run.mockRestore();
+  });
+
   it("입력 종료보다 앞선 생성 시각과 비유한 payload를 거부한다", async () => {
     const repository = await setup();
     const input = {

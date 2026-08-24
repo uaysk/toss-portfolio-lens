@@ -204,7 +204,7 @@ describe("TossScalpingProvider", () => {
   });
 
   it("uses the provider-supported daily top-gainers contract for volatility candidate discovery", async () => {
-    const getReadOnlyMarketData = vi.fn(async (feature, query) => response(feature, { result: {
+    const getReadOnlyMarketData = vi.fn(async (feature) => response(feature, { result: {
       rankedAt: fetchedAt,
       rankings: [{ rank: 1, symbol: "005930", currency: "KRW", price: 100, changeRate: 0.02 }],
     } }));
@@ -218,7 +218,7 @@ describe("TossScalpingProvider", () => {
   });
 
   it("passes the selected US market through ranking requests and normalizes USD results", async () => {
-    const getReadOnlyMarketData = vi.fn(async (feature, query) => response(feature, { result: {
+    const getReadOnlyMarketData = vi.fn(async (feature) => response(feature, { result: {
       rankedAt: "2026-07-21T09:31:00-04:00",
       rankings: [{ rank: 1, symbol: "AAPL", currency: "USD", exchange: "NAS", price: 220 }],
     } }));

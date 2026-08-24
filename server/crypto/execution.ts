@@ -67,6 +67,8 @@ export interface FuturesExecution {
   status(): FuturesExecutionStatus;
   submit(request: FuturesOrderRequest): Promise<FuturesOrderResult>;
   reconcileUnknown(clientOrderId: string, symbol: string): Promise<FuturesOrderResult>;
+  /** Paper-only lifecycle hook; guarded venue reconciliation must remain durable. */
+  releaseRun?(runId: string): void | Promise<void>;
 }
 
 export type BinanceProtectionResult = {
@@ -632,7 +634,8 @@ function verifiedProtection(
 
 export class PaperExecution implements FuturesExecution {
   readonly mode = "paper" as const;
-  private readonly orderIds = new Set<string>();
+  private readonly orderRunById = new Map<string, string>();
+  private readonly orderIdsByRun = new Map<string, Set<string>>();
 
   status(): FuturesExecutionStatus {
     return {
@@ -647,18 +650,28 @@ export class PaperExecution implements FuturesExecution {
 
   async submit(request: FuturesOrderRequest): Promise<FuturesOrderResult> {
     validateRequest(request, 15, false);
-    if (this.orderIds.has(request.clientOrderId)) {
+    if (this.orderRunById.has(request.clientOrderId)) {
       throw new Error("clientOrderId must be unique.");
     }
-    this.orderIds.add(request.clientOrderId);
+    this.orderRunById.set(request.clientOrderId, request.runId);
+    const runOrderIds = this.orderIdsByRun.get(request.runId) ?? new Set<string>();
+    runOrderIds.add(request.clientOrderId);
+    this.orderIdsByRun.set(request.runId, runOrderIds);
     return { clientOrderId: request.clientOrderId, status: "ACCEPTED" };
   }
 
   async reconcileUnknown(clientOrderId: string): Promise<FuturesOrderResult> {
     return {
       clientOrderId,
-      status: this.orderIds.has(clientOrderId) ? "ACCEPTED" : "UNKNOWN",
+      status: this.orderRunById.has(clientOrderId) ? "ACCEPTED" : "UNKNOWN",
     };
+  }
+
+  releaseRun(runId: string): void {
+    const orderIds = this.orderIdsByRun.get(runId);
+    if (!orderIds) return;
+    for (const orderId of orderIds) this.orderRunById.delete(orderId);
+    this.orderIdsByRun.delete(runId);
   }
 }
 

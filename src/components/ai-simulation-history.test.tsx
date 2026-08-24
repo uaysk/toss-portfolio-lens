@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  latestSimulationReportEntries,
+  recentSimulationReportEntries,
   retainedSimulationHistorySelection,
+  SIMULATION_REPORT_LIST_PAGE_SIZE,
   SimulationRunHistoryList,
   SimulationRunReportView,
 } from "./ai-simulation-history";
@@ -41,6 +44,24 @@ const strategyComparison: AiSimulationStrategyComparison = {
 };
 
 describe("AI simulation history", () => {
+  it("장기 실행 보고서 목록은 최신 100건부터 역순으로 렌더링한다", () => {
+    const entries = Array.from({ length: SIMULATION_REPORT_LIST_PAGE_SIZE + 25 }, (_, index) => index);
+
+    const firstPage = recentSimulationReportEntries(entries);
+    const expanded = recentSimulationReportEntries(entries, SIMULATION_REPORT_LIST_PAGE_SIZE * 2);
+
+    expect(firstPage).toHaveLength(SIMULATION_REPORT_LIST_PAGE_SIZE);
+    expect(firstPage[0]).toBe(entries.length - 1);
+    expect(firstPage.at(-1)).toBe(25);
+    expect(expanded).toHaveLength(entries.length);
+    expect(expanded.at(-1)).toBe(0);
+
+    const chronologicalTail = latestSimulationReportEntries(entries);
+    expect(chronologicalTail).toHaveLength(SIMULATION_REPORT_LIST_PAGE_SIZE);
+    expect(chronologicalTail[0]).toBe(25);
+    expect(chronologicalTail.at(-1)).toBe(entries.length - 1);
+  });
+
   it("keeps report selection empty until the user chooses a run", () => {
     const items = [
       { runId: "run-1" },
@@ -300,5 +321,47 @@ describe("AI simulation history", () => {
     );
     expect(chronos2Markup).toContain('data-simulation-model-provenance="chronos2"');
     expect(chronos2Markup).toContain("Chronos-2 · Primary");
+
+    const denseMarkup = renderToStaticMarkup(
+      <SimulationRunReportView
+        report={{
+          ...report,
+          decisions: Array.from({ length: 125 }, (_, index) => ({
+            ...report.decisions[0],
+            symbol: `DECISION-${index}`,
+            decidedAt: `2026-07-24T01:${String(index % 60).padStart(2, "0")}:00.000Z`,
+          })),
+          trades: Array.from({ length: 125 }, (_, index) => ({
+            ...report.trades[0],
+            symbol: `TRADE-${index}`,
+            executedAt: `2026-07-24T01:${String(index % 60).padStart(2, "0")}:30.000Z`,
+          })),
+          decisionProvenance: Array.from({ length: 125 }, (_, index) => ({
+            ...report.decisionProvenance[0],
+            decisionId: `PROVENANCE-${index}`,
+            pairId: `PAIR-${index}`,
+          })),
+          equity: Array.from({ length: 125 }, (_, index) => ({
+            timestamp: new Date(Date.UTC(2026, 6, 24, 1, index)).toISOString(),
+            equity: 10_000 + index,
+            cash: 9_000 + index,
+          })),
+        }}
+      />,
+    );
+    expect(denseMarkup).toContain("DECISION-124");
+    expect(denseMarkup).not.toContain("DECISION-0 ·");
+    expect(denseMarkup).toContain("이전 판단 25건 더 보기");
+    expect(denseMarkup).toContain("TRADE-124");
+    expect(denseMarkup).not.toContain("TRADE-0 ·");
+    expect(denseMarkup).toContain("이전 체결 25건 더 보기");
+    expect(denseMarkup).toContain('data-simulation-report-provenance-item="PROVENANCE-124"');
+    expect(denseMarkup).not.toContain('data-simulation-report-provenance-item="PROVENANCE-0"');
+    expect(denseMarkup).toContain("이전 provenance 25건 더 보기");
+    expect(denseMarkup.match(/data-simulation-report-provenance-item=/g)).toHaveLength(SIMULATION_REPORT_LIST_PAGE_SIZE);
+    expect(denseMarkup).toContain('data-simulation-report-equity-row="2026-07-24T03:04:00.000Z"');
+    expect(denseMarkup).not.toContain('data-simulation-report-equity-row="2026-07-24T01:00:00.000Z"');
+    expect(denseMarkup).toContain("이전 자산 기록 25개 더 보기");
+    expect(denseMarkup.match(/data-simulation-report-equity-row=/g)).toHaveLength(SIMULATION_REPORT_LIST_PAGE_SIZE);
   });
 });

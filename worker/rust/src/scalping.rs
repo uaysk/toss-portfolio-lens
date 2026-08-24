@@ -5076,8 +5076,35 @@ mod tests {
             output.result.as_ref().unwrap()["schema_version"],
             SCALPING_RESULT_SCHEMA_VERSION
         );
+        let without_artifacts = crate::compute::compute_with_artifacts(&input, false).unwrap();
+        assert_eq!(without_artifacts.summary, output.summary);
+        assert!(without_artifacts.artifacts.unwrap().is_empty());
         let artifacts = output.artifacts.unwrap();
         assert_eq!(artifacts.len(), 3);
+        let signals = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_type == "technical-signals")
+            .unwrap()
+            .content
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            output.summary.as_ref().unwrap()["signal_count"],
+            signals.len()
+        );
+        for (status, summary_field) in [
+            ("entry_candidate", "entry_candidate_count"),
+            ("hold", "hold_count"),
+            ("exit_candidate", "exit_candidate_count"),
+        ] {
+            assert_eq!(
+                output.summary.as_ref().unwrap()[summary_field],
+                signals
+                    .iter()
+                    .filter(|signal| signal["status"] == status)
+                    .count()
+            );
+        }
         assert!(
             artifacts
                 .iter()

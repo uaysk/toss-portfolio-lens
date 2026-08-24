@@ -12,6 +12,7 @@ remote는 이전 검증과 긴급 rollback을 위해 `github`라는 이름으로
 
 - runner build container의 5 GiB hard limit, Docker socket·GPU device 미노출 preflight
 - Node 정책·계약·TypeScript·production client/server build와 bundle budget
+- Python AI worker의 lock 기반 CPU-only Ruff·Pytest gate
 - OOM-safe Vitest light/heavy/PGlite lane
 - Rust fmt, clippy, test, release binary와 indicator benchmark
 - PostgreSQL 17 임시 service에서 migration, locking, durable queue와 Rust worker 통합
@@ -53,12 +54,28 @@ runner allowlist 모두 검증한 OCI index digest로 고정한다.
 - 메모리 사용량이 큰 job은 `toss-portfolio-lens-memory-heavy` resource group으로 직렬화
 - CI job image와 PostgreSQL service image는 manifest digest로 고정
 
-GitLab CI cache는 소유자를 분리한다. 모든 Node job은 npm download cache를 pull-only로 읽고 `node-static`만
-같은 lockfile key에 push한다. TypeScript build info·declaration output·server build는 별도 build key로
-`node-static`만 쓰며, `node_modules`는 cache하지 않는다. Cargo cache와 Rust target도 job별 목적을 유지하되
-압축·복원 시간을 측정한 뒤 범위를 줄인다. credential, `.env`, database dump, production release manifest는
-cache나 artifact로 올리지 않는다. 모든 job의 after-script는 credential 없이 cgroup memory peak/current,
-CPU 사용량, I/O 합계와 memory event를 한 줄로 기록한다.
+GitLab CI cache는 소유자를 분리한다. 모든 Node job은 npm download cache를 pull-only로 읽고, 보호된 ref의
+기본 브랜치·tag·schedule에서 실행되는 `node-static`만 같은 lockfile key에 push한다. MR·feature pipeline과
+비보호 tag·schedule의 `node-static`도 pull-only로 선언한다. Python·Rust도 같은 protected writer 경계를
+사용하며, 이전 writer가 만든 archive를 다시 신뢰하지 않도록 Node/Cargo는 `v3`, Python uv는 `v2` key로
+회전했다. GitLab의 `Use separate caches for protected branches` 보안 설정은 계속 활성화해야 하고, 임의 pipeline
+variable 생성 권한도 제한해야 한다. pipeline variable은 YAML job variable보다 우선하며 MR은 CI 설정 자체를
+바꿀 수 있으므로 저장소의 `policy` 선언만으로 적대적인 pipeline을 격리할 수는 없다.
+TypeScript build info·declaration output·server build는 별도 build key로 같은 protected writer만 쓰며,
+`node_modules`는 cache하지 않는다. Python uv cache와 Cargo registry·Rust target도 protected
+default branch·tag·schedule만 쓰고 비보호 ref는 pull-only로 읽는다. cache 범위는 압축·복원 시간을
+측정한 뒤 줄인다. credential, `.env`, database dump, production release manifest는 cache나
+artifact로 올리지 않는다. 모든 job의 after-script는 credential 없이 cgroup memory peak/current, CPU
+사용량, I/O 합계와 memory event를 한 줄로 기록한다.
+
+`node-static`이 검증한 `dist/client`는 짧은 수명의 artifact로 `ui-regression`에 전달한다. UI job은 이
+production bundle을 그대로 사용하며 Vite build를 반복하지 않는다. Python AI job은 `uv.lock`에서 CPU
+PyTorch 환경만 설치하고, MR에서는 worker·cross-language 계약 영향 경로에만 실행하되 protected main,
+tag와 schedule에서는 항상 실행한다. 두 job 모두 memory-heavy resource group 경계를 유지한다.
+현재 CPU backend는 GPU-oriented lock에 없는 별도 Torch wheel을 선택하므로 constraints export에
+`--no-hashes`를 사용한다. export된 모든 package version은 exact pin이지만 artifact hash까지 고정되지는
+않으며, `uv pip --strict`도 dependency 일관성 검사이지 hash 검증은 아니다. 완전한 hash 검증은 CPU wheel을
+포함한 별도 lock/source 설계 뒤에 적용한다.
 
 ## 이미지와 배포
 

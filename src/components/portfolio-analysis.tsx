@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, AlertCircle, BarChart3, CalendarDays, CandlestickChart, Info, LoaderCircle, RefreshCw, ShieldCheck, TrendingDown } from "lucide-react";
+import AlertCircle from "lucide-react/dist/esm/icons/circle-alert.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
+import CandlestickChart from "lucide-react/dist/esm/icons/chart-candlestick.js";
+import Info from "lucide-react/dist/esm/icons/info.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import ShieldCheck from "lucide-react/dist/esm/icons/shield-check.js";
 import {
   Bar,
   CartesianGrid,
@@ -62,15 +69,21 @@ const benchmarks: Array<{ key: BenchmarkKey; label: string; detail: string; colo
   { key: "SP500", label: "S&P 500", detail: "SPY 프록시", color: CHART_SERIES[3] },
 ];
 const monthLabels = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+const ANALYSIS_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  month: "short",
+  day: "numeric",
+});
+const ANALYSIS_DATE_WITH_YEAR_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
 
 function displayDate(value: string, withYear = false): string {
   const date = new Date(`${value}T00:00:00+09:00`);
-  return new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    ...(withYear ? { year: "numeric" } : {}),
-    month: "short",
-    day: "numeric",
-  }).format(date);
+  return (withYear ? ANALYSIS_DATE_WITH_YEAR_FORMATTER : ANALYSIS_DATE_FORMATTER).format(date);
 }
 
 function presetRange(range: AnalysisRange, today: string, firstDate?: string): CalendarDateRange {
@@ -176,6 +189,36 @@ function MetricCard({ label, value, detail }: { label: string; value: string; de
   );
 }
 
+function chartPriceExtremes(points: readonly AnalysisChartPoint[]): { high: number; low: number } {
+  if (!points.length) return { high: 0, low: 0 };
+  let high = points[0].high;
+  let low = points[0].low;
+  for (let index = 1; index < points.length; index += 1) {
+    high = Math.max(high, points[index].high);
+    low = Math.min(low, points[index].low);
+  }
+  return { high, low };
+}
+
+function maximumAbsoluteMetric<T>(
+  items: readonly T[] | undefined,
+  metric: (item: T) => number | null | undefined,
+): number {
+  let maximum = 1;
+  for (const item of items ?? []) {
+    const value = metric(item);
+    if (Number.isFinite(value)) maximum = Math.max(maximum, Math.abs(value as number));
+  }
+  return maximum;
+}
+
+export function shouldPollPortfolioAnalysisBackfill(
+  backfillComplete: boolean | undefined,
+  visibilityState: DocumentVisibilityState,
+): boolean {
+  return backfillComplete === false && visibilityState === "visible";
+}
+
 export function PortfolioAnalysisView({
   portfolio,
   theme,
@@ -185,7 +228,7 @@ export function PortfolioAnalysisView({
   theme: Theme;
   onUnauthorized: () => void;
 }) {
-  const today = useMemo(() => seoulDateString(), []);
+  const today = seoulDateString();
   const [period, setPeriod] = useState<AnalysisRange | "custom">("30d");
   const [draftDateRange, setDraftDateRange] = useState<CalendarDateRange>(() => presetRange("30d", today));
   const [customDateRange, setCustomDateRange] = useState<CalendarDateRange>();
@@ -238,12 +281,35 @@ export function PortfolioAnalysisView({
   }, [customDateRange?.from, customDateRange?.to, onUnauthorized, period, portfolio.selectedAccountId, retryKey, riskFreeRate, today]);
 
   useEffect(() => {
-    if (!analysis || analysis.ohlcBackfillComplete) return;
-    const timer = window.setTimeout(
-      () => setRetryKey((value) => value + 1),
-      CHART_UPDATE_INTERVAL_MS,
-    );
-    return () => window.clearTimeout(timer);
+    const backfillComplete = analysis?.ohlcBackfillComplete;
+    if (backfillComplete !== false) return;
+    let timer: number | undefined;
+
+    const clearTimer = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+    };
+    const schedule = () => {
+      clearTimer();
+      if (!shouldPollPortfolioAnalysisBackfill(backfillComplete, document.visibilityState)) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        setRetryKey((value) => value + 1);
+      }, CHART_UPDATE_INTERVAL_MS);
+    };
+    const handleVisibilityChange = () => {
+      clearTimer();
+      if (shouldPollPortfolioAnalysisBackfill(backfillComplete, document.visibilityState)) {
+        setRetryKey((value) => value + 1);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedule();
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearTimer();
+    };
   }, [analysis]);
 
   const chartData = useMemo(() => analysis ? buildAnalysisChartData(analysis) : [], [analysis]);
@@ -254,15 +320,21 @@ export function PortfolioAnalysisView({
   const portfolioBase = chartData[0]?.close ?? 0;
   const change = analysis?.metrics.valuationChangePercent ?? analysisPeriodChange(chartData);
   const latest = chartData.at(-1);
-  const high = chartData.length ? Math.max(...chartData.map((point) => point.high)) : 0;
-  const low = chartData.length ? Math.min(...chartData.map((point) => point.low)) : 0;
+  const { high, low } = useMemo(() => chartPriceExtremes(chartData), [chartData]);
   const canApplyDateRange = isValidCalendarRange(draftDateRange, today);
   const primaryBenchmark = benchmarks.find((item) => selectedBenchmarks.has(item.key)) ?? benchmarks[0];
-  const primaryComparison = analysis?.benchmarkComparisons.find((item) => item.key === primaryBenchmark.key);
-  const rollingData = analysis?.rolling.filter((point) => (
+  const rollingData = useMemo(() => analysis?.rolling.filter((point) => (
     point.return20d !== null || point.volatility60d !== null || point.benchmarkBeta60d[primaryBenchmark.key] !== undefined
-  )) ?? [];
+  )) ?? [], [analysis?.rolling, primaryBenchmark.key]);
   const hasRolling60 = rollingData.some((point) => point.volatility60d !== null);
+  const contributionMaximum = useMemo(
+    () => maximumAbsoluteMetric(analysis?.contributions, (item) => item.estimatedProfitLoss),
+    [analysis?.contributions],
+  );
+  const riskContributionMaximum = useMemo(
+    () => maximumAbsoluteMetric(analysis?.riskContributions, (item) => item.riskContributionPercent),
+    [analysis?.riskContributions],
+  );
   const monthlyYears = useMemo(() => {
     const rows = new Map<string, Record<number, number>>();
     for (const item of analysis?.monthlyReturns ?? []) {
@@ -297,7 +369,7 @@ export function PortfolioAnalysisView({
   };
 
   return (
-    <section aria-labelledby="analysis-title" className="space-y-3">
+    <section aria-labelledby="analysis-title" aria-busy={loading} className="space-y-3">
       <Card className="bg-secondary p-5 sm:p-7">
         <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
           <div className="max-w-2xl">
@@ -448,15 +520,15 @@ export function PortfolioAnalysisView({
         ) : null}
 
         {loading ? (
-          <div className="grid h-[440px] place-items-center text-center text-muted-foreground" aria-live="polite">
-            <div><LoaderCircle className="mx-auto size-6 animate-spin" /><p className="mt-3 text-sm font-semibold">평가금과 비교 지수 일봉을 불러오는 중</p></div>
+          <div className="grid h-[440px] place-items-center text-center text-muted-foreground" role="status" aria-live="polite">
+            <div><LoaderCircle className="mx-auto size-6 animate-spin" aria-hidden="true" /><p className="mt-3 text-sm font-semibold">평가금과 비교 지수 일봉을 불러오는 중</p></div>
           </div>
         ) : error ? (
-          <div className="grid h-[440px] place-items-center text-center">
-            <div><AlertCircle className="mx-auto size-7 text-muted-foreground" /><p className="mt-4 text-sm font-bold">{error}</p><Button variant="ghost" size="sm" className="mt-3" onClick={() => setRetryKey((value) => value + 1)}><RefreshCw /> 다시 시도</Button></div>
+          <div className="grid h-[440px] place-items-center text-center" role="alert">
+            <div><AlertCircle className="mx-auto size-7 text-muted-foreground" aria-hidden="true" /><p className="mt-4 text-sm font-bold">{error}</p><Button variant="ghost" size="sm" className="mt-3" onClick={() => setRetryKey((value) => value + 1)}><RefreshCw /> 다시 시도</Button></div>
           </div>
         ) : chartData.length === 0 ? (
-          <div className="mt-6 grid h-[360px] place-items-center rounded-[24px] bg-card px-6 text-center">
+          <div className="mt-6 grid h-[360px] place-items-center rounded-[24px] bg-card px-6 text-center" role="status">
             <div><BarChart3 className="mx-auto size-7 text-muted-foreground" /><p className="mt-4 text-base font-black">선택 기간에 평가금 일봉이 없습니다.</p><p className="mt-2 text-sm text-muted-foreground">더 긴 기간을 선택해 주세요.</p></div>
           </div>
         ) : (
@@ -672,7 +744,6 @@ export function PortfolioAnalysisView({
             {analysis.contributions.length ? (
               <div className="mt-6 space-y-4">
                 {analysis.contributions.map((item) => {
-                  const maximum = Math.max(...analysis.contributions.map((candidate) => Math.abs(candidate.estimatedProfitLoss)), 1);
                   return (
                     <div key={`${item.currency}:${item.key}`} className="grid gap-2 sm:grid-cols-[minmax(130px,0.8fr)_minmax(180px,2fr)_auto] sm:items-center">
                       <div className="min-w-0">
@@ -681,7 +752,7 @@ export function PortfolioAnalysisView({
                         <p className="mt-1 text-[10px] font-bold text-muted-foreground">시간연결 {formatPercent(item.timeLinkedContributionPercent, true)} · 가격 {formatPercent(item.localPriceContributionPercent, true)} · 환율 {formatPercent(item.fxContributionPercent, true)}</p>
                       </div>
                       <div className="h-2.5 overflow-hidden rounded-full bg-card">
-                        <div className="h-full rounded-full" style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / maximum) * 100)}%`, backgroundColor: stockColor(item.symbol, theme), opacity: item.estimatedProfitLoss >= 0 ? 0.96 : 0.58 }} />
+                        <div className="h-full rounded-full" style={{ width: `${Math.max(3, (Math.abs(item.estimatedProfitLoss) / contributionMaximum) * 100)}%`, backgroundColor: stockColor(item.symbol, theme), opacity: item.estimatedProfitLoss >= 0 ? 0.96 : 0.58 }} />
                       </div>
                       <div className="text-left sm:text-right">
                         <p className="text-sm font-black">{formatSignedMoney(item.estimatedProfitLoss, "KRW")}</p>
@@ -744,14 +815,13 @@ export function PortfolioAnalysisView({
               <p className="mt-2 text-sm leading-6 text-muted-foreground">최신 비중과 기간 내 종목 공분산으로 전체 변동성에 대한 기여를 계산합니다.</p>
               <div className="mt-5 space-y-3">
                 {analysis.riskContributions.slice(0, 10).map((item) => {
-                  const maximum = Math.max(...analysis.riskContributions.map((candidate) => Math.abs(candidate.riskContributionPercent ?? 0)), 1);
                   return (
                     <div key={item.key} className="rounded-[18px] bg-card p-4">
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><StockSwatch symbol={item.symbol} theme={theme} /><p className="truncate text-xs font-black">{item.name}</p></div><p className="mt-1 text-[10px] text-muted-foreground">비중 {formatPercent(item.weightPercent)} · 변동성 {metricPercent(item.annualizedVolatilityPercent)}</p></div>
                         <p className="text-sm font-black">{metricPercent(item.riskContributionPercent)}</p>
                       </div>
-                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / maximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
+                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.abs(item.riskContributionPercent ?? 0) / riskContributionMaximum * 100)}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div>
                       <p className="mt-2 text-[10px] text-muted-foreground">포트폴리오 상관 {metricRatio(item.correlationToPortfolio)}</p>
                     </div>
                   );

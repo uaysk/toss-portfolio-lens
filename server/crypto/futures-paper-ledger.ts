@@ -66,6 +66,22 @@ export type FuturesPaperLedgerSnapshot = {
   fills: FuturesPaperFill[];
 };
 
+export type FuturesPaperAccountState = Pick<
+  FuturesPaperLedgerSnapshot,
+  | "initialCash"
+  | "walletBalance"
+  | "availableBalance"
+  | "equity"
+  | "grossExposure"
+  | "totalIsolatedMargin"
+  | "realizedPnl"
+  | "unrealizedPnl"
+  | "fees"
+  | "exitTaxes"
+  | "slippage"
+  | "funding"
+>;
+
 export type FuturesPaperLedgerOptions = {
   initialCash: number;
   feeBpsPerSide?: number;
@@ -234,7 +250,7 @@ export class FuturesPaperLedger {
     }
     const markPrice = assertFinite(input.markPrice ?? observedPrice, "markPrice");
     const isolatedMargin = notional / input.leverage;
-    const availableBefore = this.snapshot().availableBalance;
+    const availableBefore = this.accountState().availableBalance;
     const fee = notional * this.feeRate;
     if (isolatedMargin + fee > availableBefore) {
       throw new Error("Insufficient available balance for isolated margin.");
@@ -445,22 +461,34 @@ export class FuturesPaperLedger {
   }
 
   snapshot(): FuturesPaperLedgerSnapshot {
-    const positions = Array.from(this.positions.values())
-      .sort((left, right) => left.symbol.localeCompare(right.symbol))
+    const positions = this.sortedPositions()
       .map((position) => ({ ...position }));
-    const unrealizedPnl = positions.reduce((sum, item) => sum + item.unrealizedPnl, 0);
-    const grossExposure = positions.reduce(
-      (sum, item) => sum + item.markPrice * item.quantity,
-      0,
-    );
-    const totalIsolatedMargin = positions.reduce(
-      (sum, item) => sum + item.isolatedMargin,
-      0,
-    );
     return {
       mode: "paper",
       marginMode: "isolated",
       positionMode: "one_way",
+      ...this.accountStateFromPositions(positions),
+      positions,
+      fills: this.fills.map((fill) => ({ ...fill })),
+    };
+  }
+
+  accountState(): FuturesPaperAccountState {
+    return this.accountStateFromPositions(this.sortedPositions());
+  }
+
+  private accountStateFromPositions(
+    positions: readonly FuturesPosition[],
+  ): FuturesPaperAccountState {
+    let unrealizedPnl = 0;
+    let grossExposure = 0;
+    let totalIsolatedMargin = 0;
+    for (const position of positions) {
+      unrealizedPnl += position.unrealizedPnl;
+      grossExposure += position.markPrice * position.quantity;
+      totalIsolatedMargin += position.isolatedMargin;
+    }
+    return {
       initialCash: this.initialCash,
       walletBalance: this.walletBalance,
       availableBalance: this.walletBalance - totalIsolatedMargin,
@@ -473,9 +501,40 @@ export class FuturesPaperLedger {
       exitTaxes: this.exitTaxes,
       slippage: this.slippage,
       funding: this.funding,
-      positions,
-      fills: this.fills.map((fill) => ({ ...fill })),
     };
+  }
+
+  position(symbol: string): FuturesPosition | undefined {
+    const position = this.positions.get(symbol);
+    return position ? { ...position } : undefined;
+  }
+
+  hasPosition(symbol: string): boolean {
+    return this.positions.has(symbol);
+  }
+
+  fillsFrom(index: number): FuturesPaperFill[] {
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new Error("fill index must be a non-negative safe integer.");
+    }
+    return this.fills.slice(index).map((fill) => ({ ...fill }));
+  }
+
+  get fillCount(): number {
+    return this.fills.length;
+  }
+
+  get positionCount(): number {
+    return this.positions.size;
+  }
+
+  get equity(): number {
+    return this.accountState().equity;
+  }
+
+  private sortedPositions(): FuturesPosition[] {
+    return Array.from(this.positions.values())
+      .sort((left, right) => left.symbol.localeCompare(right.symbol));
   }
 
   private quantityStep(position: FuturesPosition): number {

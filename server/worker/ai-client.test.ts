@@ -257,6 +257,45 @@ describe("AiComputeClient WebSocket transport", () => {
     client.close();
   });
 
+  it("파싱된 응답 payload의 byte 상한을 전체 재직렬화 없이 확인한다", async () => {
+    const { client, sockets } = harness();
+    const pending = client.request(request());
+    sockets[0]!.open();
+    answerStatus(sockets[0]!);
+    const raw = JSON.stringify({
+      transport_version: SCALPING_AI_TRANSPORT_VERSION,
+      type: "response",
+      request_id: "request-1",
+      payload: unavailableResponse(),
+    });
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    sockets[0]!.emit("message", Buffer.from(raw), false);
+    await expect(pending).resolves.toEqual(unavailableResponse());
+    expect(stringify).not.toHaveBeenCalled();
+    stringify.mockRestore();
+    client.close();
+  });
+
+  it("요청 크기 검사에서 payload 문자열과 Buffer를 미리 만들지 않는다", async () => {
+    const { client } = harness();
+    const stringify = vi.spyOn(JSON, "stringify");
+    const pending = client.request(request());
+    const standalonePayloadCalls = stringify.mock.calls.filter(([value]) => (
+      value !== null
+      && typeof value === "object"
+      && !Array.isArray(value)
+      && "schema_version" in value
+      && !("transport_version" in value)
+    ));
+
+    expect(standalonePayloadCalls).toHaveLength(0);
+    expect(stringify).toHaveBeenCalledTimes(1);
+    stringify.mockRestore();
+    client.close();
+    await expect(pending).rejects.toMatchObject({ code: "CLIENT_CLOSED" });
+  });
+
   it("forming bar는 연결 전에 거부하고 URL, token path와 frame 한도를 검증한다", () => {
     const invalid = structuredClone(request()) as unknown as { series: Array<{ bars: Array<{ complete: boolean }> }> };
     invalid.series[0]!.bars[0]!.complete = false;
@@ -292,6 +331,45 @@ describe("AiComputeClient WebSocket transport", () => {
     oversized.sockets[0]!.message("x".repeat(1_024 + 16 * 1_024 + 1));
     await expect(oversizedPending).rejects.toMatchObject({ code: "RESPONSE_LIMIT_EXCEEDED", retryable: false });
     oversized.client.close();
+  });
+
+  it("oversized fragmented frame을 합치기 전에 거부한다", async () => {
+    const { client, sockets } = harness({ config: { maximumResponseBytes: 1_024 } });
+    const pending = client.request(request());
+    sockets[0]!.open();
+    const concatenate = vi.spyOn(Buffer, "concat");
+
+    sockets[0]!.emit("message", [Buffer.alloc(9_000), Buffer.alloc(9_000)] as RawData, false);
+
+    await expect(pending).rejects.toMatchObject({
+      code: "RESPONSE_LIMIT_EXCEEDED",
+      retryable: false,
+    });
+    expect(concatenate).not.toHaveBeenCalled();
+    concatenate.mockRestore();
+    client.close();
+  });
+
+  it("frame 상한 안에 있어도 payload byte 상한을 넘는 valid response를 거부한다", async () => {
+    const { client, sockets } = harness({ config: { maximumResponseBytes: 1_024 } });
+    const pending = client.request(request());
+    sockets[0]!.open();
+    answerStatus(sockets[0]!);
+    const raw = JSON.stringify({
+      transport_version: SCALPING_AI_TRANSPORT_VERSION,
+      type: "response",
+      request_id: "request-1",
+      payload: unavailableResponse(),
+    });
+    expect(Buffer.byteLength(raw)).toBeGreaterThan(1_024);
+    expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(1_024 + 16 * 1_024);
+
+    sockets[0]!.emit("message", Buffer.from(raw), false);
+    await expect(pending).rejects.toMatchObject({
+      code: "RESPONSE_LIMIT_EXCEEDED",
+      retryable: false,
+    });
+    client.close();
   });
 
   it("token file이 늦게 생성되면 unsent 요청을 보존하고 backoff 후 연결한다", async () => {

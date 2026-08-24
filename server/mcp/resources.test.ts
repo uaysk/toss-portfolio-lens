@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { McpResourceRegistry } from "./resources.js";
 
@@ -8,7 +9,10 @@ describe("McpResourceRegistry dashboard market resources", () => {
     const descriptor = registry.storeMarket(requestHash, [{ date: "2026-01-01", value: 1 }], "revision-1", "dashboard-http");
 
     expect(descriptor.uri).toBe(`market://series/${requestHash}`);
-    expect(registry.getMarket(requestHash, "dashboard-http")).toMatchObject({ descriptor, content: [{ date: "2026-01-01", value: 1 }] });
+    expect(JSON.parse(registry.getMarket(requestHash, "dashboard-http")?.responseJson ?? "null")).toEqual({
+      descriptor,
+      data: [{ date: "2026-01-01", value: 1 }],
+    });
     expect(registry.getMarket(requestHash, "another-owner")).toBeUndefined();
   });
 
@@ -19,8 +23,66 @@ describe("McpResourceRegistry dashboard market resources", () => {
     registry.storeMarket(requestHash, [{ owner: "first" }], "revision-1", "owner-a");
     registry.storeMarket(requestHash, [{ owner: "second" }], "revision-1", "owner-b");
 
-    expect(registry.getMarket(requestHash, "owner-a")?.content).toEqual([{ owner: "first" }]);
-    expect(registry.getMarket(requestHash, "owner-b")?.content).toEqual([{ owner: "second" }]);
+    expect(JSON.parse(registry.getMarket(requestHash, "owner-a")?.responseJson ?? "null").data).toEqual([{ owner: "first" }]);
+    expect(JSON.parse(registry.getMarket(requestHash, "owner-b")?.responseJson ?? "null").data).toEqual([{ owner: "second" }]);
+  });
+
+  it("저장 상한을 넘는 resource를 명시적으로 거부하고 기존 snapshot을 보존한다", () => {
+    const registry = new McpResourceRegistry({} as never, {} as never, "none", 32);
+    const requestHash = "d".repeat(64);
+    registry.storeMarket(requestHash, [{ value: 1 }], "revision-1", "local-owner");
+
+    expect(() => registry.storeMarket(
+      requestHash,
+      [{ value: "x".repeat(64) }],
+      "revision-2",
+      "local-owner",
+    )).toThrow("시장 시계열 resource가 저장 byte 상한을 초과했습니다.");
+    expect(JSON.parse(registry.getMarket(requestHash, "local-owner")?.responseJson ?? "null").data)
+      .toEqual([{ value: 1 }]);
+  });
+
+  it("유효하지 않은 resource byte 상한을 거부한다", () => {
+    expect(() => new McpResourceRegistry({} as never, {} as never, "none", 0))
+      .toThrow("MCP market resource byte limit must be a positive integer.");
+  });
+
+  it("저장 시 만든 불변 JSON snapshot을 반복 resource 조회에 재사용한다", async () => {
+    type ResourceHandler = (
+      uri: URL,
+      variables: Record<string, string>,
+      extra: { authInfo?: { scopes?: string[]; extra?: Record<string, unknown> } },
+    ) => Promise<{ contents: Array<{ text: string }> }>;
+    const handlers = new Map<string, ResourceHandler>();
+    const server = {
+      registerResource: vi.fn((name: string, _template: unknown, _metadata: unknown, handler: ResourceHandler) => {
+        handlers.set(name, handler);
+      }),
+    };
+    const registry = new McpResourceRegistry({} as never, {} as never, "none");
+    registry.register(server as never);
+    const content = [{ date: "2026-01-01", value: 1 }];
+    const requestHash = "c".repeat(64);
+    registry.storeMarket(requestHash, content, "revision-1", "local-owner");
+    content[0]!.value = 2;
+    const handler = handlers.get("market-price-series");
+    expect(handler).toBeDefined();
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    const first = await handler!(new URL(`market://series/${requestHash}`), { requestHash }, {});
+    const second = await handler!(new URL(`market://series/${requestHash}`), { requestHash }, {});
+
+    expect(first.contents[0]?.text).toBe(second.contents[0]?.text);
+    expect(stringify).not.toHaveBeenCalled();
+    stringify.mockRestore();
+    const parsed = JSON.parse(first.contents[0]?.text ?? "null") as {
+      descriptor: { checksum: string };
+      data: unknown;
+    };
+    expect(parsed.data).toEqual([{ date: "2026-01-01", value: 1 }]);
+    expect(parsed.descriptor.checksum).toBe(
+      createHash("sha256").update(JSON.stringify(parsed.data)).digest("hex"),
+    );
   });
 
   it("공통 run artifact resource는 분석·signal-only에는 market:read, ledger run에는 backtest:run을 요구한다", async () => {

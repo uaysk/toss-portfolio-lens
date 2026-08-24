@@ -20,6 +20,7 @@ const MAX_TOTAL_BARS: usize = 2_000_000;
 const MAX_INDICATOR_DEFINITIONS: usize = 256;
 const MAX_VOLUME_PROFILE_BUCKETS: usize = 200;
 const MAX_VOLUME_PROFILE_OBSERVATIONS: usize = 20_000;
+const MAX_INDICATOR_POINT_VALUES: usize = 5;
 const MAX_PRIMITIVE_CACHE_ENTRIES: usize = 128;
 const MAX_PRIMITIVE_CACHE_CELLS: usize = 2_000_000;
 const MAX_CALCULATION_CACHE_ENTRIES: usize = 64;
@@ -1689,17 +1690,45 @@ fn selected_source(
     column_values(instrument, source_column(parameters))
 }
 
-fn numeric_values(entries: impl IntoIterator<Item = (&'static str, f64)>) -> BTreeMap<String, f64> {
-    entries
-        .into_iter()
-        .map(|(name, value)| (name.to_owned(), value))
-        .collect()
+#[derive(Debug, Clone)]
+enum NumericValues {
+    One((&'static str, f64)),
+    Many(Box<[(&'static str, f64)]>),
+}
+
+impl NumericValues {
+    fn as_slice(&self) -> &[(&'static str, f64)] {
+        match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
+        }
+    }
+}
+
+fn numeric_values(entries: impl IntoIterator<Item = (&'static str, f64)>) -> NumericValues {
+    let mut entries = entries.into_iter();
+    let first = entries
+        .next()
+        .expect("indicator point must contain at least one output value");
+    let Some(second) = entries.next() else {
+        return NumericValues::One(first);
+    };
+    let mut values = Vec::with_capacity(MAX_INDICATOR_POINT_VALUES);
+    values.extend([first, second]);
+    for entry in entries {
+        assert!(
+            values.len() < MAX_INDICATOR_POINT_VALUES,
+            "indicator point exceeds the catalog output-field limit"
+        );
+        values.push(entry);
+    }
+    NumericValues::Many(values.into_boxed_slice())
 }
 
 fn points_from_values(
     instrument: &InstrumentSeries,
     kind: IndicatorKind,
-    values: Vec<Option<BTreeMap<String, f64>>>,
+    values: Vec<Option<NumericValues>>,
     missing_states: Option<&[PointState]>,
 ) -> Result<Vec<IndicatorPoint>> {
     ensure!(
@@ -1721,11 +1750,11 @@ fn points_from_values(
             let mut output = null_values(kind);
             let state = if let Some(values) = values {
                 ensure!(
-                    values.values().all(|value| value.is_finite()),
+                    values.as_slice().iter().all(|(_, value)| value.is_finite()),
                     "indicator calculation produced a non-finite value"
                 );
-                for (name, value) in values {
-                    let target = output.get_mut(&name).with_context(|| {
+                for &(name, value) in values.as_slice() {
+                    let target = output.get_mut(name).with_context(|| {
                         format!("indicator calculation produced unknown output {name}")
                     })?;
                     *target = Some(value);
@@ -1750,7 +1779,7 @@ fn points_from_values(
 fn single_output(
     values: impl IntoIterator<Item = Option<f64>>,
     name: &'static str,
-) -> Vec<Option<BTreeMap<String, f64>>> {
+) -> Vec<Option<NumericValues>> {
     values
         .into_iter()
         .map(|value| value.map(|value| numeric_values([(name, value)])))
@@ -2710,7 +2739,7 @@ fn rolling_volume_states(values: &[Option<f64>], period: usize) -> Vec<PointStat
 fn volume_computation(
     instrument: &InstrumentSeries,
     definition: &ValidatedIndicatorDefinition,
-    values: Vec<Option<BTreeMap<String, f64>>>,
+    values: Vec<Option<NumericValues>>,
     states: &[PointState],
 ) -> Result<ComputedVolumeSeries> {
     let observed_observations = instrument
@@ -3077,13 +3106,6 @@ fn compute_vwap_anchored_vwap(
         } else {
             None
         };
-        let mut row = BTreeMap::new();
-        if let Some(value) = standard {
-            row.insert("vwap".to_owned(), value);
-        }
-        if let Some(value) = anchored {
-            row.insert("anchored_vwap".to_owned(), value);
-        }
         let all_requested_fields_ready = match mode {
             "vwap" => standard.is_some(),
             "anchored" => anchored.is_some(),
@@ -3097,8 +3119,12 @@ fn compute_vwap_anchored_vwap(
         } else {
             PointState::Unavailable
         };
-        if !row.is_empty() {
-            values[index] = Some(row);
+        if standard.is_some() || anchored.is_some() {
+            values[index] = Some(numeric_values(
+                [("vwap", standard), ("anchored_vwap", anchored)]
+                    .into_iter()
+                    .filter_map(|(name, value)| value.map(|value| (name, value))),
+            ));
         }
     }
 
@@ -4313,6 +4339,25 @@ mod tests {
             catalog_entry(IndicatorKind::BollingerBands).parameters["period"].default,
             Some(json!(20))
         );
+    }
+
+    #[test]
+    fn point_value_scratch_capacity_covers_every_catalog_output() {
+        let maximum = indicator_catalog()
+            .into_iter()
+            .map(|entry| entry.output_fields.len())
+            .max()
+            .unwrap();
+        assert_eq!(maximum, MAX_INDICATOR_POINT_VALUES);
+
+        let values = numeric_values([
+            ("one", 1.0),
+            ("two", 2.0),
+            ("three", 3.0),
+            ("four", 4.0),
+            ("five", 5.0),
+        ]);
+        assert_eq!(values.as_slice().len(), maximum);
     }
 
     #[test]

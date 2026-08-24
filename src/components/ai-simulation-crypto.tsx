@@ -1,24 +1,17 @@
-import type { KeyboardEvent } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  Check,
-  Cpu,
-  Database,
-  LoaderCircle,
-  LockKeyhole,
-  Play,
-  RefreshCw,
-  ShieldCheck,
-  Square,
-  Waves,
-} from "lucide-react";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import Database from "lucide-react/dist/esm/icons/database.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import LockKeyhole from "lucide-react/dist/esm/icons/lock-keyhole.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import ShieldCheck from "lucide-react/dist/esm/icons/shield-check.js";
+import Square from "lucide-react/dist/esm/icons/square.js";
+import Waves from "lucide-react/dist/esm/icons/waves.js";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  AI_SIMULATION_FINCAST_CANDLE_SECONDS,
   AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
 } from "@/lib/ai-simulation";
@@ -31,6 +24,7 @@ import type {
   AiSimulationModelLane,
 } from "@/lib/ai-simulation";
 import { formatMoney } from "@/lib/format";
+import { handleRadioGroupKeyDown } from "@/lib/radio-group";
 import { cn } from "@/lib/utils";
 
 export type AiSimulationAssetClass = AiSimulationCase | "stock" | "crypto_futures";
@@ -55,6 +49,17 @@ const MODEL_LABELS: Record<AiSimulationModelLane, string> = {
   fincast: "FinCast · Main",
   chronos2: "Chronos-2 · Primary",
 };
+
+const CRYPTO_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const CRYPTO_COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 const CRYPTO_PRESET_DETAILS: Record<
   AiSimulationCryptoRequest["preset"],
@@ -99,22 +104,14 @@ function decimal(value?: number, digits = 2): string {
 
 function compact(value?: number): string {
   if (!Number.isFinite(value)) return "unavailable";
-  return new Intl.NumberFormat("ko-KR", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value as number);
+  return CRYPTO_COMPACT_NUMBER_FORMATTER.format(value as number);
 }
 
 function timestamp(value?: string): string {
   if (!value) return "unavailable";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "unavailable";
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return CRYPTO_TIMESTAMP_FORMATTER.format(date);
 }
 
 export function AiSimulationAssetClassControl({
@@ -126,41 +123,26 @@ export function AiSimulationAssetClassControl({
   disabled?: boolean;
   onChange: (value: AiSimulationAssetClass) => void;
 }) {
-  const move = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const nextIndex = event.key === "Home"
-      ? 0
-      : event.key === "End"
-        ? ASSET_OPTIONS.length - 1
-        : (index + (event.key === "ArrowRight" ? 1 : -1) + ASSET_OPTIONS.length) % ASSET_OPTIONS.length;
-    const next = ASSET_OPTIONS[nextIndex];
-    onChange(next.value);
-    document.querySelector<HTMLButtonElement>(
-      `[data-simulation-asset-class-option="${next.value}"]`,
-    )?.focus();
-  };
-
   return (
     <div
       className="grid grid-cols-1 gap-1 rounded-2xl bg-secondary p-1 sm:grid-cols-3"
-      role="tablist"
+      role="radiogroup"
       aria-label="시뮬레이션 전략 케이스"
       data-simulation-asset-class={value}
     >
-      {ASSET_OPTIONS.map((option, index) => {
+      {ASSET_OPTIONS.map((option) => {
         const selected = value === option.value;
         return (
           <button
             key={option.value}
             type="button"
-            role="tab"
-            aria-selected={selected}
+            role="radio"
+            aria-checked={selected}
             tabIndex={selected ? 0 : -1}
             disabled={disabled}
             data-simulation-asset-class-option={option.value}
             onClick={() => onChange(option.value)}
-            onKeyDown={(event) => move(event, index)}
+            onKeyDown={handleRadioGroupKeyDown}
             className={cn(
               "min-w-0 rounded-xl px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               selected
@@ -561,7 +543,9 @@ export function AiSimulationCryptoSetup({
                     type="button"
                     role="radio"
                     aria-checked={selected}
+                    tabIndex={selected ? 0 : -1}
                     disabled={disabled}
+                    onKeyDown={handleRadioGroupKeyDown}
                     onClick={() => onRequestChange({
                       ...request,
                       selection: { mode: "manual", symbols: [...option.symbols] },

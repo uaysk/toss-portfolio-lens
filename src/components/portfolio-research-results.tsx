@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -11,7 +11,14 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import { Activity, CheckCircle2, CircleAlert, Database, LoaderCircle, Save, Scale, Target } from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check.js";
+import CircleAlert from "lucide-react/dist/esm/icons/circle-alert.js";
+import Database from "lucide-react/dist/esm/icons/database.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Save from "lucide-react/dist/esm/icons/save.js";
+import Scale from "lucide-react/dist/esm/icons/scale.js";
+import Target from "lucide-react/dist/esm/icons/target.js";
 import { LazyJsonDetails } from "@/components/lazy-json-details";
 import { StockSwatch } from "@/components/stock-swatch";
 import { Button } from "@/components/ui/button";
@@ -77,21 +84,44 @@ function useArtifact(input: {
   const [value, setValue] = useState<unknown>(input.initial);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const activeRequest = useRef<AbortController | undefined>(undefined);
   const available = Boolean(input.run?.artifacts?.some((artifact) => artifact.type === input.type));
   useEffect(() => {
+    activeRequest.current?.abort();
+    activeRequest.current = undefined;
     setValue(input.initial);
+    setLoading(false);
     setError("");
-  }, [input.run?.runId, input.initial]);
+    return () => {
+      activeRequest.current?.abort();
+      activeRequest.current = undefined;
+    };
+  }, [input.run?.runId, input.initial, input.type]);
   const load = async () => {
-    if (!input.run?.runId) return;
+    if (!input.run?.runId || activeRequest.current) return;
+    const controller = new AbortController();
+    activeRequest.current = controller;
     setLoading(true);
     setError("");
     try {
-      setValue(await loadAdvancedArtifact(input.run.runId, input.type, input.onUnauthorized));
+      const nextValue = await loadAdvancedArtifact(
+        input.run.runId,
+        input.type,
+        input.onUnauthorized,
+        controller.signal,
+      );
+      if (activeRequest.current === controller && !controller.signal.aborted) {
+        setValue(nextValue);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `${input.type} artifact를 불러오지 못했습니다.`);
+      if (activeRequest.current === controller && !controller.signal.aborted) {
+        setError(caught instanceof Error ? caught.message : `${input.type} artifact를 불러오지 못했습니다.`);
+      }
     } finally {
-      setLoading(false);
+      if (activeRequest.current === controller) {
+        activeRequest.current = undefined;
+        if (!controller.signal.aborted) setLoading(false);
+      }
     }
   };
   return { value, loading, error, available, load };
@@ -113,7 +143,7 @@ function ArtifactPrompt({
       <Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void artifact.load()} disabled={artifact.loading}>
         {artifact.loading ? <LoaderCircle className="animate-spin" /> : <Activity />}{label}
       </Button>
-      {artifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{artifact.error}</p> : null}
+      {artifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{artifact.error}</p> : null}
     </div>
   );
 }
@@ -198,8 +228,12 @@ export function OptimizationResearchResults({ result, run, onUnauthorized, objec
       return retained;
     });
   }, [candidates]);
-  const selectedCandidates = candidates.filter((candidate) => selected.includes(candidate.id));
-  const chart = chartCandidates(candidates).flatMap((candidate) => {
+  const selectedCandidateIds = useMemo(() => new Set(selected), [selected]);
+  const selectedCandidates = useMemo(
+    () => candidates.filter((candidate) => selectedCandidateIds.has(candidate.id)),
+    [candidates, selectedCandidateIds],
+  );
+  const chart = useMemo(() => chartCandidates(candidates).flatMap((candidate) => {
     const metrics = Object.keys(candidate.ledgerMetrics).length ? candidate.ledgerMetrics : candidate.screeningMetrics;
     const risk = candidateMetric(metrics, "volatility");
     const reward = candidateMetric(metrics, "cagr");
@@ -212,10 +246,15 @@ export function OptimizationResearchResults({ result, run, onUnauthorized, objec
       label: candidate.label,
       pareto: candidate.pareto,
     }];
-  });
+  }), [candidates]);
   const validation = researchRecord(data.ledgerValidation);
   const best = researchRecord(researchRecord(data.bestByObjective)[objective] ?? data.best);
   const bestMetrics = researchRecord(best.ledgerMetrics ?? best.metrics);
+  const robustAuditDetails = useMemo(() => ({
+    robustScoreWeights: data.robustScoreWeights,
+    ledgerValidation: data.ledgerValidation,
+    paretoComputation: data.paretoComputation,
+  }), [data.ledgerValidation, data.paretoComputation, data.robustScoreWeights]);
   const toggle = (id: string) => setSelected((current) => current.includes(id)
     ? current.length <= 2 ? current : current.filter((value) => value !== id)
     : current.length >= 5 ? current : [...current, id]);
@@ -225,9 +264,11 @@ export function OptimizationResearchResults({ result, run, onUnauthorized, objec
     const id = String(entry.id ?? payload.id ?? "");
     if (id) toggle(id);
   };
-  const selectedPoints = chart.filter((point) => selected.includes(point.id));
-  const regularPoints = chart.filter((point) => !point.pareto && !selected.includes(point.id));
-  const paretoPoints = chart.filter((point) => point.pareto && !selected.includes(point.id));
+  const { selectedPoints, regularPoints, paretoPoints } = useMemo(() => ({
+    selectedPoints: chart.filter((point) => selectedCandidateIds.has(point.id)),
+    regularPoints: chart.filter((point) => !point.pareto && !selectedCandidateIds.has(point.id)),
+    paretoPoints: chart.filter((point) => point.pareto && !selectedCandidateIds.has(point.id)),
+  }), [chart, selectedCandidateIds]);
   const selectionCandidates = useMemo(() => {
     const visible = candidates.slice(0, 250);
     const ids = new Set(visible.map((candidate) => candidate.id));
@@ -291,14 +332,14 @@ export function OptimizationResearchResults({ result, run, onUnauthorized, objec
       <ArtifactPrompt label="Screening 후보 불러오기" description="대용량 screening 후보는 별도 artifact입니다. 비교가 필요할 때만 불러옵니다." artifact={screeningArtifact.available ? screeningArtifact : candidatesArtifact} />
       <ArtifactPrompt label="Ledger 검증 후보 불러오기" description="실제 비용·현금·수량 ledger로 재검증된 후보와 순위 변화를 불러옵니다." artifact={ledgerArtifact} />
       <ArtifactPrompt label="Pareto frontier 불러오기" description="전체 Pareto frontier를 별도 artifact에서 불러옵니다." artifact={paretoArtifact} />
-      {screeningArtifact.error || candidatesArtifact.error || ledgerArtifact.error || paretoArtifact.error ? <p role="alert" className="text-xs text-rose-500">{screeningArtifact.error || candidatesArtifact.error || ledgerArtifact.error || paretoArtifact.error}</p> : null}
+      {screeningArtifact.error || candidatesArtifact.error || ledgerArtifact.error || paretoArtifact.error ? <p role="alert" className="text-xs text-rose-700 dark:text-rose-400">{screeningArtifact.error || candidatesArtifact.error || ledgerArtifact.error || paretoArtifact.error}</p> : null}
       {selectedCandidates.length >= 2 ? <>
         <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-5">{selectedCandidates.map((candidate) => <CandidateSummary key={candidate.id} candidate={candidate} theme={theme} {...(run?.kind === "optimization" ? { presetName: presetNames[candidate.id] ?? `${candidate.label} 후보`, onPresetNameChange: (value: string) => setPresetNames((current) => ({ ...current, [candidate.id]: value })), onSavePreset: () => void saveCandidatePreset(candidate), saving: savingCandidate === candidate.id } : {})} />)}</div>
         <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[960px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-3">후보</th>{candidateMetricRows.map((row) => <th key={row.key} className="p-3">{row.label}<br /><span className="font-normal">screen → ledger · Δ</span></th>)}</tr></thead><tbody>{selectedCandidates.map((candidate) => <tr key={candidate.id} className="border-t border-border align-top"><td className="p-3 font-black">{candidate.label}</td>{candidateMetricRows.map((row) => { const screen = candidateMetric(candidate.screeningMetrics, row.key); const ledger = candidateMetric(candidate.ledgerMetrics, row.key); const delta = finiteNumber(candidate.metricDelta[row.key]); return <td key={row.key} className="p-3"><p>{row.format(screen)}</p><p className="font-black">{row.format(ledger)}</p><p className="text-muted-foreground">Δ {row.format(delta)}</p></td>; })}</tr>)}</tbody></table></div>
       </> : candidates.length ? <p className="rounded-[18px] bg-card p-4 text-xs text-muted-foreground">비교하려면 후보를 2개 이상 선택하세요.</p> : null}
       {saveMessage ? <p role="status" className="rounded-[18px] bg-card p-4 text-xs font-bold">{saveMessage}</p> : null}
-      {saveError ? <p role="alert" className="rounded-[18px] bg-card p-4 text-xs text-rose-500">{saveError}</p> : null}
-      {Object.keys(researchRecord(data.robustScoreWeights)).length ? <LazyJsonDetails value={{ robustScoreWeights: data.robustScoreWeights, ledgerValidation: data.ledgerValidation, paretoComputation: data.paretoComputation }} className="rounded-[18px] bg-card p-4" /> : null}
+      {saveError ? <p role="alert" className="rounded-[18px] bg-card p-4 text-xs text-rose-700 dark:text-rose-400">{saveError}</p> : null}
+      {Object.keys(researchRecord(data.robustScoreWeights)).length ? <LazyJsonDetails value={robustAuditDetails} className="rounded-[18px] bg-card p-4" /> : null}
     </div>
   );
 }
@@ -350,30 +391,30 @@ export function OutlookResearchResults({ result, run, onUnauthorized, theme, obj
         <div className="rounded-[20px] bg-card p-4">
           <div className="flex items-center justify-between gap-2"><div><p className="text-xs font-black">미래 잔액 분위수 경로</p><p className="mt-1 text-[9px] text-muted-foreground">경로당 최대 500점 표시</p></div><Target className="size-4 text-muted-foreground" /></div>
           {quantileSeries.points.length ? <div className="mt-3 h-[300px]" role="img" aria-label="Monte Carlo 미래 잔액 분위수 경로"><ResponsiveContainer width="100%" height="100%"><LineChart data={quantileSeries.points}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis width={64} tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={chartTooltipStyle} />{quantileSeries.keys.map(({ key, quantile }, index) => <Line key={key} type="monotone" dataKey={key} name={`Q${Math.round(quantile * 100)}`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={Math.abs(quantile - 0.5) < 0.001 ? 3 : 1.4} dot={false} />)}</LineChart></ResponsiveContainer></div> : <ArtifactPrompt label="분위수 경로 불러오기" description="대용량 Monte Carlo 분위수 경로를 별도 artifact에서 불러옵니다." artifact={pathArtifact} />}
-          {pathArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{pathArtifact.error}</p> : null}
+          {pathArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{pathArtifact.error}</p> : null}
           {terminalQuantiles.length ? <div className="mt-3 flex flex-wrap gap-1.5">{terminalQuantiles.map((item) => <span key={String(item.quantile)} className="rounded-full bg-secondary px-2.5 py-1.5 text-[9px] font-black">Q{Math.round((finiteNumber(item.quantile) ?? 0) * 100)} {formatMoney(finiteNumber(item.balance ?? item.value) ?? 0, "KRW")}</span>)}</div> : null}
         </div>
         <div className="rounded-[20px] bg-card p-4">
           <div className="flex items-center justify-between gap-2"><div><p className="text-xs font-black">Stitched OOS equity</p><p className="mt-1 text-[9px] text-muted-foreground">fold별 OOS만 이어 붙인 누수 방지 경로</p></div><Scale className="size-4 text-muted-foreground" /></div>
           {equitySeries.length ? <div className="mt-3 h-[300px]" role="img" aria-label="Walk-forward stitched OOS equity"><ResponsiveContainer width="100%" height="100%"><LineChart data={equitySeries}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis width={48} tickFormatter={(value) => Number(value).toFixed(2)} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => Number(value).toFixed(4)} contentStyle={chartTooltipStyle} /><Line type="monotone" dataKey="equity" name="OOS equity" stroke={CHART_COLORS.primary} strokeWidth={2.5} dot={false} /></LineChart></ResponsiveContainer></div> : <ArtifactPrompt label="OOS equity 불러오기" description="전체 stitched OOS equity를 별도 artifact에서 불러옵니다." artifact={oosArtifact} />}
-          {oosArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{oosArtifact.error}</p> : null}
+          {oosArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{oosArtifact.error}</p> : null}
           <div className="mt-3 grid grid-cols-3 gap-2 text-center text-[9px]"><div className="rounded-xl bg-secondary p-2">CAGR<br /><b>{decimalPercent(oos.cagr)}</b></div><div className="rounded-xl bg-secondary p-2">MDD<br /><b>{decimalPercent(oos.maxDrawdown)}</b></div><div className="rounded-xl bg-secondary p-2">Sharpe<br /><b>{ratio(oos.sharpe)}</b></div></div>
         </div>
       </div>
       <div className="grid gap-3 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-[20px] bg-card p-4"><p className="text-xs font-black">최악 stress 시나리오</p>{worst.length ? <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[520px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-2">시나리오</th><th className="p-2">누적</th><th className="p-2">CAGR</th><th className="p-2">MDD</th><th className="p-2">Sharpe</th></tr></thead><tbody>{worst.map((scenario, index) => { const metrics = researchRecord(scenario.metrics ?? scenario.summary); return <tr key={String(scenario.id ?? index)} className="border-t border-border"><td className="p-2 font-black">{String(scenario.name ?? scenario.id ?? `시나리오 ${index + 1}`)}</td><td className="p-2">{valuePercent(metrics.totalReturnPercent)}</td><td className="p-2">{valuePercent(metrics.cagrPercent)}</td><td className="p-2">{valuePercent(metrics.maxDrawdownPercent)}</td><td className="p-2">{ratio(metrics.sharpeRatio)}</td></tr>; })}</tbody></table></div> : <ArtifactPrompt label="최악 시나리오 불러오기" description="stress 결과에서 손실이 큰 시나리오를 불러옵니다." artifact={worstArtifact} />}{worstArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{worstArtifact.error}</p> : null}</div>
+        <div className="rounded-[20px] bg-card p-4"><p className="text-xs font-black">최악 stress 시나리오</p>{worst.length ? <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[520px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-2">시나리오</th><th className="p-2">누적</th><th className="p-2">CAGR</th><th className="p-2">MDD</th><th className="p-2">Sharpe</th></tr></thead><tbody>{worst.map((scenario, index) => { const metrics = researchRecord(scenario.metrics ?? scenario.summary); return <tr key={String(scenario.id ?? index)} className="border-t border-border"><td className="p-2 font-black">{String(scenario.name ?? scenario.id ?? `시나리오 ${index + 1}`)}</td><td className="p-2">{valuePercent(metrics.totalReturnPercent)}</td><td className="p-2">{valuePercent(metrics.cagrPercent)}</td><td className="p-2">{valuePercent(metrics.maxDrawdownPercent)}</td><td className="p-2">{ratio(metrics.sharpeRatio)}</td></tr>; })}</tbody></table></div> : <ArtifactPrompt label="최악 시나리오 불러오기" description="stress 결과에서 손실이 큰 시나리오를 불러옵니다." artifact={worstArtifact} />}{worstArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{worstArtifact.error}</p> : null}</div>
         <div className="rounded-[20px] bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-black">검증·데이터 품질·신뢰도</p><StatusBadge value={String(quality.status ?? "unavailable")} /></div><div className="mt-3 space-y-2">{components.map((component) => <div key={String(component.name)} className="rounded-2xl bg-secondary p-3 text-[10px]"><div className="flex justify-between gap-2"><span className="font-black">{String(component.name ?? "-")}</span><span>{component.available ? decimalPercent(component.raw) : "미제공"}</span></div><div className="mt-1 text-muted-foreground">weight {decimalPercent(component.weight)} · available {String(Boolean(component.available))}</div></div>)}</div>{calibrationArtifact.value !== undefined ? <LazyJsonDetails value={calibrationArtifact.value} className="mt-3 rounded-2xl bg-secondary p-3" /> : <ArtifactPrompt label="Calibration 불러오기" description="과거 origin별 예측구간 적중률과 편향을 불러옵니다." artifact={calibrationArtifact} />}{researchArray(quality.warnings ?? data.warnings).length ? <div className="mt-3 rounded-2xl bg-secondary p-3 text-[9px] leading-4 text-muted-foreground">{researchArray(quality.warnings ?? data.warnings).map((warning) => <p key={String(warning)}>{String(warning)}</p>)}</div> : null}</div>
       </div>
       <div className="rounded-[20px] bg-card p-4">
         <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-black">시장 국면 검증</p><p className="mt-1 text-[9px] text-muted-foreground">각 날짜 직전까지의 trailing 관측만 사용하는 risk-on · neutral · risk-off 분류</p></div><StatusBadge value={String(marketRegime.status ?? "unavailable")} /></div>
         <div className="mt-3 grid gap-2 sm:grid-cols-3"><div className="rounded-2xl bg-secondary p-3 text-[10px]"><p className="text-muted-foreground">LATEST</p><p className="mt-1 font-black">{String(researchRecord(marketRegime.latest).state ?? "-")}</p></div><div className="rounded-2xl bg-secondary p-3 text-[10px]"><p className="text-muted-foreground">SOURCE</p><p className="mt-1 font-black">{String(marketRegime.source ?? "-")}</p></div><div className="rounded-2xl bg-secondary p-3 text-[10px]"><p className="text-muted-foreground">COVERAGE</p><p className="mt-1 font-black">{decimalPercent(marketRegime.coverage)}</p></div></div>
         {regimeArtifact.value !== undefined ? <LazyJsonDetails value={regimeArtifact.value} className="mt-3 rounded-2xl bg-secondary p-3" /> : <ArtifactPrompt label="국면 관측·전이 불러오기" description="전체 시점별 국면, 상태 수와 전이 횟수를 별도 artifact에서 불러옵니다." artifact={regimeArtifact} />}
-        {regimeArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{regimeArtifact.error}</p> : null}
+        {regimeArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{regimeArtifact.error}</p> : null}
       </div>
       <div className="rounded-[20px] bg-card p-4">
         <div><p className="text-xs font-black">Ledger 민감도 비교</p><p className="mt-1 text-[9px] text-muted-foreground">기준 대비 거래비용·현금흐름·리밸런싱 정책 변화의 실제 경로 차이</p></div>
         {sensitivityScenarios.length ? <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-2">시나리오</th><th className="p-2">누적</th><th className="p-2">Δ 누적</th><th className="p-2">MDD</th><th className="p-2">Δ MDD</th><th className="p-2">비용</th></tr></thead><tbody>{sensitivityScenarios.map((scenario, index) => { const metrics = researchRecord(scenario.metrics); const deltas = researchRecord(scenario.metricDeltas); return <tr key={String(scenario.id ?? index)} className="border-t border-border"><td className="p-2 font-black">{String(scenario.name ?? scenario.id ?? `민감도 ${index + 1}`)}</td><td className="p-2">{valuePercent(metrics.totalReturnPercent)}</td><td className="p-2">{valuePercent(deltas.totalReturnPercent)}</td><td className="p-2">{valuePercent(metrics.maxDrawdownPercent)}</td><td className="p-2">{valuePercent(deltas.maxDrawdownPercent)}</td><td className="p-2">{formatMoney(finiteNumber(metrics.totalTransactionCosts) ?? 0, "KRW")}</td></tr>; })}</tbody></table></div> : <ArtifactPrompt label="민감도 결과 불러오기" description="비용·현금흐름·리밸런싱 민감도 결과를 별도 artifact에서 불러옵니다." artifact={sensitivityArtifact} />}
-        {sensitivityArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-500">{sensitivityArtifact.error}</p> : null}
+        {sensitivityArtifact.error ? <p role="alert" className="mt-2 text-xs text-rose-700 dark:text-rose-400">{sensitivityArtifact.error}</p> : null}
       </div>
       {Object.keys(optimization).length ? <div className="border-t border-border pt-5"><div className="mb-3"><p className="text-xs font-black tracking-[0.1em]">SCREENING · LEDGER · PARETO</p><p className="mt-1 text-[9px] text-muted-foreground">동일 outlook 실행의 최적화 단계를 OOS·Monte Carlo·stress 결과와 함께 비교합니다.</p></div><OptimizationResearchResults result={optimization} run={run} onUnauthorized={onUnauthorized} objective={objective} theme={theme} /></div> : null}
       {data.limitation ? <p className="rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">{String(data.limitation)}</p> : null}

@@ -1,10 +1,12 @@
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import type { RequestHandler } from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { SseConnectionTracker } from "../lifecycle.js";
 import {
   AI_QUALIFICATION_EVENT_SCHEMA_VERSION,
   AI_QUALIFICATION_STATE_SCHEMA_VERSION,
@@ -189,12 +191,14 @@ async function fixtureRoot(runId = "p40-20260727-test"): Promise<string> {
 async function start(
   root: string,
   authenticate: RequestHandler = (_request, _response, next) => next(),
+  sseConnections?: SseConnectionTracker,
 ) {
   const router = createAiQualificationRouter({
     authenticate,
     runRoot: root,
     pollIntervalMs: 250,
     heartbeatMs: 1_000,
+    ...(sseConnections ? { sseConnections } : {}),
   });
   const app = createApp({
     trustProxy: [],
@@ -217,6 +221,63 @@ afterEach(async () => {
 });
 
 describe("AI qualification progress routes", () => {
+  it("returns 503 before SSE headers when shared stream capacity is full", async () => {
+    const root = await fixtureRoot();
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const held = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false,
+      end: vi.fn(),
+    });
+    const releaseHeld = tracker.track(held as never, vi.fn());
+    const router = createAiQualificationRouter({
+      authenticate: (_request, _response, next) => next(),
+      runRoot: root,
+      pollIntervalMs: 250,
+      heartbeatMs: 1_000,
+      sseConnections: tracker,
+    });
+    const route = router.stack.find(
+      (layer: { route?: { path?: string } }) => (
+        layer.route?.path === "/api/ai-qualification/runs/:runId/events"
+      ),
+    ) as any;
+    const handler = route.route.stack.at(-1).handle as (
+      request: unknown,
+      response: unknown,
+    ) => Promise<void>;
+    const request = Object.assign(new EventEmitter(), {
+      params: { runId: "p40-20260727-test" },
+      query: {},
+      get: vi.fn().mockReturnValue(undefined),
+    });
+    const response = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false,
+      status: vi.fn(),
+      setHeader: vi.fn(),
+      json: vi.fn(),
+      flushHeaders: vi.fn(),
+      write: vi.fn().mockReturnValue(true),
+      end: vi.fn(),
+    });
+    response.status.mockReturnValue(response);
+    response.json.mockReturnValue(response);
+
+    await handler(request, response);
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "SSE_CONNECTION_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(response.setHeader).not.toHaveBeenCalledWith(
+      "Content-Type",
+      "text/event-stream; charset=utf-8",
+    );
+    releaseHeld();
+  });
+
   it("returns the latest validated state and events without caching", async () => {
     const root = await fixtureRoot();
     const baseUrl = await start(root);
@@ -445,6 +506,29 @@ describe("AI qualification progress routes", () => {
     expect(received).toContain("id: 1");
     expect(received).toContain("event: progress");
     expect(received).toContain("replay-base-btc");
+  });
+
+  it("closes a terminal SSE response and immediately releases its shared connection slot", async () => {
+    const root = await fixtureRoot();
+    const runId = "p40-20260727-test";
+    const state = fixtureState(runId);
+    state.status = "completed";
+    state.activeStepId = null;
+    state.finishedAt = "2026-07-27T00:00:03.000Z";
+    await writeFile(
+      path.join(root, runId, "state.json"),
+      `${JSON.stringify(state)}\n`,
+    );
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const baseUrl = await start(root, undefined, tracker);
+
+    const response = await fetch(`${baseUrl}/api/ai-qualification/runs/${runId}/events`);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body.match(/event: terminal/g)).toHaveLength(1);
+    expect(body).toContain('"status":"completed"');
+    expect(tracker.size).toBe(0);
   });
 
   it("does not expose state without the dashboard session guard", async () => {

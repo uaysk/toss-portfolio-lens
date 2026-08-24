@@ -72,6 +72,10 @@ const rendered = JSON.parse(compose([
   "--format",
   "json",
 ]));
+assert(
+  rendered.services?.web?.environment?.APP_REPLICA_COUNT === "1",
+  "web must declare the supported single-replica process-local topology",
+);
 for (const service of ["fincast-worker", "chronos2-worker"]) {
   const profiles = rendered.services?.[service]?.profiles;
   assert(
