@@ -5,14 +5,14 @@
     {
       "source": "scripts/prepare-chronos2-comparison-input.ts",
       "name": "prepare-chronos2-comparison-input.mjs",
-      "size_bytes": 1800581,
-      "sha256": "ac716b496c93b83e10b52c9e919726411b7c0e14d571687c5e8de45610e8e427"
+      "size_bytes": 1805560,
+      "sha256": "6e37186ca61c36f1271560a1ea95d0ffd990fe5e86f7f151fac63e3467a7981a"
     },
     {
       "source": "scripts/compare-fincast-p40-policy-regression.ts",
       "name": "compare-fincast-policy.mjs",
-      "size_bytes": 720328,
-      "sha256": "3dce7687d734f98b21aedb9978b40731b0e1caed0af032b285fff0c4f7648d1d"
+      "size_bytes": 720345,
+      "sha256": "64607c04387fd6db282109afcf524db3bd798d24e3e2166f834c0ef8ce57598e"
     }
   ]
 }

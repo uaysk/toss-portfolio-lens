@@ -14969,6 +14969,7 @@ var SimulationStrategySchema = external_exports.discriminatedUnion("mode", [
 ]);
 
 // server/worker/ai-contract.ts
+import { isDeepStrictEqual } from "node:util";
 var SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v2";
 var SCALPING_AI_HORIZONS = [5, 15, 30, 60];
 var SCALPING_AI_REALTIME_HORIZONS = [5, 15];
@@ -15864,7 +15865,7 @@ var AiResponseSchema = external_exports.object({
         message: "top-level model identity must match the independent model lane"
       });
     }
-    if (JSON.stringify(response.model) !== JSON.stringify(independentRun.model) || JSON.stringify(response.series) !== JSON.stringify(independentRun.raw_series) || response.status !== independentRun.status) {
+    if (!isDeepStrictEqual(response.model, independentRun.model) || !isDeepStrictEqual(response.series, independentRun.raw_series) || response.status !== independentRun.status) {
       context.addIssue({
         code: "custom",
         path: ["model_runs", 0],
