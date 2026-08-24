@@ -1,26 +1,33 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowDownRight,
-  ArrowUpRight,
-  ChartNoAxesCombined,
-  CircleGauge,
-  Layers3,
-  ListFilter,
-  LoaderCircle,
-  LockKeyhole,
-  LogOut,
-  RefreshCw,
-  Search,
-  Settings2,
-  ShieldCheck,
-} from "lucide-react";
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import ArrowDownRight from "lucide-react/dist/esm/icons/arrow-down-right.js";
+import ArrowUpRight from "lucide-react/dist/esm/icons/arrow-up-right.js";
+import ChartNoAxesCombined from "lucide-react/dist/esm/icons/chart-no-axes-combined.js";
+import CircleGauge from "lucide-react/dist/esm/icons/circle-gauge.js";
+import Layers3 from "lucide-react/dist/esm/icons/layers.js";
+import ListFilter from "lucide-react/dist/esm/icons/list-filter.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import LockKeyhole from "lucide-react/dist/esm/icons/lock-keyhole.js";
+import LogOut from "lucide-react/dist/esm/icons/log-out.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Search from "lucide-react/dist/esm/icons/search.js";
+import Settings2 from "lucide-react/dist/esm/icons/settings-2.js";
+import ShieldCheck from "lucide-react/dist/esm/icons/shield-check.js";
 import { Logo } from "@/components/logo";
 import { StockVisibilitySettings } from "@/components/stock-visibility-settings";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePortfolioQuery } from "@/hooks/use-portfolio-query";
 import {
@@ -29,6 +36,7 @@ import {
 } from "@/lib/dashboard-view-registry";
 import { dashboardHash, dashboardViewFromHash, type DashboardView } from "@/lib/dashboard-navigation";
 import { formatMoney, formatPercent, formatQuantity, formatSignedMoney, formatSyncTime } from "@/lib/format";
+import { preferredScrollBehavior } from "@/lib/motion-preference";
 import { safeLocalStorage } from "@/lib/safe-storage";
 import { holdingKey, stockColor, stockForeground } from "@/lib/stock-appearance";
 import { cn } from "@/lib/utils";
@@ -48,6 +56,32 @@ type DashboardProps = {
   onToggleTheme: () => void;
 };
 
+const DASHBOARD_MAIN_ID = "dashboard-content";
+const DESKTOP_HOLDINGS_MEDIA_QUERY = "(min-width: 1024px)";
+
+const AccountSelector = lazy(() => (
+  import("@/components/account-selector").then((module) => ({
+    default: module.AccountSelector,
+  }))
+));
+
+function DashboardSkipLink() {
+  return (
+    <a
+      href={`#${DASHBOARD_MAIN_ID}`}
+      className="dashboard-skip-link"
+      onClick={(event) => {
+        event.preventDefault();
+        const main = document.getElementById(DASHBOARD_MAIN_ID);
+        main?.focus({ preventScroll: true });
+        main?.scrollIntoView({ block: "start" });
+      }}
+    >
+      본문으로 건너뛰기
+    </a>
+  );
+}
+
 const PortfolioAllocationChart = lazy(() => (
   import("@/components/portfolio-allocation-chart").then((module) => ({
     default: module.PortfolioAllocationChart,
@@ -66,10 +100,47 @@ function OverviewChartFallback({
   id: "allocation" | "history";
   height: string;
 }) {
+  const label = id === "allocation" ? "자산 구성 차트를 불러오는 중" : "비중 추이 차트를 불러오는 중";
   return (
-    <section id={id} className="scroll-mt-5" aria-busy="true">
+    <section id={id} className="scroll-mt-5" aria-busy="true" aria-label={label}>
+      <span className="sr-only" role="status">{label}</span>
       <Skeleton className={cn("w-full rounded-[28px]", height)} />
     </section>
+  );
+}
+
+function AccountSelectorFallback({ className }: { className: string }) {
+  return (
+    <div
+      className={cn(
+        "h-11 animate-pulse rounded-full border border-input bg-secondary",
+        className,
+      )}
+      aria-hidden="true"
+    />
+  );
+}
+
+function subscribeToDesktopHoldingsLayout(onChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  const mediaQuery = window.matchMedia(DESKTOP_HOLDINGS_MEDIA_QUERY);
+  mediaQuery.addEventListener("change", onChange);
+  return () => mediaQuery.removeEventListener("change", onChange);
+}
+
+function desktopHoldingsLayoutSnapshot(): boolean {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia(DESKTOP_HOLDINGS_MEDIA_QUERY).matches;
+}
+
+function useDesktopHoldingsLayout(): boolean {
+  return useSyncExternalStore(
+    subscribeToDesktopHoldingsLayout,
+    desktopHoldingsLayoutSnapshot,
+    () => false,
   );
 }
 
@@ -103,11 +174,15 @@ function Sidebar({
   onLogout,
   view = "overview",
   onViewChange = () => undefined,
+  navigationVisible = true,
+  interactionDisabled = false,
 }: {
   portfolio?: Portfolio;
   onLogout: () => void;
   view?: DashboardView;
   onViewChange?: (view: DashboardView) => void;
+  navigationVisible?: boolean;
+  interactionDisabled?: boolean;
 }) {
   const sections = [
     { href: "#history", label: "비중 추이", icon: ChartNoAxesCombined },
@@ -116,45 +191,52 @@ function Sidebar({
   ];
 
   return (
-    <aside className="dashboard-sidebar">
-      <Logo inverse />
-      <nav className="mt-14 space-y-1" aria-label="대시보드 탐색">
-        {DASHBOARD_VIEW_REGISTRY.filter((item) => item.navigation.desktop).map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => onViewChange(item.value)}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-left text-sm font-semibold transition-colors",
-                view === item.value ? "bg-white text-black" : "text-white/60 hover:bg-white/10 hover:text-white",
-              )}
-            >
-              <Icon className="size-[18px]" aria-hidden="true" />
-              {item.sidebarLabel}
-            </button>
-          );
-        })}
-        {view === "overview" ? (
-          <div className="space-y-0.5 pb-2 pl-4 pt-2">
-            {sections.map((item) => (
-              <a key={item.href} href={item.href} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold text-white/40 transition-colors hover:bg-white/10 hover:text-white/80">
-                <item.icon className="size-3.5" aria-hidden="true" />{item.label}
-              </a>
-            ))}
-          </div>
-        ) : null}
-      </nav>
+    <aside
+      className="dashboard-sidebar"
+      aria-hidden={interactionDisabled || undefined}
+      inert={interactionDisabled || undefined}
+    >
+      <Logo inverse className="shrink-0" />
+      {navigationVisible ? (
+        <nav className="dashboard-sidebar-nav mt-10 space-y-1" aria-label="대시보드 탐색">
+          {DASHBOARD_VIEW_REGISTRY.filter((item) => item.navigation.desktop).map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.value}
+                type="button"
+                aria-current={view === item.value ? "page" : undefined}
+                onClick={() => onViewChange(item.value)}
+                className={cn(
+                  "flex w-full items-center gap-3 rounded-2xl px-3.5 py-3 text-left text-sm font-semibold transition-colors",
+                  view === item.value ? "bg-white text-black" : "text-white/60 hover:bg-white/10 hover:text-white",
+                )}
+              >
+                <Icon className="size-[18px]" aria-hidden="true" />
+                {item.sidebarLabel}
+              </button>
+            );
+          })}
+          {view === "overview" ? (
+            <div className="space-y-0.5 pb-2 pl-4 pt-2">
+              {sections.map((item) => (
+                <a key={item.href} href={item.href} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold text-white/55 transition-colors hover:bg-white/10 hover:text-white/80">
+                  <item.icon className="size-3.5" aria-hidden="true" />{item.label}
+                </a>
+              ))}
+            </div>
+          ) : null}
+        </nav>
+      ) : <div className="flex-1" aria-hidden="true" />}
 
-      <div className="mt-auto space-y-3">
+      <div className="shrink-0 space-y-3 pt-3">
         <div className="rounded-[22px] bg-white/[0.08] p-4">
           <div className="mb-3 flex items-center gap-2 text-white/50">
             <ShieldCheck className="size-4" aria-hidden="true" />
             <span className="text-[11px] font-bold tracking-[0.12em]">READ ONLY</span>
           </div>
           <p className="truncate text-sm font-semibold text-white">{portfolio?.account.label || "토스증권 계좌"}</p>
-          <p className="mt-1 text-xs text-white/40">조회 전용 연결</p>
+          <p className="mt-1 text-xs text-white/55">조회 전용 연결</p>
         </div>
         <button
           type="button"
@@ -172,6 +254,7 @@ function Sidebar({
 function DashboardHeader({
   portfolio,
   refreshing,
+  switchingAccount,
   onRefresh,
   onAccountChange,
   onLogout,
@@ -184,6 +267,7 @@ function DashboardHeader({
 }: {
   portfolio: Portfolio;
   refreshing: boolean;
+  switchingAccount: boolean;
   onRefresh: () => void;
   onAccountChange: (value: string) => void;
   onLogout: () => void;
@@ -207,18 +291,18 @@ function DashboardHeader({
       </div>
 
       <div className="flex items-center justify-end gap-2">
-        <Select value={portfolio.selectedAccountId} onValueChange={onAccountChange}>
-          <SelectTrigger aria-label="계좌 선택" className="hidden sm:flex">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            {portfolio.accounts.map((account) => (
-              <SelectItem key={account.id} value={account.id}>
-                {account.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {portfolio.accounts.length > 1 ? (
+          <Suspense fallback={<AccountSelectorFallback className="hidden w-[180px] sm:block" />}>
+            <AccountSelector
+              accounts={portfolio.accounts}
+              selectedAccountId={portfolio.selectedAccountId}
+              switchingAccount={switchingAccount}
+              onAccountChange={onAccountChange}
+              triggerClassName="hidden sm:flex"
+              contentAlign="end"
+            />
+          </Suspense>
+        ) : null}
         <ThemeToggle theme={theme} onToggle={onToggleTheme} />
         {view === "overview" ? (
           <Button
@@ -238,19 +322,31 @@ function DashboardHeader({
             ) : null}
           </Button>
         ) : null}
-        <Button variant="secondary" size="icon" onClick={onRefresh} disabled={refreshing} aria-label="포트폴리오 새로고침">
+        <Button
+          variant="secondary"
+          size="icon"
+          onClick={onRefresh}
+          disabled={refreshing || switchingAccount}
+          aria-busy={refreshing}
+          aria-label={refreshing ? "포트폴리오 새로고침 중" : "포트폴리오 새로고침"}
+        >
           <RefreshCw className={cn(refreshing && "animate-spin")} />
         </Button>
         <Button variant="secondary" size="icon" onClick={onLogout} className="lg:hidden" aria-label="로그아웃">
           <LogOut />
         </Button>
+        {switchingAccount ? (
+          <span id="account-switch-status" role="status" className="sr-only">
+            계좌를 전환하는 중입니다.
+          </span>
+        ) : null}
       </div>
     </header>
   );
 }
 
 function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (view: DashboardView) => void }) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
@@ -267,13 +363,14 @@ function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (vi
   }, [view]);
 
   return (
-    <div ref={containerRef} className="mb-3 flex max-w-full gap-1 overflow-x-auto rounded-[20px] bg-secondary p-1 lg:hidden" aria-label="화면 선택">
+    <nav ref={containerRef} className="mb-3 flex max-w-full gap-1 overflow-x-auto rounded-[20px] bg-secondary p-1 lg:hidden" aria-label="화면 선택">
       {DASHBOARD_VIEW_REGISTRY.filter((item) => item.navigation.mobile).map((item) => (
         <button
           key={item.value}
           ref={view === item.value ? activeRef : undefined}
           type="button"
           aria-pressed={view === item.value}
+          aria-current={view === item.value ? "page" : undefined}
           onClick={() => onChange(item.value)}
           className={cn(
             "min-w-fit flex-1 rounded-full px-4 py-2.5 text-xs font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -281,15 +378,15 @@ function MobileViewTabs({ view, onChange }: { view: DashboardView; onChange: (vi
           )}
         >{item.mobileLabel}</button>
       ))}
-    </div>
+    </nav>
   );
 }
 
 function DashboardViewFallback({ view }: { view: DashboardView }) {
   return (
-    <Card className="grid min-h-[420px] place-items-center bg-secondary">
+    <Card className="grid min-h-[420px] place-items-center bg-secondary" role="status" aria-busy="true">
       <div className="text-center">
-        <LoaderCircle className="mx-auto size-5 animate-spin" />
+        <LoaderCircle className="mx-auto size-5 animate-spin" aria-hidden="true" />
         <p className="mt-3 text-xs font-black">{dashboardViewMetadata(view).loadingLabel}</p>
       </div>
     </Card>
@@ -318,7 +415,7 @@ function PortfolioHero({ portfolio }: { portfolio: Portfolio }) {
               </p>
             ) : null}
           </div>
-          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">LIVE · 1초</span>
+          <span className="hidden rounded-full bg-white px-3.5 py-2 text-xs font-black text-black sm:inline-flex">자동 동기화</span>
         </div>
 
         <div className="mt-auto grid grid-cols-2 gap-x-5 gap-y-5 pt-12 lg:grid-cols-4 lg:gap-8">
@@ -417,8 +514,9 @@ function HoldingMobileCard({ holding, theme }: { holding: Holding; theme: Theme 
   );
 }
 
-function HoldingsCard({ portfolio, theme, hiddenCount }: { portfolio: Portfolio; theme: Theme; hiddenCount: number }) {
+export function HoldingsCard({ portfolio, theme, hiddenCount }: { portfolio: Portfolio; theme: Theme; hiddenCount: number }) {
   const [query, setQuery] = useState("");
+  const desktopLayout = useDesktopHoldingsLayout();
   const holdings = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ko-KR");
     if (!normalized) return portfolio.holdings;
@@ -449,8 +547,8 @@ function HoldingsCard({ portfolio, theme, hiddenCount }: { portfolio: Portfolio;
         </div>
 
         {holdings.length ? (
-          <>
-            <div className="hidden space-y-2 lg:block">
+          desktopLayout ? (
+            <div className="space-y-2">
               <div className="holding-grid px-4 pb-1 text-[11px] font-bold tracking-wide text-muted-foreground">
                 <span>종목</span>
                 <span>보유 수량</span>
@@ -460,10 +558,11 @@ function HoldingsCard({ portfolio, theme, hiddenCount }: { portfolio: Portfolio;
               </div>
               {holdings.map((holding) => <HoldingDesktopRow key={holdingKey(holding)} holding={holding} theme={theme} />)}
             </div>
-            <div className="space-y-2 lg:hidden">
+          ) : (
+            <div className="space-y-2">
               {holdings.map((holding) => <HoldingMobileCard key={holdingKey(holding)} holding={holding} theme={theme} />)}
             </div>
-          </>
+          )
         ) : (
           <div className="grid min-h-52 place-items-center rounded-[24px] bg-muted p-8 text-center">
             <div>
@@ -485,8 +584,10 @@ function HoldingsCard({ portfolio, theme, hiddenCount }: { portfolio: Portfolio;
 function DashboardSkeleton({ theme, onToggleTheme }: { theme: Theme; onToggleTheme: () => void }) {
   return (
     <div className="dashboard-frame">
-      <Sidebar onLogout={() => undefined} />
-      <main className="dashboard-main">
+      <DashboardSkipLink />
+      <Sidebar onLogout={() => undefined} interactionDisabled />
+      <main id={DASHBOARD_MAIN_ID} tabIndex={-1} className="dashboard-main" aria-busy="true">
+        <p className="sr-only" role="status">포트폴리오를 불러오는 중입니다.</p>
         <div className="dashboard-header">
           <div className="space-y-2"><Skeleton className="h-3 w-32" /><Skeleton className="h-10 w-44" /></div>
           <div className="flex gap-2">
@@ -525,12 +626,13 @@ function InitialError({
 }) {
   return (
     <div className="dashboard-frame">
-      <Sidebar onLogout={onLogout} />
-      <main className="dashboard-main relative grid place-items-center">
+      <DashboardSkipLink />
+      <Sidebar onLogout={onLogout} navigationVisible={false} />
+      <main id={DASHBOARD_MAIN_ID} tabIndex={-1} className="dashboard-main relative grid place-items-center">
         <div className="absolute right-5 top-5">
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
         </div>
-        <div className="max-w-md text-center">
+        <div className="max-w-md text-center" role="alert">
           <div className="mx-auto grid size-14 place-items-center rounded-[20px] bg-primary text-primary-foreground">
             <RefreshCw className="size-5" />
           </div>
@@ -560,6 +662,7 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
     portfolio,
     loading,
     refreshing,
+    switchingAccount,
     error,
     retryInitial,
     changeAccount,
@@ -574,14 +677,27 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
   useEffect(() => {
     const updateFromHash = () => setView(dashboardViewFromHash(window.location.hash));
     window.addEventListener("hashchange", updateFromHash);
-    return () => window.removeEventListener("hashchange", updateFromHash);
+    window.addEventListener("popstate", updateFromHash);
+    return () => {
+      window.removeEventListener("hashchange", updateFromHash);
+      window.removeEventListener("popstate", updateFromHash);
+    };
   }, []);
+
+  useEffect(() => {
+    const title = `${dashboardViewMetadata(view).sidebarLabel} · Portfolio Lens`;
+    document.title = title;
+    return () => {
+      if (document.title === title) document.title = "Portfolio Lens";
+    };
+  }, [view]);
 
   const changeView = useCallback((nextView: DashboardView) => {
     setView(nextView);
     setSettingsOpen(false);
-    window.history.replaceState(null, "", dashboardHash(nextView));
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    const nextHash = dashboardHash(nextView);
+    if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
+    window.scrollTo({ top: 0, behavior: preferredScrollBehavior() });
   }, []);
 
   const openTechnicalBacktest = useCallback((handoff: TechnicalStrategyHandoff) => {
@@ -668,11 +784,13 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
 
   return (
     <div className="dashboard-frame">
+      <DashboardSkipLink />
       <Sidebar portfolio={portfolio} onLogout={() => void handleLogout()} view={view} onViewChange={changeView} />
-      <main className="dashboard-main">
+      <main id={DASHBOARD_MAIN_ID} tabIndex={-1} className="dashboard-main">
         <DashboardHeader
           portfolio={portfolio}
           refreshing={refreshing}
+          switchingAccount={switchingAccount}
           onRefresh={() => void refresh(portfolio.selectedAccountId)}
           onAccountChange={(value) => void changeAccount(value)}
           onLogout={() => void handleLogout()}
@@ -688,18 +806,15 @@ export function Dashboard({ onLogout, onUnauthorized, theme, onToggleTheme }: Da
 
         {portfolio.accounts.length > 1 ? (
           <div className="mb-3 sm:hidden">
-            <Select value={portfolio.selectedAccountId} onValueChange={(value) => void changeAccount(value)}>
-              <SelectTrigger aria-label="계좌 선택" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {portfolio.accounts.map((account) => (
-                  <SelectItem key={account.id} value={account.id}>
-                    {account.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Suspense fallback={<AccountSelectorFallback className="w-full" />}>
+              <AccountSelector
+                accounts={portfolio.accounts}
+                selectedAccountId={portfolio.selectedAccountId}
+                switchingAccount={switchingAccount}
+                onAccountChange={(value) => void changeAccount(value)}
+                triggerClassName="w-full"
+              />
+            </Suspense>
           </div>
         ) : null}
 

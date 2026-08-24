@@ -21,6 +21,8 @@ function staticBearerConfig(): AppConfig {
     port: 3200,
     trustProxy: [],
     gracefulShutdownTimeoutMs: 30_000,
+    appReplicaCount: 1,
+    sseMaximumConnections: 256,
     tossApiBaseUrl: "https://tpl.uaysk.com",
     postgres: {
       host: "postgres",
@@ -132,6 +134,50 @@ function oauthConfig(): AppConfig {
   };
 }
 
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function accountsPayload(...accountIds: string[]): unknown {
+  return {
+    result: accountIds.map((id, index) => ({
+      id,
+      name: "계좌 " + (index + 1),
+      type: "BROKERAGE",
+    })),
+  };
+}
+
+function holdingsPayload(symbol: string): unknown {
+  return {
+    result: {
+      totalPurchaseAmount: { krw: "100" },
+      marketValue: { amount: { krw: "110" } },
+      profitLoss: { amount: { krw: "10" }, rate: "0.1" },
+      dailyProfitLoss: { amount: { krw: "1" }, rate: "0.01" },
+      items: [{
+        symbol,
+        name: symbol,
+        marketCountry: "KR",
+        currency: "KRW",
+        quantity: "1",
+        averagePurchasePrice: "100",
+        lastPrice: "110",
+        marketValue: { purchaseAmount: "100", amount: "110" },
+        profitLoss: { amount: "10", rate: "0.1" },
+        dailyProfitLoss: { amount: "1", rate: "0.01" },
+      }],
+    },
+  };
+}
+
+function unauthorizedResponse(): Response {
+  return jsonResponse({ error: { code: "unauthorized", message: "expired token" } }, 401);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -208,6 +254,46 @@ describe("TossClient 인증", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("Content-Length가 8MiB를 넘는 upstream 응답을 본문 적재 전에 거부한다", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": String(8 * 1_024 * 1_024 + 1),
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new TossClient(staticBearerConfig()).getAccounts(true)).rejects.toMatchObject({
+      status: 502,
+      code: "upstream-response-too-large",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Content-Length가 없어도 실제 upstream stream을 8MiB까지만 읽는다", async () => {
+    const chunk = new Uint8Array(1_024 * 1_024);
+    let emittedChunks = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        emittedChunks += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new TossClient(staticBearerConfig()).getAccounts(true)).rejects.toMatchObject({
+      status: 502,
+      code: "upstream-response-too-large",
+    });
+    expect(emittedChunks).toBeLessThanOrEqual(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("시장 데이터의 rate-limit header만 provider 계층에 전달한다", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       result: { rankings: [] },
@@ -233,6 +319,295 @@ describe("TossClient 인증", () => {
       "x-ratelimit-remaining": "40",
     });
     expect(result.headers).not.toHaveProperty("set-cookie");
+  });
+});
+
+describe("TossClient single-flight", () => {
+  it("한 client의 20개 OAuth cold miss가 토큰 발급 1회를 공유한다", async () => {
+    let tokenCalls = 0;
+    let candleCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/oauth2/token") {
+        tokenCalls += 1;
+        return jsonResponse({ access_token: "shared-token", expires_in: 3600 });
+      }
+      if (url.pathname === "/api/v1/candles") {
+        candleCalls += 1;
+        return jsonResponse({ result: { candles: [] } });
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(oauthConfig());
+
+    await Promise.all(Array.from({ length: 20 }, (_, index) => client.getDailyCandles("TOKEN-" + index)));
+
+    expect(tokenCalls).toBe(1);
+    expect(candleCalls).toBe(20);
+  });
+
+  it("20개 accounts cold miss가 upstream 1회를 공유한다", async () => {
+    let accountCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload("account-1"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const results = await Promise.all(Array.from({ length: 20 }, () => client.getAccounts()));
+
+    expect(accountCalls).toBe(1);
+    expect(results.every((result) => result === results[0])).toBe(true);
+  });
+
+  it("20개 동일 계좌 portfolio cold miss가 accounts와 holdings를 각각 1회 호출한다", async () => {
+    let accountCalls = 0;
+    let holdingCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload("account-1"));
+      }
+      if (url.pathname === "/api/v1/holdings") {
+        holdingCalls += 1;
+        expect(new Headers(init?.headers).get("X-Tossinvest-Account")).toBe("account-1");
+        return jsonResponse(holdingsPayload("005930"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const results = await Promise.all(Array.from({ length: 20 }, () => client.getPortfolio("account-1")));
+
+    expect(accountCalls).toBe(1);
+    expect(holdingCalls).toBe(1);
+    expect(results.every((result) => result === results[0])).toBe(true);
+  });
+
+  it("실패한 token single-flight를 해제해 다음 호출에서 다시 발급한다", async () => {
+    let tokenCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/oauth2/token") {
+        tokenCalls += 1;
+        return tokenCalls === 1
+          ? jsonResponse({ error: "invalid_client" }, 400)
+          : jsonResponse({ access_token: "recovered-token", expires_in: 3600 });
+      }
+      if (url.pathname === "/api/v1/candles") return jsonResponse({ result: { candles: [] } });
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(oauthConfig());
+
+    const failures = await Promise.allSettled(
+      Array.from({ length: 20 }, (_, index) => client.getDailyCandles("FAIL-" + index)),
+    );
+    expect(failures.every((result) => result.status === "rejected")).toBe(true);
+    expect(tokenCalls).toBe(1);
+
+    await expect(client.getDailyCandles("RECOVERED")).resolves.toMatchObject({ candles: [] });
+    expect(tokenCalls).toBe(2);
+  });
+
+  it("실패한 accounts single-flight를 해제해 다음 호출에서 다시 조회한다", async () => {
+    let accountCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return accountCalls === 1
+          ? jsonResponse({ error: { code: "bad-request", message: "temporary failure" } }, 400)
+          : jsonResponse(accountsPayload("account-1"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const failures = await Promise.allSettled(Array.from({ length: 20 }, () => client.getAccounts()));
+    expect(failures.every((result) => result.status === "rejected")).toBe(true);
+    expect(accountCalls).toBe(1);
+
+    await expect(client.getAccounts()).resolves.toHaveLength(1);
+    expect(accountCalls).toBe(2);
+  });
+
+  it("실패한 account별 portfolio single-flight를 해제해 다음 호출에서 다시 조회한다", async () => {
+    let accountCalls = 0;
+    let holdingCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload("account-1"));
+      }
+      if (url.pathname === "/api/v1/holdings") {
+        holdingCalls += 1;
+        return holdingCalls === 1
+          ? jsonResponse({ error: { code: "bad-request", message: "temporary failure" } }, 400)
+          : jsonResponse(holdingsPayload("005930"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const failures = await Promise.allSettled(
+      Array.from({ length: 20 }, () => client.getPortfolio("account-1")),
+    );
+    expect(failures.every((result) => result.status === "rejected")).toBe(true);
+    expect(accountCalls).toBe(1);
+    expect(holdingCalls).toBe(1);
+
+    await expect(client.getPortfolio("account-1")).resolves.toMatchObject({ selectedAccountId: "account-1" });
+    expect(accountCalls).toBe(1);
+    expect(holdingCalls).toBe(2);
+  });
+
+  it("force 요청끼리는 합치고 동시에 들어온 non-force 요청은 유효한 기존 캐시를 유지한다", async () => {
+    let accountCalls = 0;
+    let holdingCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload("account-1"));
+      }
+      if (url.pathname === "/api/v1/holdings") {
+        holdingCalls += 1;
+        return jsonResponse(holdingsPayload(holdingCalls === 1 ? "WARM" : "FORCED"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const warm = await client.getPortfolio("account-1");
+    expect(await client.getPortfolio("account-1")).toBe(warm);
+
+    const forceRequests = Array.from({ length: 20 }, () => client.getPortfolio("account-1", true));
+    const cachedDuringRefresh = await client.getPortfolio("account-1");
+    const refreshed = await Promise.all(forceRequests);
+
+    expect(cachedDuringRefresh).toBe(warm);
+    expect(refreshed[0]).not.toBe(warm);
+    expect(refreshed.every((result) => result === refreshed[0])).toBe(true);
+    expect(refreshed[0]?.holdings[0]?.symbol).toBe("FORCED");
+    expect(accountCalls).toBe(2);
+    expect(holdingCalls).toBe(2);
+    expect(await client.getPortfolio("account-1")).toBe(refreshed[0]);
+  });
+
+  it("서로 다른 계좌의 portfolio 요청은 계좌별 single-flight로 분리한다", async () => {
+    let accountCalls = 0;
+    const holdingCalls = new Map<string, number>();
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload("account-1", "account-2"));
+      }
+      if (url.pathname === "/api/v1/holdings") {
+        const accountId = new Headers(init?.headers).get("X-Tossinvest-Account") ?? "missing";
+        holdingCalls.set(accountId, (holdingCalls.get(accountId) ?? 0) + 1);
+        return jsonResponse(holdingsPayload(accountId));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    const [accountOne, accountTwo] = await Promise.all([
+      ...Array.from({ length: 20 }, () => client.getPortfolio("account-1")),
+      ...Array.from({ length: 20 }, () => client.getPortfolio("account-2")),
+    ]).then((results) => [results[0], results[20]] as const);
+
+    expect(accountCalls).toBe(1);
+    expect(holdingCalls).toEqual(new Map([
+      ["account-1", 1],
+      ["account-2", 1],
+    ]));
+    expect(accountOne?.selectedAccountId).toBe("account-1");
+    expect(accountTwo?.selectedAccountId).toBe("account-2");
+  });
+
+  it("최신 계좌 목록에서 제거된 계좌의 portfolio snapshot을 보존하지 않는다", async () => {
+    let accountCalls = 0;
+    let holdingCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/accounts") {
+        accountCalls += 1;
+        return jsonResponse(accountsPayload(accountCalls === 2 ? "account-2" : "account-1"));
+      }
+      if (url.pathname === "/api/v1/holdings") {
+        holdingCalls += 1;
+        return jsonResponse(holdingsPayload(holdingCalls === 1 ? "OLD" : "REFRESHED"));
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(staticBearerConfig());
+
+    expect((await client.getPortfolio("account-1")).holdings[0]?.symbol).toBe("OLD");
+    await client.getAccounts(true);
+    await client.getAccounts(true);
+    expect((await client.getPortfolio("account-1")).holdings[0]?.symbol).toBe("REFRESHED");
+    expect(holdingCalls).toBe(2);
+  });
+
+  it("늦은 401이 새 OAuth 토큰을 무효화하지 않는다", async () => {
+    let tokenCalls = 0;
+    let resolveLateUnauthorized!: (response: Response) => void;
+    let signalLateRequestStarted!: () => void;
+    const lateUnauthorized = new Promise<Response>((resolve) => {
+      resolveLateUnauthorized = resolve;
+    });
+    const lateRequestStarted = new Promise<void>((resolve) => {
+      signalLateRequestStarted = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/oauth2/token") {
+        tokenCalls += 1;
+        return jsonResponse({
+          access_token: tokenCalls === 1 ? "old-token" : "new-token",
+          expires_in: 3600,
+        });
+      }
+      if (url.pathname === "/api/v1/candles") {
+        const authorization = new Headers(init?.headers).get("Authorization");
+        if (authorization === "Bearer old-token") {
+          if (url.searchParams.get("symbol") === "LATE") {
+            signalLateRequestStarted();
+            return lateUnauthorized;
+          }
+          return unauthorizedResponse();
+        }
+        expect(authorization).toBe("Bearer new-token");
+        return jsonResponse({ result: { candles: [] } });
+      }
+      throw new Error("unexpected upstream path: " + url.pathname);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TossClient(oauthConfig());
+
+    const lateResult = client.getDailyCandles("LATE");
+    await lateRequestStarted;
+    await Promise.all(Array.from({ length: 19 }, (_, index) => client.getDailyCandles("FAST-" + index)));
+    resolveLateUnauthorized(unauthorizedResponse());
+    await expect(lateResult).resolves.toMatchObject({ candles: [] });
+
+    expect(tokenCalls).toBe(2);
   });
 });
 

@@ -112,6 +112,10 @@ describe("SimulationCheckpointStore v2", () => {
       expect(chunks[0]?.previousChecksum).not.toBeNull();
       expect(replay?.manifest.previousChecksum).not.toBeNull();
 
+      const stateReplay = await store.replayState<typeof terminalState>(run.id);
+      expect(stateReplay?.state).toEqual(terminalState);
+      expect(stateReplay).not.toHaveProperty("events");
+
       const rows = await database.query<{
         chunk_seq: number;
         previous_checksum: string | null;

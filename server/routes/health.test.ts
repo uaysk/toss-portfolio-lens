@@ -32,6 +32,7 @@ function dependencies(
     exchangeRateFallback: "disabled",
     mcpEnabled: false,
     mcpAuthMode: "oauth",
+    appReplicaCount: 1,
     buildInfo: () => ({ gitSha: "test" }),
     executionMode: "rust_socket",
     rustSocketPath: "/tmp/compute.sock",
@@ -59,6 +60,13 @@ function dependencies(
       windowMs: 300_000,
       http: { active: 1, latencyMs: { sampleCount: 2, p95Ms: 8 } },
       artifacts: { writes: 1, bytes: 1_024 },
+    }),
+    sseConnectionSnapshot: () => ({
+      capacity: 256,
+      activeConnections: 4,
+      acceptedConnectionsTotal: 20,
+      rejectedConnectionsTotal: 2,
+      closing: false,
     }),
     portfolioLiveSnapshot: () => ({
       capacity: 128,
@@ -90,10 +98,25 @@ describe("health route", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       status: "ok",
+      topology: {
+        web: {
+          replicaPolicy: "single",
+          declaredReplicas: 1,
+          coordinationScope: "process",
+          horizontalScalingSupported: false,
+        },
+      },
       runtime: {
         windowMs: 300_000,
         http: { active: 1 },
         artifacts: { writes: 1, bytes: 1_024 },
+      },
+      sseConnections: {
+        capacity: 256,
+        activeConnections: 4,
+        acceptedConnectionsTotal: 20,
+        rejectedConnectionsTotal: 2,
+        closing: false,
       },
       compute: {
         executionMode: "rust_socket",

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { RunRepository } from "../repositories/run-repository.js";
@@ -17,15 +17,19 @@ function deferred<T = void>() {
 }
 
 describe("RunService persistence and cancellation", () => {
-  const databases: PGliteDatabase[] = [];
+  let database: PGliteDatabase;
 
+  beforeAll(() => {
+    database = new PGliteDatabase();
+  });
   afterEach(async () => {
-    await Promise.all(databases.splice(0).map((database) => database.close()));
+    await database.reset();
+  });
+  afterAll(async () => {
+    await database.close();
   });
 
   async function setup(maxConcurrentRuns = 1) {
-    const database = new PGliteDatabase();
-    databases.push(database);
     const runs = new RunRepository(database);
     const artifacts = new ArtifactRepository(database);
     await runs.initialize();
@@ -56,6 +60,60 @@ describe("RunService persistence and cancellation", () => {
     expect(second.reused).toBe(true);
     expect(task).toHaveBeenCalledOnce();
     expect(secondTask).not.toHaveBeenCalled();
+  });
+
+  it("external 완료 run의 artifact 존재 여부를 descriptor 한 번으로 확인한다", async () => {
+    const completed = {
+      id: "run-external",
+      status: "completed",
+      kind: "backtest",
+      dataRevision: "revision-external",
+    };
+    const runs = {
+      findByRequest: vi.fn().mockResolvedValue(completed),
+    };
+    const artifacts = {
+      get: vi.fn(() => { throw new Error("artifact 본문을 읽으면 안 됩니다."); }),
+      list: vi.fn().mockResolvedValue([{ type: "result" }]),
+      put: vi.fn().mockResolvedValue({ type: "equity" }),
+    };
+    const jobs = {
+      get: vi.fn(() => { throw new Error("job 존재 조회를 별도로 수행하면 안 됩니다."); }),
+      getOutput: vi.fn().mockResolvedValue({
+        value: {
+          artifacts: [
+            { type: "result", content: { existing: true }, row_count: 1 },
+            { type: "equity", content: [{ date: "2026-07-17", value: 1 }], row_count: 1 },
+            { type: "worker-metrics", content: { skipped: true }, row_count: 1 },
+          ],
+        },
+      }),
+    };
+    const service = new RunService(
+      runs as never,
+      artifacts as never,
+      1,
+      1,
+      { executionMode: "external", jobRepository: jobs as never },
+    );
+
+    await expect(service.findReusable({
+      ownerSubject: "owner",
+      kind: "backtest",
+      config: { assets: ["AAA"] },
+      dataRevision: "revision-external",
+    })).resolves.toBe(completed);
+    expect(jobs.get).not.toHaveBeenCalled();
+    expect(jobs.getOutput).toHaveBeenCalledExactlyOnceWith("run-external");
+    expect(artifacts.list).toHaveBeenCalledExactlyOnceWith("run-external");
+    expect(artifacts.get).not.toHaveBeenCalled();
+    expect(artifacts.put).toHaveBeenCalledExactlyOnceWith({
+      runId: "run-external",
+      dataRevision: "revision-external",
+      type: "equity",
+      content: [{ date: "2026-07-17", value: 1 }],
+      rowCount: 1,
+    });
   });
 
   it("동시 preflight 실패는 정확히 한 failed run과 한 쌍의 실패 event만 생성한다", async () => {

@@ -75,12 +75,37 @@ describe("production CI release entrypoint", () => {
     assert.match(source, /ubuntu-1-toss-portfolio-lens-release/u);
     assert.match(source, /toss-portfolio-release-preflight\/v1/u);
     assert.match(source, /--resource memory=4g/u);
+    assert.match(source, /minimum_available_disk_kib="15728640"/u);
+    assert.match(source, /check_disk_capacity/u);
+    assert.match(source, /docker_root_directory/u);
     assert.match(source, /harbor-trivy-release\.mjs/u);
     assert.match(source, /deploy-harbor-release\.mjs/u);
     assert.doesNotMatch(source, /CI_RUNNER_TAGS/u);
     assert.doesNotMatch(source, /docker buildx create/u);
     assert.doesNotMatch(source, /awk[^\n]*Driver:[^\n]*exit/u);
     assert.doesNotMatch(source, /fincast-worker|chronos2-worker|nvidia|cuda/iu);
+  });
+
+  it("makes the published runtime depend on the production module smoke check", () => {
+    const dockerfile = readFileSync("Dockerfile", "utf8");
+    const runtimeSmoke = readFileSync("scripts/verify-runtime-modules.mjs", "utf8");
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+    assert.match(dockerfile, /find dist\/server -type f -name '\*\.d\.ts' -delete/u);
+    assert.match(dockerfile, /^RUN npm prune --omit=dev --no-audit --no-fund \\/mu);
+    assert.match(dockerfile, /-name '\*\.d\.mts' -o -name '\*\.d\.cts'/u);
+    assert.match(dockerfile, /apk add --no-cache ca-certificates icu-data-full libstdc\+\+ nodejs/u);
+    assert.match(dockerfile, /process\.versions\.node\.split\("\."\)\[0\].*= "22"/u);
+    assert.doesNotMatch(dockerfile, /^FROM deps AS node-runtime$/mu);
+    assert.doesNotMatch(dockerfile, /binutils|strip --strip-unneeded/u);
+    assert.doesNotMatch(dockerfile, /^COPY --from=node-runtime/mu);
+    assert.match(dockerfile, /^FROM runtime-base AS runtime-verify$/mu);
+    assert.match(dockerfile, /^RUN node scripts\/verify-runtime-modules\.mjs$/mu);
+    assert.match(dockerfile, /^FROM runtime-verify AS runtime$/mu);
+    assert.doesNotMatch(dockerfile, /^FROM runtime-base AS runtime$/mu);
+    for (const dependency of Object.keys(packageJson.dependencies)) {
+      const escaped = dependency.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      assert.match(runtimeSmoke, new RegExp(`["']${escaped}(?:/[^"']*)?["']`, "u"));
+    }
   });
 
   it("wires a separate protected-main preflight without a CI-level Docker config", () => {
@@ -229,6 +254,19 @@ describe("production CI release entrypoint", () => {
     );
   });
 
+  it("rejects release disk capacity below the explicit 15 GiB floor", () => {
+    const result = runSourced(
+      "source_directory=/tmp\n"
+        + "df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev 100 90 1000 90%% /\\n'; }\n"
+        + "docker() { printf '/var/lib/docker\\n'; }\n"
+        + "check_disk_capacity",
+    );
+    assertRejected(
+      result,
+      /stage=disk-capacity reason=less than 15 GiB is available for the release checkout/u,
+    );
+  });
+
   it("accepts a fully collected docker-container inspect result with a running worker", () => {
     const inspect = "Name: toss-portfolio-lens-release\nDriver: docker-container\nStatus: running\n";
     const result = runSourced(
@@ -272,6 +310,9 @@ describe("production CI release entrypoint", () => {
         + "docker_version='28.3.3'\n"
         + "buildx_version='github.com/docker/buildx v0.25.0'\n"
         + "available_kib='4194304'\n"
+        + "source_disk_available_kib='20971520'\n"
+        + "docker_disk_available_kib='18874368'\n"
+        + "docker_root_directory='/var/lib/docker'\n"
         + "write_preflight_artifact",
       {
         arguments: [artifact],
@@ -291,6 +332,7 @@ describe("production CI release entrypoint", () => {
       "runner_id",
       "versions",
       "memory",
+      "disk",
       "stages",
     ]);
     assert.equal(parsed.schema_version, "toss-portfolio-release-preflight/v1");
@@ -298,6 +340,9 @@ describe("production CI release entrypoint", () => {
     assert.equal(parsed.runner_id, 14);
     assert.equal(parsed.versions.docker, "28.3.3");
     assert.equal(parsed.memory.available_kib, 4_194_304);
+    assert.equal(parsed.disk.source_available_kib, 20_971_520);
+    assert.equal(parsed.disk.docker_available_kib, 18_874_368);
+    assert.equal(parsed.disk.docker_root_directory, "/var/lib/docker");
     assert.ok(Object.values(parsed.stages).every((value) => value === true));
     assert.equal(statSync(artifact).mode & 0o777, 0o600);
     assert.doesNotMatch(raw, new RegExp(sentinel, "u"));

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   KisRestClient,
   KisRestError,
@@ -7,6 +7,10 @@ import {
 } from "./kis-rest-client.js";
 
 const NOW = Date.parse("2026-07-21T10:00:30+09:00");
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const config: KisRestClientConfig = {
   appKey: "test-app-key",
@@ -115,6 +119,103 @@ describe("KisRestClient", () => {
     expect(() => new KisRestClient({ ...config, requestIntervalMs: 0 })).toThrow("requestIntervalMs");
     expect(() => new KisRestClient({ ...config, retryBaseMs: -1 })).toThrow("retryBaseMs");
     expect(() => new KisRestClient({ ...config, retryMaxMs: 50 })).toThrow("retryMaxMs");
+  });
+
+  it("응답 본문 파싱이 멈춰도 같은 request timeout으로 중단하고 timer를 정리한다", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () => new Promise<unknown>((_resolve, reject) => {
+          requestSignal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          }, { once: true });
+        }),
+      } as Response;
+    }) as unknown as typeof fetch;
+    const client = new KisRestClient({ ...config, maxAttempts: 1 }, {
+      fetchImpl,
+      sleepImpl: vi.fn().mockResolvedValue(undefined),
+      now: () => NOW,
+    });
+
+    const pending = expect(client.getVolumeRanking({ basisCode: "3" })).rejects.toMatchObject({
+      name: "KisRestError",
+      code: "timeout",
+    });
+    await vi.advanceTimersByTimeAsync(config.timeoutMs);
+
+    await pending;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("Content-Length가 없는 chunked KIS 응답도 4MiB에서 중단한다", async () => {
+    let providerPulls = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/oauth2/tokenP")) {
+        return json({ access_token: "token", expires_in: 86_400 });
+      }
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          providerPulls += 1;
+          controller.enqueue(new Uint8Array(1024 * 1024));
+        },
+      }), { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const client = new KisRestClient({ ...config, maxAttempts: 1 }, {
+      fetchImpl,
+      sleepImpl: vi.fn().mockResolvedValue(undefined),
+      now: () => NOW,
+    });
+
+    await expect(client.getVolumeRanking({ basisCode: "3" })).rejects.toMatchObject({
+      name: "KisRestError",
+      code: "response-too-large",
+      retryable: false,
+    });
+    // WHATWG streams may prefetch one chunk beyond the reader's last read.
+    expect(providerPulls).toBeGreaterThanOrEqual(5);
+    expect(providerPulls).toBeLessThanOrEqual(6);
+  });
+
+  it("oversized KIS Content-Length를 본문 적재 전에 거부한다", async () => {
+    let providerBodyRead = false;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/oauth2/tokenP")) {
+        return json({ access_token: "token", expires_in: 86_400 });
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "content-type": "application/json",
+          "content-length": String(4 * 1024 * 1024 + 1),
+        }),
+        body: {
+          cancel: async () => undefined,
+          getReader() {
+            providerBodyRead = true;
+            throw new Error("body must not be read");
+          },
+        },
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const client = new KisRestClient({ ...config, maxAttempts: 1 }, {
+      fetchImpl,
+      sleepImpl: vi.fn().mockResolvedValue(undefined),
+      now: () => NOW,
+    });
+
+    await expect(client.getVolumeRanking({ basisCode: "3" })).rejects.toMatchObject({
+      code: "response-too-large",
+      retryable: false,
+    });
+    expect(providerBodyRead).toBe(false);
   });
 
   it("coalesces concurrent token requests and sends the documented ranking TR IDs", async () => {
@@ -304,7 +405,7 @@ describe("KisRestClient", () => {
     const client = new KisRestClient(config, { fetchImpl, sleepImpl: async () => {}, now: () => NOW });
 
     const volume = await client.getOverseasVolumeRanking({ exchange: "NAS" });
-    const amount = await client.getOverseasTradingAmountRanking({
+    await client.getOverseasTradingAmountRanking({
       exchange: "NAS", periodCode: "0", volumeRangeCode: "2", minPrice: 5, maxPrice: 500,
     });
     expect(volume.items[0]).toMatchObject({

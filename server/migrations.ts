@@ -334,9 +334,95 @@ async function createIndex(
   index: string,
   table: string,
   expression: string,
+  predicate?: string,
 ): Promise<void> {
   if (!await hasTable(database, table) || await hasIndex(database, index)) return;
-  await database.run(`CREATE INDEX ${index} ON ${table}(${expression})`);
+  await database.run(
+    `CREATE INDEX ${index} ON ${table}(${expression})${predicate ? ` WHERE ${predicate}` : ""}`,
+  );
+}
+
+async function createRunListIndex(database: RelationalDatabase): Promise<void> {
+  await createIndex(
+    database,
+    "idx_portfolio_run_list",
+    "portfolio_backtest_runs",
+    "owner_subject, updated_at DESC, run_id DESC",
+    "deleted_at IS NULL",
+  );
+}
+
+async function createRunSchema(database: RelationalDatabase): Promise<void> {
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_backtest_runs (
+      run_id TEXT PRIMARY KEY,
+      run_kind TEXT NOT NULL,
+      owner_subject TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      data_revision TEXT NOT NULL,
+      engine_version TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress REAL NOT NULL DEFAULT 0,
+      completed_candidates INTEGER NOT NULL DEFAULT 0,
+      total_candidates INTEGER NOT NULL DEFAULT 0,
+      current_validation_window TEXT,
+      input_json TEXT NOT NULL,
+      summary_json TEXT,
+      result_json TEXT,
+      error_json TEXT,
+      warnings_json TEXT NOT NULL,
+      name TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      archived_at BIGINT,
+      deleted_at BIGINT,
+      replay_of TEXT,
+      manifest_json TEXT,
+      created_at BIGINT NOT NULL,
+      started_at BIGINT,
+      finished_at BIGINT,
+      updated_at BIGINT NOT NULL,
+      UNIQUE(owner_subject, run_kind, request_hash, data_revision)
+    )
+  `);
+  // Historical run-management migrations could legitimately have been
+  // recorded as no-ops before the run table existed. Keep this latest schema
+  // migration self-contained for those databases while preserving every row.
+  await migrateRunManagement(database);
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS portfolio_run_events (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      event_json TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    )
+  `);
+  await createIndex(
+    database,
+    "idx_portfolio_run_status",
+    "portfolio_backtest_runs",
+    "owner_subject, status, updated_at",
+  );
+  await createIndex(
+    database,
+    "idx_portfolio_run_events",
+    "portfolio_run_events",
+    "run_id, created_at",
+  );
+  await createRunListIndex(database);
+}
+
+async function createOrderHistoryIndex(database: RelationalDatabase): Promise<void> {
+  if (!await hasTable(database, "portfolio_orders")) return;
+  await createIndex(
+    database,
+    "idx_orders_account_effective_time",
+    "portfolio_orders",
+    "account_id, (COALESCE(NULLIF(filled_at, ''), ordered_at)), order_id",
+  );
+  // The legacy index cannot satisfy the effective-time ORDER BY and has no
+  // other reader, so replace it instead of increasing order-write fan-out.
+  await database.run("DROP INDEX IF EXISTS idx_orders_account_filled_at");
 }
 
 async function migrateRunManagement(database: RelationalDatabase): Promise<void> {
@@ -399,6 +485,42 @@ async function createPresetTables(database: RelationalDatabase): Promise<void> {
   await database.run(`
     CREATE INDEX IF NOT EXISTS idx_portfolio_preset_versions
     ON portfolio_preset_versions(preset_id, revision)
+  `);
+}
+
+async function createMcpAuditSchema(database: RelationalDatabase): Promise<void> {
+  await database.run(`
+    CREATE TABLE IF NOT EXISTS mcp_tool_audit_log (
+      audit_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      protocol_request_id TEXT,
+      session_hash TEXT,
+      tool_name TEXT NOT NULL,
+      subject_hash TEXT NOT NULL,
+      auth_mode TEXT NOT NULL CHECK (auth_mode IN ('oauth', 'none')),
+      status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'insufficient_scope')),
+      error_code TEXT,
+      run_id TEXT,
+      started_at BIGINT NOT NULL,
+      finished_at BIGINT NOT NULL,
+      duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0)
+    )
+  `);
+  await addMissingColumns(database, "mcp_tool_audit_log", {
+    protocol_request_id: "TEXT",
+    session_hash: "TEXT",
+  });
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_started
+    ON mcp_tool_audit_log(started_at, tool_name)
+  `);
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_tool_started
+    ON mcp_tool_audit_log(tool_name, started_at DESC)
+  `);
+  await database.run(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_subject
+    ON mcp_tool_audit_log(subject_hash, started_at)
   `);
 }
 
@@ -667,6 +789,57 @@ async function createPortfolioBaseSchema(database: RelationalDatabase): Promise<
   for (const statement of statements) await database.run(statement);
 }
 
+export const LEGACY_COMMON_CANDLE_BACKFILL_MIGRATION_ID = "20260823_013_legacy_common_candle_backfill";
+const ORDER_HISTORY_INDEX_MIGRATION_ID = "20260824_015_order_history_index";
+export const RUN_SCHEMA_MIGRATION_ID = "20260824_017_run_schema";
+
+// Stable, project-scoped PostgreSQL advisory lock key. Holding the transaction
+// lock across the whole ledger pass prevents two application instances from
+// observing and applying the same missing migration concurrently.
+const MIGRATION_ADVISORY_LOCK_KEY = [1_884_313_412, 1_812_858_476] as const;
+
+async function backfillLegacyCommonCandles(database: RelationalDatabase): Promise<void> {
+  await database.run(`
+    INSERT INTO portfolio_market_candles (
+      source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+      open_price, high_price, low_price, close_price, volume, updated_at
+    )
+    SELECT 'stock', instruments.symbol, '1d', 0, prices.price_date, prices.timestamp, prices.currency,
+           COALESCE(prices.open_price, prices.close_price),
+           COALESCE(prices.high_price, prices.close_price),
+           COALESCE(prices.low_price, prices.close_price),
+           prices.close_price, NULL, prices.updated_at
+    FROM portfolio_daily_prices AS prices
+    JOIN portfolio_instruments AS instruments ON instruments.instrument_key = prices.instrument_key
+    ON CONFLICT DO NOTHING
+  `);
+
+  await database.run(`
+    INSERT INTO portfolio_market_candles (
+      source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+      open_price, high_price, low_price, close_price, volume, updated_at
+    )
+    SELECT 'stock', SPLIT_PART(prices.instrument_key, ':', 2), '1d', 1,
+           prices.price_date, prices.timestamp, prices.currency,
+           prices.close_price, prices.close_price, prices.close_price, prices.close_price, NULL, prices.updated_at
+    FROM portfolio_backtest_prices AS prices
+    ON CONFLICT DO NOTHING
+  `);
+
+  await database.run(`
+    INSERT INTO portfolio_market_candles (
+      source_kind, symbol, candle_interval, adjusted, price_date, timestamp, currency,
+      open_price, high_price, low_price, close_price, volume, updated_at
+    )
+    SELECT CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 'indicator' ELSE 'stock' END,
+           CASE benchmark_key WHEN 'NASDAQ100' THEN 'QQQ' WHEN 'SP500' THEN 'SPY' ELSE benchmark_key END,
+           '1d', CASE WHEN benchmark_key IN ('KOSPI', 'KOSDAQ') THEN 0 ELSE 1 END,
+           price_date, timestamp, '', close_price, close_price, close_price, close_price, NULL, updated_at
+    FROM portfolio_benchmark_prices
+    ON CONFLICT DO NOTHING
+  `);
+}
+
 const migrations: readonly Migration[] = [
   {
     id: "20260731_011_postgres_base_schema",
@@ -728,16 +901,45 @@ const migrations: readonly Migration[] = [
     signature: LATEST_CONTRACT_CUTOVER_SIGNATURE,
     up: migrateLatestContracts,
   },
+  {
+    id: LEGACY_COMMON_CANDLE_BACKFILL_MIGRATION_ID,
+    signature: "legacy-common-candles-v1;daily-prices:unadjusted;backtest-prices:adjusted;benchmarks:canonical-symbols",
+    up: backfillLegacyCommonCandles,
+  },
+  {
+    id: "20260824_014_run_list_index",
+    signature: "portfolio_backtest_runs:list-v2;owner-updated-run;live-partial",
+    up: createRunListIndex,
+  },
+  {
+    id: ORDER_HISTORY_INDEX_MIGRATION_ID,
+    signature: "portfolio_orders:list-v2;account-effective-time-order;replace-filled-at-index",
+    up: createOrderHistoryIndex,
+  },
+  {
+    id: "20260824_016_mcp_audit_schema",
+    signature: "mcp-tool-audit-log-v2;protocol-request-id;session-hash;started,tool-started,subject-indexes",
+    up: createMcpAuditSchema,
+  },
+  {
+    id: RUN_SCHEMA_MIGRATION_ID,
+    signature: "portfolio-backtest-runs-v1;portfolio-run-events-v1;run-list,status,event-indexes",
+    up: createRunSchema,
+  },
 ];
 
 export async function applyPortfolioMigrations(
   database: RelationalDatabase,
   now = Date.now(),
 ): Promise<AppliedMigration[]> {
-  await createLedger(database);
-  for (const migration of migrations) {
-    const expectedChecksum = checksum(migration);
-    await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
+    await transaction.query(
+      "SELECT pg_advisory_xact_lock(?, ?)",
+      [...MIGRATION_ADVISORY_LOCK_KEY],
+    );
+    await createLedger(transaction);
+    for (const migration of migrations) {
+      const expectedChecksum = checksum(migration);
       const [applied] = await transaction.query<MigrationRow>(
         "SELECT migration_id, checksum, applied_at FROM portfolio_schema_migrations WHERE migration_id = ?",
         [migration.id],
@@ -746,7 +948,7 @@ export async function applyPortfolioMigrations(
         if (applied.checksum !== expectedChecksum) {
           throw new Error(`DB migration checksum이 일치하지 않습니다: ${migration.id}`);
         }
-        return;
+        continue;
       }
       await migration.up(transaction);
       await transaction.run(`
@@ -754,9 +956,9 @@ export async function applyPortfolioMigrations(
         VALUES (?, ?, ?)
         ON CONFLICT(migration_id) DO NOTHING
       `, [migration.id, expectedChecksum, now]);
-    });
-  }
-  return listAppliedMigrations(database);
+    }
+    return listAppliedMigrations(transaction);
+  });
 }
 
 export async function listAppliedMigrations(database: RelationalDatabase): Promise<AppliedMigration[]> {

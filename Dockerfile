@@ -15,6 +15,7 @@ COPY test-support ./test-support
 COPY contracts ./contracts
 COPY public ./public
 COPY docs/mcp-chatgpt.md ./docs/mcp-chatgpt.md
+COPY scripts/client-build.mjs ./scripts/client-build.mjs
 COPY scripts/run-vitest-batches.mjs ./scripts/run-vitest-batches.mjs
 COPY scripts/verify-runtime-modules.mjs ./scripts/verify-runtime-modules.mjs
 
@@ -23,12 +24,14 @@ RUN npm run typecheck
 RUN npm test
 
 FROM source AS build
-RUN npm run build
+RUN npm run build \
+    && find dist/server -type f -name '*.d.ts' -delete
 
 FROM deps AS prod-deps
-RUN npm prune --omit=dev \
+RUN npm prune --omit=dev --no-audit --no-fund \
     && find node_modules -type f \
-      \( -name '*.map' -o -name '*.ts' -o -name '*.d.ts' -o -name '*.md' \) \
+      \( -name '*.map' -o -name '*.ts' -o -name '*.d.ts' \
+         -o -name '*.d.mts' -o -name '*.d.cts' -o -name '*.md' \) \
       -delete \
     && find node_modules -type d \
       \( -name test -o -name tests -o -name docs -o -name examples \
@@ -41,12 +44,12 @@ ARG APP_GIT_SHA=unknown
 LABEL org.opencontainers.image.revision="${APP_GIT_SHA}"
 ENV NODE_ENV=production
 WORKDIR /app
-RUN apk add --no-cache ca-certificates libstdc++ \
+RUN apk add --no-cache ca-certificates icu-data-full libstdc++ nodejs \
+    && test "$(node -p 'process.versions.node.split(".")[0]')" = "22" \
     && addgroup -g 10001 -S portfolio \
     && adduser -u 10001 -S portfolio -G portfolio \
     && mkdir -p /app/data /app/run \
     && chown portfolio:portfolio /app/data /app/run
-COPY --from=deps /usr/local/bin/node /usr/local/bin/node
 COPY --from=prod-deps --chown=portfolio:portfolio /app/package.json ./package.json
 COPY --from=prod-deps --chown=portfolio:portfolio /app/node_modules ./node_modules
 COPY --from=build --chown=portfolio:portfolio /app/dist ./dist
@@ -56,6 +59,6 @@ USER portfolio
 FROM runtime-base AS runtime-verify
 RUN node scripts/verify-runtime-modules.mjs
 
-FROM runtime-base AS runtime
+FROM runtime-verify AS runtime
 EXPOSE 3200
 CMD ["node", "dist/server/index.js"]

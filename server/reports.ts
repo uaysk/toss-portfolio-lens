@@ -204,4 +204,9 @@ export class PortfolioReportService {
     const value = await this.storage.get(id);
     return value === undefined ? undefined : validateStoredReport(value, id);
   }
+
+  async delete(id: string): Promise<void> {
+    if (!isReportId(id)) return;
+    await this.storage.delete(id);
+  }
 }

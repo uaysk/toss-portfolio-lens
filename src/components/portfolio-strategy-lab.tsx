@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, Ban, FlaskConical, LoaderCircle, Play, Plus, Trash2 } from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import Ban from "lucide-react/dist/esm/icons/ban.js";
+import FlaskConical from "lucide-react/dist/esm/icons/flask-conical.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,8 +19,7 @@ import { cancelAdvancedAnalysis, loadAdvancedArtifact, runAdvancedAnalysis, type
 import { normalizedBacktestWeights, parseNumberList, parseSymbolList } from "@/lib/backtest-config";
 import { CHART_COLORS, chartSeriesColor, chartSeriesDash, chartTooltipStyle } from "@/lib/chart-theme";
 import { formatMoney, formatPercent } from "@/lib/format";
-import { stockColor } from "@/lib/stock-appearance";
-import { parseFactorDraft } from "@/lib/research-visualization";
+import { downsampleRows, parseFactorDraft } from "@/lib/research-visualization";
 import {
   buildExposureAnalysisRequest,
   buildMonteCarloRequest,
@@ -265,28 +270,6 @@ function ScenarioResults({ result }: { result: unknown }) {
   );
 }
 
-function OptimizationResults({ result, objective, theme }: { result: unknown; objective: string; theme: Theme }) {
-  const data = record(result);
-  const best = record(record(data.bestByObjective)[objective] ?? data.best);
-  const metrics = record(best.metrics);
-  const weights = Object.entries(record(best.weights)).map(([symbol, value]) => ({ symbol, value: numeric(value) ?? 0 })).sort((left, right) => right.value - left.value);
-  return (
-    <div className="grid gap-3 xl:grid-cols-[0.9fr_1.2fr]">
-      <div className="rounded-[20px] bg-card p-5">
-        <p className="text-[10px] font-black tracking-[0.12em] text-muted-foreground">BEST CANDIDATE · {String(data.candidateCount ?? 0)}개 평가</p>
-        <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-          {[['CAGR', percentDecimal(metrics.cagr)], ['누적 수익률', percentDecimal(metrics.totalReturn)], ['변동성', percentDecimal(metrics.volatility)], ['MDD', percentDecimal(metrics.maxDrawdown)], ['Sharpe', ratio(metrics.sharpe)], ['CVaR', percentDecimal(metrics.cvar)], ['강건 점수', ratio(metrics.robustScore)]].map(([label, value]) => <div key={label} className="rounded-2xl bg-secondary p-3"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-1 font-black">{value}</p></div>)}
-        </div>
-        <p className="mt-4 text-[10px] text-muted-foreground">Pareto frontier {(numeric(data.paretoCount) ?? array(data.paretoFrontier).length).toLocaleString("ko-KR")}개 · seed {String(data.seed ?? "-")}</p>
-      </div>
-      <div className="rounded-[20px] bg-card p-5">
-        <p className="text-xs font-black">추천 비중</p>
-        <div className="mt-4 space-y-3">{weights.map((item) => <div key={item.symbol}><div className="flex justify-between gap-3 text-xs"><span className="flex items-center gap-2 font-black"><StockSwatch symbol={item.symbol} theme={theme} />{item.symbol}</span><span>{formatPercent(item.value * 100)}</span></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full" style={{ width: `${item.value * 100}%`, backgroundColor: stockColor(item.symbol, theme) }} /></div></div>)}</div>
-      </div>
-    </div>
-  );
-}
-
 function WalkForwardResults({ result, run, onUnauthorized }: { result: unknown; run?: AdvancedRunSnapshot; onUnauthorized: () => void }) {
   const [loadedResult, setLoadedResult] = useState<unknown>();
   const [loading, setLoading] = useState(false);
@@ -311,7 +294,7 @@ function WalkForwardResults({ result, run, onUnauthorized }: { result: unknown; 
         {[['검증 fold', String(summary.foldCount ?? summary.fold_count ?? allFolds.length)], ['평균 OOS', percentDecimal(summary.averageTotalReturn)], ['최악 OOS', percentDecimal(summary.worstTotalReturn)], ['최고 OOS', percentDecimal(summary.bestTotalReturn)]].map(([label, value]) => <div key={label} className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-2 text-sm font-black">{value}</p></div>)}
       </div>
       {data.foldsExternalized && loadedResult === undefined ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">대용량 fold 상세는 별도 artifact로 보관했습니다. 화면에는 최대 500개 fold를 표시합니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadFolds()} disabled={loading}>{loading ? <LoaderCircle className="animate-spin" /> : <Activity />}Walk-forward fold 불러오기</Button></div> : null}
-      {error ? <p className="text-xs text-rose-500">{error}</p> : null}
+      {error ? <p className="text-xs text-rose-700 dark:text-rose-400">{error}</p> : null}
       {folds.length ? <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[700px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">Fold</th><th className="p-3">학습 구간</th><th className="p-3">검증 구간</th><th className="p-3">OOS 누적 수익</th><th className="p-3">OOS MDD</th><th className="p-3">회전율</th></tr></thead><tbody>{folds.map((fold, index) => { const oos = record(fold.oos); return <tr key={index} className="border-t border-border"><td className="p-3 font-black">{index + 1}</td><td className="p-3">{String(fold.trainStart ?? fold.trainStartDate ?? fold.train_start_date ?? "-")}~{String(fold.trainEnd ?? fold.trainEndDate ?? fold.train_end_date ?? "-")}</td><td className="p-3">{String(fold.testStart ?? fold.testStartDate ?? fold.test_start_date ?? "-")}~{String(fold.testEnd ?? fold.testEndDate ?? fold.test_end_date ?? "-")}</td><td className="p-3">{percentDecimal(oos.totalReturn)}</td><td className="p-3">{percentDecimal(oos.maxDrawdown)}</td><td className="p-3">{percentDecimal(oos.turnover)}</td></tr>; })}</tbody></table>{allFolds.length > folds.length ? <p className="p-3 text-[10px] text-muted-foreground">전체 {allFolds.length.toLocaleString("ko-KR")}개 중 앞 500개를 표시합니다.</p> : null}</div> : null}
     </div>
   );
@@ -326,27 +309,25 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
   const [loadedPercentiles, setLoadedPercentiles] = useState<unknown[]>();
   const [loadingPercentiles, setLoadingPercentiles] = useState(false);
   const [percentileError, setPercentileError] = useState("");
-  const rawPaths = (loadedPercentiles ?? array(data.percentilePaths)).map(record);
-  const paths = rawPaths.map((path) => {
-    const values = array(path.points);
-    if (values.length <= 500) return path;
-    const stride = Math.ceil((values.length - 1) / 499);
-    const points = values.filter((_, index) => index % stride === 0);
-    const last = values.at(-1);
-    if (last !== undefined && points.at(-1) !== last) points.push(last);
-    return { ...path, points };
-  });
-  const points = new Map<number, Record<string, number>>();
-  for (const path of paths) {
-    const quantile = numeric(path.quantile) ?? 0;
-    for (const pointValue of array(path.points).map(record)) {
-      const step = numeric(pointValue.step) ?? 0;
-      const point = points.get(step) ?? { step };
-      point[`q${Math.round(quantile * 100)}`] = numeric(pointValue.balance) ?? 0;
-      points.set(step, point);
+  const paths = useMemo(() => (
+    (loadedPercentiles ?? array(data.percentilePaths)).map((pathValue): Record<string, unknown> => {
+      const path = record(pathValue);
+      return { ...path, points: downsampleRows(array(path.points), 500) };
+    })
+  ), [data.percentilePaths, loadedPercentiles]);
+  const chart = useMemo(() => {
+    const points = new Map<number, Record<string, number>>();
+    for (const path of paths) {
+      const quantile = numeric(path.quantile) ?? 0;
+      for (const pointValue of array(path.points).map(record)) {
+        const step = numeric(pointValue.step) ?? 0;
+        const point = points.get(step) ?? { step };
+        point[`q${Math.round(quantile * 100)}`] = numeric(pointValue.balance) ?? 0;
+        points.set(step, point);
+      }
     }
-  }
-  const chart = Array.from(points.values()).sort((left, right) => left.step - right.step);
+    return Array.from(points.values()).sort((left, right) => left.step - right.step);
+  }, [paths]);
   const percentileValues = array(terminal.percentiles).map(record);
   const [loadedSamples, setLoadedSamples] = useState<unknown[]>();
   const [loadingSamples, setLoadingSamples] = useState(false);
@@ -357,18 +338,25 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
     setLoadedSamples(undefined);
     setSampleError("");
   }, [run?.runId, result]);
-  const samplePaths = (loadedSamples ?? array(data.samplePaths)).map(record).slice(0, 10);
-  const samplePoints = new Map<number, Record<string, number>>();
-  for (const path of samplePaths) {
-    const pathIndex = numeric(path.pathIndex) ?? 0;
-    for (const pointValue of array(path.points).map(record)) {
-      const step = numeric(pointValue.step) ?? 0;
-      const point = samplePoints.get(step) ?? { step };
-      point[`p${pathIndex}`] = numeric(pointValue.balance) ?? 0;
-      samplePoints.set(step, point);
+  const samplePaths = useMemo(() => (
+    (loadedSamples ?? array(data.samplePaths)).slice(0, 10).map((pathValue): Record<string, unknown> => {
+      const path = record(pathValue);
+      return { ...path, points: downsampleRows(array(path.points), 500) };
+    })
+  ), [data.samplePaths, loadedSamples]);
+  const sampleChart = useMemo(() => {
+    const points = new Map<number, Record<string, number>>();
+    for (const path of samplePaths) {
+      const pathIndex = numeric(path.pathIndex) ?? 0;
+      for (const pointValue of array(path.points).map(record)) {
+        const step = numeric(pointValue.step) ?? 0;
+        const point = points.get(step) ?? { step };
+        point[`p${pathIndex}`] = numeric(pointValue.balance) ?? 0;
+        points.set(step, point);
+      }
     }
-  }
-  const sampleChart = Array.from(samplePoints.values()).sort((left, right) => left.step - right.step);
+    return Array.from(points.values()).sort((left, right) => left.step - right.step);
+  }, [samplePaths]);
   const loadSamples = async () => {
     if (!run?.runId) return;
     setLoadingSamples(true);
@@ -396,11 +384,11 @@ function MonteCarloResults({ result, run, onUnauthorized }: { result: unknown; r
         <div className="rounded-[18px] bg-card p-4"><p className="text-[10px] text-muted-foreground">목표 달성 확률</p><p className="mt-2 text-sm font-black">{probabilities.terminalGoalProbabilityPercent === undefined ? "목표 없음" : percentValue(probabilities.terminalGoalProbabilityPercent)}</p></div>
       </div>
       {data.percentilePathsExternalized && !loadedPercentiles ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">분위수 경로는 대용량 응답을 피하기 위해 별도 artifact로 보관했습니다. 불러온 뒤 경로당 최대 500점으로 표시합니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadPercentiles()} disabled={loadingPercentiles}>{loadingPercentiles ? <LoaderCircle className="animate-spin" /> : <Activity />}분위수 경로 불러오기</Button></div> : null}
-      {percentileError ? <p className="text-xs text-rose-500">{percentileError}</p> : null}
+      {percentileError ? <p className="text-xs text-rose-700 dark:text-rose-400">{percentileError}</p> : null}
       {chart.length ? <div className="h-[320px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={chart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={chartTooltipStyle} />{paths.map((path, index) => { const q = Math.round((numeric(path.quantile) ?? 0) * 100); return <Line key={q} type="monotone" dataKey={`q${q}`} name={`${q}% 경로`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={q === 50 ? 3 : 1.5} dot={false} />; })}</LineChart></ResponsiveContainer></div> : null}
       <div className="flex flex-wrap gap-2">{percentileValues.map((item) => <span key={String(item.quantile)} className="rounded-full bg-card px-3 py-2 text-[10px] font-black">Q{Math.round((numeric(item.quantile) ?? 0) * 100)} {formatMoney(numeric(item.value) ?? 0, "KRW")}</span>)}</div>
       {data.samplePathsExternalized && !loadedSamples ? <div className="rounded-[18px] bg-card p-4"><p className="text-xs text-muted-foreground">표본 경로는 응답 정지를 막기 위해 별도 artifact로 보관했습니다.</p><Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => void loadSamples()} disabled={loadingSamples}>{loadingSamples ? <LoaderCircle className="animate-spin" /> : <Activity />}표본 경로 불러오기</Button></div> : null}
-      {sampleError ? <p className="text-xs text-rose-500">{sampleError}</p> : null}
+      {sampleError ? <p className="text-xs text-rose-700 dark:text-rose-400">{sampleError}</p> : null}
       {sampleChart.length ? <div><p className="mb-2 text-xs font-black">표본 경로 · 최대 10개 표시</p><div className="h-[280px] rounded-[20px] bg-card p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={sampleChart}><CartesianGrid vertical={false} stroke="hsl(var(--chart-grid))" /><XAxis dataKey="step" tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><YAxis tickFormatter={(value) => formatMoney(Number(value), "KRW", true)} width={60} tickLine={false} axisLine={false} tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} /><Tooltip formatter={(value) => formatMoney(Number(value), "KRW")} contentStyle={chartTooltipStyle} />{samplePaths.map((path, index) => { const id = numeric(path.pathIndex) ?? index; return <Line key={id} type="monotone" dataKey={`p${id}`} name={`표본 ${id}`} stroke={chartSeriesColor(index)} strokeDasharray={chartSeriesDash(index)} strokeWidth={1.3} dot={false} />; })}</LineChart></ResponsiveContainer></div></div> : null}
     </div>
   );
@@ -533,7 +521,7 @@ export function PortfolioStrategyLab({
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState("");
   const controller = useRef<AbortController | undefined>(undefined);
-  const analysisInputFingerprint = JSON.stringify({
+  const analysisInputFingerprint = useMemo(() => JSON.stringify({
     baseConfig,
     mode,
     sensitivityMode,
@@ -613,7 +601,87 @@ export function PortfolioStrategyLab({
     calibrationOrigins,
     exposureLookThrough,
     exposureMetadata,
-  });
+  }), [
+    additionalWalkForwardSeeds,
+    baseConfig,
+    blockLength,
+    calibrationOrigins,
+    candidateBudget,
+    cashAmounts,
+    cashFrequencies,
+    cashTimings,
+    covarianceEstimator,
+    excludedAssets,
+    exposureLookThrough,
+    exposureMetadata,
+    foldCandidateBudget,
+    goalAmount,
+    groupConstraints,
+    horizonDays,
+    inflationAnnualPercent,
+    ledgerQuantityMode,
+    ledgerValidationBudget,
+    maxAssets,
+    maxDrawdownPercent,
+    maxTurnoverPercent,
+    maxWeightPercent,
+    minWeightPercent,
+    mode,
+    monteCarloCashFlowFrequencyDays,
+    monteCarloCashWeightPercent,
+    monteCarloCashYieldPercent,
+    monteCarloLotSizes,
+    monteCarloMethod,
+    monteCarloPeriodicCashFlow,
+    monteCarloRebalance,
+    monteCarloThreshold,
+    monteCarloTransactionCostBps,
+    objective,
+    offsetDays,
+    optimizationAlgorithm,
+    optimizationBenchmark,
+    outlookCostShockBps,
+    outlookOptimizationEnabled,
+    outlookRebalanceModes,
+    outlookRegimeLookback,
+    outlookSensitivityEnabled,
+    outlookZeroCashFlow,
+    pathCount,
+    perAssetMaximums,
+    perAssetMinimums,
+    quantiles,
+    regimePolicyEnabled,
+    regimePolicyMethod,
+    requiredAssets,
+    robustScoreWeightsDraft,
+    robustValidationEmbargo,
+    robustValidationEnabled,
+    robustValidationFoldCount,
+    robustValidationGap,
+    robustValidationMode,
+    robustValidationStep,
+    robustValidationTestPercent,
+    robustValidationTestWindow,
+    robustValidationTrainWindow,
+    robustValidationWindowMode,
+    samplePathCount,
+    seed,
+    selectedBaselines,
+    selectedRebalances,
+    selectedRuns,
+    sensitivityMode,
+    sensitivityThreshold,
+    step,
+    stressScenarios,
+    targetReturnPercent,
+    targetSymbol,
+    targetWeights,
+    testWindow,
+    trainWindow,
+    walkForwardEmbargo,
+    walkForwardGap,
+    walkForwardMode,
+  ]);
 
   useEffect(() => () => controller.current?.abort(), []);
   useEffect(() => {
@@ -681,10 +749,10 @@ export function PortfolioStrategyLab({
       && Number.isFinite(minimum) && Number.isFinite(maximum)
       && minimum >= 0 && maximum <= 100 && minimum <= maximum;
   });
-  const parsedConstituents = Object.fromEntries(baseConfig.assets.map((asset) => [
+  const parsedConstituents = useMemo(() => Object.fromEntries(baseConfig.assets.map((asset) => [
     asset.symbol,
     parseExposureConstituentsDraft(exposureMetadata[asset.symbol]?.constituents ?? ""),
-  ]));
+  ])), [baseConfig.assets, exposureMetadata]);
 
   const optimizationBody = useMemo(() => buildOptimizationRequest(baseConfig, {
     objective,
@@ -965,7 +1033,7 @@ export function PortfolioStrategyLab({
       <Field label="Ledger 재검증 후보" help="Screening 상위·Pareto 후보를 실제 거래 ledger로 다시 계산합니다."><Input aria-label="Ledger 재검증 후보 예산" type="number" min={1} max={128} value={ledgerValidationBudget} onChange={(event) => setLedgerValidationBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field>
       <Field label="Ledger 수량 방식" help="Outlook 기준 ledger와 Monte Carlo에도 같은 수량 계약을 적용합니다."><Select value={ledgerQuantityMode} onValueChange={(value) => setLedgerQuantityMode(value as BacktestQuantityMode)}><SelectTrigger aria-label="Ledger 수량 방식" className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fractional">소수 수량</SelectItem><SelectItem value="whole">정수·lot 수량</SelectItem></SelectContent></Select></Field>
     </div>
-    <Field label="강건 점수 가중치 · JSON" help={'빈 객체는 엔진 기본값을 사용합니다. 예: {"sharpe":0.4,"oosAverageSharpe":0.6}'}><Input aria-label="강건 점수 가중치 JSON" value={robustScoreWeightsDraft} onChange={(event) => setRobustScoreWeightsDraft(event.target.value)} className="bg-secondary font-mono text-[11px]" />{robustScoreWeights.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-500">{robustScoreWeights.error}</span> : null}</Field>
+    <Field label="강건 점수 가중치 · JSON" help={'빈 객체는 엔진 기본값을 사용합니다. 예: {"sharpe":0.4,"oosAverageSharpe":0.6}'}><Input aria-label="강건 점수 가중치 JSON" value={robustScoreWeightsDraft} onChange={(event) => setRobustScoreWeightsDraft(event.target.value)} className="bg-secondary font-mono text-[11px]" />{robustScoreWeights.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-700 dark:text-rose-400">{robustScoreWeights.error}</span> : null}</Field>
     <div className="rounded-[18px] bg-card p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div><p className="text-[11px] font-bold text-muted-foreground">후보별 IS/OOS 강건 검증</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">후보·공분산은 최초 학습 구간에서만 적합하고 이후 시간순 OOS fold의 점수·coverage를 합산합니다. fold마다 재최적화하려면 Walk-forward 실행을 사용하세요. 기존 단일 holdout도 선택할 수 있습니다.</p></div>
@@ -986,13 +1054,13 @@ export function PortfolioStrategyLab({
           <Field label="Embargo"><Input aria-label="강건 검증 embargo" type="number" min={0} max={1000} value={robustValidationEmbargo} onChange={(event) => setRobustValidationEmbargo(Number(event.target.value))} className="bg-secondary text-right" /></Field>
         </>}
       </div> : null}
-      {!robustValidationReady ? <p role="alert" className="mt-3 text-[10px] text-rose-500">강건 검증의 기간·fold·gap·embargo 범위를 확인하세요.</p> : null}
+      {!robustValidationReady ? <p role="alert" className="mt-3 text-[10px] text-rose-700 dark:text-rose-400">강건 검증의 기간·fold·gap·embargo 범위를 확인하세요.</p> : null}
     </div>
     <div className="grid gap-3 lg:grid-cols-[1.4fr_0.8fr]">
       <div className="rounded-[18px] bg-card p-4" role="group" aria-label="기준 후보 선택">
         <p className="text-[11px] font-bold text-muted-foreground">기준 후보 · 최소 1개</p>
         <div className="mt-3 flex flex-wrap gap-2">{optimizerBaselines.map((baseline) => <ToggleChoice key={baseline} active={selectedBaselines.includes(baseline)} onClick={() => setSelectedBaselines((current) => current.includes(baseline) ? current.filter((item) => item !== baseline) : [...current, baseline])}>{baselineLabels[baseline]}</ToggleChoice>)}</div>
-        {!selectedBaselines.length ? <p role="alert" className="mt-3 text-[10px] text-rose-500">Screening 기준 후보를 하나 이상 선택하세요.</p> : null}
+        {!selectedBaselines.length ? <p role="alert" className="mt-3 text-[10px] text-rose-700 dark:text-rose-400">Screening 기준 후보를 하나 이상 선택하세요.</p> : null}
       </div>
       <div className="rounded-[18px] bg-card p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-[11px] font-bold text-muted-foreground">시장 국면 순차 정책</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">과거 정보만으로 상태별 기준 비중을 선택하고 ledger로 재검증합니다.</p></div><ToggleChoice active={regimePolicyEnabled} onClick={() => setRegimePolicyEnabled((current) => !current)}>{regimePolicyEnabled ? "활성" : "비활성"}</ToggleChoice></div>
@@ -1002,14 +1070,14 @@ export function PortfolioStrategyLab({
     <div className="rounded-[18px] bg-card p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-[11px] font-bold text-muted-foreground">그룹 비중 제약</p><p className="mt-1 text-[10px] text-muted-foreground">아래 종목별 metadata의 그룹 합산 비중에 최소·최대 제약을 적용합니다.</p></div><Button type="button" variant="secondary" size="sm" onClick={() => setGroupConstraints((current) => [...current, { id: Math.max(0, ...current.map((item) => item.id)) + 1, dimension: "sector", group: "", minWeightPercent: "0", maxWeightPercent: "100" }])} disabled={groupConstraints.length >= 100}><Plus />제약 추가</Button></div>
       {groupConstraints.length ? <div className="mt-3 space-y-2">{groupConstraints.map((constraint) => <div key={constraint.id} className="grid gap-2 rounded-2xl bg-secondary p-3 sm:grid-cols-[1fr_1.2fr_0.7fr_0.7fr_auto]"><Select value={constraint.dimension} onValueChange={(value) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, dimension: value as AssetGroupDimension } : item))}><SelectTrigger aria-label={`그룹 제약 ${constraint.id} 차원`} className="w-full bg-card"><SelectValue /></SelectTrigger><SelectContent>{groupDimensionOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select><Input aria-label={`그룹 제약 ${constraint.id} 이름`} value={constraint.group} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, group: event.target.value } : item))} placeholder="그룹 이름" maxLength={80} className="bg-card" /><Input aria-label={`그룹 제약 ${constraint.id} 최소 비중`} type="number" min={0} max={100} value={constraint.minWeightPercent} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, minWeightPercent: event.target.value } : item))} placeholder="최소 %" className="bg-card text-right" /><Input aria-label={`그룹 제약 ${constraint.id} 최대 비중`} type="number" min={0} max={100} value={constraint.maxWeightPercent} onChange={(event) => setGroupConstraints((current) => current.map((item) => item.id === constraint.id ? { ...item, maxWeightPercent: event.target.value } : item))} placeholder="최대 %" className="bg-card text-right" /><Button type="button" variant="ghost" size="icon" aria-label={`그룹 제약 ${constraint.id} 삭제`} onClick={() => setGroupConstraints((current) => current.filter((item) => item.id !== constraint.id))}><Trash2 /></Button></div>)}</div> : <p className="mt-3 text-[10px] text-muted-foreground">제약 없음</p>}
-      {!groupConstraintsReady ? <p role="alert" className="mt-3 text-[10px] text-rose-500">그룹 이름과 0~100% 범위의 최소·최대 비중을 확인하세요.</p> : null}
+      {!groupConstraintsReady ? <p role="alert" className="mt-3 text-[10px] text-rose-700 dark:text-rose-400">그룹 이름과 0~100% 범위의 최소·최대 비중을 확인하세요.</p> : null}
     </div>
   </div>;
 
   const assetGroupControlsPanel = <div className="overflow-x-auto rounded-[18px] bg-card p-3">
     <p className="p-3 text-[11px] font-bold text-muted-foreground">종목별 그룹 metadata · 빈 값은 제약 계산에서 미지정</p>
     <table className="w-full min-w-[980px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">Sector</th><th className="p-3">Industry</th><th className="p-3">Country</th><th className="p-3">Currency</th><th className="p-3">Asset type</th></tr></thead><tbody>{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown" as const, factors: "", constituents: "" }; return <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black">{asset.symbol}</td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 sector`} maxLength={80} value={metadata.sector} onChange={(event) => updateExposure(asset.symbol, { sector: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 industry`} maxLength={80} value={metadata.industry} onChange={(event) => updateExposure(asset.symbol, { industry: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 country`} maxLength={80} value={metadata.country} onChange={(event) => updateExposure(asset.symbol, { country: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 currency`} maxLength={3} value={metadata.currency} onChange={(event) => updateExposure(asset.symbol, { currency: event.target.value.toUpperCase() })} placeholder="USD" className="h-10 bg-secondary uppercase" /></td><td className="p-2"><Input aria-label={`${asset.symbol} 최적화 asset type`} maxLength={80} value={metadata.assetType} onChange={(event) => updateExposure(asset.symbol, { assetType: event.target.value })} placeholder="미지정" className="h-10 bg-secondary" /></td></tr>; })}</tbody></table>
-    {!assetGroupMetadataReady ? <p role="alert" className="p-3 text-[10px] text-rose-500">입력한 통화는 3자리 코드, 국가는 2자 이상이어야 하며 metadata는 80자 이하여야 합니다.</p> : null}
+    {!assetGroupMetadataReady ? <p role="alert" className="p-3 text-[10px] text-rose-700 dark:text-rose-400">입력한 통화는 3자리 코드, 국가는 2자 이상이어야 하며 metadata는 80자 이하여야 합니다.</p> : null}
   </div>;
 
   const walkForwardControlsPanel = <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -1053,9 +1121,121 @@ export function PortfolioStrategyLab({
         {sensitivityMode === "cash-flow" ? <div className="space-y-3"><Field label="월 현금흐름 비교 · KRW"><Input value={cashAmounts} onChange={(event) => setCashAmounts(event.target.value)} className="bg-secondary" /></Field><div className="grid gap-3 md:grid-cols-2"><div className="rounded-[18px] bg-card p-4"><p className="text-[11px] text-muted-foreground">주기</p><div className="mt-3 flex flex-wrap gap-2">{(['monthly','quarterly','annually'] as const).map((item) => <ToggleChoice key={item} active={cashFrequencies.includes(item)} onClick={() => setCashFrequencies((current) => current.includes(item) ? current.filter((value) => value !== item) : [...current, item])}>{item}</ToggleChoice>)}</div></div><div className="rounded-[18px] bg-card p-4"><p className="text-[11px] text-muted-foreground">시점</p><div className="mt-3 flex flex-wrap gap-2">{(['period_start','period_end'] as const).map((item) => <ToggleChoice key={item} active={cashTimings.includes(item)} onClick={() => setCashTimings((current) => current.includes(item) ? current.filter((value) => value !== item) : [...current, item])}>{item}</ToggleChoice>)}</div></div></div></div> : null}
       </div> : null}
 
-      {mode === "stress" ? <div className="mt-5 space-y-3">{stressScenarios.map((scenario, index) => <div key={scenario.id} className="rounded-[20px] bg-card p-4"><div className="flex items-center justify-between"><p className="text-xs font-black">시나리오 {index + 1}</p><Button type="button" variant="ghost" size="icon" disabled={stressScenarios.length <= 1} onClick={() => setStressScenarios((current) => current.filter((item) => item.id !== scenario.id))}><Trash2 /></Button></div><div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4"><Input aria-label="시나리오 이름" value={scenario.name} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, name: event.target.value } : item))} placeholder="시나리오 이름" className="bg-secondary" /><Input type="date" aria-label="스트레스 시작일" value={scenario.startDate} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, startDate: event.target.value } : item))} className="bg-secondary" /><Input type="date" aria-label="스트레스 종료일" value={scenario.endDate} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, endDate: event.target.value } : item))} className="bg-secondary" /><Input type="number" aria-label="시나리오 거래비용" value={scenario.transactionCostBps} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, transactionCostBps: event.target.value } : item))} placeholder="거래비용 bp · 상속" className="bg-secondary" /><Input type="number" aria-label="시나리오 현금흐름" value={scenario.monthlyCashFlow} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, monthlyCashFlow: event.target.value } : item))} placeholder="월 현금흐름 · 상속" className="bg-secondary" /><Select value={scenario.cashFlowFrequency} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowFrequency: value as StressDraft['cashFlowFrequency'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">현금흐름 주기 상속</SelectItem><SelectItem value="monthly">monthly</SelectItem><SelectItem value="quarterly">quarterly</SelectItem><SelectItem value="annually">annually</SelectItem></SelectContent></Select><Select value={scenario.cashFlowTiming} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowTiming: value as StressDraft['cashFlowTiming'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">현금흐름 시점 상속</SelectItem><SelectItem value="period_start">period_start</SelectItem><SelectItem value="period_end">period_end</SelectItem></SelectContent></Select><Select value={scenario.currencyMode} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, currencyMode: value as StressDraft['currencyMode'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">통화 모드 상속</SelectItem><SelectItem value="KRW">KRW FX</SelectItem><SelectItem value="local">local</SelectItem></SelectContent></Select><Select value={scenario.rebalanceFrequency} onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, rebalanceFrequency: value as StressDraft['rebalanceFrequency'] } : item))}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="inherit">리밸런싱 상속</SelectItem>{rebalanceModes.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent></Select>{scenario.rebalanceFrequency === "threshold" ? <Input type="number" value={scenario.thresholdPercent} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, thresholdPercent: event.target.value } : item))} placeholder="Threshold %" className="bg-secondary" /> : null}<Input value={scenario.excludeSymbols} onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, excludeSymbols: event.target.value } : item))} placeholder="제외 심볼 · 쉼표" className="bg-secondary" /></div></div>)}<Button type="button" variant="secondary" onClick={() => setStressScenarios((current) => [...current, { id: Math.max(0, ...current.map((item) => item.id)) + 1, name: `사용자 시나리오 ${current.length + 1}`, startDate: "", endDate: "", transactionCostBps: "", monthlyCashFlow: "", cashFlowFrequency: "inherit", cashFlowTiming: "inherit", currencyMode: "inherit", rebalanceFrequency: "inherit", thresholdPercent: "", excludeSymbols: "" }])} disabled={stressScenarios.length >= 50}><Plus />시나리오 추가</Button></div> : null}
+      {mode === "stress" ? (
+        <div className="mt-5 space-y-3">
+          {stressScenarios.map((scenario, index) => (
+            <div key={scenario.id} className="rounded-[20px] bg-card p-4">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-black">시나리오 {index + 1}</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={stressScenarios.length <= 1}
+                  onClick={() => setStressScenarios((current) => current.filter((item) => item.id !== scenario.id))}
+                  aria-label={`시나리오 ${index + 1} 삭제`}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <Input
+                  aria-label={`시나리오 ${index + 1} 이름`}
+                  value={scenario.name}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, name: event.target.value } : item))}
+                  placeholder="시나리오 이름"
+                  className="bg-secondary"
+                />
+                <Input
+                  type="date"
+                  aria-label={`시나리오 ${index + 1} 스트레스 시작일`}
+                  value={scenario.startDate}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, startDate: event.target.value } : item))}
+                  className="bg-secondary"
+                />
+                <Input
+                  type="date"
+                  aria-label={`시나리오 ${index + 1} 스트레스 종료일`}
+                  value={scenario.endDate}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, endDate: event.target.value } : item))}
+                  className="bg-secondary"
+                />
+                <Input
+                  type="number"
+                  aria-label={`시나리오 ${index + 1} 거래비용`}
+                  value={scenario.transactionCostBps}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, transactionCostBps: event.target.value } : item))}
+                  placeholder="거래비용 bp · 상속"
+                  className="bg-secondary"
+                />
+                <Input
+                  type="number"
+                  aria-label={`시나리오 ${index + 1} 현금흐름`}
+                  value={scenario.monthlyCashFlow}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, monthlyCashFlow: event.target.value } : item))}
+                  placeholder="월 현금흐름 · 상속"
+                  className="bg-secondary"
+                />
+                <Select
+                  value={scenario.cashFlowFrequency}
+                  onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowFrequency: value as StressDraft["cashFlowFrequency"] } : item))}
+                >
+                  <SelectTrigger aria-label={`시나리오 ${index + 1} 현금흐름 주기`} className="w-full bg-secondary"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="inherit">현금흐름 주기 상속</SelectItem><SelectItem value="monthly">monthly</SelectItem><SelectItem value="quarterly">quarterly</SelectItem><SelectItem value="annually">annually</SelectItem></SelectContent>
+                </Select>
+                <Select
+                  value={scenario.cashFlowTiming}
+                  onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, cashFlowTiming: value as StressDraft["cashFlowTiming"] } : item))}
+                >
+                  <SelectTrigger aria-label={`시나리오 ${index + 1} 현금흐름 시점`} className="w-full bg-secondary"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="inherit">현금흐름 시점 상속</SelectItem><SelectItem value="period_start">period_start</SelectItem><SelectItem value="period_end">period_end</SelectItem></SelectContent>
+                </Select>
+                <Select
+                  value={scenario.currencyMode}
+                  onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, currencyMode: value as StressDraft["currencyMode"] } : item))}
+                >
+                  <SelectTrigger aria-label={`시나리오 ${index + 1} 통화 모드`} className="w-full bg-secondary"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="inherit">통화 모드 상속</SelectItem><SelectItem value="KRW">KRW FX</SelectItem><SelectItem value="local">local</SelectItem></SelectContent>
+                </Select>
+                <Select
+                  value={scenario.rebalanceFrequency}
+                  onValueChange={(value) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, rebalanceFrequency: value as StressDraft["rebalanceFrequency"] } : item))}
+                >
+                  <SelectTrigger aria-label={`시나리오 ${index + 1} 리밸런싱`} className="w-full bg-secondary"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="inherit">리밸런싱 상속</SelectItem>{rebalanceModes.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+                </Select>
+                {scenario.rebalanceFrequency === "threshold" ? (
+                  <Input
+                    type="number"
+                    aria-label={`시나리오 ${index + 1} 리밸런싱 threshold`}
+                    value={scenario.thresholdPercent}
+                    onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, thresholdPercent: event.target.value } : item))}
+                    placeholder="Threshold %"
+                    className="bg-secondary"
+                  />
+                ) : null}
+                <Input
+                  aria-label={`시나리오 ${index + 1} 제외 심볼`}
+                  value={scenario.excludeSymbols}
+                  onChange={(event) => setStressScenarios((current) => current.map((item) => item.id === scenario.id ? { ...item, excludeSymbols: event.target.value } : item))}
+                  placeholder="제외 심볼 · 쉼표"
+                  className="bg-secondary"
+                />
+              </div>
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setStressScenarios((current) => [...current, { id: Math.max(0, ...current.map((item) => item.id)) + 1, name: `사용자 시나리오 ${current.length + 1}`, startDate: "", endDate: "", transactionCostBps: "", monthlyCashFlow: "", cashFlowFrequency: "inherit", cashFlowTiming: "inherit", currencyMode: "inherit", rebalanceFrequency: "inherit", thresholdPercent: "", excludeSymbols: "" }])}
+            disabled={stressScenarios.length >= 50}
+          >
+            <Plus />시나리오 추가
+          </Button>
+        </div>
+      ) : null}
 
-      {mode === "optimization" || mode === "walk-forward" ? <div className="mt-5 space-y-3"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Field label="목적 함수"><Select value={objective} onValueChange={setObjective}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{objectiveOptions.map(([value,label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field label="벤치마크 심볼 · 선택" help="Information Ratio 목적에는 필수"><Input value={optimizationBenchmark} onChange={(event) => setOptimizationBenchmark(event.target.value.toUpperCase())} placeholder="SPY, QQQ" className="bg-secondary" /></Field><Field label="후보 예산"><Input type="number" min={1} max={10000} value={candidateBudget} onChange={(event) => setCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field><Field label="최대 보유 종목"><Input type="number" min={1} max={baseConfig.assets.length} value={maxAssets} onChange={(event) => setMaxAssets(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최대 낙폭 % · 선택"><Input type="number" min={0} max={100} value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="목표 CAGR % · 선택"><Input type="number" min={-100} max={1000} value={targetReturnPercent} onChange={(event) => setTargetReturnPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="최대 회전율 % · 선택"><Input type="number" min={0} max={200} value={maxTurnoverPercent} onChange={(event) => setMaxTurnoverPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field></div>
+      {mode === "optimization" || mode === "walk-forward" ? <div className="mt-5 space-y-3"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Field label="목적 함수"><Select value={objective} onValueChange={setObjective}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{objectiveOptions.map(([value,label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field label="벤치마크 심볼 · 선택" help="Information Ratio 목적에는 필수"><Input value={optimizationBenchmark} onChange={(event) => setOptimizationBenchmark(event.target.value.toUpperCase())} placeholder="SPY, QQQ" className="bg-secondary" /></Field><Field label="후보 예산"><Input type="number" min={1} max={10000} value={candidateBudget} onChange={(event) => setCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input aria-label="최적화 최소 비중" type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="최적화 최대 비중" type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field><Field label="최대 보유 종목"><Input type="number" min={1} max={baseConfig.assets.length} value={maxAssets} onChange={(event) => setMaxAssets(Number(event.target.value))} className="bg-secondary text-right" /></Field><Field label="최대 낙폭 % · 선택"><Input type="number" min={0} max={100} value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="목표 CAGR % · 선택"><Input type="number" min={-100} max={1000} value={targetReturnPercent} onChange={(event) => setTargetReturnPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="최대 회전율 % · 선택"><Input type="number" min={0} max={200} value={maxTurnoverPercent} onChange={(event) => setMaxTurnoverPercent(event.target.value)} placeholder="제약 없음" className="bg-secondary text-right" /></Field><Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field></div>
         {optimizationEngineControls}
         <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[680px] text-left text-xs"><thead><tr className="text-muted-foreground"><th className="p-3">종목</th><th className="p-3">개별 최소 %</th><th className="p-3">개별 최대 %</th><th className="p-3">필수</th><th className="p-3">제외</th></tr></thead><tbody>{baseConfig.assets.map((asset) => <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black"><span className="flex items-center gap-2"><StockSwatch symbol={asset.symbol} theme={theme} />{asset.symbol}</span></td><td className="p-3"><Input aria-label={`${asset.symbol} 개별 최소 비중`} type="number" min={0} max={100} value={perAssetMinimums[asset.symbol] ?? ""} onChange={(event) => updateOptionalWeight(setPerAssetMinimums, asset.symbol, event.target.value)} placeholder="전역" className="h-10 bg-secondary" /></td><td className="p-3"><Input aria-label={`${asset.symbol} 개별 최대 비중`} type="number" min={0} max={100} value={perAssetMaximums[asset.symbol] ?? ""} onChange={(event) => updateOptionalWeight(setPerAssetMaximums, asset.symbol, event.target.value)} placeholder="전역" className="h-10 bg-secondary" /></td><td className="p-3"><input aria-label={`${asset.symbol} 필수 종목`} type="checkbox" checked={requiredAssets.includes(asset.symbol)} onChange={() => { setRequiredAssets((current) => current.includes(asset.symbol) ? current.filter((value) => value !== asset.symbol) : [...current, asset.symbol]); setExcludedAssets((current) => current.filter((value) => value !== asset.symbol)); }} /></td><td className="p-3"><input aria-label={`${asset.symbol} 제외 종목`} type="checkbox" checked={excludedAssets.includes(asset.symbol)} onChange={() => { setExcludedAssets((current) => current.includes(asset.symbol) ? current.filter((value) => value !== asset.symbol) : [...current, asset.symbol]); setRequiredAssets((current) => current.filter((value) => value !== asset.symbol)); }} /></td></tr>)}</tbody></table></div>
         {assetGroupControlsPanel}
@@ -1070,7 +1250,7 @@ export function PortfolioStrategyLab({
           <Field label="최적화 목적"><Select value={objective} onValueChange={setObjective}><SelectTrigger className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent>{objectiveOptions.map(([value,label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="전망 벤치마크 · 선택" help="비우면 백테스트 기본 벤치마크를 사용"><Input value={optimizationBenchmark} onChange={(event) => setOptimizationBenchmark(event.target.value.toUpperCase())} placeholder={baseConfig.benchmark === "NONE" ? "SPY, QQQ" : `${baseConfig.benchmark} 사용`} className="bg-secondary" /></Field>
           <Field label="Screening 후보 예산"><Input type="number" min={10} max={10000} value={candidateBudget} onChange={(event) => setCandidateBudget(Number(event.target.value))} className="bg-secondary text-right" /></Field>
-          <Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
+          <Field label="최소 · 최대 비중 %"><div className="grid grid-cols-2 gap-2"><Input aria-label="Outlook 최적화 최소 비중" type="number" min={0} max={100} value={minWeightPercent} onChange={(event) => setMinWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /><Input aria-label="Outlook 최적화 최대 비중" type="number" min={0} max={100} value={maxWeightPercent} onChange={(event) => setMaxWeightPercent(Number(event.target.value))} className="bg-secondary text-right" /></div></Field>
           <Field label="재현 seed"><Input type="number" min={0} value={seed} onChange={(event) => setSeed(Number(event.target.value))} className="bg-secondary text-right" /></Field>
         </div>
         {optimizationEngineControls}
@@ -1088,14 +1268,14 @@ export function PortfolioStrategyLab({
       {mode === "exposures" ? <div className="mt-5 space-y-3">
         <div className="rounded-[20px] bg-card p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black">공급자 metadata 기반 노출 분석</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">통화는 현재 종목 metadata로 채웁니다. 공급되지 않은 sector·industry·국가·factor를 추정하지 않으며 빈 값은 UNKNOWN으로 반환합니다.</p></div><ToggleChoice active={exposureLookThrough} onClick={() => setExposureLookThrough((current) => !current)}>ETF look-through {exposureLookThrough ? "ON" : "OFF"}</ToggleChoice></div></div>
         <div className="overflow-x-auto rounded-[20px] bg-card p-3"><table className="w-full min-w-[1260px] text-left text-[10px]"><thead><tr className="text-muted-foreground"><th className="p-3">종목·비중</th><th className="p-3">통화 *</th><th className="p-3">Sector</th><th className="p-3">Industry</th><th className="p-3">Country</th><th className="p-3">Asset type</th><th className="p-3">환헤지</th><th className="p-3">Factor</th></tr></thead><tbody>{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol] ?? { currency: "", sector: "", industry: "", country: "", assetType: "", hedge: "unknown" as const, factors: "", constituents: "" }; return <tr key={asset.symbol} className="border-t border-border"><td className="p-3 font-black">{asset.symbol}<br /><span className="font-normal text-muted-foreground">{formatPercent(asset.weight)}</span></td><td className="p-2"><Input aria-label={`${asset.symbol} 통화`} maxLength={3} value={metadata.currency} onChange={(event) => updateExposure(asset.symbol, { currency: event.target.value.toUpperCase() })} placeholder="USD" className="h-10 bg-secondary uppercase" /></td><td className="p-2"><Input aria-label={`${asset.symbol} sector`} value={metadata.sector} onChange={(event) => updateExposure(asset.symbol, { sector: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} industry`} value={metadata.industry} onChange={(event) => updateExposure(asset.symbol, { industry: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} country`} value={metadata.country} onChange={(event) => updateExposure(asset.symbol, { country: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Input aria-label={`${asset.symbol} asset type`} value={metadata.assetType} onChange={(event) => updateExposure(asset.symbol, { assetType: event.target.value })} placeholder="미제공" className="h-10 bg-secondary" /></td><td className="p-2"><Select value={metadata.hedge} onValueChange={(value) => updateExposure(asset.symbol, { hedge: value as ExposureDraft["hedge"] })}><SelectTrigger aria-label={`${asset.symbol} 환헤지`} className="w-full bg-secondary"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unknown">미확인</SelectItem><SelectItem value="hedged">헤지</SelectItem><SelectItem value="unhedged">비헤지</SelectItem></SelectContent></Select></td><td className="p-2"><Input aria-label={`${asset.symbol} factor`} value={metadata.factors} onChange={(event) => updateExposure(asset.symbol, { factors: event.target.value })} placeholder="value=0.3, momentum=-0.1" className="h-10 bg-secondary" /></td></tr>; })}</tbody></table></div>
-        {exposureLookThrough ? <div className="grid gap-3 lg:grid-cols-2">{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol]; const parsed = parsedConstituents[asset.symbol]; return <label key={asset.symbol} className="rounded-[18px] bg-card p-4"><span className="text-[11px] font-black">{asset.symbol} ETF 구성종목 JSON</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">배열 항목: symbol, 0~1 weight, 선택 sector·industry·country·currency. 빈 값은 구성 snapshot 미제공입니다.</span><textarea aria-label={`${asset.symbol} ETF 구성종목 JSON`} value={metadata?.constituents ?? ""} onChange={(event) => updateExposure(asset.symbol, { constituents: event.target.value })} placeholder={'[{"symbol":"AAPL","weight":0.07,"sector":"Technology","country":"US","currency":"USD"}]'} rows={4} className="mt-3 w-full resize-y rounded-xl border border-border bg-secondary px-3 py-2 font-mono text-[11px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring" />{parsed?.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-500">{parsed.error}</span> : parsed?.value.length ? <span className="mt-2 block text-[10px] text-muted-foreground">검증된 구성종목 {parsed.value.length.toLocaleString("ko-KR")}개</span> : null}</label>; })}</div> : null}
-        {!exposureReady ? <p role="alert" className="rounded-[18px] bg-card p-4 text-xs text-rose-500">모든 종목에 ISO 4217 형식의 3자리 통화 코드가 필요합니다. 통화를 추정해서 채우지 않습니다.</p> : null}
+        {exposureLookThrough ? <div className="grid gap-3 lg:grid-cols-2">{baseConfig.assets.map((asset) => { const metadata = exposureMetadata[asset.symbol]; const parsed = parsedConstituents[asset.symbol]; return <label key={asset.symbol} className="rounded-[18px] bg-card p-4"><span className="text-[11px] font-black">{asset.symbol} ETF 구성종목 JSON</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">배열 항목: symbol, 0~1 weight, 선택 sector·industry·country·currency. 빈 값은 구성 snapshot 미제공입니다.</span><textarea aria-label={`${asset.symbol} ETF 구성종목 JSON`} value={metadata?.constituents ?? ""} onChange={(event) => updateExposure(asset.symbol, { constituents: event.target.value })} placeholder={'[{"symbol":"AAPL","weight":0.07,"sector":"Technology","country":"US","currency":"USD"}]'} rows={4} className="mt-3 w-full resize-y rounded-xl border border-border bg-secondary px-3 py-2 font-mono text-[11px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring" />{parsed?.error ? <span role="alert" className="mt-2 block text-[10px] text-rose-700 dark:text-rose-400">{parsed.error}</span> : parsed?.value.length ? <span className="mt-2 block text-[10px] text-muted-foreground">검증된 구성종목 {parsed.value.length.toLocaleString("ko-KR")}개</span> : null}</label>; })}</div> : null}
+        {!exposureReady ? <p role="alert" className="rounded-[18px] bg-card p-4 text-xs text-rose-700 dark:text-rose-400">모든 종목에 ISO 4217 형식의 3자리 통화 코드가 필요합니다. 통화를 추정해서 채우지 않습니다.</p> : null}
         {exposureLookThrough ? <p className="rounded-[18px] bg-card p-4 text-[10px] leading-5 text-muted-foreground">입력한 공급자 snapshot만 look-through에 사용합니다. 빈 구성종목은 추정하지 않으며 coverage 0과 명시적 경고를 반환합니다.</p> : null}
       </div> : null}
 
       {mode === "research" ? <PortfolioResearchTools baseConfig={baseConfig} backtestRuns={backtestRuns} optimizationRuns={optimizationRuns} theme={theme} onUnauthorized={onUnauthorized} /> : null}
 
-      {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-500">{error}</p> : null}
+      {error ? <p role="alert" className="mt-4 rounded-[18px] bg-card px-4 py-3 text-sm font-semibold text-rose-700 dark:text-rose-400">{error}</p> : null}
       {run && ["queued", "running", "cancel_requested"].includes(run.status) ? <ProgressPanel run={run} onCancel={() => void requestCancel()} cancelling={cancelling} /> : null}
       {mode !== "research" ? <Button type="button" className="mt-5 w-full sm:w-auto" onClick={() => void submit()} disabled={!canSubmit}>{running ? <LoaderCircle className="animate-spin" /> : <Play />}{running ? "Rust worker 계산 중" : "고급 분석 실행"}</Button> : null}
 

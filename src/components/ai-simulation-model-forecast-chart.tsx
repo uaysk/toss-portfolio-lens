@@ -29,28 +29,31 @@ type AiSimulationModelForecastSectionProps = {
   className?: string;
 };
 
+const FORECAST_CHART_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const FORECAST_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 function chartTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return FORECAST_CHART_TIME_FORMATTER.format(date);
 }
 
 function timestamp(value: string | undefined): string {
   if (!value) return "unavailable";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return FORECAST_TIMESTAMP_FORMATTER.format(date);
 }
 
 function probability(value: number | undefined): string {

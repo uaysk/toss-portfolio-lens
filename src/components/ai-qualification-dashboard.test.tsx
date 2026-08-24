@@ -4,7 +4,13 @@ import type {
   CadenceContextCombination,
   QualificationState,
 } from "@/lib/ai-qualification";
-import { AiQualificationRunView } from "./ai-qualification-dashboard";
+import {
+  AiQualificationRunView,
+  QUALIFICATION_POLL_INTERVAL_MS,
+  QUALIFICATION_POLL_MAX_INTERVAL_MS,
+  nextQualificationPollInterval,
+  shouldPollAiQualification,
+} from "./ai-qualification-dashboard";
 
 function state(): QualificationState {
   return {
@@ -77,6 +83,24 @@ function state(): QualificationState {
 }
 
 describe("AI qualification dashboard", () => {
+  it("polls only for visible discovery or explicit SSE fallback", () => {
+    expect(shouldPollAiQualification("connecting", "visible")).toBe(true);
+    expect(shouldPollAiQualification("polling", "visible")).toBe(true);
+    expect(shouldPollAiQualification("polling", "hidden")).toBe(false);
+    expect(shouldPollAiQualification("live", "visible")).toBe(false);
+    expect(shouldPollAiQualification("terminal", "visible")).toBe(false);
+  });
+
+  it("backs failed polling off within a bounded interval and resets after recovery", () => {
+    expect(nextQualificationPollInterval(QUALIFICATION_POLL_INTERVAL_MS, "error")).toBe(10_000);
+    expect(nextQualificationPollInterval(20_000, "error")).toBe(QUALIFICATION_POLL_MAX_INTERVAL_MS);
+    expect(nextQualificationPollInterval(QUALIFICATION_POLL_MAX_INTERVAL_MS, "error"))
+      .toBe(QUALIFICATION_POLL_MAX_INTERVAL_MS);
+    expect(nextQualificationPollInterval(20_000, "success")).toBe(QUALIFICATION_POLL_INTERVAL_MS);
+    expect(nextQualificationPollInterval(20_000, "missing")).toBe(QUALIFICATION_POLL_INTERVAL_MS);
+    expect(nextQualificationPollInterval(20_000, "busy")).toBe(QUALIFICATION_POLL_INTERVAL_MS);
+  });
+
   it("renders the live P40 progress, active step, GPU telemetry, and event", () => {
     const markup = renderToStaticMarkup(
       <AiQualificationRunView

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import {
   PORTFOLIO_EVENT_SCHEMA_VERSION,
   type PortfolioEventV1,
@@ -70,14 +70,74 @@ function streamKey(ownerSubject: string, accountId: string): string {
   return `${ownerSubject}\u0000${accountId}`;
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-    .join(",")}}`;
+const CHECKSUM_WRITE_BUFFER_LENGTH = 16 * 1_024;
+const MAXIMUM_CHECKSUM_KEY_SHAPES = 16;
+
+function updateCanonicalHash(hash: Hash, value: unknown): void {
+  let buffer = "";
+  // Holdings repeat one object shape. Reuse its sorted keys only for this
+  // checksum, with a cap so unusual input cannot grow the per-call cache without bound.
+  const keyShapes: Array<{ source: string[]; sorted: string[] }> = [];
+  const flush = () => {
+    if (!buffer) return;
+    hash.update(buffer);
+    buffer = "";
+  };
+  const append = (part: string) => {
+    buffer += part;
+    if (buffer.length >= CHECKSUM_WRITE_BUFFER_LENGTH) flush();
+  };
+  const write = (item: unknown): void => {
+    if (item === null || typeof item !== "object") {
+      append(JSON.stringify(item));
+      return;
+    }
+    if (Array.isArray(item)) {
+      append("[");
+      for (let index = 0; index < item.length; index += 1) {
+        if (index > 0) append(",");
+        if (
+          item[index] === undefined
+          || typeof item[index] === "function"
+          || typeof item[index] === "symbol"
+        ) continue;
+        write(item[index]);
+      }
+      append("]");
+      return;
+    }
+    const record = item as Record<string, unknown>;
+    const objectKeys = Object.keys(record);
+    let sortedKeys: string[] | undefined;
+    for (const shape of keyShapes) {
+      if (
+        shape.source.length === objectKeys.length
+        && shape.source.every((key, index) => key === objectKeys[index])
+      ) {
+        sortedKeys = shape.sorted;
+        break;
+      }
+    }
+    if (!sortedKeys) {
+      sortedKeys = [...objectKeys].sort();
+      if (keyShapes.length < MAXIMUM_CHECKSUM_KEY_SHAPES) {
+        keyShapes.push({ source: objectKeys, sorted: sortedKeys });
+      }
+    }
+    append("{");
+    let index = 0;
+    for (const key of sortedKeys) {
+      if (index > 0) append(",");
+      append(JSON.stringify(key));
+      append(":");
+      write(record[key]);
+      index += 1;
+    }
+    append("}");
+  };
+
+  write(value);
+  flush();
 }
 
 export function portfolioContentChecksum(portfolio: Portfolio): string {
@@ -88,7 +148,9 @@ export function portfolioContentChecksum(portfolio: Portfolio): string {
     summary: portfolio.summary,
     holdings: portfolio.holdings,
   };
-  return createHash("sha256").update(canonicalJson(stableContent)).digest("hex");
+  const hash = createHash("sha256");
+  updateCanonicalHash(hash, stableContent);
+  return hash.digest("hex");
 }
 
 function positiveInteger(value: number, name: string, minimum = 1): number {

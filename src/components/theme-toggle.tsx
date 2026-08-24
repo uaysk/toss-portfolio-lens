@@ -1,4 +1,5 @@
-import { Moon, Sun } from "lucide-react";
+import Moon from "lucide-react/dist/esm/icons/moon.js";
+import Sun from "lucide-react/dist/esm/icons/sun.js";
 import { Button } from "@/components/ui/button";
 import type { Theme } from "@/types";
 

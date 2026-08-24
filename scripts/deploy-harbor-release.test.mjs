@@ -49,30 +49,57 @@ describe("production Harbor deployment helper", () => {
     assert.deepEqual(releaseChanges(release, rustOnly), { web: false, rust: true });
   });
 
-  it("accepts only the PostgreSQL/Rust/paper-only health contract", () => {
+  it("accepts only the PostgreSQL/Rust/single-web/paper-only health contract", () => {
     const summary = assertHealthPayload({
       status: "ok",
       service: "portfolio-lens",
       storage: "postgres",
       build: { gitSha: release.APP_GIT_SHA },
       compute: { executionMode: "rust_socket" },
+      topology: {
+        web: {
+          replicaPolicy: "single",
+          declaredReplicas: 1,
+          coordinationScope: "process",
+          horizontalScalingSupported: false,
+        },
+      },
       simulation: { realOrder: false },
     }, release.APP_GIT_SHA);
     assert.equal(summary.gitSha, release.APP_GIT_SHA);
+    assert.equal(summary.webReplicaPolicy, "single");
+    assert.equal(summary.declaredWebReplicas, 1);
     assert.equal(summary.realOrder, false);
   });
 
-  it("fails closed on an old revision, non-PostgreSQL storage, or real orders", () => {
+  it("fails closed on an old revision, non-PostgreSQL storage, unsafe topology, or real orders", () => {
     const base = {
       status: "ok",
       service: "portfolio-lens",
       storage: "postgres",
       build: { gitSha: release.APP_GIT_SHA },
       compute: { executionMode: "rust_socket" },
+      topology: {
+        web: {
+          replicaPolicy: "single",
+          declaredReplicas: 1,
+          coordinationScope: "process",
+          horizontalScalingSupported: false,
+        },
+      },
       simulation: { realOrder: false },
     };
     assert.throws(() => assertHealthPayload({ ...base, storage: "sqlite" }, release.APP_GIT_SHA));
     assert.throws(() => assertHealthPayload({ ...base, build: { gitSha: "f".repeat(40) } }, release.APP_GIT_SHA));
+    assert.throws(() => assertHealthPayload({ ...base, topology: undefined }, release.APP_GIT_SHA));
+    assert.throws(() => assertHealthPayload({
+      ...base,
+      topology: { web: { ...base.topology.web, declaredReplicas: 2 } },
+    }, release.APP_GIT_SHA));
+    assert.throws(() => assertHealthPayload({
+      ...base,
+      topology: { web: { ...base.topology.web, horizontalScalingSupported: true } },
+    }, release.APP_GIT_SHA));
     assert.throws(() => assertHealthPayload({ ...base, simulation: { realOrder: true } }, release.APP_GIT_SHA));
   });
 

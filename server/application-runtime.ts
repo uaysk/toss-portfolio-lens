@@ -7,16 +7,14 @@ import { HistoricalPortfolioBackfill } from "./backfill.js";
 import { PortfolioBacktestService } from "./backtest.js";
 import type { AppConfig } from "./env.js";
 import { KisExchangeRateClient } from "./kis-exchange-rate.js";
-import { BedrockReportWriter } from "./bedrock-report-ai.js";
 import { OpenAiReportWriter } from "./report-ai.js";
 import { createReportStorage } from "./report-storage.js";
 import { PortfolioReportService } from "./reports.js";
 import { openConfiguredHistoryStore } from "./storage.js";
 import { TossClient } from "./toss.js";
-import { createMcpOAuthRuntime, type McpOAuthRuntime } from "./auth/mcp-oauth-routes.js";
+import type { McpOAuthRuntime } from "./auth/mcp-oauth-routes.js";
 import { MarketDataService } from "./services/market-data-service.js";
-import { createMcpServer } from "./mcp/server.js";
-import { createMcpHttpRuntime, type McpHttpRuntime } from "./mcp/transport.js";
+import type { McpHttpRuntime } from "./mcp/transport.js";
 import { EventLoopLagMonitor } from "./observability/event-loop-monitor.js";
 import { RuntimeTelemetry } from "./observability/runtime-telemetry.js";
 import { ApplicationSnapshotOrchestrator } from "./runtime/application-snapshots.js";
@@ -27,17 +25,11 @@ import {
 } from "./runtime/core-services.js";
 import { RustComputeClient } from "./worker/rust-client.js";
 import { AiComputeClient } from "./worker/ai-client.js";
-import { ScalpingAiService } from "./services/scalping-ai-service.js";
-import { TossScalpingProvider } from "./scalping/toss-provider.js";
-import { KisRestClient } from "./scalping/kis-rest-client.js";
-import { KisWebSocketClient } from "./scalping/kis-websocket-client.js";
-import { IntradayBarAggregator } from "./scalping/intraday-bar-aggregator.js";
-import { ScalpingScanner } from "./scalping/scanner-service.js";
-import { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
-import { MarketDataRecorder } from "./scalping/market-data-recorder.js";
-import { ScalpingService } from "./scalping/scalping-service.js";
+import type { ScalpingLiveRuntime } from "./scalping/live-runtime.js";
+import type { MarketDataRecorder } from "./scalping/market-data-recorder.js";
+import type { ScalpingService } from "./scalping/scalping-service.js";
 import { createScalpingRouter } from "./scalping/router.js";
-import { AiTradingSimulationService } from "./simulation/simulation-service.js";
+import type { AiTradingSimulationService } from "./simulation/simulation-service.js";
 import { createSimulationRouter } from "./simulation/router.js";
 import { PortfolioLiveHub } from "./portfolio/live-hub.js";
 import {
@@ -59,7 +51,6 @@ import { CryptoPaperRuntime } from "./crypto/crypto-paper-runtime.js";
 import { CryptoRustTechnicalAnalyzer } from "./crypto/crypto-rust-technical.js";
 import { createConfiguredFuturesExecution } from "./crypto/execution.js";
 import { cryptoWorkerPublicState } from "./crypto/worker-public-state.js";
-import { krIntegratedSessionWindows } from "./scalping/market-session.js";
 import { buildInfo } from "./build-info.js";
 import { GracefulLifecycle, ShutdownGate, SseConnectionTracker } from "./lifecycle.js";
 import { createAuthRouteRuntime } from "./routes/auth.js";
@@ -74,18 +65,35 @@ import { createCompatibleApiRouter } from "./routes/compatible-api.js";
 import { createPortfolioDataRouter } from "./routes/portfolio-data.js";
 import { createDashboardToolsRouter } from "./routes/dashboard-tools.js";
 import { createAiQualificationRouter } from "./routes/ai-qualification.js";
+import { listenForStartup, StartupRollback } from "./startup-rollback.js";
 
 export class ApplicationRuntime {
 static async start(config: AppConfig): Promise<void> {
+const startupRollback = new StartupRollback();
+try {
+  await ApplicationRuntime.startManaged(config, startupRollback);
+} catch (error) {
+  return startupRollback.rethrow(error);
+}
+}
+
+private static async startManaged(
+config: AppConfig,
+startupRollback: StartupRollback,
+): Promise<void> {
 const eventLoopLag = new EventLoopLagMonitor();
+startupRollback.defer("event loop lag monitor", () => eventLoopLag.stop());
 eventLoopLag.start();
 const runtimeTelemetry = new RuntimeTelemetry();
 const toss = new TossClient(config);
 const portfolioLive = new PortfolioLiveHub({
   getPortfolio: (_ownerSubject, accountId) => toss.getPortfolio(accountId),
 });
+startupRollback.defer("portfolio live hub", () => portfolioLive.close());
 const historyStore = await openConfiguredHistoryStore(config);
+startupRollback.defer("history storage", () => historyStore.close());
 const historicalBackfill = new HistoricalPortfolioBackfill(toss, historyStore);
+startupRollback.defer("historical backfill", () => historicalBackfill.waitForIdle());
 const portfolioAnalysis = new PortfolioAnalysisService(toss, historyStore);
 const kisExchangeRate = config.kisExchangeRate
   ? new KisExchangeRateClient(config.kisExchangeRate)
@@ -102,8 +110,9 @@ const rustCompute = config.compute.executionMode === "rust_socket"
     queueTimeoutMs: config.compute.rustComputeQueueTimeoutMs,
   })
   : undefined;
+if (rustCompute) startupRollback.defer("Rust client", () => rustCompute.close());
 const reportWriter = config.bedrock
-  ? new BedrockReportWriter(config.bedrock)
+  ? new (await import("./bedrock-report-ai.js")).BedrockReportWriter(config.bedrock)
   : config.openAi
     ? new OpenAiReportWriter(config.openAi)
     : undefined;
@@ -124,6 +133,8 @@ const persistence = await initializeCorePersistence({
   database,
   runtimeTelemetry,
   scalpingEnabled: config.scalping.enabled,
+  // openConfiguredHistoryStore completed the migration pass above.
+  migrationsAlreadyApplied: true,
 });
 const {
   runRepository,
@@ -174,6 +185,10 @@ mcpAuditCleanupTimer = setInterval(
   }),
   24 * 60 * 60_000,
 );
+startupRollback.defer("MCP audit cleanup", async () => {
+  if (mcpAuditCleanupTimer) clearInterval(mcpAuditCleanupTimer);
+  await mcpAuditCleanupTask;
+});
 mcpAuditCleanupTimer.unref();
 
 const coreServices = await initializeCoreServices({
@@ -194,6 +209,7 @@ const {
   backtests,
   technicalTradeMarkerService,
 } = coreServices;
+startupRollback.defer("run service", () => runService.close("startup_failed"));
 const binanceCredentialLoad = loadBinanceServerCredentials({
   BINANCE_API_KEY: process.env.BINANCE_API_KEY,
   BINANCE_SECRET_KEY: process.env.BINANCE_SECRET_KEY,
@@ -210,9 +226,13 @@ const binanceMaintenanceMargin = new BinanceMaintenanceMarginProvider({
 });
 const binanceMarketData = new OfficialBinanceUsdmRestMarketData();
 const cryptoFincastClient = new AiComputeClient(config.cryptoAi.fincast);
+startupRollback.defer("FinCast AI client", () => cryptoFincastClient.close());
 const cryptoChronos2Client = config.cryptoAi.chronos2
   ? new AiComputeClient(config.cryptoAi.chronos2)
   : undefined;
+if (cryptoChronos2Client) {
+  startupRollback.defer("Chronos-2 AI client", () => cryptoChronos2Client.close());
+}
 cryptoFincastClient.start();
 cryptoChronos2Client?.start();
 const cryptoRuntimeSnapshots = new Map<string, unknown>();
@@ -287,12 +307,41 @@ const cryptoSimulationService = new CryptoSimulationCoordinator({
     chronos2: cryptoWorkerPublicState(cryptoChronos2Client?.snapshot()),
   }),
 });
+startupRollback.defer(
+  "crypto simulation",
+  () => cryptoSimulationService.close("startup_failed"),
+);
 let scalpingLiveRuntime: ScalpingLiveRuntime | undefined;
 let scalpingService: ScalpingService | undefined;
 let marketDataRecorder: MarketDataRecorder | undefined;
 let simulationService: AiTradingSimulationService | undefined;
 let aiComputeClient: AiComputeClient | undefined;
 if (config.scalping.enabled && scalpingRepository) {
+  const [
+    { ScalpingAiService },
+    { TossScalpingProvider },
+    { KisRestClient },
+    { KisWebSocketClient },
+    { IntradayBarAggregator },
+    { ScalpingScanner },
+    { ScalpingLiveRuntime },
+    { MarketDataRecorder },
+    { ScalpingService },
+    { AiTradingSimulationService },
+    { krIntegratedSessionWindows },
+  ] = await Promise.all([
+    import("./services/scalping-ai-service.js"),
+    import("./scalping/toss-provider.js"),
+    import("./scalping/kis-rest-client.js"),
+    import("./scalping/kis-websocket-client.js"),
+    import("./scalping/intraday-bar-aggregator.js"),
+    import("./scalping/scanner-service.js"),
+    import("./scalping/live-runtime.js"),
+    import("./scalping/market-data-recorder.js"),
+    import("./scalping/scalping-service.js"),
+    import("./simulation/simulation-service.js"),
+    import("./scalping/market-session.js"),
+  ]);
   const tossScalping = new TossScalpingProvider(toss, config.scalping.toss);
   const kisScalpingRest = new KisRestClient(config.scalping.kisRest);
   const kisScalpingSocket = new KisWebSocketClient(config.scalping.kisWebSocket);
@@ -318,6 +367,11 @@ if (config.scalping.enabled && scalpingRepository) {
       }),
     },
   );
+  const ownedScalpingLiveRuntime = scalpingLiveRuntime;
+  startupRollback.defer("scalping runtime", async () => {
+    ownedScalpingLiveRuntime.close();
+    await ownedScalpingLiveRuntime.waitForIdle();
+  });
   aiComputeClient = new AiComputeClient({
     url: config.scalping.ai.url,
     authTokenFile: config.scalping.ai.authTokenFile,
@@ -330,6 +384,8 @@ if (config.scalping.enabled && scalpingRepository) {
     maximumResponseBytes: config.scalping.ai.maximumResponseBytes,
     tlsCa: config.scalping.ai.tlsCa,
   });
+  const ownedAiComputeClient = aiComputeClient;
+  startupRollback.defer("stock AI client", () => ownedAiComputeClient.close());
   const stockFincastAi = new ScalpingAiService(
     aiComputeClient,
     scalpingRepository,
@@ -369,6 +425,8 @@ if (config.scalping.enabled && scalpingRepository) {
         closeTimeoutMs: Math.max(1, config.gracefulShutdownTimeoutMs - 3_000),
       },
     );
+    const ownedMarketDataRecorder = marketDataRecorder;
+    startupRollback.defer("market-data recorder", () => ownedMarketDataRecorder.close());
   }
   if (config.scalping.maximumTopCount >= 2) {
     simulationService = new AiTradingSimulationService(
@@ -387,6 +445,11 @@ if (config.scalping.enabled && scalpingRepository) {
       },
       simulationCheckpoints,
     );
+    const ownedSimulationService = simulationService;
+    startupRollback.defer(
+      "stock simulation",
+      () => ownedSimulationService.close("startup_failed"),
+    );
   }
 }
 const computeToolDependencies = createCoreToolDependencies({
@@ -402,6 +465,7 @@ if (config.mcp.enabled) {
   const resourceMetadataUrl = new URL("/.well-known/oauth-protected-resource", config.mcp.resourceUrl).toString();
 
   if (config.mcp.authMode === "oauth") {
+    const { createMcpOAuthRuntime } = await import("./auth/mcp-oauth-routes.js");
     mcpOAuthRuntime = await createMcpOAuthRuntime({
       database,
       oauth: config.mcp.oauth!,
@@ -410,6 +474,10 @@ if (config.mcp.enabled) {
       dashboardSessionSecret: config.sessionSecret,
       publicAppUrl: config.publicAppUrl,
       maxRequestsPerMinute: config.mcp.maxRequestsPerMinute,
+    });
+    startupRollback.defer("MCP OAuth cleanup", async () => {
+      if (mcpCleanupTimer) clearInterval(mcpCleanupTimer);
+      await mcpCleanupTask;
     });
     mcpCleanupTimer = setInterval(
       () => void runMcpOAuthCleanup().catch((error) => {
@@ -420,6 +488,10 @@ if (config.mcp.enabled) {
     mcpCleanupTimer.unref();
   }
 
+  const [{ createMcpServer }, { createMcpHttpRuntime }] = await Promise.all([
+    import("./mcp/server.js"),
+    import("./mcp/transport.js"),
+  ]);
   mcpHttpRuntime = createMcpHttpRuntime({
     serverFactory: () => createMcpServer({
       dependencies: computeToolDependencies,
@@ -436,6 +508,8 @@ if (config.mcp.enabled) {
     audit: mcpAuditRepository,
     auditSubjectSalt: config.sessionSecret,
   });
+  const ownedMcpHttpRuntime = mcpHttpRuntime;
+  startupRollback.defer("MCP transport", () => ownedMcpHttpRuntime.close());
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDirectory = path.resolve(__dirname, "../client");
@@ -444,7 +518,9 @@ const oauthCallbackOrigin = config.mcp.oauth
   ? new URL(config.mcp.oauth.redirectUri).origin
   : undefined;
 const shutdownGate = new ShutdownGate();
-const sseConnections = new SseConnectionTracker();
+const sseConnections = new SseConnectionTracker({
+  maximumConnections: config.sseMaximumConnections,
+});
 const {
   router: authRouter,
   requireSession,
@@ -493,11 +569,13 @@ const healthRouter = createHealthRouter({
   kisEnvironment: config.kisExchangeRate?.environment,
   mcpEnabled: config.mcp.enabled,
   mcpAuthMode: config.mcp.authMode,
+  appReplicaCount: config.appReplicaCount,
   buildInfo,
   executionMode: config.compute.executionMode,
   rustSocketPath: config.compute.rustSocketPath,
   rustSchedulerSnapshot: () => rustCompute?.snapshot(),
   eventLoopLagSnapshot: () => eventLoopLag.snapshot(),
+  sseConnectionSnapshot: () => sseConnections.telemetry,
   simulationSseSnapshot: () => simulationRunEvents.telemetry,
   portfolioLiveSnapshot: () => portfolioLive.telemetry,
   runtimeTelemetrySnapshot: () => runtimeTelemetry.snapshot(),
@@ -582,6 +660,10 @@ const snapshotOrchestrator = new ApplicationSnapshotOrchestrator({
   runBackfill: () => historicalBackfill.runAll(),
   refreshIntervalMs: config.snapshotRefreshHours * 60 * 60 * 1000,
 });
+startupRollback.defer("snapshot collection", async () => {
+  snapshotOrchestrator.stopScheduling();
+  await snapshotOrchestrator.waitForIdle();
+});
 snapshotOrchestrator.start();
 
 async function shutdownStep(name: string, operation: () => void | Promise<void>): Promise<void> {
@@ -602,6 +684,7 @@ const lifecycle = new GracefulLifecycle({
   sseConnections,
   deadlineMs: config.gracefulShutdownTimeoutMs,
   onShutdownStart: (signal) => {
+    startupRollback.commit();
     applicationShuttingDown = true;
     snapshotOrchestrator.stopScheduling();
     eventLoopLag.stop();
@@ -643,6 +726,7 @@ const lifecycle = new GracefulLifecycle({
   },
   exit: (code) => process.exit(recorderStartupFailed ? 1 : code),
 });
+startupRollback.defer("lifecycle listeners", () => lifecycle.dispose());
 lifecycle.installSignalHandlers();
 if (marketDataRecorder && !applicationShuttingDown) {
   try {
@@ -658,13 +742,16 @@ if (marketDataRecorder && !applicationShuttingDown) {
       "[scalping-recorder] 시작 실패:",
       error instanceof Error ? error.message : "unknown error",
     );
+    startupRollback.commit();
     await lifecycle.shutdown("recorder-start-failed");
   }
 }
 if (!applicationShuttingDown) {
-  server.listen(config.port, config.host, () => {
+  await listenForStartup(server, config.port, config.host);
+  startupRollback.commit();
+  if (!applicationShuttingDown) {
     console.info("Portfolio Lens listening on http://" + config.host + ":" + config.port);
-  });
+  }
 }
 }
 }

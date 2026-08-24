@@ -7,6 +7,7 @@ import type {
   ScalpingTradeRecord,
 } from "../repositories/scalping-repository.js";
 import {
+  MARKET_DATA_RECORDER_SCHEMA_VERSION,
   NormalizedOrderbookSchema,
   NormalizedTradeSchema,
   type UsExchange,
@@ -14,8 +15,87 @@ import {
 import type { ScalpingLiveEvent, ScalpingLiveRuntime } from "./live-runtime.js";
 import { marketLocalParts } from "./market-time.js";
 
-export const MARKET_DATA_RECORDER_SCHEMA_VERSION = "scalping-market-recorder/v1" as const;
+export { MARKET_DATA_RECORDER_SCHEMA_VERSION };
 const MAXIMUM_RECORDING_EVENT_QUEUE_SIZE = 10_000;
+const BATCH_QUEUE_CHUNK_SIZE = 1_024;
+const BATCH_QUEUE_CHUNK_COMPACTION_HEAD = 64;
+
+/** FIFO whose prefix is committed only after a durable batch succeeds. */
+class RetriableBatchQueue<T> {
+  private chunks: T[][] = [];
+  private chunkHead = 0;
+  private itemHead = 0;
+  private queuedLength = 0;
+
+  get length(): number {
+    return this.queuedLength;
+  }
+
+  push(value: T): void {
+    let tail = this.chunks.at(-1);
+    if (!tail || tail.length >= BATCH_QUEUE_CHUNK_SIZE) {
+      tail = [];
+      this.chunks.push(tail);
+    }
+    tail.push(value);
+    this.queuedLength += 1;
+  }
+
+  peek(count: number): T[] {
+    if (!Number.isSafeInteger(count) || count < 0 || count > this.queuedLength) {
+      throw new Error("Recorder batch peek exceeds the queued prefix.");
+    }
+    const result = new Array<T>(count);
+    let chunkIndex = this.chunkHead;
+    let itemIndex = this.itemHead;
+    let written = 0;
+    while (written < count) {
+      const chunk = this.chunks[chunkIndex]!;
+      const copied = Math.min(count - written, chunk.length - itemIndex);
+      for (let offset = 0; offset < copied; offset += 1) {
+        result[written + offset] = chunk[itemIndex + offset]!;
+      }
+      written += copied;
+      chunkIndex += 1;
+      itemIndex = 0;
+    }
+    return result;
+  }
+
+  commit(count: number): void {
+    if (!Number.isSafeInteger(count) || count < 0 || count > this.queuedLength) {
+      throw new Error("Recorder batch commit exceeds the queued prefix.");
+    }
+    let remaining = count;
+    this.queuedLength -= count;
+    while (remaining > 0) {
+      const chunk = this.chunks[this.chunkHead]!;
+      const available = chunk.length - this.itemHead;
+      if (remaining < available) {
+        this.itemHead += remaining;
+        remaining = 0;
+        break;
+      }
+      remaining -= available;
+      chunk.length = 0;
+      this.chunkHead += 1;
+      this.itemHead = 0;
+    }
+    if (this.queuedLength === 0) {
+      this.chunks.length = 0;
+      this.chunkHead = 0;
+      this.itemHead = 0;
+      return;
+    }
+    if (
+      this.chunkHead >= BATCH_QUEUE_CHUNK_COMPACTION_HEAD
+      && this.chunkHead * 2 >= this.chunks.length
+    ) {
+      this.chunks = this.chunks.slice(this.chunkHead);
+      this.chunkHead = 0;
+    }
+  }
+}
 
 export type MarketDataRecorderConfig = {
   instruments: Array<{
@@ -58,9 +138,9 @@ export class MarketDataRecorder {
   private readonly closeTimeoutMs: number;
   private readonly symbols: Set<string>;
   private readonly exchanges: Readonly<Record<string, UsExchange>>;
-  private readonly trades: ScalpingTradeRecord[] = [];
-  private readonly orderbooks: ScalpingOrderbookRecord[] = [];
-  private readonly recordingEvents: ScalpingRecordingEventRecord[] = [];
+  private readonly trades = new RetriableBatchQueue<ScalpingTradeRecord>();
+  private readonly orderbooks = new RetriableBatchQueue<ScalpingOrderbookRecord>();
+  private readonly recordingEvents = new RetriableBatchQueue<ScalpingRecordingEventRecord>();
   private readonly lastTradeAtBySymbol = new Map<string, string>();
   private readonly lastOrderbookAtBySymbol = new Map<string, string>();
   private phase: RecorderPhase = "idle";
@@ -602,9 +682,9 @@ export class MarketDataRecorder {
       }
       this.batchCursor = (this.batchCursor + 1) % lengths.length;
       const [tradeCount, orderbookCount, recordingEventCount] = counts;
-      const trades = this.trades.slice(0, tradeCount);
-      const orderbooks = this.orderbooks.slice(0, orderbookCount);
-      const recordingEvents = this.recordingEvents.slice(0, recordingEventCount);
+      const trades = this.trades.peek(tradeCount);
+      const orderbooks = this.orderbooks.peek(orderbookCount);
+      const recordingEvents = this.recordingEvents.peek(recordingEventCount);
       try {
         if (trades.length) await this.store.putTrades(trades);
         if (orderbooks.length) await this.store.putOrderbooks(orderbooks);
@@ -631,9 +711,9 @@ export class MarketDataRecorder {
         }
         throw error;
       }
-      this.trades.splice(0, trades.length);
-      this.orderbooks.splice(0, orderbooks.length);
-      this.recordingEvents.splice(0, recordingEvents.length);
+      this.trades.commit(trades.length);
+      this.orderbooks.commit(orderbooks.length);
+      this.recordingEvents.commit(recordingEvents.length);
       this.persistedTrades += trades.length;
       this.persistedOrderbooks += orderbooks.length;
       this.persistedRecordingEvents += recordingEvents.length;

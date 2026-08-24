@@ -10,6 +10,107 @@ workflow:
     - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_COMMIT_TAG'
 
+# Keep the change classifier explicit so it can be copied to other repositories.
+# A code-sensitive job runs for any non-docs change; docs-only changes use the
+# lightweight documentation validation job below. Main, tags, and schedules are
+# always complete validation boundaries.
+.ci-code-paths: &ci_code_paths
+  - .gitlab-ci.yml
+  - .gitlab/**/*
+  - .dockerignore
+  - .semgrepignore
+  - Dockerfile*
+  - package.json
+  - package-lock.json
+  - tsconfig*.json
+  - vite.config.*
+  - postcss.config.*
+  - tailwind.config.*
+  - Cargo.toml
+  - Cargo.lock
+  - worker/**/*
+  - server/**/*
+  - src/**/*
+  - public/**/*
+  - scripts/**/*
+  - test-support/**/*
+  - qualification-tools/**/*
+  - infra/**/*
+  - '**/*.ts'
+  - '**/*.tsx'
+  - '**/*.mjs'
+  - '**/*.cjs'
+  - '**/*.sh'
+  - '**/*.rs'
+  - '**/*.go'
+  - '**/*.css'
+  - '**/*.html'
+
+.ci-doc-paths: &ci_doc_paths
+  - docs/**/*
+  - '**/*.md'
+  - '*.md'
+  - LICENSE*
+
+# Keep the Python worker gate focused on code and integration surfaces that can
+# change its runtime or cross-language contract. Default-branch, tag, and
+# scheduled pipelines still run the job unconditionally below.
+.ci-python-ai-paths: &ci_python_ai_paths
+  - .gitlab-ci.yml
+  - Dockerfile.worker.*
+  - compose.yaml
+  - compose.ai*.yaml
+  - worker/ai/**/*
+  - contracts/scalping-ai/**/*
+  - server/config/crypto-ai.ts
+  - server/crypto/chronos2-*
+  - server/crypto/fincast-*
+  - server/scalping/fincast-*
+  - server/services/scalping-ai-service*
+  - server/worker/ai-*
+  - scripts/**/*.py
+  - scripts/**/*chronos2*
+  - scripts/**/*fincast*
+  - scripts/verify-ai-compose-profiles.mjs
+  - qualification-tools/**/*
+
+.ci-code-sensitive-rules:
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+      variables:
+        NODE_STATIC_CACHE_POLICY: pull-push
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - changes: *ci_code_paths
+    - changes: *ci_doc_paths
+      when: never
+    - when: on_success
+
+.ci-docs-only-rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+      when: never
+    - changes: *ci_code_paths
+      when: never
+    - changes: *ci_doc_paths
+    - when: never
+
+.ci-resource-metrics-script: &ci_resource_metrics_script |
+  ci_record_resource_metrics() {
+    local job_status="$1"
+    local memory_peak_bytes memory_current_bytes memory_events cpu_usage_usec io_bytes
+    memory_peak_bytes="$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || true)"
+    memory_current_bytes="$(cat /sys/fs/cgroup/memory.current 2>/dev/null || true)"
+    memory_events="$(tr '\n' ',' < /sys/fs/cgroup/memory.events 2>/dev/null | sed 's/,$//' || true)"
+    cpu_usage_usec="$(awk '$1 == "usage_usec" { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || true)"
+    io_bytes="$(awk '{ for (field = 1; field <= NF; field += 1) if ($field ~ /^rbytes=|^wbytes=/) { split($field, pair, "="); total += pair[2] } } END { print total + 0 }' /sys/fs/cgroup/io.stat 2>/dev/null || true)"
+    printf 'ci-resource-metrics scope=job-script job=%s runner=%s status=%s memory_peak_bytes=%s memory_current_bytes=%s cpu_usage_usec=%s io_bytes=%s memory_events=%s\n' \
+      "${CI_JOB_NAME:-unknown}" "${CI_RUNNER_ID:-unknown}" "$job_status" \
+      "${memory_peak_bytes:-unknown}" "${memory_current_bytes:-unknown}" \
+      "${cpu_usage_usec:-unknown}" "${io_bytes:-unknown}" "${memory_events:-unknown}" >&2
+    return "$job_status"
+  }
+  trap 'ci_record_resource_metrics "$?"' EXIT
+
 stages:
   - preflight
   - validate
@@ -29,7 +130,7 @@ default:
       - server_timeout_running
 
 variables:
-  GIT_DEPTH: "50"
+  GIT_DEPTH: "20"
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.cache/npm"
@@ -38,12 +139,16 @@ variables:
   CARGO_BUILD_JOBS: "2"
   CARGO_TERM_COLOR: "always"
   AST_ENABLE_MR_PIPELINES: "true"
-  SAST_EXCLUDED_PATHS: "graphify-out,docs/reports,.cache,dist,node_modules,worker/rust/target"
+  SAST_EXCLUDED_PATHS: "spec,test,tests,tmp,graphify-out,docs/reports,.cache,dist,node_modules,qualification-tools,worker/rust/target"
 
 runner-boundary:
   stage: preflight
   image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
   timeout: 5 minutes
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - *ci_resource_metrics_script
   script:
     - mkdir -p .cache/performance
     - |
@@ -62,29 +167,55 @@ runner-boundary:
 .node-job:
   image: node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
   before_script:
+    - *ci_resource_metrics_script
     - npm ci --prefer-offline --no-audit --no-fund
   cache:
-    key:
-      files:
-        - package-lock.json
-      prefix: node-project-references-v1
-    paths:
-      - .cache/npm/
-      - .cache/types/
-      - .cache/tsbuildinfo/
-      - dist/server/
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-npm-v3
+      policy: pull
+      paths:
+        - .cache/npm/
 
 node-static:
   extends: .node-job
   stage: validate
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
+  variables:
+    NODE_STATIC_CACHE_POLICY: pull
   before_script:
+    - *ci_resource_metrics_script
     - apt-get update -qq
     - apt-get install -y --no-install-recommends git >/dev/null
     - npm ci --prefer-offline --no-audit --no-fund
+  cache:
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-npm-v3
+      policy: $NODE_STATIC_CACHE_POLICY
+      paths:
+        - .cache/npm/
+    - key:
+        files:
+          - package-lock.json
+        prefix: node-build-v3
+      policy: $NODE_STATIC_CACHE_POLICY
+      paths:
+        - .cache/types/
+        - .cache/tsbuildinfo/
+        - dist/server/
   script:
     - npm run test:release-tools
+    - |
+      qualification_output="$(mktemp -d)"
+      QUALIFICATION_TOOLS_OUTPUT="$qualification_output" npm run qualification:chronos2:tools
+      node scripts/verify-qualification-tools.mjs "$qualification_output"
+      rm -rf "$qualification_output"
     - npm run typecheck:app
     - npm run build:client
     - npm run build:server
@@ -99,16 +230,30 @@ node-static:
     - npm run docs:mcp:check
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - typescript-diagnostics.txt
       - .cache/performance/bundle-report.json
+      # The browser lane consumes this exact production build. Its compressed
+      # artifact is substantially cheaper than a second Vite compilation.
+      - dist/client/
+
+docs-validation:
+  extends: .node-job
+  stage: validate
+  timeout: 10 minutes
+  dependencies: []
+  rules: !reference [.ci-docs-only-rules, rules]
+  script:
+    - npm run docs:mcp:check
 
 vitest-light:
   extends: .node-job
   stage: test
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
     VITEST_MEMORY_BUDGET_MB: "3584"
     VITEST_MAX_PARALLEL: "2"
@@ -117,7 +262,7 @@ vitest-light:
     - npm run test:light
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-light/
@@ -129,6 +274,8 @@ vitest-heavy:
   stage: test
   timeout: 30 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
     VITEST_MEMORY_BUDGET_MB: "2048"
     VITEST_MAX_PARALLEL: "1"
@@ -137,7 +284,7 @@ vitest-heavy:
     - npm run test:heavy
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-heavy/
@@ -149,15 +296,19 @@ vitest-pglite:
   stage: test
   timeout: 35 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
     VITEST_MEMORY_BUDGET_MB: "4096"
     VITEST_MAX_PARALLEL: "1"
+    VITEST_PGLITE_MAX_PARALLEL: "2"
+    VITEST_PGLITE_SERIAL_FILES: "server/services/run-service.test.ts"
     VITEST_JUNIT_DIR: "$CI_PROJECT_DIR/.cache/test-reports/vitest-pglite"
   script:
     - npm run test:pglite
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/performance/vitest-batches.json
       - .cache/test-reports/vitest-pglite/
@@ -169,24 +320,28 @@ vitest-coverage:
   stage: test
   timeout: 35 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
   variables:
     VITEST_MEMORY_BUDGET_MB: "3072"
     VITEST_MAX_PARALLEL: "1"
     VITEST_COVERAGE_DIR: "$CI_PROJECT_DIR/.cache/coverage/vitest-light"
+    VITEST_JUNIT_DIR: "$CI_PROJECT_DIR/.cache/test-reports/vitest-coverage"
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *ci_code_paths
     - when: never
   script:
     - npm run test:light
   coverage: '/Lines\s*:\s*(\d+(?:\.\d+)?)%/'
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 14 days
     paths:
       - .cache/coverage/vitest-light/
       - .cache/performance/vitest-batches.json
     reports:
+      junit: .cache/test-reports/vitest-coverage/*.xml
       coverage_report:
         coverage_format: cobertura
         path: .cache/coverage/vitest-light/cobertura-coverage.xml
@@ -195,27 +350,107 @@ semgrep-sast:
   image: registry.gitlab.com/security-products/semgrep:6@sha256:69d311ec0f712f054aa0ea1cb47a5a2bfde6bb7c36d77144c9e189eec83dfa8f
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
+  variables:
+    # Keep per-rule execution bounded at the analyzer default. A higher timeout
+    # makes this runner spend several extra minutes on known complex test files.
+    SAST_SCANNER_ALLOWED_CLI_OPTS: "--timeout 5"
+  before_script:
+    - *ci_resource_metrics_script
 
 secret_detection:
   image: registry.gitlab.com/security-products/secrets:7@sha256:67653ece880ca76f6e6a468fee1923d59b0f48138aee06199208b4b2bec478ff
   timeout: 15 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules: !reference [.ci-code-sensitive-rules, rules]
+  before_script:
+    - *ci_resource_metrics_script
+
+python-ai-quality:
+  stage: test
+  image: ghcr.io/astral-sh/uv:0.7.19-python3.12-bookworm-slim@sha256:235c2e8419851c1d539e2b19033d56aaf82670bfaaa155e20ac6b21260dc0be9
+  timeout: 15 minutes
+  resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+      variables:
+        PYTHON_AI_CACHE_POLICY: pull-push
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - changes: *ci_python_ai_paths
+    - when: never
+  variables:
+    PYTHON_AI_CACHE_POLICY: pull
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+    UV_LINK_MODE: copy
+    UV_PYTHON_DOWNLOADS: never
+  cache:
+    - key:
+        files:
+          - worker/ai/pyproject.toml
+          - worker/ai/uv.lock
+        prefix: python-ai-uv-v2
+      policy: $PYTHON_AI_CACHE_POLICY
+      paths:
+        - .cache/uv/
+  before_script:
+    - *ci_resource_metrics_script
+    - cd worker/ai
+    - uv export --quiet --all-extras --locked --no-hashes --no-emit-project --output-file /tmp/python-ai-constraints.txt
+    - uv venv --python 3.12
+    # The full GPU lock pulls several GiB of CUDA wheels that these CPU-only
+    # tests never exercise. Install the declared test and runtime extras once,
+    # selecting uv's CPU PyTorch backend while preserving locked versions for
+    # all compatible packages, then keep every command sync-free.
+    - uv pip install --requirements pyproject.toml --all-extras --torch-backend cpu --constraints /tmp/python-ai-constraints.txt --strict
+  script:
+    - uv run --no-sync ruff check
+    - mkdir -p "$CI_PROJECT_DIR/.cache/test-reports/python-ai"
+    - uv run --no-sync pytest --junitxml="$CI_PROJECT_DIR/.cache/test-reports/python-ai/pytest.xml"
+  artifacts:
+    when: always
+    expire_in: 14 days
+    reports:
+      junit: .cache/test-reports/python-ai/pytest.xml
 
 rust-quality:
   stage: test
   image: rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
   timeout: 35 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  dependencies: []
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG)'
+      variables:
+        RUST_CACHE_POLICY: pull-push
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - changes: *ci_code_paths
+    - changes: *ci_doc_paths
+      when: never
+    - when: on_success
+  variables:
+    CARGO_INCREMENTAL: "0"
+    RUST_CACHE_POLICY: pull
   cache:
-    key:
-      files:
-        - worker/rust/Cargo.lock
-      prefix: rust
-    paths:
-      - .cache/cargo/registry/
-      - .cache/cargo/git/
-      - worker/rust/target/
+    - key:
+        files:
+          - worker/rust/Cargo.lock
+        prefix: rust-registry-v3
+      policy: $RUST_CACHE_POLICY
+      paths:
+        - .cache/cargo/registry/
+        - .cache/cargo/git/
+    - key:
+        files:
+          - worker/rust/Cargo.lock
+        prefix: rust-target-v3
+      policy: $RUST_CACHE_POLICY
+      paths:
+        - worker/rust/target/
   before_script:
+    - *ci_resource_metrics_script
     - rustup component add rustfmt clippy
   script:
     - cargo fmt --check --manifest-path worker/rust/Cargo.toml
@@ -224,7 +459,7 @@ rust-quality:
     - cargo build --release --locked --manifest-path worker/rust/Cargo.toml
     - INDICATOR_BENCH_OUTPUT=.cache/performance/rust-indicator-cache.json cargo run --release --locked --manifest-path worker/rust/Cargo.toml --example indicator_cache_benchmark
   artifacts:
-    expire_in: 30 days
+    expire_in: 7 days
     paths:
       - worker/rust/target/release/portfolio-lens-worker
       - .cache/performance/rust-indicator-cache.json
@@ -233,14 +468,19 @@ cnpg-backup-retention:
   stage: test
   image: golang:1.26.5-alpine3.23@sha256:73f9732658b30852522ee5ebe698daa27e1829add9a70ff4f4a828409f8d0a99
   timeout: 10 minutes
+  before_script:
+    - *ci_resource_metrics_script
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - changes:
+        - infra/homelab/cnpg-backup-retention/**/*
+        - .gitlab-ci.yml
+      when: on_success
+    - when: never
   script:
     - cd infra/homelab/cnpg-backup-retention
     - go test ./...
     - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -buildid=' -o cnpg-backup-retention .
-  artifacts:
-    expire_in: 30 days
-    paths:
-      - infra/homelab/cnpg-backup-retention/cnpg-backup-retention
 
 ui-regression:
   extends: .node-job
@@ -248,15 +488,23 @@ ui-regression:
   image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
   timeout: 25 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  needs:
+    - job: node-static
+      artifacts: true
+  rules: !reference [.ci-code-sensitive-rules, rules]
   variables:
     UI_VALIDATION_SKIP_BUILD: "1"
     UI_VALIDATION_SCREENSHOT_DIR: "$CI_PROJECT_DIR/.cache/ui-regression"
   script:
-    - npm run build:client
+    - test -f dist/client/index.html
     - npm run test:ui-regression
+    - |
+      if [[ -d "$UI_VALIDATION_SCREENSHOT_DIR" ]]; then
+        find "$UI_VALIDATION_SCREENSHOT_DIR" -type f -name '*.png' -delete
+      fi
   artifacts:
     when: always
-    expire_in: 30 days
+    expire_in: 7 days
     paths:
       - .cache/ui-regression/
 
@@ -265,7 +513,9 @@ postgres-integration:
   stage: integration
   timeout: 30 minutes
   resource_group: toss-portfolio-lens-memory-heavy
+  rules: !reference [.ci-code-sensitive-rules, rules]
   before_script:
+    - *ci_resource_metrics_script
     - apt-get update -qq
     - apt-get install -y --no-install-recommends libssl3 >/dev/null
     - npm ci --prefer-offline --no-audit --no-fund
@@ -311,10 +561,14 @@ security-report-gate:
       artifacts: true
     - job: secret_detection
       artifacts: true
+  before_script:
+    - *ci_resource_metrics_script
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH'
-    - when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG'
+    - changes: *ci_code_paths
+    - changes: *ci_doc_paths
+      when: never
+    - when: on_success
   script:
     - node scripts/check-gitlab-security-reports.mjs
   artifacts:

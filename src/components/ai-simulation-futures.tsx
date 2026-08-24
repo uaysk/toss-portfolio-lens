@@ -1,13 +1,11 @@
-import {
-  AlertTriangle,
-  ArrowDownRight,
-  ArrowUpRight,
-  CheckCircle2,
-  ExternalLink,
-  Gauge,
-  GitCompareArrows,
-  ShieldAlert,
-} from "lucide-react";
+import AlertTriangle from "lucide-react/dist/esm/icons/triangle-alert.js";
+import ArrowDownRight from "lucide-react/dist/esm/icons/arrow-down-right.js";
+import ArrowUpRight from "lucide-react/dist/esm/icons/arrow-up-right.js";
+import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check.js";
+import ExternalLink from "lucide-react/dist/esm/icons/external-link.js";
+import Gauge from "lucide-react/dist/esm/icons/gauge.js";
+import GitCompareArrows from "lucide-react/dist/esm/icons/git-compare-arrows.js";
+import ShieldAlert from "lucide-react/dist/esm/icons/shield-alert.js";
 import { Card } from "@/components/ui/card";
 import type {
   AiSimulationFuturesPosition,

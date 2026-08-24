@@ -15,10 +15,25 @@ import { fileURLToPath } from "node:url";
 export const HEAP_LIMIT_MB = 768;
 export const UNIT_BATCH_SIZE = 16;
 export const PROCESS_RESERVATION_MB = 1_024;
+export const PGLITE_PROCESS_RESERVATION_MB = 1_536;
 export const MEMORY_HEADROOM_MB = 512;
 export const MAX_LIGHT_PARALLELISM = 4;
 
 const TEST_FILE = /\.test\.(?:ts|tsx)$/u;
+const TEST_WALK_IGNORED_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".playwright-mcp",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "coverage",
+  "dist",
+  "graphify-out",
+  "node_modules",
+  "target",
+  "venv",
+]);
 const PGLITE_MARKERS =
   /@electric-sql\/pglite|\bPGlite\b|createTestDatabase|PGliteDatabase|openTestHistoryStore|test-support\/history-store/u;
 const HEAVY_PATH =
@@ -29,6 +44,7 @@ const HEAVY_FILE_BYTES = 64 * 1_024;
 const REPORT_PATH = ".cache/performance/vitest-batches.json";
 const RSS_SAMPLE_INTERVAL_MS = 250;
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const activeTestProcesses = new Set();
 const GROUP_LANES = Object.freeze({
   all: Object.freeze(["light", "heavy", "pglite"]),
   unit: Object.freeze(["light", "heavy"]),
@@ -73,13 +89,19 @@ export function classifyTestFile(path, contents) {
   return { lane: "light", reason: "default" };
 }
 
+export function shouldIgnoreTestDirectory(name) {
+  return TEST_WALK_IGNORED_DIRECTORIES.has(name);
+}
+
+export function terminateTestProcesses(processes, signal) {
+  for (const child of processes) {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  }
+}
+
 function walk(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.name === "node_modules"
-      || entry.name === "dist"
-      || entry.name === ".git"
-      || entry.name === "graphify-out"
-      || entry.name === ".cache") {
+    if (entry.isDirectory() && shouldIgnoreTestDirectory(entry.name)) {
       return [];
     }
     const path = join(directory, entry.name);
@@ -124,6 +146,41 @@ export function planBatches(files, group, unitBatchSize = UNIT_BATCH_SIZE) {
       : []),
   ];
   return batches.map((batch, index) => ({ ...batch, ordinal: index + 1 }));
+}
+
+export function parseSerialFiles(value) {
+  return new Set(
+    String(value ?? "")
+      .split(",")
+      .map((path) => path.trim())
+      .filter(Boolean),
+  );
+}
+
+export function isSerialBatch(batch, serialFiles = new Set()) {
+  return batch.lane === "heavy"
+    || (batch.lane === "pglite" && batch.files.some((file) => serialFiles.has(file)));
+}
+
+export function planPgliteGroups(batches, serialFiles = new Set(), parallelism = 1) {
+  const safeParallelism = positiveInteger(parallelism, "PGlite parallelism");
+  const groups = [];
+  let parallelGroup = [];
+  const flushParallelGroup = () => {
+    if (parallelGroup.length > 0) groups.push(parallelGroup);
+    parallelGroup = [];
+  };
+  for (const batch of batches) {
+    if (isSerialBatch(batch, serialFiles)) {
+      flushParallelGroup();
+      groups.push([batch]);
+      continue;
+    }
+    parallelGroup.push(batch);
+    if (parallelGroup.length >= safeParallelism) flushParallelGroup();
+  }
+  flushParallelGroup();
+  return groups;
 }
 
 function bytesFromMeminfo(name) {
@@ -174,6 +231,7 @@ export function memoryPlan({
   detectedAvailableMb,
   explicitBudgetMb,
   requestedMaxParallel,
+  requestedPgliteParallel,
 }) {
   const safeDetectedMb = Number.isFinite(detectedAvailableMb) && detectedAvailableMb > 0
     ? Math.floor(detectedAvailableMb)
@@ -184,6 +242,9 @@ export function memoryPlan({
   const requestedParallel = requestedMaxParallel === undefined
     ? MAX_LIGHT_PARALLELISM
     : positiveInteger(requestedMaxParallel, "max parallelism");
+  const requestedPglite = requestedPgliteParallel === undefined
+    ? 1
+    : positiveInteger(requestedPgliteParallel, "PGlite max parallelism");
   const fallbackBudgetMb = PROCESS_RESERVATION_MB + MEMORY_HEADROOM_MB;
   const requestedBudgetMb = safeExplicitMb ?? safeDetectedMb ?? fallbackBudgetMb;
   const effectiveBudgetMb = safeDetectedMb === undefined
@@ -193,18 +254,25 @@ export function memoryPlan({
     1,
     Math.floor(Math.max(0, effectiveBudgetMb - MEMORY_HEADROOM_MB) / PROCESS_RESERVATION_MB),
   );
+  const pgliteMemoryBound = Math.max(
+    1,
+    Math.floor(Math.max(0, effectiveBudgetMb - MEMORY_HEADROOM_MB) / PGLITE_PROCESS_RESERVATION_MB),
+  );
   return {
     detectedAvailableMb: safeDetectedMb,
     requestedBudgetMb,
     explicitBudgetMb: safeExplicitMb,
     effectiveBudgetMb,
     processReservationMb: PROCESS_RESERVATION_MB,
+    pgliteProcessReservationMb: PGLITE_PROCESS_RESERVATION_MB,
     headroomMb: MEMORY_HEADROOM_MB,
     requestedMaxParallel: requestedParallel,
+    requestedPgliteParallel: requestedPglite,
     lightParallelism: Math.max(
       1,
       Math.min(requestedParallel, MAX_LIGHT_PARALLELISM, memoryBound),
     ),
+    pgliteParallelism: Math.max(1, Math.min(requestedPglite, pgliteMemoryBound)),
   };
 }
 
@@ -383,12 +451,12 @@ class RssSampler {
   }
 }
 
-function pendingBatchRecord(batch) {
+function pendingBatchRecord(batch, serialFiles) {
   return {
     ordinal: batch.ordinal,
     name: batch.name,
     lane: batch.lane,
-    serial: batch.lane !== "light",
+    serial: isSerialBatch(batch, serialFiles),
     files: batch.files,
     state: "pending",
     startedAt: null,
@@ -425,6 +493,7 @@ async function executeBatch(batch, record, context) {
       stdio: "inherit",
     },
   );
+  activeTestProcesses.add(child);
   if (child.pid) context.sampler.add(batch.name, child.pid);
   child.once("error", (error) => {
     spawnError = error;
@@ -432,6 +501,7 @@ async function executeBatch(batch, record, context) {
   const result = await new Promise((resolveResult) => {
     child.once("close", (exitCode, signal) => resolveResult({ exitCode, signal }));
   });
+  activeTestProcesses.delete(child);
   const elapsedMs = Math.round(performance.now() - started);
   record.finishedAt = new Date().toISOString();
   record.elapsedMs = elapsedMs;
@@ -468,6 +538,16 @@ async function executeLightBatches(batches, records, context, parallelism) {
   return !failed;
 }
 
+async function executePgliteBatches(batches, records, context, parallelism) {
+  for (const group of planPgliteGroups(batches, context.serialFiles, parallelism)) {
+    const results = await Promise.all(group.map((batch) => (
+      executeBatch(batch, records.get(batch.name), context)
+    )));
+    if (results.some((passed) => !passed)) return false;
+  }
+  return true;
+}
+
 function writeReport(report) {
   const reportPath = join(root, REPORT_PATH);
   mkdirSync(dirname(reportPath), { recursive: true });
@@ -488,6 +568,9 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     ?? environment.VITEST_MEMORY_BUDGET_MB;
   const maxParallelValue = argumentValue(arguments_, "--max-parallel")
     ?? environment.VITEST_MAX_PARALLEL;
+  const pgliteMaxParallelValue = argumentValue(arguments_, "--pglite-max-parallel")
+    ?? environment.VITEST_PGLITE_MAX_PARALLEL;
+  const serialFiles = parseSerialFiles(environment.VITEST_PGLITE_SERIAL_FILES);
   const dryRun = arguments_.includes("--dry-run");
   const junitDirectory = optionalOutputDirectory(
     arguments_,
@@ -509,6 +592,7 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     detectedAvailableMb,
     explicitBudgetMb: explicitBudgetValue,
     requestedMaxParallel: maxParallelValue,
+    requestedPgliteParallel: pgliteMaxParallelValue,
   });
   const files = walk(root)
     .map((path) => {
@@ -538,13 +622,15 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     laneFileCounts,
     totalBatchCount: allBatches.length,
     selectedBatchCount: batches.length,
-    junitDirectory: junitDirectory ? relative(root, junitDirectory) : null,
-    coverageDirectory: coverageDirectory ? relative(root, coverageDirectory) : null,
+      junitDirectory: junitDirectory ? relative(root, junitDirectory) : null,
+      coverageDirectory: coverageDirectory ? relative(root, coverageDirectory) : null,
+    pgliteParallelism: resolvedMemoryPlan.pgliteParallelism,
+    pgliteSerialFiles: [...serialFiles],
     batches: batches.map(({ ordinal, name, lane, files: batchFiles }) => ({
       ordinal,
       name,
       lane,
-      serial: lane !== "light",
+      serial: isSerialBatch({ lane, files: batchFiles }, serialFiles),
       fileCount: batchFiles.length,
       files: batchFiles,
     })),
@@ -558,7 +644,7 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
   const started = performance.now();
   const batchRecords = new Map(batches.map((batch) => [
     batch.name,
-    pendingBatchRecord(batch),
+    pendingBatchRecord(batch, serialFiles),
   ]));
   const report = {
     schemaVersion: "vitest-batch-report/v2",
@@ -574,6 +660,8 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     selectedBatchCount: batches.length,
     junitDirectory: junitDirectory ? relative(root, junitDirectory) : null,
     coverageDirectory: coverageDirectory ? relative(root, coverageDirectory) : null,
+    pgliteParallelism: resolvedMemoryPlan.pgliteParallelism,
+    pgliteSerialFiles: [...serialFiles],
     memory: {
       ...resolvedMemoryPlan,
       hostAvailableBytes: detectedMemory.hostAvailableBytes ?? null,
@@ -599,10 +687,12 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     junitDirectory,
     nodeOptions: nodeOptionsWithHeapLimit(environment.NODE_OPTIONS),
     sampler,
+    serialFiles,
     totalBatchCount: allBatches.length,
   };
   const lightBatches = batches.filter(({ lane }) => lane === "light");
-  const serialBatches = batches.filter(({ lane }) => lane !== "light");
+  const heavyBatches = batches.filter(({ lane }) => lane === "heavy");
+  const pgliteBatches = batches.filter(({ lane }) => lane === "pglite");
   let passed = await executeLightBatches(
     lightBatches,
     batchRecords,
@@ -610,10 +700,18 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
     resolvedMemoryPlan.lightParallelism,
   );
   if (passed) {
-    for (const batch of serialBatches) {
+    for (const batch of heavyBatches) {
       passed = await executeBatch(batch, batchRecords.get(batch.name), context);
       if (!passed) break;
     }
+  }
+  if (passed && pgliteBatches.length > 0) {
+    passed = await executePgliteBatches(
+      pgliteBatches,
+      batchRecords,
+      context,
+      resolvedMemoryPlan.pgliteParallelism,
+    );
   }
   if (coverageDirectory) {
     try {
@@ -638,6 +736,14 @@ export async function main(arguments_ = process.argv.slice(2), environment = pro
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
 if (invokedPath === fileURLToPath(import.meta.url)) {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const handler = () => {
+      terminateTestProcesses(activeTestProcesses, signal);
+      process.removeListener(signal, handler);
+      process.kill(process.pid, signal);
+    };
+    process.once(signal, handler);
+  }
   main().then(
     (exitCode) => {
       process.exitCode = exitCode;

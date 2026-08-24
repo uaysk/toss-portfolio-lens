@@ -6,15 +6,19 @@ import {
 export const SIMULATION_RUN_FALLBACK_INITIAL_MS = 5_000;
 export const SIMULATION_RUN_FALLBACK_MAX_MS = 30_000;
 
-export type SimulationRunEventType =
-  | "snapshot"
-  | "progress"
-  | "changed"
-  | "terminal"
-  | "heartbeat";
+export const SIMULATION_RUN_EVENT_SCHEMA_VERSION = 1 as const;
+export const SIMULATION_RUN_EVENT_TYPES = [
+  "snapshot",
+  "progress",
+  "changed",
+  "terminal",
+  "heartbeat",
+] as const;
+
+export type SimulationRunEventType = (typeof SIMULATION_RUN_EVENT_TYPES)[number];
 
 export type SimulationRunEventV1 = {
-  schemaVersion: 1;
+  schemaVersion: typeof SIMULATION_RUN_EVENT_SCHEMA_VERSION;
   runId: string;
   revision: number;
   emittedAt: string;
@@ -22,13 +26,7 @@ export type SimulationRunEventV1 = {
   payload: unknown;
 };
 
-const EVENT_TYPES = new Set<SimulationRunEventType>([
-  "snapshot",
-  "progress",
-  "changed",
-  "terminal",
-  "heartbeat",
-]);
+const EVENT_TYPES = new Set<SimulationRunEventType>(SIMULATION_RUN_EVENT_TYPES);
 
 const RUN_KEYS = new Set([
   "run",
@@ -56,7 +54,7 @@ export function simulationRunEventsUrl(runId: string, lastEventId?: number): str
 export function parseSimulationRunEvent(value: unknown): SimulationRunEventV1 | undefined {
   const source = record(value);
   if (
-    source?.schemaVersion !== 1
+    source?.schemaVersion !== SIMULATION_RUN_EVENT_SCHEMA_VERSION
     || typeof source.runId !== "string"
     || source.runId.length === 0
     || !Number.isSafeInteger(source.revision)
@@ -68,7 +66,7 @@ export function parseSimulationRunEvent(value: unknown): SimulationRunEventV1 | 
     return undefined;
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: SIMULATION_RUN_EVENT_SCHEMA_VERSION,
     runId: source.runId,
     revision: source.revision as number,
     emittedAt: source.emittedAt,

@@ -15,8 +15,9 @@ describe("crypto futures simulation UI", () => {
     const asset = renderToStaticMarkup(
       <AiSimulationAssetClassControl value="btc_eth" onChange={() => undefined} />,
     );
-    expect(asset).toContain('role="tablist"');
-    expect(asset).toContain('aria-selected="true"');
+    expect(asset).toContain('role="radiogroup"');
+    expect(asset).toContain('role="radio"');
+    expect(asset).toContain('aria-checked="true"');
     expect(asset).toContain('data-simulation-asset-class-option="btc_eth"');
     expect(asset).toContain('data-simulation-asset-class-option="high_vol_crypto"');
     expect(asset).toContain('data-simulation-asset-class-option="us_etf_pair"');

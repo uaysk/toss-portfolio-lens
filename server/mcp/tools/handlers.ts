@@ -31,7 +31,7 @@ import {
   type OptimizationObjective,
   type PortfolioCandidate,
 } from "../../contracts/optimization.js";
-import { envelope, HISTORICAL_LIMITATION, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "../../services/service-envelope.js";
+import { envelope, PORTFOLIO_ENGINE_VERSION, requestHash, ServiceError } from "../../services/service-envelope.js";
 import type { McpResourceRegistry } from "../resources.js";
 import { resolvedPresetExecutionSchemas, type ToolName } from "../schemas.js";
 import type { RustComputeClient } from "../../worker/rust-client.js";
@@ -371,36 +371,6 @@ async function persistOptimization(
   await dependencies.optimizationRepository.putCandidates([...unique.values()]);
 }
 
-function returnsToPrices(series: ReturnSeriesInput, start: number, end: number): PriceSeriesInput {
-  const selected = series.points.slice(start, end + 1);
-  if (!selected.length) return { key: series.key, label: series.label, points: [] };
-  let price = 100;
-  const points = [{ date: addDays(selected[0].date, -1), value: price }];
-  for (const point of selected) {
-    price *= 1 + point.value;
-    points.push({ date: point.date, value: price });
-  }
-  return { key: series.key, label: series.label, points };
-}
-
-function portfolioReturns(
-  aligned: ReturnType<typeof alignReturnSeries>,
-  weights: Record<string, number>,
-  start: number,
-  end: number,
-): ReturnSeriesInput {
-  return {
-    key: "oos-portfolio",
-    label: "OOS portfolio",
-    points: aligned.dates.slice(start, end + 1).map((date, relative) => ({
-      date,
-      value: Object.entries(weights).reduce((sum, [symbol, weight]) => (
-        sum + weight * (aligned.byKey[symbol]?.[start + relative] ?? 0)
-      ), 0),
-    })),
-  };
-}
-
 function normalizedWeights(keys: string[], input?: Record<string, number>): Record<string, number> {
   const values = Object.fromEntries(keys.map((key) => [key, Math.max(0, Number(input?.[key] ?? (input ? 0 : 1)))]));
   const total = Object.values(values).reduce((sum, value) => sum + value, 0);
@@ -449,32 +419,6 @@ function riskSnapshot(analysis: ReturnType<typeof analyzeReturnSeries>) {
     sortino_ratio: analysis.sortinoRatio,
     observations: analysis.observations,
   };
-}
-
-function numericDistribution(values: number[]) {
-  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
-  if (!sorted.length) return { minimum: null, median: null, maximum: null };
-  const middle = Math.floor(sorted.length / 2);
-  return {
-    minimum: sorted[0],
-    median: sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2,
-    maximum: sorted.at(-1)!,
-  };
-}
-
-function metricDistributions(rows: Array<{ metrics: Record<string, unknown> }>) {
-  const keys = [
-    "cagrPercent",
-    "annualizedVolatilityPercent",
-    "maxDrawdownPercent",
-    "cvar95Percent",
-    "sharpeRatio",
-    "sortinoRatio",
-  ];
-  return Object.fromEntries(keys.map((key) => [
-    key,
-    numericDistribution(rows.map((row) => Number(row.metrics[key])).filter(Number.isFinite)),
-  ]));
 }
 
 type PresetExecutionTool =

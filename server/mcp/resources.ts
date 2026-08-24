@@ -9,7 +9,7 @@ import { mcpVisibleRun } from "./run-visibility.js";
 
 type MarketResource = {
   ownerSubject: string;
-  content: unknown;
+  responseJson: string;
   descriptor: {
     uri: string;
     format: "application/json";
@@ -72,20 +72,29 @@ export class McpResourceRegistry {
     private readonly runs: RunService,
     private readonly authMode: "oauth" | "none",
     private readonly maxMarketBytes = 20 * 1024 * 1024,
-  ) {}
+  ) {
+    if (!Number.isSafeInteger(maxMarketBytes) || maxMarketBytes < 1) {
+      throw new Error("MCP market resource byte limit must be a positive integer.");
+    }
+  }
 
   private marketKey(requestHash: string, ownerSubject: string): string {
     return `${ownerSubject.length}:${ownerSubject}${requestHash}`;
   }
 
   storeMarket(requestHash: string, content: unknown, dataRevision: string, ownerSubject: string): MarketResource["descriptor"] {
-    const json = JSON.stringify(content);
+    const contentJson = JSON.stringify(content);
+    if (contentJson === undefined) throw new Error("시장 시계열을 JSON으로 직렬화할 수 없습니다.");
+    const byteCount = Buffer.byteLength(contentJson);
+    if (byteCount > this.maxMarketBytes) {
+      throw new Error("시장 시계열 resource가 저장 byte 상한을 초과했습니다.");
+    }
     const descriptor: MarketResource["descriptor"] = {
       uri: `market://series/${requestHash}`,
       format: "application/json",
       row_count: Array.isArray(content) ? content.length : 1,
-      byte_count: Buffer.byteLength(json),
-      checksum: createHash("sha256").update(json).digest("hex"),
+      byte_count: byteCount,
+      checksum: createHash("sha256").update(contentJson).digest("hex"),
       generated_at: new Date().toISOString(),
       schema_version: MCP_SCHEMA_VERSION,
       data_revision: dataRevision,
@@ -93,7 +102,8 @@ export class McpResourceRegistry {
     const key = this.marketKey(requestHash, ownerSubject);
     const previous = this.market.get(key);
     if (previous) this.marketBytes -= previous.descriptor.byte_count;
-    this.market.set(key, { ownerSubject, content, descriptor });
+    const responseJson = `{"descriptor":${JSON.stringify(descriptor)},"data":${contentJson}}`;
+    this.market.set(key, { ownerSubject, responseJson, descriptor });
     this.marketBytes += descriptor.byte_count;
     while (this.market.size > 200 || this.marketBytes > this.maxMarketBytes) {
       const oldest = this.market.keys().next().value as string | undefined;
@@ -123,7 +133,7 @@ export class McpResourceRegistry {
           contents: [{
             uri: stored.descriptor.uri,
             mimeType: "application/json",
-            text: JSON.stringify({ descriptor: stored.descriptor, data: stored.content }),
+            text: stored.responseJson,
           }],
         };
       },

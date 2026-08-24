@@ -271,12 +271,6 @@ function average(values: readonly number[]): number {
     : 0;
 }
 
-function percentile(values: readonly number[], probability: number): number {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.floor((sorted.length - 1) * probability)]!;
-}
-
 function ema(values: readonly number[], period: number): number {
   if (!values.length) return 0;
   const alpha = 2 / (period + 1);
@@ -1221,14 +1215,6 @@ async function log(message: string): Promise<void> {
     await appendFile(logPath, line);
   }
   process.stdout.write(line);
-}
-
-function stripDetails(result: HistoricalBacktestResult): Omit<
-  HistoricalBacktestResult,
-  "decisions" | "fills"
-> {
-  const { decisions: _decisions, fills: _fills, ...summary } = result;
-  return summary;
 }
 
 async function executeChunk(

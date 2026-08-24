@@ -171,11 +171,16 @@ export function candidateQualityStatus(candidate: ResearchCandidate): "available
 }
 
 export function downsampleRows<T>(rows: T[], limit = 500): T[] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("chart row limit must be a positive safe integer");
+  }
   if (rows.length <= limit) return rows;
-  const stride = Math.ceil((rows.length - 1) / (limit - 1));
-  const sampled = rows.filter((_, index) => index % stride === 0).slice(0, limit - 1);
-  const last = rows.at(-1);
-  return last === undefined ? sampled : [...sampled, last];
+  if (limit === 1) return [rows.at(-1)!];
+  const lastIndex = rows.length - 1;
+  return Array.from(
+    { length: limit },
+    (_, index) => rows[Math.round(index * lastIndex / (limit - 1))]!,
+  );
 }
 
 /** Convert worker percentile paths into one Recharts row per step/date. */

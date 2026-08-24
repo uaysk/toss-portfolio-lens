@@ -203,6 +203,7 @@ describe("portfolio reports", () => {
       backend: "local",
       put: vi.fn(async (_id, document) => { stored = document; }),
       get: vi.fn(async () => stored),
+      delete: vi.fn(async () => { stored = undefined; }),
     };
     const writer = { evaluate: vi.fn(async () => narrative) };
     const service = new PortfolioReportService(storage, "https://tpl.uaysk.com", writer);

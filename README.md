@@ -363,6 +363,18 @@ npm run dev
 EXECUTION_MODE=external docker compose --profile external-compute up --build -d --no-deps web compute-worker
 ```
 
+### Web replica 정책
+
+현재 web control plane은 **단일 replica**만 지원합니다. 전역 SSE admission/replay, portfolio live hub,
+simulation session admission, 주기 snapshot scheduler와 `rust_socket` scheduler가 프로세스 메모리에
+있기 때문입니다. `APP_REPLICA_COUNT`는 orchestrator가 실제 desired replica 수와 맞춰 주어야 하는
+**운영 선언값**이지 자동 탐지값이 아니며, 앱은 1이 아닌 선언값으로 시작하지 않습니다. 기본 Compose도
+1을 명시하므로 `docker compose --scale web=...`로 web을 수평 확장하지 마세요.
+
+수평 확장 전에는 session/snapshot 단일 실행 lease, 공유 SSE pub/sub와 replay, 분산 admission quota를
+먼저 도입하고 이 계약을 함께 변경해야 합니다. PostgreSQL 기반 `external` compute worker의 독립 확장은
+이 web replica 제약과 별개입니다.
+
 ## 주요 환경 변수
 
 | 변수 | 설명 |
@@ -372,6 +384,8 @@ EXECUTION_MODE=external docker compose --profile external-compute up --build -d 
 | `SESSION_SECRET` | 로그인 세션 HMAC 서명 값, 32자 이상 |
 | `TRUST_PROXY` | 명시적으로 신뢰할 reverse proxy IP/CIDR 목록. 미설정 시 forwarded header를 신뢰하지 않음 |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_MS` | SSE와 장시간 작업을 정리할 graceful shutdown 제한 시간, 기본 30000ms |
+| `APP_REPLICA_COUNT` | 실제 web replica 수와 맞추는 운영 선언값. process-local 상태 때문에 현재 1만 허용 |
+| `SSE_MAX_CONNECTIONS` | 모든 SSE 엔드포인트가 공유하는 동시 연결 상한, 기본 256 (1~10000) |
 | `APP_GIT_SHA` | `.git`이 없는 배포 이미지의 health/MCP build identity에 주입할 commit SHA |
 | `TOSS_API_AUTH_MODE` | `oauth_client_credentials` 또는 `static_bearer` |
 | `TOSS_API_BASE_URL` | 토스증권 또는 호환 API 주소 |
@@ -382,6 +396,7 @@ EXECUTION_MODE=external docker compose --profile external-compute up --build -d 
 | `MCP_ENABLED` | MCP endpoint 활성화 여부, 기본 `false` |
 | `REPORT_AI_PROVIDER` | 선택적 보고서 provider, `openai` 또는 `bedrock` |
 | `REPORTS_PATH` / `S3_*` | 보고서 JSON 저장 위치 |
+| `S3_TIMEOUT_MS` | S3 보고서 저장·조회와 응답 본문 처리 제한 시간, 기본 30000ms (5000~180000ms) |
 
 전체 설정과 예시는 [.env.example](.env.example), MCP 전용 설정은 [.env.chatgpt.example](.env.chatgpt.example)을 참고하세요.
 

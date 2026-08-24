@@ -1,20 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  Check,
-  CircleAlert,
-  Clock3,
-  Cpu,
-  FileText,
-  Gauge,
-  LoaderCircle,
-  MemoryStick,
-  Radio,
-  ServerCog,
-  Thermometer,
-  TimerReset,
-  X,
-} from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import CircleAlert from "lucide-react/dist/esm/icons/circle-alert.js";
+import Clock3 from "lucide-react/dist/esm/icons/clock-3.js";
+import Cpu from "lucide-react/dist/esm/icons/cpu.js";
+import FileText from "lucide-react/dist/esm/icons/file-text.js";
+import Gauge from "lucide-react/dist/esm/icons/gauge.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import MemoryStick from "lucide-react/dist/esm/icons/memory-stick.js";
+import Radio from "lucide-react/dist/esm/icons/radio.js";
+import ServerCog from "lucide-react/dist/esm/icons/server-cog.js";
+import Thermometer from "lucide-react/dist/esm/icons/thermometer.js";
+import TimerReset from "lucide-react/dist/esm/icons/timer-reset.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import {
   isQualificationPayload,
   isTerminalQualificationStatus,
@@ -28,6 +26,43 @@ import {
 import { cn } from "@/lib/utils";
 
 type ConnectionState = "connecting" | "live" | "polling" | "terminal";
+type QualificationRefreshResult = "success" | "missing" | "terminal" | "error" | "busy";
+
+export const QUALIFICATION_POLL_INTERVAL_MS = 5_000;
+export const QUALIFICATION_POLL_MAX_INTERVAL_MS = 30_000;
+export const QUALIFICATION_STREAM_RETRY_MS = 30_000;
+
+const QUALIFICATION_MOMENT_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+export function shouldPollAiQualification(
+  connection: ConnectionState,
+  visibilityState: DocumentVisibilityState,
+): boolean {
+  if (visibilityState !== "visible" || connection === "live" || connection === "terminal") {
+    return false;
+  }
+  // Keep the bounded fallback active until EventSource actually opens. Some
+  // proxies can leave a connection pending without emitting open or error.
+  return true;
+}
+
+export function nextQualificationPollInterval(
+  currentIntervalMs: number,
+  result: QualificationRefreshResult,
+): number {
+  if (result !== "error") return QUALIFICATION_POLL_INTERVAL_MS;
+  return Math.min(
+    QUALIFICATION_POLL_MAX_INTERVAL_MS,
+    Math.max(QUALIFICATION_POLL_INTERVAL_MS, currentIntervalMs * 2),
+  );
+}
 
 const runStatusLabel: Record<QualificationRunStatus, string> = {
   planned: "대기",
@@ -61,14 +96,7 @@ function formatDuration(milliseconds: number): string {
 function formatMoment(value: string): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(parsed);
+  return QUALIFICATION_MOMENT_FORMATTER.format(parsed);
 }
 
 function statusTone(status: QualificationRunStatus | QualificationStepStatus): string {
@@ -920,7 +948,7 @@ function EmptyState({
           {loading ? "검증 실행을 찾는 중입니다." : "아직 모니터링할 실행이 없습니다."}
         </h2>
         <p className="mt-3 text-sm leading-6 text-white/45">
-          {error || "자동 검증 스크립트를 실행하면 이 화면에 1초 단위로 상태가 표시됩니다."}
+          {error || "자동 검증 스크립트를 실행하면 이 화면에 진행 상태가 실시간으로 표시됩니다."}
         </p>
         {!loading ? (
           <button
@@ -969,7 +997,13 @@ export function AiQualificationRunView({
     step.model === "comparison"
     && !["prepare-input"].includes(step.id)
   ));
-  const orderedEvents = [...events].sort((left, right) => right.sequence - left.sequence).slice(0, 80);
+  // Snapshot telemetry can refresh every second while the event array identity
+  // stays unchanged. Keep the bounded reverse chronology stable across those
+  // renders instead of sorting the same events repeatedly.
+  const orderedEvents = useMemo(
+    () => [...events].sort((left, right) => right.sequence - left.sequence).slice(0, 80),
+    [events],
+  );
   const memoryPercent = state.telemetry
     ? state.telemetry.memoryUsedMiB / state.telemetry.memoryTotalMiB * 100
     : 0;
@@ -988,7 +1022,7 @@ export function AiQualificationRunView({
                 {connection === "live"
                   ? "SSE LIVE · 1초"
                   : connection === "polling"
-                    ? "1초 폴링"
+                    ? "5초 폴링"
                     : connection === "terminal"
                       ? "실행 종료"
                       : "연결 중"}
@@ -1358,25 +1392,40 @@ export function AiQualificationDashboard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [documentVisible, setDocumentVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
+  const [streamRevision, setStreamRevision] = useState(0);
   const streamRef = useRef<EventSource | undefined>(undefined);
+  const refreshRequest = useRef<AbortController | undefined>(undefined);
   const refreshRunning = useRef(false);
+  const abortRefresh = useCallback(() => {
+    const controller = refreshRequest.current;
+    refreshRequest.current = undefined;
+    refreshRunning.current = false;
+    controller?.abort();
+  }, []);
 
-  const refresh = useCallback(async () => {
-    if (refreshRunning.current) return;
+  const refresh = useCallback(async (): Promise<QualificationRefreshResult> => {
+    if (refreshRunning.current) return "busy";
+    const controller = new AbortController();
+    refreshRequest.current = controller;
     refreshRunning.current = true;
     try {
       const response = await fetch("/api/ai-qualification/runs/latest", {
         headers: { Accept: "application/json" },
         cache: "no-store",
+        signal: controller.signal,
       });
+      if (controller.signal.aborted || refreshRequest.current !== controller) return "busy";
       if (response.status === 401) {
         onUnauthorized();
-        return;
+        return "terminal";
       }
       if (response.status === 404) {
         setPayload(undefined);
         setError(undefined);
-        return;
+        return "missing";
       }
       if (!response.ok) {
         let message = "검증 진행 상태를 불러오지 못했습니다.";
@@ -1400,34 +1449,66 @@ export function AiQualificationDashboard({
         throw new Error(message);
       }
       const value: unknown = await response.json();
+      if (controller.signal.aborted || refreshRequest.current !== controller) return "busy";
       if (!isQualificationPayload(value)) throw new Error("검증 진행 상태 형식이 올바르지 않습니다.");
       setPayload(value);
       setError(undefined);
-      if (isTerminalQualificationStatus(value.state.status)) setConnection("terminal");
+      if (isTerminalQualificationStatus(value.state.status)) {
+        setConnection("terminal");
+        return "terminal";
+      }
+      return "success";
     } catch (requestError) {
+      if (controller.signal.aborted || refreshRequest.current !== controller) return "busy";
       setError(requestError instanceof Error ? requestError.message : "검증 진행 상태를 불러오지 못했습니다.");
+      return "error";
     } finally {
-      refreshRunning.current = false;
-      setLoading(false);
+      if (refreshRequest.current === controller) {
+        refreshRequest.current = undefined;
+        refreshRunning.current = false;
+        if (!controller.signal.aborted) setLoading(false);
+      }
     }
   }, [onUnauthorized]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    const updateVisibility = () => {
+      const visible = document.visibilityState === "visible";
+      if (!visible) abortRefresh();
+      setDocumentVisible(visible);
+    };
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", updateVisibility);
+      abortRefresh();
+    };
+  }, [abortRefresh]);
+
+  useEffect(() => {
+    if (documentVisible) void refresh();
+  }, [documentVisible, refresh]);
 
   const runId = payload?.state.runId;
   useEffect(() => {
     streamRef.current?.close();
     streamRef.current = undefined;
-    if (!runId || (payload && isTerminalQualificationStatus(payload.state.status))) return;
+    if (!documentVisible || !runId || (payload && isTerminalQualificationStatus(payload.state.status))) return;
     setConnection("connecting");
     const stream = new EventSource(
       `/api/ai-qualification/runs/${encodeURIComponent(runId)}/events`,
     );
     streamRef.current = stream;
-    stream.onopen = () => setConnection("live");
+    const enterPollingFallback = () => {
+      if (streamRef.current !== stream) return;
+      stream.close();
+      streamRef.current = undefined;
+      setConnection("polling");
+    };
+    stream.onopen = () => {
+      if (streamRef.current === stream) setConnection("live");
+    };
     stream.addEventListener("snapshot", (event) => {
+      if (streamRef.current !== stream) return;
       try {
         const state = JSON.parse((event as MessageEvent<string>).data) as QualificationState;
         if (state.schemaVersion !== "ai-p40-qualification-state/v1" || state.runId !== runId) return;
@@ -1438,12 +1519,14 @@ export function AiQualificationDashboard({
         if (isTerminalQualificationStatus(state.status)) {
           setConnection("terminal");
           stream.close();
+          if (streamRef.current === stream) streamRef.current = undefined;
         }
       } catch {
-        setConnection("polling");
+        enterPollingFallback();
       }
     });
     stream.addEventListener("progress", (event) => {
+      if (streamRef.current !== stream) return;
       try {
         const progressEvent = JSON.parse((event as MessageEvent<string>).data) as QualificationEvent;
         if (progressEvent.schemaVersion !== "ai-p40-qualification-event/v1"
@@ -1457,26 +1540,54 @@ export function AiQualificationDashboard({
           return { ...current, events };
         });
       } catch {
-        setConnection("polling");
+        enterPollingFallback();
       }
     });
     stream.addEventListener("terminal", () => {
+      if (streamRef.current !== stream) return;
       setConnection("terminal");
       stream.close();
+      if (streamRef.current === stream) streamRef.current = undefined;
       void refresh();
     });
-    stream.onerror = () => setConnection("polling");
+    stream.onerror = enterPollingFallback;
     return () => {
       stream.close();
       if (streamRef.current === stream) streamRef.current = undefined;
     };
-  }, [payload?.state.status, refresh, runId]);
+  }, [documentVisible, payload?.state.status, refresh, runId, streamRevision]);
 
   useEffect(() => {
-    if (connection === "live" || connection === "terminal") return;
-    const timer = window.setInterval(() => void refresh(), 1_000);
-    return () => window.clearInterval(timer);
-  }, [connection, payload, refresh]);
+    if (!shouldPollAiQualification(
+      connection,
+      documentVisible ? "visible" : "hidden",
+    )) return;
+    let active = true;
+    let intervalMs = QUALIFICATION_POLL_INTERVAL_MS;
+    let timer: number | undefined;
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        const result = await refresh();
+        if (!active || result === "terminal") return;
+        intervalMs = nextQualificationPollInterval(intervalMs, result);
+        schedule();
+      }, intervalMs);
+    };
+    schedule();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [connection, documentVisible, refresh, runId]);
+
+  useEffect(() => {
+    if (!documentVisible || !runId || connection !== "polling") return;
+    const timer = window.setTimeout(
+      () => setStreamRevision((revision) => revision + 1),
+      QUALIFICATION_STREAM_RETRY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [connection, documentVisible, runId]);
 
   const events = useMemo(() => payload?.events ?? [], [payload?.events]);
   if (!payload) {

@@ -1,19 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  BarChart3,
-  ChevronRight,
-  Clock3,
-  Cpu,
-  FileText,
-  History,
-  ListChecks,
-  LoaderCircle,
-  ReceiptText,
-  RefreshCw,
-  Wallet,
-} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import AlertTriangle from "lucide-react/dist/esm/icons/triangle-alert.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import ChevronRight from "lucide-react/dist/esm/icons/chevron-right.js";
+import Clock3 from "lucide-react/dist/esm/icons/clock-3.js";
+import Cpu from "lucide-react/dist/esm/icons/cpu.js";
+import FileText from "lucide-react/dist/esm/icons/file-text.js";
+import History from "lucide-react/dist/esm/icons/history.js";
+import ListChecks from "lucide-react/dist/esm/icons/list-checks.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import ReceiptText from "lucide-react/dist/esm/icons/receipt-text.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Wallet from "lucide-react/dist/esm/icons/wallet.js";
 import { AiSimulationChart } from "@/components/ai-simulation-chart";
 import { AiSimulationComparisonPanel } from "@/components/ai-simulation-comparison-panel";
 import {
@@ -54,6 +52,30 @@ export function retainedSimulationHistorySelection(
     : undefined;
 }
 
+export const SIMULATION_REPORT_LIST_PAGE_SIZE = 100;
+
+function boundedSimulationReportCount(entryCount: number, visibleCount: number): number {
+  return Number.isSafeInteger(visibleCount) && visibleCount > 0
+    ? Math.min(entryCount, visibleCount)
+    : Math.min(entryCount, SIMULATION_REPORT_LIST_PAGE_SIZE);
+}
+
+export function recentSimulationReportEntries<T>(
+  entries: readonly T[],
+  visibleCount = SIMULATION_REPORT_LIST_PAGE_SIZE,
+): T[] {
+  const boundedCount = boundedSimulationReportCount(entries.length, visibleCount);
+  return entries.slice(entries.length - boundedCount).reverse();
+}
+
+export function latestSimulationReportEntries<T>(
+  entries: readonly T[],
+  visibleCount = SIMULATION_REPORT_LIST_PAGE_SIZE,
+): T[] {
+  const boundedCount = boundedSimulationReportCount(entries.length, visibleCount);
+  return entries.slice(entries.length - boundedCount);
+}
+
 const PRESET_LABELS: Record<AiSimulationPreset, string> = {
   trend: "추세 수익",
   breakout: "돌파 가속 · 최대 공격",
@@ -91,6 +113,16 @@ const MODEL_LANE_LABELS: Record<AiSimulationModelLane, string> = {
   chronos2: "Chronos-2 · Primary",
 };
 
+const SIMULATION_HISTORY_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  year: "2-digit",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 function modelLaneFromIdentity(
   component?: string,
   modelId?: string,
@@ -116,15 +148,7 @@ function timestamp(value?: string): string {
   if (!value) return "unavailable";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "unavailable";
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "2-digit",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return SIMULATION_HISTORY_TIMESTAMP_FORMATTER.format(date);
 }
 
 function ratio(value?: number, signed = false): string {
@@ -295,6 +319,9 @@ function DecisionList({
 }: {
   decisions: AiSimulationDecision[];
 }) {
+  const [visibleCount, setVisibleCount] = useState(SIMULATION_REPORT_LIST_PAGE_SIZE);
+  const visibleDecisions = recentSimulationReportEntries(decisions, visibleCount);
+  const hiddenCount = decisions.length - visibleDecisions.length;
   return (
     <section className="min-w-0 rounded-2xl bg-secondary p-4" data-simulation-report-decisions>
       <div className="flex items-center justify-between gap-2">
@@ -302,7 +329,7 @@ function DecisionList({
         <span className="text-[9px] font-black text-muted-foreground">{decisions.length}건</span>
       </div>
       <div className="mt-3 max-h-72 min-h-0 space-y-2 overflow-y-auto overscroll-contain pr-1" tabIndex={0}>
-        {decisions.length ? [...decisions].reverse().map((decision, index) => (
+        {decisions.length ? visibleDecisions.map((decision, index) => (
           <article key={`${decision.symbol}:${decision.decidedAt}:${index}`} className="rounded-xl bg-card p-3">
             <div className="flex flex-wrap justify-between gap-2">
               <p className="text-[10px] font-black">
@@ -350,6 +377,17 @@ function DecisionList({
             ) : null}
           </article>
         )) : <p className="text-[9px] text-muted-foreground">저장된 판단이 없습니다.</p>}
+        {hiddenCount > 0 ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="w-full"
+            onClick={() => setVisibleCount((current) => Math.min(decisions.length, current + SIMULATION_REPORT_LIST_PAGE_SIZE))}
+          >
+            이전 판단 {Math.min(hiddenCount, SIMULATION_REPORT_LIST_PAGE_SIZE)}건 더 보기
+          </Button>
+        ) : null}
       </div>
     </section>
   );
@@ -363,6 +401,9 @@ function TradeList({
   currency: AiSimulationCurrency;
 }) {
   const quantityUnit = currency === "USDT" ? "계약" : "주";
+  const [visibleCount, setVisibleCount] = useState(SIMULATION_REPORT_LIST_PAGE_SIZE);
+  const visibleTrades = recentSimulationReportEntries(trades, visibleCount);
+  const hiddenCount = trades.length - visibleTrades.length;
   return (
     <section className="min-w-0 rounded-2xl bg-secondary p-4" data-simulation-report-trades>
       <div className="flex items-center justify-between gap-2">
@@ -374,7 +415,7 @@ function TradeList({
         tabIndex={0}
         aria-label="가상 체결 스크롤 목록"
       >
-        {trades.length ? [...trades].reverse().map((trade, index) => (
+        {trades.length ? visibleTrades.map((trade, index) => (
           <article key={`${trade.symbol}:${trade.executedAt}:${index}`} className="rounded-xl bg-card p-3">
             <div className="flex flex-wrap justify-between gap-2">
               <p className="text-[10px] font-black">
@@ -390,7 +431,183 @@ function TradeList({
             </p>
           </article>
         )) : <p className="text-[9px] text-muted-foreground">저장된 가상 체결이 없습니다.</p>}
+        {hiddenCount > 0 ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="w-full"
+            onClick={() => setVisibleCount((current) => Math.min(trades.length, current + SIMULATION_REPORT_LIST_PAGE_SIZE))}
+          >
+            이전 체결 {Math.min(hiddenCount, SIMULATION_REPORT_LIST_PAGE_SIZE)}건 더 보기
+          </Button>
+        ) : null}
       </div>
+    </section>
+  );
+}
+
+function DecisionProvenanceList({
+  decisions,
+  cryptoFutures,
+  reportModelLabel,
+}: {
+  decisions: AiSimulationRunReport["decisionProvenance"];
+  cryptoFutures: boolean;
+  reportModelLabel: string;
+}) {
+  const [visibleCount, setVisibleCount] = useState(SIMULATION_REPORT_LIST_PAGE_SIZE);
+  const visibleDecisions = recentSimulationReportEntries(decisions, visibleCount);
+  const hiddenCount = decisions.length - visibleDecisions.length;
+
+  return (
+    <details
+      className="mt-3 rounded-xl bg-card p-3"
+      data-simulation-report-decision-provenance
+    >
+      <summary className="cursor-pointer text-[9px] font-black">
+        판단 provenance {decisions.length}건
+        {" · "}{cryptoFutures ? reportModelLabel : `${reportModelLabel} / Rust`}
+      </summary>
+      <div
+        className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1"
+        aria-label="판단 provenance 스크롤 목록"
+        tabIndex={0}
+      >
+        {visibleDecisions.map((decision, decisionIndex) => (
+          <article
+            key={decision.decisionId ?? `${decision.origin ?? "unknown"}:${decisionIndex}`}
+            className="rounded-xl bg-secondary p-3"
+            data-simulation-report-provenance-item={decision.decisionId}
+          >
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <p className="break-words text-[8px] font-black">
+                {[decision.pairId, decision.signalSymbol && decision.executionSymbol
+                  ? `${decision.signalSymbol} → ${decision.executionSymbol}`
+                  : decision.signalSymbol ?? decision.executionSymbol, decision.direction]
+                  .filter(Boolean)
+                  .join(" · ") || "판단 식별자 unavailable"}
+              </p>
+              <span className={cn(
+                "rounded-full px-2 py-1 text-[8px] font-black",
+                decision.degraded
+                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+              )}>
+                {decision.degraded ? "degraded" : "정상"}
+              </span>
+            </div>
+            <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+              origin {timestamp(decision.origin)} · 판단 {timestamp(decision.decisionAt)}
+            </p>
+            <div className="mt-2 grid gap-2">
+              {decision.models.map((model) => {
+                const componentLabel = decisionModelLabel(model.component, model.modelId);
+                const device = [model.device, model.deviceName].filter(Boolean).join(" · ")
+                  || "unavailable";
+                return (
+                  <section
+                    key={model.component}
+                    className="min-w-0 rounded-xl bg-card p-3"
+                    data-simulation-model-provenance={model.component}
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-1">
+                      <p className="text-[8px] font-black">{componentLabel}</p>
+                      <span className={cn(
+                        "rounded-full px-2 py-1 text-[8px] font-black",
+                        model.degraded
+                          ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                          : statusClass(model.status),
+                      )}>
+                        {model.status}{model.degraded && model.status !== "degraded" ? " · degraded" : ""}
+                      </span>
+                    </div>
+                    <p className="mt-2 break-all text-[8px] font-black">
+                      {model.modelId ?? "model unavailable"}
+                      {model.modelRevision ? ` @ ${model.modelRevision}` : ""}
+                    </p>
+                    <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                      origin {timestamp(model.origin)} · 생성 {timestamp(model.generatedAt)}
+                    </p>
+                    <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
+                      device {device} · latency {Number.isFinite(model.latencyMs)
+                        ? `${(model.latencyMs as number).toFixed(0)}ms`
+                        : "unavailable"}
+                    </p>
+                  </section>
+                );
+              })}
+            </div>
+          </article>
+        ))}
+        {hiddenCount > 0 ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="w-full"
+            onClick={() => setVisibleCount((current) => Math.min(decisions.length, current + SIMULATION_REPORT_LIST_PAGE_SIZE))}
+          >
+            이전 provenance {Math.min(hiddenCount, SIMULATION_REPORT_LIST_PAGE_SIZE)}건 더 보기
+          </Button>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function EquityHistoryTable({
+  points,
+  currency,
+}: {
+  points: AiSimulationRunReport["equity"];
+  currency: AiSimulationCurrency;
+}) {
+  const [visibleCount, setVisibleCount] = useState(SIMULATION_REPORT_LIST_PAGE_SIZE);
+  const visiblePoints = latestSimulationReportEntries(points, visibleCount);
+  const hiddenCount = points.length - visiblePoints.length;
+
+  return (
+    <section className="rounded-2xl bg-secondary p-4" data-simulation-report-equity>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-sm font-black"><Activity className="size-4" />자산 추이</h3>
+        <span className="text-[9px] font-black text-muted-foreground">{points.length}개 기록</span>
+      </div>
+      <div
+        className="mt-3 max-h-40 overflow-y-auto rounded-xl bg-card"
+        aria-label="자산 추이 스크롤 표"
+        tabIndex={0}
+      >
+        <table className="w-full text-left text-[9px]">
+          <thead className="sticky top-0 bg-card">
+            <tr className="text-muted-foreground"><th className="p-3 font-black">시각</th><th className="p-3 text-right font-black">자산</th><th className="p-3 text-right font-black">현금</th></tr>
+          </thead>
+          <tbody>
+            {visiblePoints.map((point, index) => (
+              <tr
+                key={`${point.timestamp}:${index}`}
+                className="border-t border-border/50"
+                data-simulation-report-equity-row={point.timestamp}
+              >
+                <td className="p-3">{timestamp(point.timestamp)}</td>
+                <td className="p-3 text-right font-black">{formatMoney(point.equity, currency)}</td>
+                <td className="p-3 text-right">{money(point.cash, currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {hiddenCount > 0 ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          className="mt-2 w-full"
+          onClick={() => setVisibleCount((current) => Math.min(points.length, current + SIMULATION_REPORT_LIST_PAGE_SIZE))}
+        >
+          이전 자산 기록 {Math.min(hiddenCount, SIMULATION_REPORT_LIST_PAGE_SIZE)}개 더 보기
+        </Button>
+      ) : null}
     </section>
   );
 }
@@ -547,82 +764,12 @@ export function SimulationRunReportView({
             )) : <p className="text-[9px] text-muted-foreground">모델 provenance가 저장되지 않았습니다.</p>}
           </div>
           {report.decisionProvenance.length ? (
-            <details
-              className="mt-3 rounded-xl bg-card p-3"
-              data-simulation-report-decision-provenance
-            >
-              <summary className="cursor-pointer text-[9px] font-black">
-                판단 provenance {report.decisionProvenance.length}건
-                {" · "}{cryptoFutures ? reportModelLabel : `${reportModelLabel} / Rust`}
-              </summary>
-              <div className="mt-3 max-h-72 space-y-3 overflow-y-auto overscroll-contain pr-1">
-                {[...report.decisionProvenance].reverse().map((decision, decisionIndex) => (
-                  <article
-                    key={decision.decisionId ?? `${decision.origin ?? "unknown"}:${decisionIndex}`}
-                    className="rounded-xl bg-secondary p-3"
-                  >
-                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                      <p className="break-words text-[8px] font-black">
-                        {[decision.pairId, decision.signalSymbol && decision.executionSymbol
-                          ? `${decision.signalSymbol} → ${decision.executionSymbol}`
-                          : decision.signalSymbol ?? decision.executionSymbol, decision.direction]
-                          .filter(Boolean)
-                          .join(" · ") || "판단 식별자 unavailable"}
-                      </p>
-                      <span className={cn(
-                        "rounded-full px-2 py-1 text-[8px] font-black",
-                        decision.degraded
-                          ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                          : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                      )}>
-                        {decision.degraded ? "degraded" : "정상"}
-                      </span>
-                    </div>
-                    <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
-                      origin {timestamp(decision.origin)} · 판단 {timestamp(decision.decisionAt)}
-                    </p>
-                    <div className="mt-2 grid gap-2">
-                      {decision.models.map((model) => {
-                        const componentLabel = decisionModelLabel(model.component, model.modelId);
-                        const device = [model.device, model.deviceName].filter(Boolean).join(" · ")
-                          || "unavailable";
-                        return (
-                          <section
-                            key={model.component}
-                            className="min-w-0 rounded-xl bg-card p-3"
-                            data-simulation-model-provenance={model.component}
-                          >
-                            <div className="flex min-w-0 flex-wrap items-center justify-between gap-1">
-                              <p className="text-[8px] font-black">{componentLabel}</p>
-                              <span className={cn(
-                                "rounded-full px-2 py-1 text-[8px] font-black",
-                                model.degraded
-                                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                                  : statusClass(model.status),
-                              )}>
-                                {model.status}{model.degraded && model.status !== "degraded" ? " · degraded" : ""}
-                              </span>
-                            </div>
-                            <p className="mt-2 break-all text-[8px] font-black">
-                              {model.modelId ?? "model unavailable"}
-                              {model.modelRevision ? ` @ ${model.modelRevision}` : ""}
-                            </p>
-                            <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
-                              origin {timestamp(model.origin)} · 생성 {timestamp(model.generatedAt)}
-                            </p>
-                            <p className="mt-1 break-words text-[8px] leading-4 text-muted-foreground">
-                              device {device} · latency {Number.isFinite(model.latencyMs)
-                                ? `${(model.latencyMs as number).toFixed(0)}ms`
-                                : "unavailable"}
-                            </p>
-                          </section>
-                        );
-                      })}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </details>
+            <DecisionProvenanceList
+              key={`provenance:${report.runId}`}
+              decisions={report.decisionProvenance}
+              cryptoFutures={cryptoFutures}
+              reportModelLabel={reportModelLabel}
+            />
           ) : null}
           <dl className="mt-3 grid grid-cols-2 gap-2 text-[9px]">
             <div className="rounded-xl bg-card p-3"><dt className="text-muted-foreground">트리거</dt><dd className="mt-1 break-words font-black">{report.decisionCadence?.trigger ?? "unavailable"}</dd></div>
@@ -632,28 +779,11 @@ export function SimulationRunReportView({
       </div>
 
       {report.equity.length ? (
-        <section className="rounded-2xl bg-secondary p-4" data-simulation-report-equity>
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-black"><Activity className="size-4" />자산 추이</h3>
-            <span className="text-[9px] font-black text-muted-foreground">{report.equity.length}개 기록</span>
-          </div>
-          <div className="mt-3 max-h-40 overflow-y-auto rounded-xl bg-card" tabIndex={0}>
-            <table className="w-full text-left text-[9px]">
-              <thead className="sticky top-0 bg-card">
-                <tr className="text-muted-foreground"><th className="p-3 font-black">시각</th><th className="p-3 text-right font-black">자산</th><th className="p-3 text-right font-black">현금</th></tr>
-              </thead>
-              <tbody>
-                {report.equity.map((point, index) => (
-                  <tr key={`${point.timestamp}:${index}`} className="border-t border-border/50">
-                    <td className="p-3">{timestamp(point.timestamp)}</td>
-                    <td className="p-3 text-right font-black">{formatMoney(point.equity, performance.currency)}</td>
-                    <td className="p-3 text-right">{money(point.cash, performance.currency)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <EquityHistoryTable
+          key={`equity:${report.runId}`}
+          points={report.equity}
+          currency={performance.currency}
+        />
       ) : null}
 
       {report.charts.length ? (
@@ -694,8 +824,8 @@ export function SimulationRunReportView({
       ) : null}
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <DecisionList decisions={report.decisions} />
-        <TradeList trades={report.trades} currency={performance.currency} />
+        <DecisionList key={`decisions:${report.runId}`} decisions={report.decisions} />
+        <TradeList key={`trades:${report.runId}`} trades={report.trades} currency={performance.currency} />
       </div>
 
       {report.positions.length ? (
@@ -757,18 +887,30 @@ export function AiSimulationHistory({
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState("");
   const [reportError, setReportError] = useState("");
+  const historyRequest = useRef<AbortController | undefined>(undefined);
 
   const loadHistory = useCallback(async (cursor?: string) => {
     const append = Boolean(cursor);
-    append ? setLoadingMore(true) : setLoading(true);
+    historyRequest.current?.abort();
+    const controller = new AbortController();
+    historyRequest.current = controller;
+    if (append) {
+      setLoading(false);
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      setLoadingMore(false);
+    }
     setError("");
     try {
       const search = new URLSearchParams({ limit: "20" });
       if (cursor) search.set("cursor", cursor);
       const response = await fetch(`/api/portfolio/simulation/runs?${search.toString()}`, {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       });
       const payload = await readJson(response);
+      if (controller.signal.aborted || historyRequest.current !== controller) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -786,14 +928,22 @@ export function AiSimulationHistory({
         setSelectedRunId((current) => retainedSimulationHistorySelection(page.items, current));
       }
     } catch (caught) {
+      if (controller.signal.aborted || historyRequest.current !== controller) return;
       setError(caught instanceof Error ? caught.message : "시뮬레이션 기록을 불러오지 못했습니다.");
     } finally {
-      append ? setLoadingMore(false) : setLoading(false);
+      if (historyRequest.current === controller) {
+        historyRequest.current = undefined;
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
     }
   }, [onUnauthorized]);
 
   useEffect(() => {
     void loadHistory();
+    return () => historyRequest.current?.abort();
   }, [loadHistory, refreshKey]);
 
   useEffect(() => {
@@ -858,7 +1008,7 @@ export function AiSimulationHistory({
           size="sm"
           variant="secondary"
           onClick={() => void loadHistory()}
-          disabled={loading}
+          disabled={loading || loadingMore}
           aria-label="시뮬레이션 기록 새로고침"
         >
           <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
@@ -895,7 +1045,7 @@ export function AiSimulationHistory({
               className="mt-3 w-full"
               size="sm"
               variant="secondary"
-              disabled={loadingMore}
+              disabled={loading || loadingMore}
               onClick={() => void loadHistory(nextCursor)}
             >
               {loadingMore ? <LoaderCircle className="animate-spin" /> : <Clock3 />}

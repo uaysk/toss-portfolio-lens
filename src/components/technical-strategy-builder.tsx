@@ -1,5 +1,8 @@
 import { memo, useMemo } from "react";
-import { AlertCircle, Braces, Plus, Trash2 } from "lucide-react";
+import AlertCircle from "lucide-react/dist/esm/icons/circle-alert.js";
+import Braces from "lucide-react/dist/esm/icons/braces.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -7,7 +10,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   MAX_TECHNICAL_CONDITION_DEPTH,
   defaultTechnicalCondition,
-  technicalConditionDepth,
   technicalIndicatorReferenceOptions,
   technicalSignalStatusLabel,
   validateTechnicalStrategyDraft,

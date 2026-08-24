@@ -57,6 +57,7 @@ export type S3ReportStorageConfig = {
   bucket: string;
   region: string;
   prefix: string;
+  timeoutMs: number;
   endpoint?: string;
   forcePathStyle: boolean;
   credentials?: {
@@ -183,6 +184,9 @@ export type AppConfig = TossApiAuthenticationConfig & {
   port: number;
   trustProxy: string[];
   gracefulShutdownTimeoutMs: number;
+  /** Operator-declared web replica count. The runtime currently accepts only one. */
+  appReplicaCount: 1;
+  sseMaximumConnections: number;
   tossApiBaseUrl: string;
   postgres: PostgresConnectionConfig;
   candleCacheLatestTtlMs: number;
@@ -203,6 +207,16 @@ export type AppConfig = TossApiAuthenticationConfig & {
 function optional(name: string): string | undefined {
   const value = process.env[name]?.trim();
   return value || undefined;
+}
+
+function readAppReplicaCount(): 1 {
+  const value = optional("APP_REPLICA_COUNT") ?? "1";
+  if (value !== "1") {
+    throw new Error(
+      "APP_REPLICA_COUNT는 process-local runtime 상태 때문에 현재 1이어야 합니다.",
+    );
+  }
+  return 1;
 }
 
 function readBoolean(name: string, fallback: boolean): boolean {
@@ -475,6 +489,7 @@ function readReportStorage(): ReportStorageConfig {
     bucket,
     region: optional("S3_REGION") || optional("AWS_REGION") || "us-east-1",
     prefix: (optional("S3_PREFIX") || "portfolio-reports").replace(/^\/+|\/+$/g, "") || "portfolio-reports",
+    timeoutMs: readBoundedInteger("S3_TIMEOUT_MS", 30_000, 5_000, 180_000),
     ...(endpoint ? { endpoint: normalizedHttpUrl(endpoint, "S3_ENDPOINT") } : {}),
     forcePathStyle: readBoolean("S3_FORCE_PATH_STYLE", Boolean(endpoint)),
     ...(accessKeyId && secretAccessKey ? {
@@ -1061,6 +1076,8 @@ export function loadConfig(): AppConfig {
       1_000,
       300_000,
     ),
+    appReplicaCount: readAppReplicaCount(),
+    sseMaximumConnections: readBoundedInteger("SSE_MAX_CONNECTIONS", 256, 1, 10_000),
     tossApiBaseUrl,
     postgres,
     candleCacheLatestTtlMs: readBoundedInteger("CANDLE_CACHE_LATEST_TTL_MS", 300_000, 10_000, 86_400_000),

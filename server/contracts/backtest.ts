@@ -1,4 +1,141 @@
-import type { BacktestAdvancedAnalytics } from "../backtest-analytics.js";
+export type BacktestAdvancedAnalytics = {
+  benchmarkComparison?: {
+    key: string;
+    name: string;
+    observations: number;
+    returnPercent: number | null;
+    excessReturnPercent: number | null;
+    trackingErrorPercent: number | null;
+    informationRatio: number | null;
+    beta: number | null;
+    alphaPercent: number | null;
+    correlation: number | null;
+    upsideCapturePercent: number | null;
+    downsideCapturePercent: number | null;
+    dailyWinRatePercent: number | null;
+    monthlyWinRatePercent: number | null;
+    relativeMaxDrawdownPercent: number | null;
+  };
+  rolling: Array<{
+    date: string;
+    return20d: number | null;
+    return60d: number | null;
+    return120d: number | null;
+    return252d: number | null;
+    volatility60d: number | null;
+    sharpe60d: number | null;
+    benchmarkExcess60d: number | null;
+    benchmarkBeta60d: number | null;
+    benchmarkCorrelation60d: number | null;
+  }>;
+  drawdowns: {
+    points: Array<{ date: string; drawdownPercent: number }>;
+    episodes: Array<{
+      startDate: string;
+      troughDate: string;
+      recoveryDate?: string;
+      depthPercent: number;
+      durationDays: number;
+      recoveryDays?: number;
+    }>;
+    currentUnderwaterDays: number;
+    averageDrawdownPercent: number | null;
+    ulcerIndex: number | null;
+    worst20DayReturnPercent: number | null;
+    worst60DayReturnPercent: number | null;
+  };
+  tailRisk: {
+    historicalVar95Percent: number | null;
+    expectedShortfall95Percent: number | null;
+    lossDaysPercent: number | null;
+    averageGainPercent: number | null;
+    averageLossPercent: number | null;
+    gainLossRatio: number | null;
+    skewness: number | null;
+    excessKurtosis: number | null;
+    maxConsecutiveGainDays: number;
+    maxConsecutiveLossDays: number;
+  };
+  monthlyReturns: Array<{ month: string; returnPercent: number }>;
+  riskContributions: Array<{
+    key: string;
+    symbol: string;
+    name: string;
+    averageWeightPercent: number;
+    endingWeightPercent: number;
+    annualizedVolatilityPercent: number | null;
+    riskContributionPercent: number | null;
+    correlationToPortfolio: number | null;
+  }>;
+  exposure: {
+    krwWeightPercent: number;
+    usdWeightPercent: number;
+    domesticWeightPercent: number;
+    overseasWeightPercent: number;
+    top1WeightPercent: number;
+    top5WeightPercent: number;
+    top10WeightPercent: number;
+    hhi: number;
+    effectivePositions: number | null;
+    diversificationBenefitPercent: number | null;
+  };
+  costEfficiency: {
+    transactionCostBps: number;
+    turnoverPercent: number | null;
+    totalTradedAmount: number;
+    ongoingTradedAmount: number;
+    estimatedTotalCost: number;
+    actualTotalCost: number;
+    costDragPercent: number | null;
+    grossReturnPercent: number | null;
+    netEstimatedReturnPercent: number;
+    netReturnPercent: number;
+    costsDeductedFromPath: boolean;
+    method: "actual_path_deduction";
+    averageTradeAmount: number | null;
+    buySellAmountRatio: number | null;
+    tradeCount: number;
+    monthly: Array<{
+      month: string;
+      turnoverPercent: number;
+      tradeCount: number;
+      tradedAmount: number;
+      estimatedCost: number;
+    }>;
+  };
+  tradeBehavior: {
+    estimatedRealizedProfitLoss: number;
+    estimatedWinRatePercent: number | null;
+    estimatedProfitFactor: number | null;
+    estimatedAverageHoldingDays: number | null;
+    matchedSellCount: number;
+    unmatchedSellCount: number;
+    buyCount: number;
+    sellCount: number;
+  };
+  dataQuality: {
+    confidence: "high" | "medium" | "limited";
+    observationDays: number;
+    returnObservationDays: number;
+    requestedCalendarDays: number;
+    effectiveStartDate: string;
+    effectiveEndDate: string;
+    commonCoveragePercent: number;
+    carriedForwardObservations: number;
+    benchmarkObservations: number;
+    assets: Array<{
+      key: string;
+      symbol: string;
+      name: string;
+      observations: number;
+      alignedDays: number;
+      coveragePercent: number;
+      firstDate: string;
+      lastDate: string;
+    }>;
+    notes: string[];
+  };
+};
 
 export type BacktestRebalanceFrequency = "none" | "monthly" | "quarterly" | "annually" | "threshold";
 export type BacktestCashFlowFrequency = "monthly" | "quarterly" | "annually";

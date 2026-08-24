@@ -5,6 +5,8 @@ import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.
 import type { RelationalDatabase } from "../database.js";
 import type { McpOAuthConfig } from "../env.js";
 import { passwordsMatch, setNoStore } from "../auth.js";
+import { BoundedFixedWindowRateLimiter } from "./fixed-window-rate-limiter.js";
+import { LoginAttemptLimiter, normalizeClientIp } from "./login-attempt-limiter.js";
 import {
   OAuthRepository,
   OAuthRepositoryError,
@@ -35,8 +37,6 @@ type PendingAuthorization = {
   createdAt: number;
   expiresAt: number;
 };
-
-type Attempt = { count: number; resetAt: number };
 
 export type McpOAuthRuntime = {
   router: Router;
@@ -119,8 +119,12 @@ function authorizationRedirect(
 }
 
 function requestIp(request: Request): string {
-  return request.socket.remoteAddress ?? "unknown";
+  return normalizeClientIp(request.ip || request.socket.remoteAddress);
 }
+
+const DEFAULT_MAXIMUM_PENDING_AUTHORIZATIONS = 512;
+const DEFAULT_MAXIMUM_OAUTH_REQUEST_SOURCES = 2_000;
+const DEFAULT_MAXIMUM_OAUTH_LOGIN_SOURCES = 10_000;
 
 export async function createMcpOAuthRuntime(input: {
   database: RelationalDatabase;
@@ -130,11 +134,20 @@ export async function createMcpOAuthRuntime(input: {
   dashboardSessionSecret: string;
   publicAppUrl: string;
   maxRequestsPerMinute: number;
+  maximumPendingAuthorizations?: number;
+  maximumRequestSources?: number;
+  maximumLoginAttemptSources?: number;
 }): Promise<McpOAuthRuntime> {
+  const privateKey = createPrivateKey(input.oauth.signingPrivateKeyPem);
+  if (
+    privateKey.asymmetricKeyType !== "rsa"
+    || (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2_048
+  ) {
+    throw new Error("MCP OAuth signing key must be an RSA key of at least 2048 bits.");
+  }
+  const publicKey = createPublicKey(privateKey);
   const repository = new OAuthRepository(input.database);
   await repository.ensureSchema();
-  const privateKey = createPrivateKey(input.oauth.signingPrivateKeyPem);
-  const publicKey = createPublicKey(privateKey);
   const sessionSigningSecret = createHmac("sha256", input.dashboardSessionSecret)
     .update("toss-portfolio-lens:mcp-oauth-owner-session:v1")
     .digest("base64url");
@@ -156,8 +169,21 @@ export async function createMcpOAuthRuntime(input: {
   });
   const router = Router();
   const sessions = new Map<string, PendingAuthorization>();
-  const attempts = new Map<string, Attempt>();
-  const requestBuckets = new Map<string, Attempt>();
+  const maximumPendingAuthorizations = input.maximumPendingAuthorizations
+    ?? DEFAULT_MAXIMUM_PENDING_AUTHORIZATIONS;
+  if (!Number.isInteger(maximumPendingAuthorizations) || maximumPendingAuthorizations < 1) {
+    throw new Error("OAuth pending authorization capacity is invalid.");
+  }
+  const loginAttempts = new LoginAttemptLimiter({
+    maximumAttempts: 5,
+    windowMs: 15 * 60_000,
+    maximumEntries: input.maximumLoginAttemptSources ?? DEFAULT_MAXIMUM_OAUTH_LOGIN_SOURCES,
+  });
+  const requestLimiter = new BoundedFixedWindowRateLimiter({
+    maximumRequests: input.maxRequestsPerMinute,
+    windowMs: 60_000,
+    maximumEntries: input.maximumRequestSources ?? DEFAULT_MAXIMUM_OAUTH_REQUEST_SOURCES,
+  });
   const cookieName = "mcp_oauth_owner";
   const secureCookie = new URL(input.oauth.issuer).protocol === "https:";
   const oauthRateLimitedPaths = new Set([
@@ -170,18 +196,18 @@ export async function createMcpOAuthRuntime(input: {
   ]);
 
   router.use((request, response, next) => {
-    if (!oauthRateLimitedPaths.has(request.path)) {
+    // Express route matching is case-insensitive and accepts a trailing slash
+    // by default. Apply the same canonicalization here so alternate spellings
+    // cannot reach an OAuth handler without consuming the shared rate bucket.
+    const rateLimitPath = (request.path.replace(/\/+$/u, "") || "/").toLowerCase();
+    if (!oauthRateLimitedPaths.has(rateLimitPath)) {
       next();
       return;
     }
-    const now = Date.now();
     const key = requestIp(request);
-    const previous = requestBuckets.get(key);
-    const bucket = previous && previous.resetAt > now ? previous : { count: 0, resetAt: now + 60_000 };
-    bucket.count += 1;
-    requestBuckets.set(key, bucket);
-    if (bucket.count > input.maxRequestsPerMinute) {
-      response.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+    const decision = requestLimiter.check(key);
+    if (!decision.allowed) {
+      response.setHeader("Retry-After", String(decision.retryAfterSeconds));
       oauthError(response, 429, "temporarily_unavailable", "요청이 너무 많습니다.");
       return;
     }
@@ -255,6 +281,15 @@ export async function createMcpOAuthRuntime(input: {
       if (pending.state && Buffer.byteLength(pending.state, "utf8") > 2_048) {
         throw new Error("state는 2,048 bytes 이하여야 합니다.");
       }
+      if (sessions.size >= maximumPendingAuthorizations) {
+        for (const [key, session] of sessions) {
+          if (session.expiresAt <= now) sessions.delete(key);
+        }
+      }
+      if (sessions.size >= maximumPendingAuthorizations) {
+        oauthError(response, 503, "temporarily_unavailable", "대기 중인 OAuth 연결 요청이 너무 많습니다.");
+        return;
+      }
       sessions.set(sessionId, pending);
       const cookie: OAuthSessionCookiePayload = {
         subject: "pending-owner",
@@ -295,11 +330,9 @@ export async function createMcpOAuthRuntime(input: {
     const action = stringField(request, "action");
     if (action === "login") {
       const ip = requestIp(request);
-      const now = Date.now();
-      const previous = attempts.get(ip);
-      const state = previous && previous.resetAt > now ? previous : { count: 0, resetAt: now + 15 * 60_000 };
-      if (state.count >= 5) {
-        response.setHeader("Retry-After", String(Math.max(1, Math.ceil((state.resetAt - now) / 1000))));
+      const decision = loginAttempts.check(ip);
+      if (!decision.allowed) {
+        response.setHeader("Retry-After", String(decision.retryAfterSeconds));
         response.status(429).type("html").send(ownerPage({
           title: "ChatGPT 앱 연결",
           clientName: input.oauth.clientName,
@@ -312,8 +345,7 @@ export async function createMcpOAuthRuntime(input: {
         return;
       }
       if (!passwordsMatch(stringField(request, "password"), input.dashboardPassword)) {
-        state.count += 1;
-        attempts.set(ip, state);
+        loginAttempts.recordFailure(ip);
         response.status(401).type("html").send(ownerPage({
           title: "ChatGPT 앱 연결",
           clientName: input.oauth.clientName,
@@ -325,7 +357,7 @@ export async function createMcpOAuthRuntime(input: {
         }));
         return;
       }
-      attempts.delete(ip);
+      loginAttempts.reset(ip);
       pending.authenticated = true;
       pending.csrfToken = generateOpaqueToken(24);
       if (!input.oauth.autoApprove) {
@@ -523,9 +555,8 @@ export async function createMcpOAuthRuntime(input: {
   const cleanup = async () => {
     const now = Math.floor(Date.now() / 1000);
     for (const [key, session] of sessions) if (session.expiresAt <= now) sessions.delete(key);
-    const nowMs = Date.now();
-    for (const [key, attempt] of attempts) if (attempt.resetAt <= nowMs) attempts.delete(key);
-    for (const [key, bucket] of requestBuckets) if (bucket.resetAt <= nowMs) requestBuckets.delete(key);
+    void loginAttempts.size;
+    void requestLimiter.size;
     await repository.cleanupExpired(now);
   };
   return { router, repository, service, verifier, cleanup };

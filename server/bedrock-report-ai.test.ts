@@ -66,4 +66,45 @@ describe("Bedrock report evaluation", () => {
       retryable: true,
     });
   });
+
+  it("timeout, retry와 동시 요청 경계를 검증한다", () => {
+    expect(() => new BedrockReportWriter({ modelId: "model", timeoutMs: 999 }))
+      .toThrow("Bedrock timeoutMs");
+    expect(() => new BedrockReportWriter({ modelId: "model", maxAttempts: 0 }))
+      .toThrow("Bedrock maxAttempts");
+    expect(() => new BedrockReportWriter({ modelId: "model", maximumInFlight: 0 }))
+      .toThrow("Bedrock maximumInFlight");
+  });
+
+  it("동시 Bedrock 요청 상한을 fail-fast로 적용하고 완료 후 capacity를 반환한다", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const client = {
+      send: vi.fn(async (): Promise<ConverseCommandOutput> => {
+        await blocked;
+        return {
+          stopReason: "end_turn",
+          output: { message: { role: "assistant", content: [{ text: JSON.stringify(narrative) }] } },
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          metrics: { latencyMs: 1 },
+          $metadata: {},
+        };
+      }),
+    };
+    const writer = new BedrockReportWriter({
+      modelId: "moonshotai.kimi-k2.5",
+      maximumInFlight: 1,
+    }, client);
+
+    const first = writer.evaluate({ request: 1 });
+    await vi.waitFor(() => expect(client.send).toHaveBeenCalledOnce());
+    await expect(writer.evaluate({ request: 2 })).rejects.toMatchObject({
+      name: "ReportGenerationError",
+      retryable: true,
+    });
+    release();
+    await expect(first).resolves.toEqual(narrative);
+    await expect(writer.evaluate({ request: 3 })).resolves.toEqual(narrative);
+    expect(client.send).toHaveBeenCalledTimes(2);
+  });
 });

@@ -5,10 +5,14 @@ remote는 이전 검증과 긴급 rollback을 위해 `github`라는 이름으로
 
 ## Pipeline 범위
 
+실행 시간·메모리·I/O·artifact 보존량을 측정하고 다른 저장소에도 재사용할 수 있는 최적화 절차는
+[CI 파이프라인 최적화 가이드](ci-optimization.md)에 기록한다.
+
 `.gitlab-ci.yml`은 merge request, branch, tag에 대해 다음 gate를 실행한다.
 
 - runner build container의 5 GiB hard limit, Docker socket·GPU device 미노출 preflight
 - Node 정책·계약·TypeScript·production client/server build와 bundle budget
+- Python AI worker의 lock 기반 CPU-only Ruff·Pytest gate
 - OOM-safe Vitest light/heavy/PGlite lane
 - Rust fmt, clippy, test, release binary와 indicator benchmark
 - PostgreSQL 17 임시 service에서 migration, locking, durable queue와 Rust worker 통합
@@ -50,8 +54,28 @@ runner allowlist 모두 검증한 OCI index digest로 고정한다.
 - 메모리 사용량이 큰 job은 `toss-portfolio-lens-memory-heavy` resource group으로 직렬화
 - CI job image와 PostgreSQL service image는 manifest digest로 고정
 
-GitLab CI cache에는 npm download cache, 서로 일치하는 TypeScript build info·declaration output과 Cargo cache만
-저장한다. credential, `.env`, database dump, production release manifest는 cache나 artifact로 올리지 않는다.
+GitLab CI cache는 소유자를 분리한다. 모든 Node job은 npm download cache를 pull-only로 읽고, 보호된 ref의
+기본 브랜치·tag·schedule에서 실행되는 `node-static`만 같은 lockfile key에 push한다. MR·feature pipeline과
+비보호 tag·schedule의 `node-static`도 pull-only로 선언한다. Python·Rust도 같은 protected writer 경계를
+사용하며, 이전 writer가 만든 archive를 다시 신뢰하지 않도록 Node/Cargo는 `v3`, Python uv는 `v2` key로
+회전했다. GitLab의 `Use separate caches for protected branches` 보안 설정은 계속 활성화해야 하고, 임의 pipeline
+variable 생성 권한도 제한해야 한다. pipeline variable은 YAML job variable보다 우선하며 MR은 CI 설정 자체를
+바꿀 수 있으므로 저장소의 `policy` 선언만으로 적대적인 pipeline을 격리할 수는 없다.
+TypeScript build info·declaration output·server build는 별도 build key로 같은 protected writer만 쓰며,
+`node_modules`는 cache하지 않는다. Python uv cache와 Cargo registry·Rust target도 protected
+default branch·tag·schedule만 쓰고 비보호 ref는 pull-only로 읽는다. cache 범위는 압축·복원 시간을
+측정한 뒤 줄인다. credential, `.env`, database dump, production release manifest는 cache나
+artifact로 올리지 않는다. 모든 job의 after-script는 credential 없이 cgroup memory peak/current, CPU
+사용량, I/O 합계와 memory event를 한 줄로 기록한다.
+
+`node-static`이 검증한 `dist/client`는 짧은 수명의 artifact로 `ui-regression`에 전달한다. UI job은 이
+production bundle을 그대로 사용하며 Vite build를 반복하지 않는다. Python AI job은 `uv.lock`에서 CPU
+PyTorch 환경만 설치하고, MR에서는 worker·cross-language 계약 영향 경로에만 실행하되 protected main,
+tag와 schedule에서는 항상 실행한다. 두 job 모두 memory-heavy resource group 경계를 유지한다.
+현재 CPU backend는 GPU-oriented lock에 없는 별도 Torch wheel을 선택하므로 constraints export에
+`--no-hashes`를 사용한다. export된 모든 package version은 exact pin이지만 artifact hash까지 고정되지는
+않으며, `uv pip --strict`도 dependency 일관성 검사이지 hash 검증은 아니다. 완전한 hash 검증은 CPU wheel을
+포함한 별도 lock/source 설계 뒤에 적용한다.
 
 ## 이미지와 배포
 
@@ -92,6 +116,11 @@ Docker daemon과 Buildx bootstrap probe는 2초 간격으로 최대 3회 재시�
 파이프로 조기 종료하지 않고 전부 수집한 뒤 driver와 worker status를 파싱한다. CI는
 `toss-portfolio-lens-release` builder를 생성·삭제하지 않으며 `docker-container` driver와 running worker를
 요구한다.
+
+Chronos-2 qualification bundle은 `node-static`에서 임시 경로로 결정론적으로 다시 만들고 canonical
+`qualification-tools/`와 byte·size·SHA-256을 비교한다. 검증이 끝난 generated output만 Semgrep 제외 경로로
+취급하며, 원본 script와 검증기는 계속 SAST 대상이다. CNPG retention job은 schedule/default branch 또는
+관련 경로 변경에서만 실행하고, test artifact는 소비자가 있는 진단 파일만 짧은 TTL로 보존한다.
 
 FinCast, Chronos-2, TiRex-2와 GPU runtime은 이 job의 build, pull, restart 대상이 아니다. Compose에서도
 오직 `web`과 `compute-ipc` service만 명시적으로 조작한다.

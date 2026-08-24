@@ -1,0 +1,1486 @@
+<!doctype html>
+<html lang="ko" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta
+    name="description"
+    content="Toss Portfolio Lens 레거시 제거, PostgreSQL canonical cutover, Rust 계산 경로 및 성능 검증 결과 보고서"
+  >
+  <title>Toss Portfolio Lens · Legacy Removal &amp; Cutover Report</title>
+  <style>
+    :root {
+      --bg: #09090b;
+      --surface: #111113;
+      --surface-2: #18181b;
+      --surface-3: #222225;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --subtle: #71717a;
+      --line: #2a2a2e;
+      --strong: #f4f4f5;
+      --strong-text: #09090b;
+      --ok: #b6f0cc;
+      --ok-bg: #102219;
+      --warn: #f7d794;
+      --warn-bg: #2a2111;
+      --info: #b8d9ff;
+      --info-bg: #101d2b;
+      --danger: #ffb4b4;
+      --danger-bg: #2a1113;
+      --shadow: 0 28px 90px rgb(0 0 0 / 25%);
+      --radius: 20px;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      --sans: Inter, Pretendard, "Noto Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    html[data-theme="light"] {
+      --bg: #f5f5f6;
+      --surface: #ffffff;
+      --surface-2: #ededf0;
+      --surface-3: #e2e2e6;
+      --text: #111113;
+      --muted: #52525b;
+      --subtle: #71717a;
+      --line: #d9d9de;
+      --strong: #18181b;
+      --strong-text: #fafafa;
+      --ok: #17613a;
+      --ok-bg: #e2f8ea;
+      --warn: #7a4c00;
+      --warn-bg: #fff1cf;
+      --info: #134c7c;
+      --info-bg: #e2f1ff;
+      --danger: #8a2727;
+      --danger-bg: #ffe5e5;
+      --shadow: 0 24px 70px rgb(24 24 27 / 10%);
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; scroll-behavior: smooth; background: var(--bg); }
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      overflow-x: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 86% -10%, rgb(120 119 198 / 14%), transparent 34rem),
+        radial-gradient(circle at -8% 22%, rgb(63 131 248 / 8%), transparent 31rem),
+        linear-gradient(rgb(255 255 255 / 2%) 1px, transparent 1px),
+        linear-gradient(90deg, rgb(255 255 255 / 2%) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, auto, 48px 48px, 48px 48px, auto;
+      font-family: var(--sans);
+      font-feature-settings: "tnum" 1, "ss01" 1;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { color: inherit; font: inherit; }
+    a { color: inherit; }
+    code { font-family: var(--mono); }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+    ::selection { color: var(--strong-text); background: var(--strong); }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 10px;
+      left: 10px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--strong-text);
+      background: var(--strong);
+      font-size: 12px;
+      transform: translateY(-160%);
+      transition: transform .18s ease;
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .shell { width: min(1320px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 72px; }
+    .topbar {
+      position: relative;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 2px 0 24px;
+    }
+    .brand { display: flex; min-width: 0; align-items: center; gap: 11px; }
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      flex: none;
+      place-items: center;
+      border-radius: 11px;
+      color: var(--strong-text);
+      background: var(--strong);
+      font: 900 10px/1 var(--mono);
+    }
+    .brand strong { display: block; font-size: 13px; letter-spacing: -.025em; }
+    .brand small { display: block; margin-top: 3px; color: var(--subtle); font-size: 9px; }
+    .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+    .button {
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      font-size: 10px;
+      font-weight: 760;
+      cursor: pointer;
+      transition: border-color .16s ease, color .16s ease, transform .16s ease, background .16s ease;
+    }
+    .button:hover { color: var(--text); border-color: var(--subtle); background: var(--surface-2); }
+    .button:active { transform: scale(.97); }
+    .button[aria-pressed="true"] { color: var(--strong-text); border-color: var(--strong); background: var(--strong); }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(30px, 6vw, 72px);
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 8px);
+      background:
+        linear-gradient(135deg, rgb(255 255 255 / 7%), transparent 45%),
+        color-mix(in srgb, var(--surface) 94%, transparent);
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      position: absolute;
+      right: -6%;
+      bottom: -43%;
+      width: 520px;
+      height: 520px;
+      border: 1px solid rgb(255 255 255 / 8%);
+      border-radius: 50%;
+      background: rgb(255 255 255 / 2%);
+      content: "";
+    }
+    .eyebrow {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      color: var(--subtle);
+      font: 800 10px/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h1 {
+      position: relative;
+      z-index: 1;
+      max-width: 1040px;
+      margin: 18px 0 0;
+      font-size: clamp(2.7rem, 7.2vw, 6.7rem);
+      font-weight: 850;
+      line-height: .92;
+      letter-spacing: -.073em;
+    }
+    .hero-copy {
+      position: relative;
+      z-index: 1;
+      max-width: 840px;
+      margin: 27px 0 0;
+      color: var(--muted);
+      font-size: clamp(13px, 1.4vw, 16px);
+      line-height: 1.8;
+      word-break: keep-all;
+    }
+    .hero-badges { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 7px; margin-top: 27px; }
+    .badge, .pill {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font: 800 9px/1 var(--mono);
+      white-space: nowrap;
+    }
+    .badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: var(--ok-bg); }
+    .badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: var(--warn-bg); }
+    .badge.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); background: var(--info-bg); }
+    .hero-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 9px;
+      margin-top: 40px;
+    }
+    .hero-metric {
+      min-height: 132px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: color-mix(in srgb, var(--bg) 60%, transparent);
+      backdrop-filter: blur(12px);
+    }
+    .metric-label { color: var(--subtle); font: 760 9px/1.3 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .metric-value { margin-top: 24px; font-size: clamp(1.55rem, 3.4vw, 2.8rem); font-weight: 850; letter-spacing: -.055em; }
+    .metric-note { margin-top: 7px; color: var(--subtle); font-size: 9px; line-height: 1.5; }
+
+    .gate {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      margin-top: 12px;
+      padding: 16px 18px;
+      border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+      border-radius: 16px;
+      color: var(--warn);
+      background: var(--warn-bg);
+    }
+    .gate-icon {
+      display: grid;
+      width: 29px;
+      height: 29px;
+      place-items: center;
+      border: 1px solid currentColor;
+      border-radius: 9px;
+      font: 900 11px/1 var(--mono);
+    }
+    .gate strong { display: block; font-size: 11px; }
+    .gate p { margin: 4px 0 0; color: color-mix(in srgb, var(--warn) 78%, var(--muted)); font-size: 9px; line-height: 1.55; }
+    .gate code { font-size: 9px; }
+    .gate.success {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+      background: var(--ok-bg);
+    }
+    .gate.success p { color: color-mix(in srgb, var(--ok) 78%, var(--muted)); }
+
+    .nav {
+      position: sticky;
+      z-index: 20;
+      top: 10px;
+      display: flex;
+      gap: 4px;
+      margin: 18px auto 0;
+      padding: 5px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      box-shadow: 0 16px 50px rgb(0 0 0 / 16%);
+      backdrop-filter: blur(18px);
+      scrollbar-width: none;
+    }
+    .nav::-webkit-scrollbar { display: none; }
+    .nav a {
+      flex: 1 0 auto;
+      padding: 10px 13px;
+      border-radius: 999px;
+      color: var(--subtle);
+      font-size: 10px;
+      font-weight: 760;
+      text-align: center;
+      text-decoration: none;
+      transition: color .16s ease, background .16s ease;
+    }
+    .nav a:hover { color: var(--text); }
+    .nav a.active { color: var(--strong-text); background: var(--strong); }
+
+    section { scroll-margin-top: 72px; }
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      padding: 76px 3px 20px;
+    }
+    .section-head h2 { margin: 0; font-size: clamp(1.8rem, 4vw, 3.5rem); letter-spacing: -.055em; }
+    .section-head p { max-width: 600px; margin: 0; color: var(--subtle); font-size: 11px; line-height: 1.7; text-align: right; word-break: keep-all; }
+    .card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 22px 22px 0; }
+    .card-head h3 { margin: 0; font-size: 14px; letter-spacing: -.025em; }
+    .card-head p { margin: 7px 0 0; color: var(--subtle); font-size: 10px; line-height: 1.55; }
+    .card-body { padding: 22px; }
+
+    .architecture { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .lane { padding: 24px; }
+    .lane.before { opacity: .78; }
+    .lane.after { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+    .lane-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .lane-label strong { font-size: 12px; }
+    .lane-label code { color: var(--subtle); font-size: 8px; }
+    .flow { display: grid; gap: 8px; margin-top: 23px; }
+    .flow-row {
+      display: grid;
+      grid-template-columns: 104px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--surface-2);
+    }
+    .flow-row span { color: var(--subtle); font: 760 8px/1 var(--mono); text-transform: uppercase; }
+    .flow-row strong { font-size: 10px; line-height: 1.5; }
+    .flow-row.removed strong { color: var(--danger); text-decoration: line-through; text-decoration-thickness: 1px; }
+    .contract-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 12px; }
+    .contract { min-height: 150px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }
+    .contract code { color: var(--info); font-size: 9px; }
+    .contract strong { display: block; margin-top: 25px; font-size: 12px; }
+    .contract p { margin: 8px 0 0; color: var(--subtle); font-size: 9px; line-height: 1.6; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .stat-card { min-height: 160px; padding: 19px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }
+    .stat-card .metric-value { margin-top: 27px; }
+
+    .timeline { position: relative; display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px; }
+    .timeline::before { position: absolute; top: 15px; right: 8%; left: 8%; height: 1px; background: var(--line); content: ""; }
+    .timeline-step { position: relative; z-index: 1; }
+    .timeline-dot { width: 31px; height: 31px; border: 7px solid var(--surface); border-radius: 50%; background: var(--strong); box-shadow: 0 0 0 1px var(--line); }
+    .timeline-step strong { display: block; margin-top: 17px; font-size: 10px; }
+    .timeline-step p { margin: 6px 0 0; color: var(--subtle); font-size: 9px; line-height: 1.55; }
+
+    .comparison-table { width: 100%; border-collapse: collapse; }
+    .table-wrap { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+    .comparison-table th, .comparison-table td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: right; font-size: 10px; }
+    .comparison-table th:first-child, .comparison-table td:first-child { padding-left: 0; text-align: left; }
+    .comparison-table th { color: var(--subtle); font: 760 8px/1 var(--mono); text-transform: uppercase; }
+    .comparison-table td { font-family: var(--mono); }
+    .comparison-table tr:last-child td { border-bottom: 0; }
+    .delta.good { color: var(--ok); }
+    .delta.neutral { color: var(--muted); }
+    .delta.caution { color: var(--warn); }
+
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+    .tabs { display: inline-flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); }
+    .tab {
+      min-height: 32px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 999px;
+      color: var(--subtle);
+      background: transparent;
+      font-size: 10px;
+      font-weight: 760;
+      cursor: pointer;
+    }
+    .tab[aria-selected="true"] { color: var(--strong-text); background: var(--strong); }
+    .chart-stack { display: grid; gap: 18px; }
+    .chart-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) 128px; gap: 14px; align-items: center; }
+    .chart-name strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .chart-name small { display: block; margin-top: 4px; color: var(--subtle); font: 700 8px/1 var(--mono); }
+    .pair-bars { display: grid; gap: 5px; }
+    .track { position: relative; height: 13px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+    .bar { height: 100%; min-width: 2px; border-radius: inherit; transition: width .45s cubic-bezier(.2,.8,.2,1); }
+    .bar.before { background: var(--subtle); opacity: .5; }
+    .bar.after { background: var(--strong); }
+    .chart-value { text-align: right; }
+    .chart-value strong { display: block; font: 760 10px/1 var(--mono); }
+    .chart-value small { display: block; margin-top: 5px; color: var(--subtle); font: 700 8px/1 var(--mono); }
+    .legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 17px; color: var(--subtle); font-size: 8px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { display: inline-block; width: 18px; height: 6px; border-radius: 999px; background: var(--subtle); opacity: .5; }
+    .legend span:last-child i { background: var(--strong); opacity: 1; }
+
+    .spotlight {
+      padding: 27px;
+      color: var(--strong-text);
+      background: var(--strong);
+    }
+    .spotlight .metric-label { color: color-mix(in srgb, var(--strong-text) 58%, transparent); }
+    .spotlight-value { margin-top: 48px; font-size: clamp(3rem, 8vw, 6.8rem); font-weight: 900; line-height: .85; letter-spacing: -.08em; }
+    .spotlight-value small { font-size: .18em; letter-spacing: 0; }
+    .spotlight p { max-width: 660px; margin: 22px 0 0; color: color-mix(in srgb, var(--strong-text) 68%, transparent); font-size: 11px; line-height: 1.7; }
+    .mini-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 24px; }
+    .mini-grid div { padding: 12px; border-radius: 11px; background: color-mix(in srgb, var(--strong-text) 9%, transparent); }
+    .mini-grid span { display: block; color: color-mix(in srgb, var(--strong-text) 55%, transparent); font: 700 8px/1 var(--mono); text-transform: uppercase; }
+    .mini-grid strong { display: block; margin-top: 8px; font-size: 11px; }
+
+    .check-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .check {
+      display: grid;
+      grid-template-columns: 31px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-2);
+    }
+    .check.filtered { display: none; }
+    .check-mark { display: grid; width: 29px; height: 29px; place-items: center; border-radius: 9px; font: 900 10px/1 var(--mono); }
+    .check[data-status="pass"] .check-mark { color: var(--ok); background: var(--ok-bg); }
+    .check[data-status="warn"] .check-mark { color: var(--warn); background: var(--warn-bg); }
+    .check[data-status="info"] .check-mark { color: var(--info); background: var(--info-bg); }
+    .check strong { display: block; font-size: 10px; }
+    .check p { margin: 5px 0 0; color: var(--subtle); font-size: 8px; line-height: 1.55; }
+    .check .pill { min-height: 22px; padding: 0 8px; color: var(--subtle); font-size: 7px; }
+
+    .goal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 12px; }
+    .goal { padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+    .goal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .goal strong { font-size: 10px; }
+    .goal p { margin: 13px 0 0; color: var(--subtle); font-size: 9px; line-height: 1.6; }
+    .progress { height: 7px; margin-top: 18px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+    .progress span { display: block; height: 100%; border-radius: inherit; background: var(--ok); }
+    .goal.warn .progress span { background: var(--warn); }
+
+    .checksum {
+      display: grid;
+      grid-template-columns: minmax(150px, .7fr) minmax(260px, 1.3fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .checksum:last-child { border-bottom: 0; }
+    .checksum strong { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+    .checksum code { overflow: hidden; color: var(--subtle); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .copy { min-height: 28px; padding: 0 9px; font-size: 8px; }
+
+    .decision {
+      display: grid;
+      grid-template-columns: 1.25fr .75fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .decision-main { padding: clamp(25px, 5vw, 52px); color: var(--strong-text); background: var(--strong); }
+    .decision-main h3 { max-width: 800px; margin: 44px 0 0; font-size: clamp(2rem, 5vw, 4.7rem); line-height: .98; letter-spacing: -.062em; }
+    .decision-main p { max-width: 720px; margin: 21px 0 0; color: color-mix(in srgb, var(--strong-text) 68%, transparent); font-size: 11px; line-height: 1.75; }
+    .decision-side { padding: 24px; }
+    .decision-list { display: grid; gap: 8px; margin-top: 22px; }
+    .decision-item { padding: 13px; border-radius: 11px; background: var(--surface-2); }
+    .decision-item strong { display: block; font-size: 9px; }
+    .decision-item p { margin: 6px 0 0; color: var(--subtle); font-size: 8px; line-height: 1.55; }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      margin-top: 72px;
+      padding: 22px 3px 0;
+      border-top: 1px solid var(--line);
+      color: var(--subtle);
+      font-size: 9px;
+      line-height: 1.65;
+    }
+    .footer code { font-size: 8px; }
+    .toast {
+      position: fixed;
+      z-index: 80;
+      right: 18px;
+      bottom: 18px;
+      max-width: min(360px, calc(100% - 36px));
+      padding: 12px 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--text);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      font-size: 10px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(12px);
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .noscript { margin: 12px 0; padding: 14px; border-radius: 12px; color: var(--warn); background: var(--warn-bg); font-size: 11px; }
+
+    @media (max-width: 980px) {
+      .hero-grid, .contract-grid { grid-template-columns: repeat(2, 1fr); }
+      .timeline { grid-template-columns: 1fr; gap: 10px; }
+      .timeline::before { top: 5%; bottom: 5%; left: 15px; width: 1px; height: auto; }
+      .timeline-step { display: grid; grid-template-columns: 31px minmax(0, 1fr); gap: 13px; align-items: start; }
+      .timeline-step strong { margin-top: 3px; }
+      .timeline-step p { grid-column: 2; margin-top: -10px; }
+      .goal-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1320px); padding-top: 12px; }
+      .topbar { align-items: flex-start; }
+      .actions .button span { display: none; }
+      .hero { padding: 28px 20px; }
+      .hero-grid, .architecture, .grid-2, .grid-3, .check-grid, .decision { grid-template-columns: 1fr; }
+      .contract-grid { grid-template-columns: 1fr; }
+      .section-head { align-items: flex-start; flex-direction: column; gap: 10px; padding-top: 60px; }
+      .section-head p { text-align: left; }
+      .chart-row { grid-template-columns: 100px minmax(0, 1fr); }
+      .chart-value { grid-column: 2; text-align: left; }
+      .gate { grid-template-columns: auto minmax(0, 1fr); }
+      .gate > code { grid-column: 2; }
+      .checksum { grid-template-columns: minmax(0, 1fr) auto; }
+      .checksum code { grid-column: 1 / -1; grid-row: 2; }
+      .comparison-table { min-width: 560px; }
+      .footer { flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+    }
+
+    @media print {
+      :root, html[data-theme="light"], html[data-theme="dark"] {
+        --bg: #fff;
+        --surface: #fff;
+        --surface-2: #f3f4f6;
+        --surface-3: #e5e7eb;
+        --text: #111;
+        --muted: #444;
+        --subtle: #666;
+        --line: #d1d5db;
+        --strong: #111;
+        --strong-text: #fff;
+        --shadow: none;
+      }
+      body { background: #fff; }
+      .shell { width: 100%; padding: 0; }
+      .topbar .actions, .nav, .toast { display: none !important; }
+      .hero, .card { box-shadow: none; break-inside: avoid; }
+      .section-head { padding-top: 38px; }
+      section { break-before: auto; }
+      .check.filtered { display: grid; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 이동</a>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">TPL</span>
+        <span>
+          <strong>Toss Portfolio Lens</strong>
+          <small>Engineering change report · 2026-07-31</small>
+        </span>
+      </div>
+      <div class="actions" aria-label="보고서 도구">
+        <button class="button" id="themeButton" type="button" aria-pressed="false" title="테마 전환">◐ <span>테마</span></button>
+        <button class="button" id="exportButton" type="button" title="내장 데이터를 JSON으로 저장">↓ <span>JSON</span></button>
+        <button class="button" id="printButton" type="button" title="보고서 인쇄">⌘ <span>인쇄</span></button>
+      </div>
+    </header>
+
+    <main id="main">
+      <article class="hero" aria-labelledby="report-title">
+        <p class="eyebrow">Legacy removal · non-AI operations · production release</p>
+        <h1 id="report-title">레거시를 걷어내고<br>하나의 실행 경로로.</h1>
+        <p class="hero-copy">
+          저장소는 PostgreSQL, 수치 계산은 Rust, 공개 계약은 simulation v9·catalog v4·worker 2.0으로
+          통일했다. 데이터 이관·OOM-safe CI shard·CNPG volume snapshot backup·Harbor Trivy 게이트와
+          digest 고정 web/Rust 배포를 완료했다. 이번 증분 release에서 GPU·AI 모델 build, test,
+          image 및 runtime은 명시적으로 제외했다.
+        </p>
+        <div class="hero-badges" aria-label="최종 상태">
+          <span class="badge ok">Implementation verified</span>
+          <span class="badge ok">Production DB migrated</span>
+          <span class="badge ok">CNPG snapshots ready</span>
+          <span class="badge ok">Harbor release deployed</span>
+          <span class="badge ok">Fixable C/H · 0</span>
+          <span class="badge info">AI/GPU out of scope</span>
+          <span class="badge info">Self-contained report</span>
+        </div>
+        <div class="hero-grid">
+          <div class="hero-metric">
+            <div class="metric-label">Codebase bytes</div>
+            <div class="metric-value">−3.01%</div>
+            <div class="metric-note">−844,738 bytes · generated report 제외 snapshot</div>
+          </div>
+          <div class="hero-metric">
+            <div class="metric-label">Deployed main images</div>
+            <div class="metric-value">−33.13%</div>
+            <div class="metric-note">최초 운영 web + Rust 대비 −93,558,300 bytes</div>
+          </div>
+          <div class="hero-metric">
+            <div class="metric-label">Initial route gzip</div>
+            <div class="metric-value">−47~53%</div>
+            <div class="metric-note">Dashboard · Backtest · Simulation</div>
+          </div>
+          <div class="hero-metric">
+            <div class="metric-label">Rust indicator p50</div>
+            <div class="metric-value">−98.03%</div>
+            <div class="metric-note">동일 result digest 유지</div>
+          </div>
+        </div>
+      </article>
+
+      <aside class="gate success" aria-label="최종 배포 상태">
+        <span class="gate-icon" aria-hidden="true">✓</span>
+        <div>
+          <strong>Harbor digest 고정 배포와 startup smoke를 완료했다.</strong>
+          <p>web/Rust 모두 healthy·restart 0이며, 누락·오류·dashboard password token은 401로 거부한다. CNPG backup·retention과 공개 health도 검증했고 실제 주문은 비활성 상태다.</p>
+        </div>
+        <code>git 9018af8f</code>
+      </aside>
+
+      <nav class="nav" aria-label="보고서 섹션">
+        <a href="#scope">전환 범위</a>
+        <a href="#cutover">데이터 전환</a>
+        <a href="#performance">성능·크기</a>
+        <a href="#security">보안·배포</a>
+        <a href="#operations">운영·백업</a>
+        <a href="#verification">검증</a>
+        <a href="#evidence">증거·결론</a>
+      </nav>
+
+      <noscript><p class="noscript">JavaScript가 꺼져 있어 동적 차트와 필터를 표시할 수 없습니다. 본문의 정적 결론은 그대로 유효합니다.</p></noscript>
+
+      <section id="scope" aria-labelledby="scope-title">
+        <div class="section-head">
+          <h2 id="scope-title">전환 범위</h2>
+          <p>여러 dialect·worker·계약이 공존하던 구조를 단일 production 경로로 줄였다. 기존 AI 관련 결과는 역사 자료로만 보존하며, 이번 증분 작업은 web·Rust·PostgreSQL·CNPG에만 적용했다.</p>
+        </div>
+        <div class="architecture">
+          <article class="card lane before">
+            <div class="lane-label">
+              <strong>Historical before · compatibility matrix</strong>
+              <code>legacy surface</code>
+            </div>
+            <div class="flow">
+              <div class="flow-row removed"><span>Storage</span><strong>SQLite · MySQL · PostgreSQL</strong></div>
+              <div class="flow-row removed"><span>Compute</span><strong>Node inline · Python worker · Rust</strong></div>
+              <div class="flow-row removed"><span>AI lanes · history</span><strong>Kronos-base · FinCast · Chronos-2</strong></div>
+              <div class="flow-row removed"><span>Contracts</span><strong>v7/v8 · v2/v3 · aliases · fallback</strong></div>
+              <div class="flow-row removed"><span>Runtime</span><strong>bootstrap 직접 import 79개</strong></div>
+            </div>
+          </article>
+          <article class="card lane after">
+            <div class="lane-label">
+              <strong>Historical cutover · canonical production path</strong>
+              <span class="badge ok">strict</span>
+            </div>
+            <div class="flow">
+              <div class="flow-row"><span>Storage</span><strong>PostgreSQL only · migration-owned schema</strong></div>
+              <div class="flow-row"><span>Compute</span><strong>Rust socket + durable external queue</strong></div>
+              <div class="flow-row"><span>AI lanes · history</span><strong>FinCast · Chronos-2 · incremental scope excluded</strong></div>
+              <div class="flow-row"><span>Contracts</span><strong>simulation v9 · catalog v4 · worker 2.0</strong></div>
+              <div class="flow-row"><span>Runtime</span><strong>bootstrap 6줄 · production import 2개</strong></div>
+            </div>
+          </article>
+        </div>
+        <div class="contract-grid" aria-label="최신 계약">
+          <article class="contract">
+            <code>ai-paper-simulation/v9</code>
+            <strong>서버 결정 model plan</strong>
+            <p>필수 case·market·selection·strategy와 FinCast/Chronos-2 canonical plan.</p>
+          </article>
+          <article class="contract">
+            <code>scalping-pair-catalog/v4</code>
+            <strong>명시적 symbol 의미</strong>
+            <p>displaySignalSymbol과 modelTargetSymbol을 분리하고 v2 alias를 제거.</p>
+          </article>
+          <article class="contract">
+            <code>portfolio-worker/2.0</code>
+            <strong>단일 compute-json</strong>
+            <p>cagr·totalReturn만 허용하고 구 result-only CLI와 return metric을 거부.</p>
+          </article>
+          <article class="contract">
+            <code>scalping-ai/v2 · historical</code>
+            <strong>기존 계약 보존</strong>
+            <p>기존 canonical 계약은 변경하지 않았고 이번 build·test·deploy 범위에서 제외.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="cutover" aria-labelledby="cutover-title">
+        <div class="section-head">
+          <h2 id="cutover-title">데이터 전환</h2>
+          <p>queue와 실행 중 simulation이 비어 있음을 확인하고 backup → SQLite digest archive → rehearsal → production migration → idempotency 순서로 진행했다.</p>
+        </div>
+        <article class="card">
+          <div class="card-body">
+            <div class="timeline" aria-label="전환 순서">
+              <div class="timeline-step"><div class="timeline-dot"></div><strong>01 · Drain</strong><p>active job 0 · active run 0 · incompatible job 0</p></div>
+              <div class="timeline-step"><div class="timeline-dot"></div><strong>02 · Backup</strong><p>630,241,982 bytes · mode 600 · pg_restore list 검증</p></div>
+              <div class="timeline-step"><div class="timeline-dot"></div><strong>03 · Archive</strong><p>SQLite 3개를 gzip NDJSON·checksum manifest로 변환</p></div>
+              <div class="timeline-step"><div class="timeline-dot"></div><strong>04 · Migrate</strong><p>migration 012 · canonical copy + replay_of + soft archive</p></div>
+              <div class="timeline-step"><div class="timeline-dot"></div><strong>05 · Verify</strong><p>231ms idempotency · checksum/contract 오류 0</p></div>
+            </div>
+          </div>
+        </article>
+
+        <div class="grid-3" style="margin-top:12px">
+          <article class="stat-card">
+            <div class="metric-label">SQLite rows verified</div>
+            <div class="metric-value">82,819</div>
+            <div class="metric-note">34,477 + 48,342 · matched=true</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">Archive-only rows</div>
+            <div class="metric-value">240</div>
+            <div class="metric-note">역사 자료 보존 · production resume 제외</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">Migration / idempotency</div>
+            <div class="metric-value">28m 13s</div>
+            <div class="metric-note">SQL duration · operational elapsed 29m 54s · replay 231ms</div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div>
+              <h3>Production PostgreSQL before / after</h3>
+              <p>canonical 사본 생성 때문에 DB와 candidate 수는 의도적으로 증가했다.</p>
+            </div>
+            <span class="badge ok">idempotent</span>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap" tabindex="0" aria-label="PostgreSQL before/after 비교 표, 작은 화면에서는 가로 스크롤">
+              <table class="comparison-table">
+                <thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Delta</th></tr></thead>
+                <tbody id="databaseRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="performance" aria-labelledby="performance-title">
+        <div class="section-head">
+          <h2 id="performance-title">성능과 크기</h2>
+          <p>크기는 byte 기준 Docker image inspect와 tracked implementation snapshot으로 비교했다. 이 HTML 보고서 자체는 결과를 오염시키지 않도록 코드베이스 snapshot에서 제외한다.</p>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <div class="card-head">
+              <div><h3>Codebase snapshot</h3><p>파일·bytes·선택 text extension 줄 수</p></div>
+              <span class="badge ok">bytes −3.01%</span>
+            </div>
+            <div class="card-body">
+              <div class="chart-stack" id="codeChart"></div>
+              <div class="legend"><span><i></i>Before</span><span><i></i>After</span></div>
+            </div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <div><h3>Deployment images</h3><p>이번 release 범위인 web·Rust만 baseline을 100%로 정규화</p></div>
+              <div class="tabs" role="tablist" aria-label="크기 단위">
+                <button class="tab" type="button" role="tab" aria-selected="true" data-unit="bytes">Bytes</button>
+                <button class="tab" type="button" role="tab" aria-selected="false" data-unit="mib">MiB</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="chart-stack" id="imageChart"></div>
+              <div class="legend"><span><i></i>Before</span><span><i></i>After</span></div>
+              <p class="metric-note" style="margin-top:14px">
+                최초 운영 main web+Rust 282,383,053 bytes 대비 최종 배포본은
+                93,558,300 bytes(33.13%) 감소했다. 직전 release 대비는 142 bytes(+0.000075%)다.
+              </p>
+            </div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div><h3>Initial route gzip</h3><p>조건부 dynamic import 이후 route별 초기 전송량</p></div>
+            <span class="badge ok">budget passed</span>
+          </div>
+          <div class="card-body">
+            <div class="chart-stack" id="bundleChart"></div>
+            <div class="legend"><span><i></i>Baseline</span><span><i></i>Final</span></div>
+          </div>
+        </article>
+
+        <div class="grid-2" style="margin-top:12px">
+          <article class="card spotlight">
+            <div class="metric-label">Rust bounded indicator cache</div>
+            <div class="spotlight-value">98.03<small>% p50</small></div>
+            <p>20,000 bars × 22 indicators × 15 iterations. 결과 SHA-256은 cache 전후 동일한 <code>254bc520…</code>다.</p>
+            <div class="mini-grid">
+              <div><span>p50</span><strong>306.052 → 6.035 ms</strong></div>
+              <div><span>p95</span><strong>334.195 → 8.145 ms</strong></div>
+              <div><span>cache hits</span><strong>25 · evictions 0</strong></div>
+              <div><span>calculation hits</span><strong>342 · misses 10</strong></div>
+            </div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <div><h3>PostgreSQL batch query count</h3><p>최대 1,000행 UNNEST batch</p></div>
+              <span class="badge ok">≥80% target</span>
+            </div>
+            <div class="card-body">
+              <div class="chart-stack" id="queryChart"></div>
+              <div class="legend"><span><i></i>Row-by-row</span><span><i></i>UNNEST</span></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="security" aria-labelledby="security-title">
+        <div class="section-head">
+          <h2 id="security-title">보안과 Harbor 배포</h2>
+          <p>SHA별 이미지를 Harbor에 push하고 Trivy를 digest 단위로 재검사했다. 수정 가능한 Critical/High가 0이 된 release만 메인 런타임에 배포했다.</p>
+        </div>
+
+        <div class="grid-3">
+          <article class="stat-card">
+            <div class="metric-label">Web final</div>
+            <div class="metric-value">0 CVE</div>
+            <div class="metric-note">Critical 0 · High 0 · fixable 0</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">Rust final</div>
+            <div class="metric-value">0 C/H</div>
+            <div class="metric-note">Medium 4 · Low 13 · fix version 없음</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">CNPG retention final</div>
+            <div class="metric-value">0 CVE</div>
+            <div class="metric-note">scratch image · 6,180,990 bytes · fixable 0</div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div><h3>Harbor Trivy release scope</h3><p>web·Rust·CNPG retention의 총 발견 수와 Critical·High·수정 가능한 C/H를 표시한다.</p></div>
+            <span class="badge ok">release gate passed</span>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap" tabindex="0" aria-label="Harbor Trivy 초기 및 최종 비교 표">
+              <table class="comparison-table">
+                <thead><tr><th>Image</th><th>Initial total</th><th>Final total</th><th>Final C / H</th><th>Fixable C / H</th></tr></thead>
+                <tbody id="securityRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <div class="grid-2" style="margin-top:12px">
+          <article class="card">
+            <div class="card-head">
+              <div><h3>적용한 보안 보정</h3><p>새 Git SHA와 digest로 build·push·scan하고 최소 RBAC을 확인했다.</p></div>
+              <span class="badge ok">remediated</span>
+            </div>
+            <div class="card-body">
+              <div class="decision-list">
+                <div class="decision-item"><strong>Digest pinning</strong><p>web·Rust·retention을 전부 Harbor manifest digest로 고정하고 배포 직전 재스캔.</p></div>
+                <div class="decision-item"><strong>Scratch retention image</strong><p>초기 kubectl/Go 기반 후보의 수정 가능 취약점을 없애고 scratch 바이너로 0 CVE 달성.</p></div>
+                <div class="decision-item"><strong>Least privilege</strong><p>retention ServiceAccount는 CNPG Backup 삭제만 허용하고 Kubernetes Secret 읽기는 거부됨을 실제 검증.</p></div>
+              </div>
+            </div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <div><h3>남은 스캐너·registry 항목</h3><p>배포하지 않은 후보와 fixedVersion 없는 항목을 따로 기록한다.</p></div>
+              <span class="badge warn">explicit cleanup approval</span>
+            </div>
+            <div class="card-body">
+              <div class="decision-list">
+                <div class="decision-item"><strong>Rust base packages</strong><p>Medium 4·Low 13, Critical/High 0이며 스캔 시점 fixedVersion이 없다.</p></div>
+                <div class="decision-item"><strong>Rejected remote digests</strong><p><code>sha256:029d786a…</code>와 <code>sha256:bfe5a062…</code>는 unreferenced·rejected·not deployed다. 명시적 삭제 승인이 거부되어 Harbor에만 남았다.</p></div>
+                <div class="decision-item"><strong>Scope boundary</strong><p>GPU·AI 모델 image·test·runtime은 이번 release의 build, scan, deploy 범위에 포함하지 않았다.</p></div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div><h3>최종 production release</h3><p>mutable tag가 아닌 Harbor manifest digest로 실행한다.</p></div>
+            <span class="badge ok">healthy · restart 0</span>
+          </div>
+          <div class="card-body">
+            <div class="decision-list">
+              <div class="decision-item"><strong>Git revision</strong><p><code>9018af8f01ef5e0d88951c2df15080ae954e583f</code></p></div>
+              <div class="decision-item"><strong>Web</strong><p><code>sha256:10ae9f1e1caf2d46…513d8b9d</code> · 160,898,575 bytes</p></div>
+              <div class="decision-item"><strong>Rust compute</strong><p><code>sha256:82e2a33460381968…a646cf4d</code> · 27,926,178 bytes</p></div>
+              <div class="decision-item"><strong>CNPG retention</strong><p><code>sha256:0146b529063ccbfe…e8003b</code> · 6,180,990 bytes · 0 CVE.</p></div>
+              <div class="decision-item"><strong>Smoke</strong><p>로컬·공개 health와 SHA 일치 · PostgreSQL migration OK · rust_socket · realOrder=false.</p></div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="operations" aria-labelledby="operations-title">
+        <div class="section-head">
+          <h2 id="operations-title">운영과 백업</h2>
+          <p>OOM이 발생한 11GiB 호스트에서 테스트 lane을 분리하고, CNPG volume snapshot·retention을 복원 rehearsal 후 적용했다. AWS는 만료된 세션 때문에 읽기 전용 inventory가 차단된 상태다.</p>
+        </div>
+
+        <div class="grid-3">
+          <article class="stat-card">
+            <div class="metric-label">CI shards</div>
+            <div class="metric-value">3 lanes</div>
+            <div class="metric-note">198 files · 57 batches · theoretical wall 280.421s</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">CNPG snapshots</div>
+            <div class="metric-value">4 ready</div>
+            <div class="metric-note">64/16Gi × 2 backups · restore digest matched</div>
+          </article>
+          <article class="stat-card">
+            <div class="metric-label">Host filesystem</div>
+            <div class="metric-value">91%</div>
+            <div class="metric-note">11,714,695,168 bytes available · global prune skipped</div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div><h3>OOM-safe Vitest lane results</h3><p>light만 제한 병렬화하고 heavy·PGlite는 항상 단일 worker로 인과적 순서와 메모리 상한을 유지한다.</p></div>
+            <span class="badge ok">all lanes passed</span>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap" tabindex="0" aria-label="Vitest lane 실행 결과">
+              <table class="comparison-table">
+                <thead><tr><th>Lane</th><th>Files / batches</th><th>Elapsed</th><th>Peak RSS</th><th>Parallelism</th></tr></thead>
+                <tbody>
+                  <tr><td>Light</td><td>151 / 10</td><td>37.867s</td><td>888,610,816 B</td><td>2 measured · CI max 3</td></tr>
+                  <tr><td>Heavy</td><td>25 / 25</td><td>92.654s</td><td>522,051,584 B</td><td>1</td></tr>
+                  <tr><td>PGlite</td><td>22 / 22</td><td>280.421s</td><td>3,073,847,296 B</td><td>1 fixed</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="metric-note" style="margin-top:14px">Local sequential sum 410.942s. PGlite <code>run-service.test.ts</code> batch peak 2,995,593,216 B(2,857MiB)로, PGlite lane을 병렬화하지 않은 정책의 근거다.</p>
+          </div>
+        </article>
+
+        <div class="grid-2" style="margin-top:12px">
+          <article class="card">
+            <div class="card-head">
+              <div><h3>CNPG volume snapshot + retention</h3><p><code>pg/pg-prod-block</code> · healthy 3/3 · primary <code>pg-prod-block-3</code></p></div>
+              <span class="badge ok">rehearsed · active</span>
+            </div>
+            <div class="card-body">
+              <div class="decision-list">
+                <div class="decision-item"><strong>Backup path</strong><p>VSC <code>rook-ceph-rbd-cnpg-managed</code>. on-demand rehearsal와 immediate daily Backup이 Completed, data/WAL snapshot 4개가 ReadyToUse.</p></div>
+                <div class="decision-item"><strong>Schedule</strong><p>daily next <code>2026-07-31T18:17:00Z</code>(2026-08-01 03:17 KST). retention CronJob은 <code>04:10 Asia/Seoul</code>, 최근 성공 7개 보존.</p></div>
+                <div class="decision-item"><strong>Retention verification</strong><p>수동 job success · matched 1 · deleted 0. RBAC은 Backup delete=yes, Secret delete=no.</p></div>
+                <div class="decision-item"><strong>Boundary</strong><p>VolumeSnapshot은 외부 WAL archive/PITR이 아니다. 로컬 mode-600 dump를 독립 backup으로 계속 보존한다.</p></div>
+                <div class="decision-item"><strong>Accepted residual risk</strong><p>Ceph HEALTH_WARN: BlueStore slow OSD 3, stalled DB read 1, monitor l low. 다만 137 PG active+clean, OSD 5/5 up/in을 확인하고 두 차례 restore/digest rehearsal 후 적용했다.</p></div>
+              </div>
+            </div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <div><h3>AWS inventory + disk hygiene</h3><p>외부 세션 차단과 보수적 로컬 정리 결과</p></div>
+              <span class="badge warn">AWS blocked</span>
+            </div>
+            <div class="card-body">
+              <div class="decision-list">
+                <div class="decision-item"><strong>AWS</strong><p>CLI session expired. re-login 전에는 실제 resource inventory를 신뢰할 수 없어 읽기·삭제 모두 수행하지 않았다. tracked <code>infra/aws/**</code> 0.</p></div>
+                <div class="decision-item"><strong>Filesystem after cleanup</strong><p>133,569,777,664 B total · 115,022,823,424 B used · 11,714,695,168 B available · 91%.</p></div>
+                <div class="decision-item"><strong>Removed</strong><p>실행 중이 아닌 Bun·hello-world와 local rejected retention images만 정확한 대상으로 제거.</p></div>
+                <div class="decision-item"><strong>Preserved</strong><p>current/rollback web·Rust, 운영 volume, 30일 이내 mixed build cache를 보존했고 global volume/build prune는 수행하지 않았다.</p></div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="verification" aria-labelledby="verification-title">
+        <div class="section-head">
+          <h2 id="verification-title">검증과 OOM 대응</h2>
+          <p>11GiB 호스트에서 light·heavy·PGlite를 독립 CI lane으로 분리했다. light만 가용 메모리에 따라 제한 병렬화하고 heavy·PGlite는 single worker로 유지해 OOM 없이 198개 파일·57 batch를 통과했다.</p>
+        </div>
+
+        <article class="card">
+          <div class="card-head">
+            <div><h3>Verification matrix</h3><p>상태별 필터로 확인할 수 있다.</p></div>
+            <div class="tabs" role="tablist" aria-label="검증 상태 필터">
+              <button class="tab validation-tab" type="button" role="tab" aria-selected="true" data-filter="all">전체</button>
+              <button class="tab validation-tab" type="button" role="tab" aria-selected="false" data-filter="pass">통과</button>
+              <button class="tab validation-tab" type="button" role="tab" aria-selected="false" data-filter="warn">주의</button>
+              <button class="tab validation-tab" type="button" role="tab" aria-selected="false" data-filter="info">정보</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="check-grid" id="verificationGrid"></div>
+          </div>
+        </article>
+
+        <div class="goal-grid">
+          <article class="goal">
+            <div class="goal-head"><strong>Warm check ≤ 8s</strong><span class="badge ok">met</span></div>
+            <p>project reference incremental cache 이후 warm typecheck median은 0.33초다. clean build median도 12.75초로 15초 목표를 통과했다.</p>
+            <div class="progress"><span style="width:100%"></span></div>
+          </article>
+          <article class="goal">
+            <div class="goal-head"><strong>Route gzip −20%</strong><span class="badge ok">met</span></div>
+            <p>세 route 모두 47.23~53.05% 감소했고 page chunk budget도 통과했다.</p>
+            <div class="progress"><span style="width:100%"></span></div>
+          </article>
+          <article class="goal warn">
+            <div class="goal-head"><strong>Full Vitest ≤ 35s</strong><span class="badge warn">not met</span></div>
+            <p>CI shard 이론 wall time은 가장 느린 PGlite lane의 280.421초다. OOM 안정성은 확보했지만 35초 성능 목표는 미달이다.</p>
+            <div class="progress"><span style="width:12.5%"></span></div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top:12px">
+          <div class="card-head">
+            <div><h3>Graphify structural audit</h3><p>최종 implementation graph와 PostgreSQL hybrid index 대조</p></div>
+            <span class="badge ok">node count matched</span>
+          </div>
+          <div class="card-body">
+            <div class="grid-3">
+              <div class="stat-card"><div class="metric-label">Nodes</div><div class="metric-value">12,039</div><div class="metric-note">release SHA structural graph</div></div>
+              <div class="stat-card"><div class="metric-label">Edges</div><div class="metric-value">32,224</div><div class="metric-note">new production cycles 0</div></div>
+              <div class="stat-card"><div class="metric-label">Hybrid DB index</div><div class="metric-value" id="hybridNodeCount">12,039</div><div class="metric-note">graph node count·SHA 일치 · systemd success</div></div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="evidence" aria-labelledby="evidence-title">
+        <div class="section-head">
+          <h2 id="evidence-title">증거와 결론</h2>
+          <p>보고서의 수치는 mode-600 backup·performance artifact·Graphify 결과에서 가져왔다. credential 값은 포함하지 않았다.</p>
+        </div>
+
+        <article class="card">
+          <div class="card-head">
+            <div><h3>Artifact checksums</h3><p>버튼으로 SHA-256을 복사할 수 있다.</p></div>
+            <span class="badge info">SHA-256</span>
+          </div>
+          <div class="card-body" id="checksumList"></div>
+        </article>
+
+        <div class="decision">
+          <article class="card decision-main">
+            <span class="badge ok">Release decision · deployed</span>
+            <h3>데이터·계산·계약·보안·백업 게이트를 전환하고 운영 배포까지 완료.</h3>
+            <p>
+              production PostgreSQL migration·restore rehearsal, OOM-safe 3-lane 회귀 검증, CNPG snapshot/retention,
+              Harbor push·Trivy 재검사, digest 고정 web/Rust 배포와 public smoke가 모두 성공했다.
+              롤백에는 직전 SHA 55ff의 digest set과 pre-cutover dump를 보존했다. GPU·AI 모델 작업은
+              이번 증분 release에서 제외했다.
+            </p>
+          </article>
+          <aside class="card decision-side">
+            <div class="metric-label">추가로 진행할 작업</div>
+            <div class="decision-list">
+              <div class="decision-item"><strong>01 · AWS inventory</strong><p><code>aws login</code>으로 만료된 세션을 갱신한 뒤 폐기 대상 실제 리소스를 읽기 전용 inventory. 삭제는 별도 승인.</p></div>
+              <div class="decision-item"><strong>02 · Ceph + external PITR</strong><p>BlueStore/DB read/monitor 경고를 해소하고, VolumeSnapshot과 별개로 외부 WAL archive·PITR 복구 경로를 구성·rehearsal.</p></div>
+              <div class="decision-item"><strong>03 · Harbor rejected digests</strong><p>명시적 승인 후 unreferenced <code>029d…</code>, <code>bfe5…</code> 두 digest를 remote Harbor에서 삭제.</p></div>
+              <div class="decision-item"><strong>04 · Deferred by scope</strong><p>GPU·AI 모델 정확도·latency·runtime qualification은 이번 release 범위 밖의 별도 세션에서 수행.</p></div>
+              <div class="decision-item"><strong>Rollback</strong><p><code>.env.harbor.rollback</code>과 pre-cutover dump·SQLite manifest로 복구 가능.</p></div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Generated from local verified artifacts · deployed 2026-07-31 21:17 KST<br>Incremental release scope: web · Rust · PostgreSQL · CNPG; GPU/AI excluded.</span>
+      <span><code>toss-portfolio-lens-legacy-removal-2026-07-31.html</code><br>No external scripts, fonts, analytics, or network requests.</span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    "use strict";
+
+    const reportData = Object.freeze({
+      schemaVersion: "toss-portfolio-lens-legacy-removal-report/v2",
+      generatedAt: "2026-07-31T21:28:06+09:00",
+      status: {
+        implementation: "verified",
+        productionDatabase: "migrated",
+        harborSecurityGate: "passed",
+        applicationDeployment: "deployed",
+        publicHealth: "ok",
+        cnpgBackup: "scheduled snapshots and retention active",
+        deploymentGate: "fixable Critical/High = 0; dedicated read-only token = 200",
+        incrementalScope: "web, Rust, PostgreSQL, CNPG; GPU/AI excluded"
+      },
+      codebase: {
+        method: "Initial tracked implementation snapshot versus release commit 9018af8f01ef5e0d88951c2df15080ae954e583f; generated HTML report and pre-existing user-owned untracked .claude, CLAUDE.md and opencode.json excluded.",
+        metrics: [
+          { key: "files", label: "Files", before: 819, after: 818, deltaPercent: -0.1221 },
+          { key: "bytes", label: "Bytes", before: 28081504, after: 27236766, deltaPercent: -3.008165 },
+          { key: "lines", label: "Text lines", before: 439342, after: 421202, deltaPercent: -4.128902 }
+        ]
+      },
+      images: [
+        { key: "web", label: "Web", before: 161191676, after: 160898575, delta: -293101, deltaPercent: -0.181834 },
+        { key: "rust", label: "Rust", before: 27894810, after: 27926178, delta: 31368, deltaPercent: 0.112451 }
+      ],
+      imageTotals: {
+        webAndRustComparable: { before: 189086486, after: 188824753, delta: -261733, deltaPercent: -0.13842 },
+        deployedMain: { before: 282383053, after: 188824753, delta: -93558300, deltaPercent: -33.131698 },
+        priorReleaseToCurrent: { before: 188824611, after: 188824753, delta: 142, deltaPercent: 0.000075 }
+      },
+      bundles: [
+        { label: "Dashboard", before: 241896, after: 113574, reductionPercent: 53.05 },
+        { label: "Backtest", before: 339552, after: 171762, reductionPercent: 49.42 },
+        { label: "Simulation", before: 314379, after: 165908, reductionPercent: 47.23 }
+      ],
+      postgres: {
+        durationMs: 1693084,
+        operationalElapsedMs: 1794000,
+        idempotencyDurationMs: 231,
+        peakNodeRssBytes: 124997632,
+        before: { databaseBytes: 5425893859, runs: 284, candidates: 379272, artifacts: 1824 },
+        after: { databaseBytes: 6502158819, runs: 380, candidates: 758544, artifacts: 2158 },
+        archivedOptimizationRuns: 78,
+        canonicalOptimizationRuns: 78,
+        invalidArtifactChecksums: 0,
+        invalidV9Inputs: 0,
+        activeRuns: 0,
+        activeJobs: 0
+      },
+      sqliteArchive: {
+        matched: true,
+        verifiedRows: [34477, 48342],
+        archiveOnlyRows: 240,
+        backupBytes: 630241982,
+        backupMode: "600"
+      },
+      indicator: {
+        bars: 20000,
+        indicators: 22,
+        iterations: 15,
+        uncachedP50Ms: 306.051783,
+        cachedP50Ms: 6.035288,
+        uncachedP95Ms: 334.195085,
+        cachedP95Ms: 8.145371,
+        p50ImprovementPercent: 98.028017,
+        p95ImprovementPercent: 97.56269,
+        resultSha256: "254bc520345f870f41958d3fbf18ed5a55255428c1a1457dd40b6454fe069ac7"
+      },
+      queries: [
+        { label: "Orders · 1,000 rows", before: 1000, after: 1, reductionPercent: 99.9 },
+        { label: "Bars · 2,000 rows", before: 2000, after: 2, reductionPercent: 99.9 },
+        { label: "Snapshots · 4,001 rows", before: 4001, after: 4, reductionPercent: 99.900025 }
+      ],
+      tests: {
+        vitestFiles: 198,
+        vitestTests: 1559,
+        vitestBatches: 57,
+        localSequentialDurationMs: 410942,
+        theoreticalCiWallTimeMs: 280421,
+        lanes: [
+          { name: "light", files: 151, batches: 10, durationMs: 37867, peakRssBytes: 888610816, measuredParallelism: 2, ciMaxParallelism: 3 },
+          { name: "heavy", files: 25, batches: 25, durationMs: 92654, peakRssBytes: 522051584, measuredParallelism: 1, ciMaxParallelism: 1 },
+          { name: "pglite", files: 22, batches: 22, durationMs: 280421, peakRssBytes: 3073847296, measuredParallelism: 1, ciMaxParallelism: 1 }
+        ],
+        pgliteLargestBatch: { file: "server/services/run-service.test.ts", peakRssBytes: 2995593216, durationMs: 37526 },
+        rustLibTests: 176,
+        rustBinTests: 10,
+        playwrightMatrices: 20,
+        deployedChartAreaSeries: 6,
+        deployedChartPieSectors: 6,
+        playwrightViewports: [1440, 768, 390],
+        cleanBuildMedianSeconds: 12.75,
+        warmTypecheckMedianSeconds: 0.33
+      },
+      graphify: {
+        beforeNodes: 12359,
+        afterNodes: 12039,
+        beforeEdges: 33140,
+        afterEdges: 32224,
+        indexedNodes: 12039,
+        releaseShaMatched: true,
+        systemdIndexVerified: true,
+        runtimeOrReportCycles: 0,
+        existingUnrelatedCycles: 1
+      },
+      security: {
+        releaseGate: "No fixable Critical/High vulnerabilities",
+        images: [
+          { label: "Web", initialTotal: 0, finalTotal: 0, critical: 0, high: 0, fixableCriticalHigh: 0 },
+          { label: "Rust", initialTotal: 17, finalTotal: 17, critical: 0, high: 0, fixableCriticalHigh: 0 },
+          { label: "CNPG retention", initialTotal: 22, finalTotal: 0, critical: 0, high: 0, fixableCriticalHigh: 0 }
+        ],
+        rejectedRemoteDigests: [
+          { digest: "sha256:029d786ae8ccd94c66d1d32392dcdaead1a0cd524e2854d22f3371af3e28f6c7", deployed: false, deletionApproval: "denied" },
+          { digest: "sha256:bfe5a062678211946b5e65e9a229cda9a04337d38a2a5ddb486832a5d4ed9290", deployed: false, deletionApproval: "denied" }
+        ],
+        unresolvedRationale: "Rust Medium/Low entries have no fixedVersion; rejected remote artifacts are unreferenced and not deployed.",
+        npmProductionAudit: 0
+      },
+      operations: {
+        cnpg: {
+          cluster: "pg/pg-prod-block",
+          healthyInstances: 3,
+          primary: "pg-prod-block-3",
+          volumeSnapshotClass: "rook-ceph-rbd-cnpg-managed",
+          completedBackups: 2,
+          readySnapshots: 4,
+          snapshotCapacitiesGiB: [64, 16, 64, 16],
+          nextDailyBackupUtc: "2026-07-31T18:17:00Z",
+          nextDailyBackupKst: "2026-08-01T03:17:00+09:00",
+          retention: { schedule: "04:10", timeZone: "Asia/Seoul", keepSuccessful: 7, manualMatched: 1, manualDeleted: 0 },
+          rbac: { backupDelete: true, secretDelete: false },
+          externalWalPitr: false,
+          ceph: { health: "HEALTH_WARN", activeCleanPlacementGroups: 137, osdsUp: 5, osdsIn: 5, slowBlueStoreOsds: 3, stalledDbReadOsds: 1, lowMonitors: ["l"] },
+          residualRiskAcceptedAfterRestoreRehearsals: 2
+        },
+        aws: { status: "blocked", reason: "expired aws login session", trackedInfraAwsFiles: 0, inventoryPerformed: false, deletionPerformed: false },
+        disk: {
+          totalBytes: 133569777664,
+          usedBytes: 115022823424,
+          availableBytes: 11714695168,
+          usePercent: 91,
+          removed: ["unused Bun image", "unused hello-world image", "local rejected retention images"],
+          globalVolumePrune: false,
+          globalBuildCachePrune: false
+        }
+      },
+      deployment: {
+        deployedAt: "2026-07-31T21:17:00+09:00",
+        gitSha: "9018af8f01ef5e0d88951c2df15080ae954e583f",
+        publicUrl: "https://tpl.uaysk.com",
+        webDigest: "sha256:10ae9f1e1caf2d4603cb42c01ffa62798133e72b92235a46a530491d513d8b9d",
+        rustDigest: "sha256:82e2a33460381968861b46b2ac868aa38b3581a4c37a263fcbe902aaa646cf4d",
+        cnpgRetentionDigest: "sha256:0146b529063ccbfe3831f18ac1d94216cf834324545ec641b82fac131ee8003b",
+        webHealthy: true,
+        rustHealthy: true,
+        restartCount: 0,
+        authStatus: { missing: 401, wrong: 401, dashboardPassword: 401, dedicatedToken: 200 },
+        realOrder: false,
+        rollbackGitSha: "55ff0994754f4f0a993aba37ae46a50ec296e6a9"
+      },
+      checksums: [
+        { label: "Pre-cutover PostgreSQL dump", file: "data/backups/portfolio-postgres-pre-v9-worker2-2026-07-31.dump", sha256: "7443289dcec557da6d1ff9c165c571945950a55bd3892a2bebacca9e67e6e4af" },
+        { label: "Production cutover report", file: ".cache/performance/postgres-cutover-production.json", sha256: "e522e83739d2d0029e4722717c4cfba27869bcde5b5499a6b8e5bf1828430a13" },
+        { label: "Size comparison", file: ".cache/performance/size-comparison.json", sha256: "ae8b91d73225b6c679d473f7c1344d68ccc2f98c7d9066ae789385aa74838e0c" },
+        { label: "Rust indicator benchmark", file: ".cache/performance/rust-indicator-cache-final.json", sha256: "2abcde518816fc0f6ed195b6f77e60e98049e8e1e99c4a0391ed49fd0e0fa6d3" },
+        { label: "Bundle budget", file: ".cache/performance/bundle-report.json", sha256: "7dd5b31c61f1cacd1ca5d686701ee5be7e648b10eeb55afad11d9283d61826cd" },
+        { label: "PostgreSQL batch benchmark", file: ".cache/performance/postgres-batch.json", sha256: "aec1652bb6c43dd73313b263e3be21d7c48ff96717fc2f7923ef333becadd10f" },
+        { label: "Vitest · light", file: ".cache/performance/vitest-light.json", sha256: "539dd46c3f404777ecd541c3427580697f879c970cdfdb57e8df38bdf15de697" },
+        { label: "Vitest · heavy", file: ".cache/performance/vitest-heavy.json", sha256: "10edfd1fe760de68fd0bfe931bad6977087764020c42c580c3f81311dbe369ae" },
+        { label: "Vitest · PGlite", file: ".cache/performance/vitest-pglite.json", sha256: "6791188b0a84cbc8f047a5e41481fa7e44224d5f80bc5a3719325bf2ba89ba4f" },
+        { label: "Playwright release smoke", file: ".cache/performance/playwright-release-9018af8.json", sha256: "4e8f40ee00c64725a33c27e211daa5b7e264f33a32b2f72915fa257ab07a6a66" },
+        { label: "Harbor Trivy · web", file: ".cache/security/harbor-trivy-web-9018af8.json", sha256: "e47ff6d3f889fa7eb7a67785ececbe1f4ad9826d3ee9ce9b63da5a0c1c8c4fe7" },
+        { label: "Harbor Trivy · Rust", file: ".cache/security/harbor-trivy-rust-worker-9018af8.json", sha256: "648ddcde051d3ab500d592c5a1ac817e4857aab473d6780c6762e3220e41a162" },
+        { label: "Harbor Trivy · CNPG retention", file: ".cache/security/harbor-trivy-cnpg-backup-retention-fixed.json", sha256: "4a2b74557217adc6a01cf3a42ff24dbdb90b4266f76d440bbb5fbfc95936b22d" }
+      ]
+    });
+
+    const formatInteger = (value) => new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 }).format(value);
+    const formatNumber = (value, digits = 2) => new Intl.NumberFormat("ko-KR", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    }).format(value);
+    const formatBytes = (value, unit = "bytes") => unit === "mib"
+      ? `${formatNumber(value / 1048576, value >= 104857600 ? 1 : 2)} MiB`
+      : `${formatInteger(value)} B`;
+    const formatSigned = (value, suffix = "") => `${value > 0 ? "+" : value < 0 ? "−" : ""}${formatInteger(Math.abs(value))}${suffix}`;
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+    function comparisonRow(item, formatter) {
+      const ratio = Math.max(0.2, Math.min(100, item.after / item.before * 100));
+      return `
+        <div class="chart-row">
+          <div class="chart-name"><strong>${escapeHtml(item.label)}</strong><small>${item.deltaPercent > 0 ? "+" : ""}${formatNumber(item.deltaPercent, Math.abs(item.deltaPercent) < .01 ? 4 : 2)}%</small></div>
+          <div class="pair-bars" aria-label="${escapeHtml(item.label)} before ${formatter(item.before)}, after ${formatter(item.after)}">
+            <div class="track"><div class="bar before" style="width:100%"></div></div>
+            <div class="track"><div class="bar after" style="width:${ratio}%"></div></div>
+          </div>
+          <div class="chart-value"><strong>${formatter(item.after)}</strong><small>was ${formatter(item.before)}</small></div>
+        </div>`;
+    }
+
+    function renderCodeChart() {
+      const formatters = {
+        files: (value) => formatInteger(value),
+        bytes: (value) => formatBytes(value),
+        lines: (value) => formatInteger(value)
+      };
+      document.querySelector("#codeChart").innerHTML = reportData.codebase.metrics
+        .map((item) => comparisonRow(item, formatters[item.key]))
+        .join("");
+    }
+
+    let imageUnit = "bytes";
+    function renderImageChart() {
+      document.querySelector("#imageChart").innerHTML = reportData.images
+        .map((item) => comparisonRow(item, (value) => formatBytes(value, imageUnit)))
+        .join("");
+    }
+
+    function renderBundleChart() {
+      document.querySelector("#bundleChart").innerHTML = reportData.bundles
+        .map((item) => comparisonRow({
+          ...item,
+          deltaPercent: -item.reductionPercent
+        }, (value) => `${formatInteger(value)} B`))
+        .join("");
+    }
+
+    function renderQueryChart() {
+      document.querySelector("#queryChart").innerHTML = reportData.queries
+        .map((item) => comparisonRow({
+          ...item,
+          deltaPercent: -item.reductionPercent
+        }, (value) => `${formatInteger(value)} q`))
+        .join("");
+    }
+
+    function renderDatabaseRows() {
+      const metrics = [
+        { label: "Database bytes", before: reportData.postgres.before.databaseBytes, after: reportData.postgres.after.databaseBytes, format: formatBytes, className: "neutral" },
+        { label: "Runs", before: reportData.postgres.before.runs, after: reportData.postgres.after.runs, format: formatInteger, className: "neutral" },
+        { label: "Optimization candidates", before: reportData.postgres.before.candidates, after: reportData.postgres.after.candidates, format: formatInteger, className: "neutral" },
+        { label: "Artifacts", before: reportData.postgres.before.artifacts, after: reportData.postgres.after.artifacts, format: formatInteger, className: "neutral" },
+        { label: "Invalid v9 inputs", before: 0, after: reportData.postgres.invalidV9Inputs, format: formatInteger, className: "good" },
+        { label: "Invalid checksums", before: 0, after: reportData.postgres.invalidArtifactChecksums, format: formatInteger, className: "good" }
+      ];
+      document.querySelector("#databaseRows").innerHTML = metrics.map((item) => {
+        const delta = item.after - item.before;
+        return `<tr>
+          <td>${escapeHtml(item.label)}</td>
+          <td>${item.format(item.before)}</td>
+          <td>${item.format(item.after)}</td>
+          <td class="delta ${item.className}">${formatSigned(delta)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderSecurityRows() {
+      document.querySelector("#securityRows").innerHTML = reportData.security.images.map((item) => `
+        <tr>
+          <td>${escapeHtml(item.label)}</td>
+          <td>${formatInteger(item.initialTotal)}</td>
+          <td>${formatInteger(item.finalTotal)}</td>
+          <td>${formatInteger(item.critical)} / ${formatInteger(item.high)}</td>
+          <td class="delta good">${formatInteger(item.fixableCriticalHigh)}</td>
+        </tr>`).join("");
+    }
+
+    const verificationItems = [
+      { status: "pass", title: "Vitest full suite", detail: "198 files · 1,559 tests · 57 OOM-safe batches · 3 independent lanes", tag: "410.942s local" },
+      { status: "pass", title: "PostgreSQL integration", detail: "migration count 12 · latest 012 · locking · queue · checkpoint · Rust E2E", tag: "real PG" },
+      { status: "pass", title: "PostgreSQL restore rehearsal", detail: "630,241,982-byte dump를 격리 PG17에 복원하고 주요 row count 일치", tag: "155s" },
+      { status: "pass", title: "Rust quality gate", detail: "176 lib + 10 bin tests · fmt · clippy -D warnings · release", tag: "186 tests" },
+      { status: "pass", title: "CNPG backup + restore", detail: "2 completed backups · 4 ReadyToUse snapshots · two restore/digest rehearsals", tag: "scheduled" },
+      { status: "pass", title: "CNPG retention RBAC", detail: "manual job matched 1/delete 0 · Backup delete allowed · Secret delete denied", tag: "keep 7" },
+      { status: "pass", title: "Playwright UI", detail: "20 fixture matrices · deployed 6 area/6 sector · tooltip · keyboard · 3 viewports · no errors", tag: "passed" },
+      { status: "pass", title: "Contract rejection", detail: "v7/v8 · omitted version · aliases · return metric · old CLI 거부", tag: "fail-closed" },
+      { status: "pass", title: "Bundle budget", detail: "세 route 47.23~53.05% 감소 · oversized chunks 0", tag: "passed" },
+      { status: "pass", title: "Harbor release", detail: "web/Rust/CNPG retention rescanned · fixable Critical/High 0 · digest pinned", tag: "deployed" },
+      { status: "pass", title: "Production smoke", detail: "local/public SHA match · auth fail-closed · dedicated token 200 · web/Rust restart 0", tag: "healthy" },
+      { status: "pass", title: "Graph/index parity", detail: "release SHA graph 12,039 nodes = PostgreSQL hybrid index 12,039 · systemd log verified", tag: "matched" },
+      { status: "warn", title: "Vitest wall-time target", detail: "35초 목표는 OOM-safe shard 이론 wall 280.421초로 미달", tag: "4m 40s" },
+      { status: "warn", title: "Ceph residual risk", detail: "HEALTH_WARN · BlueStore slow 3 · stalled DB read 1 · monitor l low · 137 PG active+clean", tag: "accepted" },
+      { status: "warn", title: "AWS inventory", detail: "expired aws login session으로 읽기 전용 inventory 차단 · mutation 0", tag: "blocked" },
+      { status: "info", title: "Host memory policy", detail: "11GiB host · light CI max 3 · heavy/PGlite serial · PGlite peak 3,073,847,296 B", tag: "bounded" },
+      { status: "info", title: "Scope boundary", detail: "GPU·AI 모델 build, test, image, deployment은 이번 증분 release에서 제외", tag: "deferred" }
+    ];
+
+    function renderVerification(filter = "all") {
+      document.querySelector("#verificationGrid").innerHTML = verificationItems.map((item) => `
+        <article class="check ${filter !== "all" && filter !== item.status ? "filtered" : ""}" data-status="${item.status}">
+          <span class="check-mark" aria-hidden="true">${item.status === "pass" ? "✓" : item.status === "warn" ? "!" : "i"}</span>
+          <div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.detail)}</p></div>
+          <span class="pill">${escapeHtml(item.tag)}</span>
+        </article>`).join("");
+    }
+
+    function renderChecksums() {
+      document.querySelector("#checksumList").innerHTML = reportData.checksums.map((item, index) => `
+        <div class="checksum">
+          <strong title="${escapeHtml(item.file)}">${escapeHtml(item.label)}</strong>
+          <code title="${escapeHtml(item.sha256)}">${escapeHtml(item.sha256)}</code>
+          <button class="button copy" type="button" data-copy-index="${index}" aria-label="${escapeHtml(item.label)} checksum 복사">복사</button>
+        </div>`).join("");
+    }
+
+    let toastTimer;
+    function showToast(message) {
+      const toast = document.querySelector("#toast");
+      toast.textContent = message;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 1800);
+    }
+
+    async function copyText(value, message) {
+      try {
+        await navigator.clipboard.writeText(value);
+        showToast(message);
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = value;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.append(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+        showToast(message);
+      }
+    }
+
+    function exportJson() {
+      const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "toss-portfolio-lens-legacy-removal-2026-07-31.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 0);
+      showToast("내장 보고서 데이터를 JSON으로 저장했습니다.");
+    }
+
+    function installInteractions() {
+      document.querySelectorAll("[data-unit]").forEach((button) => {
+        button.addEventListener("click", () => {
+          imageUnit = button.dataset.unit;
+          document.querySelectorAll("[data-unit]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderImageChart();
+        });
+      });
+
+      document.querySelectorAll(".validation-tab").forEach((button) => {
+        button.addEventListener("click", () => {
+          document.querySelectorAll(".validation-tab").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderVerification(button.dataset.filter);
+        });
+      });
+
+      document.querySelector("#checksumList").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-copy-index]");
+        if (!button) return;
+        const item = reportData.checksums[Number(button.dataset.copyIndex)];
+        copyText(item.sha256, `${item.label} checksum을 복사했습니다.`);
+      });
+
+      document.querySelector("#themeButton").addEventListener("click", (event) => {
+        const root = document.documentElement;
+        const next = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        event.currentTarget.setAttribute("aria-pressed", String(next === "light"));
+        showToast(`${next === "dark" ? "다크" : "라이트"} 테마로 전환했습니다.`);
+      });
+      document.querySelector("#exportButton").addEventListener("click", exportJson);
+      document.querySelector("#printButton").addEventListener("click", () => window.print());
+
+      const navLinks = [...document.querySelectorAll(".nav a")];
+      const sections = navLinks.map((link) => document.querySelector(link.getAttribute("href"))).filter(Boolean);
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        navLinks.forEach((link) => link.classList.toggle("active", link.getAttribute("href") === `#${visible.target.id}`));
+      }, { rootMargin: "-20% 0px -66% 0px", threshold: [0, .2, .6] });
+      sections.forEach((section) => observer.observe(section));
+    }
+
+    renderCodeChart();
+    renderImageChart();
+    renderBundleChart();
+    renderQueryChart();
+    renderDatabaseRows();
+    renderSecurityRows();
+    renderVerification();
+    renderChecksums();
+    installInteractions();
+  </script>
+</body>
+</html>

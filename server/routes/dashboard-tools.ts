@@ -15,7 +15,6 @@ import {
   ARTIFACT_TYPES,
   type ArtifactType,
 } from "../repositories/artifact-repository.js";
-import type { ArtifactService } from "../services/artifact-service.js";
 import { ServiceError } from "../services/service-envelope.js";
 import type { RunService } from "../services/run-service.js";
 import type { TechnicalTradeMarkerService } from "../services/technical-trade-marker-service.js";
@@ -272,7 +271,7 @@ export function createDashboardToolsRouter({
         });
         return;
       }
-      response.json({ descriptor: stored.descriptor, data: stored.content });
+      response.type("application/json").send(stored.responseJson);
     },
   );
 

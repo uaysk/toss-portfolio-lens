@@ -6,6 +6,8 @@ import express, {
 import { z } from "zod";
 import { setNoStore } from "../auth.js";
 import type { SseConnectionTracker } from "../lifecycle.js";
+import { admitSseConnection } from "../routes/sse-admission.js";
+import { createTurnScopedFrameSerializer } from "../routes/sse-frame-cache.js";
 import {
   AI_SIMULATION_CONTRACT_VERSION,
   SIMULATION_RUN_EVENT_SCHEMA_VERSION,
@@ -169,10 +171,21 @@ function lastEventRevision(request: Request): number | undefined {
   return Number.isSafeInteger(revision) && revision >= 0 ? revision : undefined;
 }
 
+const serializeSimulationEventFrame = createTurnScopedFrameSerializer(
+  (event: SimulationRunEventV1) => (
+    `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+  ),
+);
+
+function simulationEventFrame(event: SimulationRunEventV1): string {
+  if (event.type === "heartbeat") {
+    return `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  }
+  return serializeSimulationEventFrame(event);
+}
+
 function writeSimulationEvent(response: Response, event: SimulationRunEventV1): boolean {
-  return response.write(
-    `id: ${event.revision}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-  );
+  return response.write(simulationEventFrame(event));
 }
 
 function streamUnavailable(response: Response): void {
@@ -387,9 +400,19 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
       while (!blocked && pending.length) send(pending.shift()!);
     };
 
+    const registration = admitSseConnection(
+      dependencies.sseConnections,
+      response,
+      cleanup,
+    );
+    if (!registration) return;
+    untrack = registration;
+    if (ended) return;
+
     try {
       release = dependencies.events.subscribe(runId, ownerSubject, sendLive);
     } catch (error) {
+      cleanup();
       if (error instanceof SimulationRunEventsBusyError) {
         setNoStore(response);
         response.setHeader("Retry-After", "5");
@@ -414,7 +437,6 @@ export function createSimulationRouter(dependencies: SimulationRouterDependencie
     response.on("drain", drain);
     request.on("close", cleanup);
     response.on("close", cleanup);
-    untrack = dependencies.sseConnections?.track(response, cleanup) ?? (() => undefined);
 
     let replay: SimulationRunEventV1[];
     if (requestedRevision === undefined) {

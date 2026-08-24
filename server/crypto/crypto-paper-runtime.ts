@@ -99,7 +99,6 @@ import {
 import {
   CHRONOS2_CONTEXT_BARS,
   DEFAULT_CONTEXT_BARS,
-  canonicalCryptoModelInputDigest,
   normalizeLaneForecast,
   type ModelMemoryStatus,
   type ModelPeakVramMeasurement,
@@ -111,6 +110,7 @@ import {
   type PrecisionFailureReason,
 } from "./crypto-forecast-normalization.js";
 import { AsyncMarketEventQueue as BoundedMarketEventQueue } from "./market-event-queue.js";
+import { AggregateTradeWindow } from "./aggregate-trade-window.js";
 
 export { canonicalCryptoModelInputDigest } from "./crypto-forecast-normalization.js";
 
@@ -1083,24 +1083,12 @@ function exactText(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function nullableExactText(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return null;
-  return exactText(value);
-}
-
 function first(source: UnknownRecord | undefined, ...keys: string[]): unknown {
   if (!source) return undefined;
   for (const key of keys) {
     if (source[key] !== undefined && source[key] !== null) return source[key];
   }
   return undefined;
-}
-
-function timestamp(value: unknown): number | undefined {
-  const candidate = text(value);
-  if (!candidate) return undefined;
-  const parsed = Date.parse(candidate);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function iso(value: number): string {
@@ -1229,26 +1217,26 @@ function safeProvenanceErrorCodes(values: readonly string[]): string[] {
   return unique(values.map(safeModelErrorCode)).slice(-MAXIMUM_PROVENANCE_ERROR_CODES);
 }
 
-function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+export function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.reject(signal.reason instanceof Error
       ? signal.reason
       : new Error("Crypto paper runtime was aborted."));
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, Math.max(0, milliseconds));
     const onAbort = () => {
       clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
       reject(signal.reason instanceof Error
         ? signal.reason
         : new Error("Crypto paper runtime was aborted."));
     };
-    signal.addEventListener("abort", onAbort, { once: true });
-    void Promise.resolve().then(() => {
-      if (!signal.aborted) return;
-      clearTimeout(timer);
+    const timer = setTimeout(() => {
       signal.removeEventListener("abort", onAbort);
-    });
+      resolve();
+    }, Math.max(0, milliseconds));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 }
 
@@ -2559,10 +2547,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       BinanceMarketEvent,
       { kind: "book_ticker" }
     > | undefined;
-    const recentAggregateTrades: Array<Extract<
-      BinanceMarketEvent,
-      { kind: "agg_trade" }
-    >> = [];
+    const recentAggregateTrades = new AggregateTradeWindow(2 * MINUTE_MS);
     let lastIngressSequence = 0;
     let coalescedFinalKlines = 0;
     let coalescedInferenceBar: BinanceKline | undefined;
@@ -2923,7 +2908,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       lastIngressBookTickerEventTime = undefined;
       lastIngressMarkPriceEventTime = undefined;
       latestBookTicker = undefined;
-      recentAggregateTrades.length = 0;
+      recentAggregateTrades.clear();
       finalKlineRiskEvidence.clear();
       markEvidenceEvictedThroughEventTime = undefined;
       blockPendingOpens("stream_reconnecting");
@@ -3208,22 +3193,22 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       phase: CryptoPaperRuntimeSnapshot["phase"],
       force = false,
       at = this.clock.now(),
-    ): Promise<CryptoPaperRuntimeSnapshot> => {
-      const snapshot = snapshotFor(phase, at);
+      preparedSnapshot?: CryptoPaperRuntimeSnapshot,
+    ): Promise<void> => {
       const observer = input.snapshotObserver ?? this.options.onSnapshot;
-      if (!observer || (!force && at - lastPublishedAt < 500)) return snapshot;
+      if (!observer || (!force && at - lastPublishedAt < 500)) return;
+      const snapshot = preparedSnapshot ?? snapshotFor(phase, at);
       try {
         await observer(context.runId, structuredClone(snapshot));
         lastPublishedAt = at;
       } catch (error) {
         warnings.push(`snapshot_observer_failed:${error instanceof Error ? error.message : "unknown"}`);
       }
-      return snapshot;
     };
 
     const recordEquity = (at: number, force = false): void => {
       for (const state of states.values()) {
-        const equity = state.ledger.snapshot().equity;
+        const equity = state.ledger.equity;
         state.equityPeak = Math.max(state.equityPeak, equity);
         const drawdown = state.equityPeak > 0
           ? (state.equityPeak - equity) / state.equityPeak
@@ -3286,7 +3271,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         symbol,
         lane,
         at,
-        sequence: states.get(lane)!.ledger.snapshot().fills.length + 1,
+        sequence: states.get(lane)!.ledger.fillCount + 1,
       })
     );
     const clientOrderId = (
@@ -3299,7 +3284,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       lane,
       action,
       at,
-      sequence: states.get(lane)!.ledger.snapshot().fills.length + 1,
+      sequence: states.get(lane)!.ledger.fillCount + 1,
     });
 
     const executePending = (event: BinanceMarketEvent): boolean => {
@@ -3330,7 +3315,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         // close/receipt time here would look back to a price that had already
         // traded while model inference was still running.
         if (event.kind === "kline" && event.openTime <= pending.decisionAt) continue;
-        const ledgerBefore = state.ledger.snapshot();
+        const positionBefore = state.ledger.position(symbol);
         if (pending.action === "open" && event.kind === "kline") {
           const evidenceSnapshot = finalKlineRiskEvidenceSnapshots.get(event);
           if (evidenceSnapshot?.complete !== true) {
@@ -3369,7 +3354,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               const causalSpreadBps = event.kind === "kline"
                 ? pending.spreadBps!
                 : Math.max(pending.spreadBps!, currentSpreadBps);
-              const latest = state.ledger.snapshot();
+              const latest = state.ledger.accountState();
               const revalidated = sizeFuturesPosition({
                 mode: "paper",
                 side,
@@ -3452,7 +3437,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               });
             })()
             : (() => {
-              const position = ledgerBefore.positions.find((item) => item.symbol === symbol);
+              const position = positionBefore;
               if (!position) return undefined;
               return state.ledger.reduce({
                 fillId: fillId(state.lane, executedAt),
@@ -3506,7 +3491,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       at: number,
       reason: "daily_loss_gate" | "protection",
     ): void => {
-      const position = state.ledger.snapshot().positions.find((item) => item.symbol === symbol);
+      const position = state.ledger.position(symbol);
       if (!position || at <= position.openedAt) return;
       if (state.pending?.action === "reduce") {
         if (reason === "daily_loss_gate") {
@@ -3564,9 +3549,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           prospectivePendingOpenRisk.delete(state.lane);
           state.pending = undefined;
         }
-        const position = state.ledger.snapshot().positions.find(
-          (candidatePosition) => candidatePosition.symbol === symbol,
-        );
+        const position = state.ledger.position(symbol);
         if (!position) {
           lanes.push({
             lane: state.lane,
@@ -3630,7 +3613,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisionAt: iso(pending.decisionAt),
           eligibleAfterIngressSequence: pending.eligibleAfterIngressSequence,
           status: "pending",
-          fillCountAtExpiry: state.ledger.snapshot().fills.length,
+          fillCountAtExpiry: state.ledger.fillCount,
         });
       }
 
@@ -3803,14 +3786,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       for (const state of states.values()) {
         const pending = state.pending;
         if (pending?.action !== "reduce") continue;
-        if (state.ledger.snapshot().positions.some((position) => position.symbol === symbol)) {
+        if (state.ledger.hasPosition(symbol)) {
           continue;
         }
         const laneEvidence = terminalSettlement.lanes.find(
           (candidateLane) => candidateLane.lane === state.lane,
         );
-        const fills = state.ledger.snapshot().fills;
-        const postExpiryLiquidation = fills.slice(laneEvidence?.fillCountAtExpiry ?? 0)
+        const postExpiryLiquidation = state.ledger
+          .fillsFrom(laneEvidence?.fillCountAtExpiry ?? 0)
           .reverse()
           .find((fill) => fill.action === "reduce" && fill.reason === "liquidation");
         if (postExpiryLiquidation) {
@@ -3850,7 +3833,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       const price = eventPrice(event);
       for (const state of states.values()) {
         if (targetLanes && !targetLanes.has(state.lane)) continue;
-        const position = state.ledger.snapshot().positions.find((item) => item.symbol === symbol);
+        const position = state.ledger.position(symbol);
         const eventIsAfterPosition = position !== undefined && (
           event.kind === "kline"
             ? event.openTime > position.openedAt
@@ -3870,7 +3853,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         const gate = observeDailyGate(
           state,
-          state.ledger.snapshot().equity,
+          state.ledger.equity,
           at,
         );
         if (gate.closeAllReduceOnly
@@ -3886,24 +3869,24 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
     ): boolean => {
       const consumed = consumedFundingSettlements.get(state.lane)!;
       if (consumed.has(settlement.eventId)) return false;
-      const beforeMark = state.ledger.snapshot();
-      const position = beforeMark.positions.find((candidate) => candidate.symbol === symbol);
+      const position = state.ledger.position(symbol);
       if (!position || position.openedAt >= settlement.eventAt) return false;
 
       // Funding is valued from the last accepted mark before the canonical
       // funding boundary. Both ordinary positions and delayed finalized-kline
       // opens consume this same immutable settlement.
+      const fillCountBeforeMark = state.ledger.fillCount;
       state.ledger.mark(
         symbol,
         settlement.settlementMarkPrice,
         settlement.eventAt,
       );
-      const afterMark = state.ledger.snapshot();
-      if (afterMark.fills.length > beforeMark.fills.length) {
-        state.riskGeneration += afterMark.fills.length - beforeMark.fills.length;
+      const fillCountAfterMark = state.ledger.fillCount;
+      if (fillCountAfterMark > fillCountBeforeMark) {
+        state.riskGeneration += fillCountAfterMark - fillCountBeforeMark;
       }
       consumed.add(settlement.eventId);
-      if (!afterMark.positions.some((candidate) => candidate.symbol === symbol)) {
+      if (!state.ledger.hasPosition(symbol)) {
         return true;
       }
       try {
@@ -3963,17 +3946,17 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         if (action.kind === "mark") {
           for (const state of states.values()) {
             if (!targetLanes.has(state.lane)) continue;
-            const beforeMark = state.ledger.snapshot();
-            const position = beforeMark.positions.find((candidate) => candidate.symbol === symbol);
+            const position = state.ledger.position(symbol);
             if (!position || action.item.event.eventTime <= position.openedAt) continue;
+            const fillCountBeforeMark = state.ledger.fillCount;
             state.ledger.mark(
               symbol,
               action.item.event.markPrice,
               action.item.event.eventTime,
             );
-            const fillCountAfterMark = state.ledger.snapshot().fills.length;
-            if (fillCountAfterMark > beforeMark.fills.length) {
-              state.riskGeneration += fillCountAfterMark - beforeMark.fills.length;
+            const fillCountAfterMark = state.ledger.fillCount;
+            if (fillCountAfterMark > fillCountBeforeMark) {
+              state.riskGeneration += fillCountAfterMark - fillCountBeforeMark;
             }
           }
           enforceRisk(action.item.event, targetLanes);
@@ -3997,12 +3980,11 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       currentMarkPrice = event.markPrice;
       currentMarkPriceObservedAt = event.eventTime;
       for (const state of states.values()) {
-        const beforeMark = state.ledger.snapshot();
-        const position = beforeMark.positions.find((item) => item.symbol === symbol);
+        const position = state.ledger.position(symbol);
         if (position && event.eventTime <= position.openedAt) continue;
-        const fillCountBeforeMark = beforeMark.fills.length;
+        const fillCountBeforeMark = state.ledger.fillCount;
         state.ledger.mark(symbol, event.markPrice, event.eventTime);
-        const fillCountAfterMark = state.ledger.snapshot().fills.length;
+        const fillCountAfterMark = state.ledger.fillCount;
         if (fillCountAfterMark > fillCountBeforeMark) {
           state.riskGeneration += fillCountAfterMark - fillCountBeforeMark;
         }
@@ -4069,19 +4051,15 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           askQuantity: latestBookTicker.askQuantity,
         }
         : undefined;
-      const causalLiveTrades = recentAggregateTrades.filter((trade) => (
-        trade.executedAt <= trigger.decisionAt
-        && trade.executedAt > trigger.decisionAt - MINUTE_MS
-      ));
-      const causalLiveTradeStats = causalLiveTrades.length
+      const causalLiveTrades = recentAggregateTrades.summarize(
+        trigger.decisionAt - MINUTE_MS,
+        trigger.decisionAt,
+      );
+      const causalLiveTradeStats = causalLiveTrades
         ? {
-          observedAt: iso(Math.max(...causalLiveTrades.map((trade) => trade.executedAt))),
-          buyVolume: causalLiveTrades
-            .filter((trade) => !trade.buyerWasMaker)
-            .reduce((sum, trade) => sum + trade.quantity, 0),
-          sellVolume: causalLiveTrades
-            .filter((trade) => trade.buyerWasMaker)
-            .reduce((sum, trade) => sum + trade.quantity, 0),
+          observedAt: iso(causalLiveTrades.observedAt),
+          buyVolume: causalLiveTrades.buyVolume,
+          sellVolume: causalLiveTrades.sellVolume,
         }
         : undefined;
       const decisionSpreadBps = currentSpreadBps;
@@ -4154,24 +4132,16 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                     }
                     : {}),
                   ...(() => {
-                    const causalTrades = recentAggregateTrades.filter((trade) => (
-                      trade.executedAt <= bar.closeTime
-                      && trade.executedAt > bar.closeTime - 60_000
-                    ));
-                    if (!causalTrades.length) return {};
-                    const buyVolume = causalTrades
-                      .filter((trade) => !trade.buyerWasMaker)
-                      .reduce((sum, trade) => sum + trade.quantity, 0);
-                    const sellVolume = causalTrades
-                      .filter((trade) => trade.buyerWasMaker)
-                      .reduce((sum, trade) => sum + trade.quantity, 0);
+                    const causalTrades = recentAggregateTrades.summarize(
+                      bar.closeTime - 60_000,
+                      bar.closeTime,
+                    );
+                    if (!causalTrades) return {};
                     return {
                       tradeStats: {
-                        observedAt: iso(Math.max(
-                          ...causalTrades.map((trade) => trade.executedAt),
-                        )),
-                        buyVolume,
-                        sellVolume,
+                        observedAt: iso(causalTrades.observedAt),
+                        buyVolume: causalTrades.buyVolume,
+                        sellVolume: causalTrades.sellVolume,
                       },
                     };
                   })(),
@@ -4783,8 +4753,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           decisions.push(baseDecision);
           continue;
         }
-        const ledger = state.ledger.snapshot();
-        const position = ledger.positions.find((item) => item.symbol === symbol);
+        const ledger = state.ledger.accountState();
+        const position = state.ledger.position(symbol);
         if (unifiedDecision?.direction === "cash") {
           baseDecision.status = position ? "pending" : "blocked";
           baseDecision.reason = unifiedDecision.reasons[0] ?? "unified_policy_no_trade";
@@ -5159,7 +5129,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           }
           if (event.kind === "agg_trade") {
             const needed = Array.from(states.values()).some((state) => (
-              Boolean(state.pending) || state.ledger.snapshot().positions.length > 0
+              Boolean(state.pending) || state.ledger.positionCount > 0
             ));
             if (!needed) {
               queue.noteIgnoredAggTrade();
@@ -5201,7 +5171,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               const expectedEntryPrice = pending.side === "long"
                 ? ceilToStep(fillObservation.price * (1 + slippageRate), rules.tickSize)
                 : floorToStep(fillObservation.price * (1 - slippageRate), rules.tickSize);
-              const latest = state.ledger.snapshot();
+              const latest = state.ledger.accountState();
               const prospectiveSizing = sizeFuturesPosition({
                 mode: "paper",
                 side: pending.side,
@@ -5250,8 +5220,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
             : undefined;
           const markRiskBarrierKey = event.kind === "mark_price" && acceptedIngressMarkPrice
             ? Array.from(states.values()).flatMap((state) => {
-              const positionKeys = state.ledger.snapshot().positions.flatMap((position) => {
-                if (position.symbol !== symbol) return [];
+              const position = state.ledger.position(symbol);
+              const positionKeys = position ? (() => {
                 const liquidationCrossed = position.side === "long"
                   ? event.markPrice <= position.estimatedLiquidationPrice
                   : event.markPrice >= position.estimatedLiquidationPrice;
@@ -5271,7 +5241,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
                       + `:${position.side}:${tier}`,
                   ]
                   : [];
-              });
+              })() : [];
               const pending = state.pending;
               const pendingKey = pending?.action === "open" && pending.side !== undefined
                 ? `${pending.eligibleAfterIngressSequence}:${pending.side}`
@@ -5514,7 +5484,9 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         if (queued.kind === "disconnect") {
           const detail = queued.error instanceof Error ? queued.error.message : "public stream closed";
           warnings.push(`stream_desync:${detail}`);
-          const failedSnapshot = await publishSnapshot("failed", true);
+          const failedAt = this.clock.now();
+          const failedSnapshot = snapshotFor("failed", failedAt);
+          await publishSnapshot("failed", true, failedAt, failedSnapshot);
           throw new CryptoPaperRuntimeError(
             "stream_desync",
             `Binance public stream desynchronized: ${detail}`,
@@ -5698,11 +5670,6 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         if (event.kind === "agg_trade") {
           recentAggregateTrades.push(event);
-          const cutoff = event.executedAt - 2 * MINUTE_MS;
-          while (
-            recentAggregateTrades[0]
-            && recentAggregateTrades[0].executedAt < cutoff
-          ) recentAggregateTrades.shift();
         }
         if (event.kind === "mark_price") {
           riskEventAccepted = lastMarkPriceEventTime === undefined
@@ -5766,7 +5733,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         const positionedBeforeFinalFill = event.kind === "kline" && event.final
           ? new Set(Array.from(states.values()).flatMap((state) => (
-            state.ledger.snapshot().positions.some((position) => position.symbol === symbol)
+            state.ledger.hasPosition(symbol)
               ? [state.lane]
               : []
           )))
@@ -5775,9 +5742,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         if (!subminuteFinCast && event.kind === "kline" && event.final) {
           const newlyOpenedLanes = new Set(Array.from(states.values()).flatMap((state) => {
             if (positionedBeforeFinalFill?.has(state.lane)) return [];
-            const position = state.ledger.snapshot().positions.find(
-              (candidatePosition) => candidatePosition.symbol === symbol,
-            );
+            const position = state.ledger.position(symbol);
             return position?.openedAt === event.openTime ? [state.lane] : [];
           }));
           replayFinalKlineOpenRiskEvidence(event, newlyOpenedLanes);
@@ -5831,9 +5796,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         | "terminal_settlement_fill_rejected" = "terminal_settlement_no_causal_fill";
       const hasUnsettledPosition = (): boolean => settlement.lanes.some((lane) => (
         lane.required
-        && states.get(lane.lane)!.ledger.snapshot().positions.some(
-          (position) => position.symbol === symbol,
-        )
+        && states.get(lane.lane)!.ledger.hasPosition(symbol)
       ));
 
       while (hasUnsettledPosition() && this.clock.now() < settlementDeadlineAt) {
@@ -5915,7 +5878,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         noteTerminalCandidate(queued, ingressSequence);
         const filled = executePending(queued);
         if (Array.from(states.values()).some((state) => (
-          state.ledger.snapshot().positions.some((position) => position.symbol === symbol)
+          state.ledger.hasPosition(symbol)
           && state.pending === undefined
         ))) {
           settlementFailureDetail = "terminal_settlement_fill_rejected";
@@ -5932,9 +5895,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         const decision = decisions.find(
           (candidateDecision) => candidateDecision.id === laneEvidence.decisionId,
         );
-        const positionStillOpen = state.ledger.snapshot().positions.some(
-          (position) => position.symbol === symbol,
-        );
+        const positionStillOpen = state.ledger.hasPosition(symbol);
         if (!positionStillOpen) {
           const ledger = state.ledger.snapshot();
           const terminalFills = ledger.fills.slice(laneEvidence.fillCountAtExpiry ?? 0);
@@ -5978,9 +5939,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         }
         laneEvidence.status = "unsettled_fail_closed";
         laneEvidence.unavailableReason = "terminal_settlement_unavailable";
-        laneEvidence.remainingQuantity = state.ledger.snapshot().positions
-          .filter((position) => position.symbol === symbol)
-          .reduce((sum, position) => sum + position.quantity, 0);
+        laneEvidence.remainingQuantity = state.ledger.position(symbol)?.quantity ?? 0;
         if (decision) {
           if (decision.status === "pending") decision.status = "blocked";
           decision.terminalSettlementFailureReason = settlementFailureDetail;
@@ -6020,7 +5979,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       for (const state of states.values()) {
         state.dailyGate = observeDailyGate(
           state,
-          state.ledger.snapshot().equity,
+          state.ledger.equity,
           terminalObservedAt,
         );
       }
@@ -6028,9 +5987,14 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
       await cancellationCheckpoint();
       const terminalPhase = settlement.settlementComplete ? "completed" : "failed";
       await updateProgress(true, settlement.settlementComplete);
-      const terminalSnapshot = await publishSnapshot(terminalPhase, true, terminalObservedAt);
+      const terminalSnapshot = snapshotFor(terminalPhase, terminalObservedAt);
+      await publishSnapshot(terminalPhase, true, terminalObservedAt, terminalSnapshot);
+      const finalLedgerSnapshots = new Map(selectedLanes.map((lane) => [
+        lane,
+        states.get(lane)!.ledger.snapshot(),
+      ]));
       const allTrades = selectedLanes.flatMap((lane) => (
-        tradeRows(lane, states.get(lane)!.ledger.snapshot())
+        tradeRows(lane, finalLedgerSnapshots.get(lane)!)
       ));
       const comparison = modelComparison();
       const provenance = selectedLanes.map((lane) => {
@@ -6051,7 +6015,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           ]),
         };
       });
-      const executionLedger = states.get(executionLane)!.ledger.snapshot();
+      const executionLedger = finalLedgerSnapshots.get(executionLane)!;
       const summary = {
         schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
         phase: terminalPhase,
@@ -6162,8 +6126,8 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
               lanes: Object.fromEntries(selectedLanes.map((lane) => [
                 lane,
                 {
-                  ledger: states.get(lane)!.ledger.snapshot(),
-                  trades: tradeRows(lane, states.get(lane)!.ledger.snapshot()),
+                  ledger: finalLedgerSnapshots.get(lane)!,
+                  trades: tradeRows(lane, finalLedgerSnapshots.get(lane)!),
                 },
               ])),
               trades: allTrades,
@@ -6343,6 +6307,10 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
         metrics: aggregatedMetrics.metrics,
       };
     });
+    const lastTriggeredAt = snapshots.reduce<string | undefined>((latest, snapshot) => {
+      const candidate = snapshot.decisionCadence.lastTriggeredAt;
+      return candidate && (!latest || candidate > latest) ? candidate : latest;
+    }, undefined);
     return {
       schemaVersion: AI_SIMULATION_CONTRACT_VERSION,
       runId,
@@ -6456,16 +6424,7 @@ export class CryptoPaperRuntime implements CryptoSimulationRuntime {
           (sum, snapshot) => sum + snapshot.decisionCadence.coalescedFinalKlines,
           0,
         ),
-        ...(snapshots.map((snapshot) => snapshot.decisionCadence.lastTriggeredAt)
-          .filter((value): value is string => Boolean(value))
-          .sort()
-          .at(-1)
-          ? {
-            lastTriggeredAt: snapshots.map(
-              (snapshot) => snapshot.decisionCadence.lastTriggeredAt,
-            ).filter((value): value is string => Boolean(value)).sort().at(-1),
-          }
-          : {}),
+        ...(lastTriggeredAt ? { lastTriggeredAt } : {}),
         inFlight: snapshots.some((snapshot) => snapshot.decisionCadence.inFlight),
       },
     };

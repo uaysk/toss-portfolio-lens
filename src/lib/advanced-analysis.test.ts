@@ -6,10 +6,52 @@ function json(value: unknown): Response {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("runAdvancedAnalysis externalized results", () => {
+  it("장기 polling이 정상 완료된 abort listener를 누적하지 않는다", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const addListener = vi.spyOn(controller.signal, "addEventListener");
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+    let pollCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "/api/portfolio/advanced/monte-carlo") {
+        return json({ result: { run_id: "run-poll", kind: "monte_carlo", status: "queued" } });
+      }
+      if (url === "/api/portfolio/advanced/runs/run-poll") {
+        pollCount += 1;
+        return json({
+          runId: "run-poll",
+          kind: "monte_carlo",
+          status: pollCount === 1 ? "running" : "completed",
+        });
+      }
+      if (url === "/api/portfolio/advanced/runs/run-poll/result") return json({
+        runId: "run-poll",
+        kind: "monte_carlo",
+        status: "completed",
+        result: { probabilities: {} },
+      });
+      throw new Error(`unexpected fetch: ${url}`);
+    }));
+
+    const result = runAdvancedAnalysis({
+      operation: "monte-carlo",
+      body: {},
+      signal: controller.signal,
+      pollIntervalMs: 10,
+    });
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toMatchObject({ result: { probabilities: {} } });
+
+    expect(addListener).toHaveBeenCalledTimes(2);
+    expect(removeListener).toHaveBeenCalledTimes(2);
+  });
+
   it("Monte Carlo percentile/sample path artifact는 사용자 요청 전까지 가져오지 않는다", async () => {
     const runId = "00000000-0000-4000-8000-000000000001";
     const fetchMock = vi.fn(async (input: string | URL | Request) => {

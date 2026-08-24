@@ -107,7 +107,7 @@ describe("AiSimulation", () => {
   it("renders the three strategy cases and the BTC·ETH paper setup", () => {
     const markup = renderToStaticMarkup(<AiSimulation onUnauthorized={() => undefined} />);
     expect(markup).toContain('data-ai-simulation="true"');
-    expect(markup).toContain('role="tablist"');
+    expect(markup).toContain('role="radiogroup"');
     expect(markup).toContain('data-simulation-asset-class-option="btc_eth"');
     expect(markup).toContain('data-simulation-asset-class-option="high_vol_crypto"');
     expect(markup).toContain('data-simulation-asset-class-option="us_etf_pair"');

@@ -302,7 +302,10 @@ export class MarketDataService {
       } else {
         await this.store.upsertMarketCandles("stock", instrument.symbol, "1d", false, page.candles);
       }
-      const oldest = [...page.candles].map((candle) => candle.date).sort()[0];
+      let oldest: string | undefined;
+      for (const candle of page.candles) {
+        if (oldest === undefined || candle.date < oldest) oldest = candle.date;
+      }
       if (!page.nextBefore || !page.candles.length || (oldest && oldest <= fromDate)) return;
       if (seenBefore.has(page.nextBefore)) {
         throw new BacktestValidationError(`${instrument.name} 일봉 커서가 반복되었습니다.`);
@@ -338,9 +341,7 @@ export class MarketDataService {
           false,
         );
       }
-      for (const rate of rates) {
-        await this.store.upsertExchangeRate(rate.date, rate.rate, rate.timestamp);
-      }
+      await this.store.upsertExchangeRates(rates);
       console.info(`[fx] KIS 폴백으로 USD/KRW ${rates.length}개 관측을 채웠습니다.`);
       return rates.length;
     })().finally(() => this.fxFallbackInFlight.delete(key));

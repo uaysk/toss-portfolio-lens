@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SharedComputationCapacityError } from "../concurrency/shared-computation-registry.js";
 import type { IntradayBarRecord } from "../repositories/scalping-repository.js";
 import {
   rerankDomesticKisRankings,
@@ -1751,6 +1752,38 @@ describe("ScalpingService", () => {
       schemaVersion: "scalping-realtime-analysis/v1",
     });
     expect(rustSignal?.aborted).toBe(false);
+  });
+
+  it("uses Rust scheduler capacity to fail fast on excess distinct realtime computations", async () => {
+    const parts = dependencies();
+    Object.assign(parts.rust, {
+      snapshot: vi.fn().mockReturnValue({ capacity: 1, maxQueued: 0 }),
+    });
+    let resolveRust!: (value: unknown) => void;
+    parts.rust.compute.mockImplementation(() => new Promise((resolve) => {
+      resolveRust = resolve;
+    }));
+    const subject = service(parts);
+    const admitted = subject.realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "trend",
+    }, { skipAutomaticRefresh: true });
+    await vi.waitFor(() => expect(parts.rust.compute).toHaveBeenCalledTimes(1));
+
+    await expect(subject.realtimeAnalysis({
+      symbols: ["005930"],
+      interval: "1m",
+      preset: "breakout",
+    }, { skipAutomaticRefresh: true })).rejects.toBeInstanceOf(
+      SharedComputationCapacityError,
+    );
+    expect(parts.rust.compute).toHaveBeenCalledTimes(1);
+
+    resolveRust({ result: parts.analysis, summary: {}, warnings: [], artifacts: [] });
+    await expect(admitted).resolves.toMatchObject({
+      schemaVersion: "scalping-realtime-analysis/v1",
+    });
   });
 
   it("keeps full KR session evidence while bounding the model context", async () => {

@@ -6,19 +6,17 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  BrainCircuit,
-  CircleDashed,
-  FlaskConical,
-  LoaderCircle,
-  Radio,
-  RefreshCw,
-  ShieldAlert,
-  Wifi,
-  WifiOff,
-} from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import AlertTriangle from "lucide-react/dist/esm/icons/triangle-alert.js";
+import BrainCircuit from "lucide-react/dist/esm/icons/brain-circuit.js";
+import CircleDashed from "lucide-react/dist/esm/icons/circle-dashed.js";
+import FlaskConical from "lucide-react/dist/esm/icons/flask-conical.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Radio from "lucide-react/dist/esm/icons/radio.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import ShieldAlert from "lucide-react/dist/esm/icons/shield-alert.js";
+import Wifi from "lucide-react/dist/esm/icons/wifi.js";
+import WifiOff from "lucide-react/dist/esm/icons/wifi-off.js";
 import {
   Area,
   Bar,
@@ -101,6 +99,29 @@ function marketVenueLabel(venue: ScalpingCandidate["venue"]): string | undefined
 }
 
 const SCALPING_CHART_SYNC_ID = "scalping-assistant-shared-time";
+const SCALPING_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const SCALPING_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const SCALPING_CHART_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const SCALPING_COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 const DEFAULT_REQUEST: ScalpingRequest = {
   marketCountry: "KR",
   criterion: "trading_amount",
@@ -162,7 +183,7 @@ function finite(value: number | undefined): value is number {
 
 function formatCompact(value: number | undefined): string {
   if (!finite(value)) return "unavailable";
-  return new Intl.NumberFormat("ko-KR", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+  return SCALPING_COMPACT_NUMBER_FORMATTER.format(value);
 }
 
 function formatRatio(value: number | undefined, signed = false): string {
@@ -249,19 +270,13 @@ function formatTimestamp(value: string | undefined, withDate = false): string {
   if (!value) return "unavailable";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "unavailable";
-  return new Intl.DateTimeFormat("ko-KR", {
-    ...(withDate ? { month: "short", day: "numeric" } : {}),
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return (withDate ? SCALPING_DATE_TIME_FORMATTER : SCALPING_TIME_FORMATTER).format(date);
 }
 
 function chartTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  return SCALPING_CHART_TIME_FORMATTER.format(date);
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -950,7 +965,12 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
   const [error, setError] = useState("");
   const [forecastError, setForecastError] = useState("");
   const [streamState, setStreamState] = useState<"idle" | "connected" | "reconnecting" | "unavailable">("idle");
+  const [documentVisible, setDocumentVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
   const analysisSequence = useRef(0);
+  const workspaceRequest = useRef<AbortController | undefined>(undefined);
+  const forecastRequest = useRef<AbortController | undefined>(undefined);
   const minimumTopCount = status?.limits?.minimumTopCount ?? 5;
   const maximumTopCount = status?.limits?.maximumTopCount ?? 50;
   const topCountLimits = useMemo<ScalpingRequestLimits>(() => ({
@@ -971,9 +991,15 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       setError(issues.join(" "));
       return;
     }
-    analysisSequence.current += 1;
+    workspaceRequest.current?.abort();
+    const controller = new AbortController();
+    workspaceRequest.current = controller;
+    const sequence = ++analysisSequence.current;
+    forecastRequest.current?.abort();
+    forecastRequest.current = undefined;
     setSelectedSymbol(undefined);
     setAnalyzingSymbol(undefined);
+    setForecastLoading(false);
     setForecastError("");
     setLoading(true);
     setError("");
@@ -988,8 +1014,11 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify(scanRequest),
+        signal: controller.signal,
       });
       const payload = await readJson(response);
+      if (controller.signal.aborted || workspaceRequest.current !== controller
+        || analysisSequence.current !== sequence) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -997,15 +1026,24 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       if (!response.ok) throw new Error(scalpingErrorMessage(payload, "단타 후보를 불러오지 못했습니다."));
       setWorkspace(normalizeScalpingWorkspace(payload, scanRequest));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "단타 후보를 불러오지 못했습니다.");
+      if (!controller.signal.aborted && workspaceRequest.current === controller
+        && analysisSequence.current === sequence) {
+        setError(caught instanceof Error ? caught.message : "단타 후보를 불러오지 못했습니다.");
+      }
     } finally {
-      setLoading(false);
+      if (workspaceRequest.current === controller) workspaceRequest.current = undefined;
+      if (analysisSequence.current === sequence) setLoading(false);
     }
   }, [onUnauthorized]);
 
   const analyzeCandidate = useCallback(async (symbol: string) => {
     if (!workspace || analyzingSymbol) return;
+    workspaceRequest.current?.abort();
+    const controller = new AbortController();
+    workspaceRequest.current = controller;
     const sequence = ++analysisSequence.current;
+    forecastRequest.current?.abort();
+    forecastRequest.current = undefined;
     const analysisRequest: ScalpingRequest = {
       marketCountry: workspace.marketCountry,
       criterion: workspace.criterion,
@@ -1019,6 +1057,8 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     };
     setSelectedSymbol(undefined);
     setAnalyzingSymbol(symbol);
+    setLoading(false);
+    setForecastLoading(false);
     setError("");
     setForecastError("");
     try {
@@ -1026,8 +1066,11 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify(analysisRequest),
+        signal: controller.signal,
       });
       const payload = await readJson(response);
+      if (controller.signal.aborted || workspaceRequest.current !== controller
+        || analysisSequence.current !== sequence) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -1037,16 +1080,31 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       if (!nextWorkspace.candidates.some((candidate) => candidate.symbol === symbol)) {
         throw new Error("선택한 종목이 상세 분석 응답에 없습니다.");
       }
-      if (analysisSequence.current !== sequence) return;
       setWorkspace(nextWorkspace);
       setSelectedSymbol(symbol);
     } catch (caught) {
-      if (analysisSequence.current !== sequence) return;
-      setError(caught instanceof Error ? caught.message : "선택 종목을 분석하지 못했습니다.");
+      if (!controller.signal.aborted && workspaceRequest.current === controller
+        && analysisSequence.current === sequence) {
+        setError(caught instanceof Error ? caught.message : "선택 종목을 분석하지 못했습니다.");
+      }
     } finally {
+      if (workspaceRequest.current === controller) workspaceRequest.current = undefined;
       if (analysisSequence.current === sequence) setAnalyzingSymbol(undefined);
     }
   }, [analyzingSymbol, onUnauthorized, workspace]);
+
+  useEffect(() => {
+    const updateVisibility = () => setDocumentVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", updateVisibility);
+      analysisSequence.current += 1;
+      workspaceRequest.current?.abort();
+      workspaceRequest.current = undefined;
+      forecastRequest.current?.abort();
+      forecastRequest.current = undefined;
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1095,6 +1153,10 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
     return symbol && exchange ? [[symbol, exchange as ScalpingUsExchange] as const] : [];
   }));
   useEffect(() => {
+    if (!documentVisible) {
+      setStreamState("idle");
+      return;
+    }
     if (!status?.enabled || !symbolsKey || !workspaceInterval || !workspacePreset || !workspaceMarketCountry
       || typeof EventSource === "undefined") {
       setStreamState(status?.enabled && symbolsKey ? "unavailable" : "idle");
@@ -1129,6 +1191,7 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       setStreamState("idle");
     };
   }, [
+    documentVisible,
     status?.enabled,
     symbolsKey,
     workspaceExchangeKey,
@@ -1139,6 +1202,9 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
 
   const requestForecasts = async () => {
     if (!workspace || !selectedCandidate) return;
+    forecastRequest.current?.abort();
+    const controller = new AbortController();
+    forecastRequest.current = controller;
     setForecastLoading(true);
     setForecastError("");
     try {
@@ -1146,8 +1212,10 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({ marketCountry: workspace.marketCountry, symbols: [selectedCandidate.symbol], interval: workspace.interval }),
+        signal: controller.signal,
       });
       const payload = await readJson(response);
+      if (controller.signal.aborted || forecastRequest.current !== controller) return;
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -1160,9 +1228,14 @@ export function ScalpingAssistant({ portfolio: _portfolio, theme, onUnauthorized
       } : current);
       if (!forecasts.size) setForecastError("예측 응답에 표시 가능한 종목 결과가 없습니다. 임의 값을 표시하지 않습니다.");
     } catch (caught) {
-      setForecastError(caught instanceof Error ? caught.message : "AI 전망을 생성하지 못했습니다.");
+      if (!controller.signal.aborted && forecastRequest.current === controller) {
+        setForecastError(caught instanceof Error ? caught.message : "AI 전망을 생성하지 못했습니다.");
+      }
     } finally {
-      setForecastLoading(false);
+      if (forecastRequest.current === controller) {
+        forecastRequest.current = undefined;
+        setForecastLoading(false);
+      }
     }
   };
 

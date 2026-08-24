@@ -14,6 +14,7 @@ const servers: Server[] = [];
 function dependencies(input: {
   runGet?: RunService["get"];
   getMarkers?: TechnicalTradeMarkerService["getMarkers"];
+  getMarket?: McpResourceRegistry["getMarket"];
 } = {}): Parameters<typeof createDashboardToolsRouter>[0] {
   const runs = {
     get: input.runGet ?? vi.fn(async () => undefined),
@@ -25,7 +26,7 @@ function dependencies(input: {
     get: vi.fn(async () => undefined),
   } as unknown as ArtifactService;
   const resources = {
-    getMarket: vi.fn(() => undefined),
+    getMarket: input.getMarket ?? vi.fn(() => undefined),
   } as unknown as McpResourceRegistry;
   return {
     authenticate: (_request, _response, next) => next(),
@@ -118,6 +119,27 @@ describe("dashboard tools routes", () => {
       fromDate: "2026-07-01",
       symbols: ["005930", "AAPL"],
     });
+  });
+
+  it("returns the pre-serialized market resource snapshot without changing it", async () => {
+    const requestHash = "a".repeat(64);
+    const responseJson = JSON.stringify({
+      descriptor: { uri: `market://series/${requestHash}` },
+      data: [{ date: "2026-01-01", value: 1 }],
+    });
+    const getMarket = vi.fn(() => ({
+      ownerSubject: "owner",
+      descriptor: { uri: `market://series/${requestHash}` },
+      responseJson,
+    })) as unknown as McpResourceRegistry["getMarket"];
+    const baseUrl = await start(dependencies({ getMarket }));
+
+    const response = await fetch(`${baseUrl}/api/portfolio/advanced/resources/market/${requestHash}`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.text()).toBe(responseJson);
+    expect(getMarket).toHaveBeenCalledExactlyOnceWith(requestHash, "owner");
   });
 
   it("returns Rust overload as HTTP 503 with Retry-After", async () => {

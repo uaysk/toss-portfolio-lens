@@ -123,6 +123,10 @@ type EventRow = {
   created_at: number | string;
 };
 
+export type RunRepositoryInitializeOptions = {
+  migrationsAlreadyApplied?: boolean;
+};
+
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
@@ -204,56 +208,8 @@ function asRun(row: RunRow): PortfolioRunRecord {
 export class RunRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
-  async initialize(): Promise<void> {
-    await this.database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_backtest_runs (
-        run_id TEXT PRIMARY KEY,
-        run_kind TEXT NOT NULL,
-        owner_subject TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        data_revision TEXT NOT NULL,
-        engine_version TEXT NOT NULL,
-        status TEXT NOT NULL,
-        progress REAL NOT NULL DEFAULT 0,
-        completed_candidates INTEGER NOT NULL DEFAULT 0,
-        total_candidates INTEGER NOT NULL DEFAULT 0,
-        current_validation_window TEXT,
-        input_json TEXT NOT NULL,
-        summary_json TEXT,
-        result_json TEXT,
-        error_json TEXT,
-        warnings_json TEXT NOT NULL,
-        name TEXT,
-        tags_json TEXT NOT NULL DEFAULT '[]',
-        archived_at BIGINT,
-        deleted_at BIGINT,
-        replay_of TEXT,
-        manifest_json TEXT,
-        created_at BIGINT NOT NULL,
-        started_at BIGINT,
-        finished_at BIGINT,
-        updated_at BIGINT NOT NULL,
-        UNIQUE(owner_subject, run_kind, request_hash, data_revision)
-      )
-    `);
-    await this.database.run(`
-      CREATE INDEX IF NOT EXISTS idx_portfolio_run_status
-      ON portfolio_backtest_runs(owner_subject, status, updated_at)
-    `);
-    await this.database.run(`
-      CREATE TABLE IF NOT EXISTS portfolio_run_events (
-        event_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL REFERENCES portfolio_backtest_runs(run_id) ON DELETE CASCADE,
-        event_type TEXT NOT NULL,
-        event_json TEXT NOT NULL,
-        created_at BIGINT NOT NULL
-      )
-    `);
-    await this.database.run(`
-      CREATE INDEX IF NOT EXISTS idx_portfolio_run_events
-      ON portfolio_run_events(run_id, created_at)
-    `);
-    await applyPortfolioMigrations(this.database);
+  async initialize(options: RunRepositoryInitializeOptions = {}): Promise<void> {
+    if (!options.migrationsAlreadyApplied) await applyPortfolioMigrations(this.database);
   }
 
   async create(input: {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Layers3 } from "lucide-react";
+import Layers3 from "lucide-react/dist/esm/icons/layers.js";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { Card } from "@/components/ui/card";
 import { buildAllocation } from "@/lib/allocation";

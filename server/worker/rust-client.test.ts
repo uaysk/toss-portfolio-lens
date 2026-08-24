@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalJson,
   WORKER_PAYLOAD_SCHEMA_VERSION,
@@ -292,5 +292,24 @@ describe("RustComputeClient", () => {
     await expect(first).resolves.toMatchObject({ result: 1 });
     await expect(cancellable).resolves.toMatchObject({ result: 2 });
     expect(connections).toBe(2);
+  });
+
+  it("destroys and rejects a UDS connection attempt when the client closes", async () => {
+    const connectingSocket = new net.Socket();
+    const createConnection = vi.spyOn(net, "createConnection")
+      .mockImplementation(() => connectingSocket);
+    cleanup.push(() => createConnection.mockRestore());
+    const client = new RustComputeClient({
+      socketPath: "/tmp/toss-portfolio-lens-never-connect.sock",
+      poolSize: 1,
+      timeoutMs: 60_000,
+    });
+
+    const pending = client.compute<number>("backtest", { value: 1 });
+    await vi.waitFor(() => expect(createConnection).toHaveBeenCalledOnce());
+    client.close();
+
+    await expect(pending).rejects.toThrow("Rust compute client closed");
+    expect(connectingSocket.destroyed).toBe(true);
   });
 });

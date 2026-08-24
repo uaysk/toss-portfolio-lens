@@ -3,6 +3,7 @@ import {
   isCalendarDate,
   isValidCalendarRange,
   presetCalendarRange,
+  seoulDateString,
   shiftCalendarDate,
 } from "./date-range";
 
@@ -21,5 +22,10 @@ describe("calendar date range", () => {
     });
     expect(isValidCalendarRange({ from: "2026-07-01", to: "2026-07-15" }, "2026-07-15")).toBe(true);
     expect(isValidCalendarRange({ from: "2026-07-16", to: "2026-07-15" }, "2026-07-15")).toBe(false);
+  });
+
+  it("UTC 날짜 경계에서도 서울 달력 날짜를 유지한다", () => {
+    expect(seoulDateString(new Date("2026-08-23T14:59:59.999Z"))).toBe("2026-08-23");
+    expect(seoulDateString(new Date("2026-08-23T15:00:00.000Z"))).toBe("2026-08-24");
   });
 });

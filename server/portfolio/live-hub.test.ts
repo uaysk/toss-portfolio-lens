@@ -8,7 +8,7 @@ import {
   PortfolioLiveHub,
   portfolioContentChecksum,
 } from "./live-hub.js";
-import type { Portfolio } from "../toss.js";
+import type { Holding, Portfolio } from "../toss.js";
 
 function portfolio(
   accountId = "account-1",
@@ -167,9 +167,40 @@ describe("PortfolioLiveHub", () => {
   it("ignores timestamp-only differences in the canonical content checksum", () => {
     const first = portfolio("account-1", 1_000, "2026-07-30T00:00:00.000Z");
     const second = portfolio("account-1", 1_000, "2026-07-30T00:00:10.000Z");
+    expect(portfolioContentChecksum(first)).toBe(
+      "ce0c3d9a84e401243e444c99becdef4aff4d15e7bfc092fa1fb6c4ad6737420f",
+    );
     expect(portfolioContentChecksum(first)).toBe(portfolioContentChecksum(second));
     expect(portfolioContentChecksum(first)).not.toBe(
       portfolioContentChecksum(portfolio("account-1", 2_000)),
     );
+  });
+
+  it("keeps nested object key order out of the content checksum", () => {
+    const holding: Holding = {
+      symbol: "005930",
+      name: "삼성전자",
+      market: "KRX",
+      currency: "KRW",
+      quantity: 10,
+      availableQuantity: 8,
+      averagePrice: 72_000,
+      currentPrice: 75_000,
+      purchaseAmount: 720_000,
+      evaluationAmount: 750_000,
+      profitLoss: 30_000,
+      profitRate: 4.1667,
+      dailyProfitLoss: 5_000,
+      dailyProfitRate: 0.6711,
+    };
+    const reorderedHolding = Object.fromEntries(
+      Object.entries(holding).reverse(),
+    ) as Holding;
+    const first = portfolio();
+    const second = portfolio();
+    first.holdings = [holding];
+    second.holdings = [reorderedHolding];
+
+    expect(portfolioContentChecksum(first)).toBe(portfolioContentChecksum(second));
   });
 });

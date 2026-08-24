@@ -832,17 +832,24 @@ class Chronos2Adapter:
             raise RuntimeError("Chronos-2 pipeline returned a misaligned task count")
         output: list[RawPrediction] = []
         horizons = (5, 15) if result_steps == 15 else (5, 15, 30, 60)
+        horizon_indices = [
+            horizon * 60 // interval_seconds - 1
+            for horizon in horizons
+        ]
         for item, prediction in zip(series, predictions, strict=True):
-            values = prediction.detach().to(dtype=torch.float32, device="cpu").numpy()
-            if values.shape != (1, len(CHRONOS2_NATIVE_QUANTILES), prediction_length):
+            expected_shape = (1, len(CHRONOS2_NATIVE_QUANTILES), prediction_length)
+            if tuple(prediction.shape) != expected_shape:
                 raise RuntimeError("Chronos-2 pipeline returned an unexpected tensor shape")
+            # The pipeline returns every native cadence step. Gather the public
+            # horizons on-device before the FP32 host transfer and NumPy sort.
+            values = prediction[:, :, horizon_indices].detach().to(dtype=torch.float32, device="cpu").numpy()
             native = np.sort(values[0], axis=0)
             close_quantiles = {
                 horizon: {
-                    quantile: float(native[index, horizon * 60 // interval_seconds - 1])
+                    quantile: float(native[index, horizon_index])
                     for index, quantile in enumerate(CHRONOS2_NATIVE_QUANTILES)
                 }
-                for horizon in horizons
+                for horizon_index, horizon in enumerate(horizons)
             }
             output.append(
                 RawPrediction(

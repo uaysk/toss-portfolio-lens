@@ -1,16 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  BarChart3,
-  CalendarDays,
-  CheckCircle2,
-  CircleAlert,
-  FileChartColumn,
-  Info,
-  Lightbulb,
-  LoaderCircle,
-  ShieldAlert,
-  Target,
-} from "lucide-react";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
+import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check.js";
+import CircleAlert from "lucide-react/dist/esm/icons/circle-alert.js";
+import FileChartColumn from "lucide-react/dist/esm/icons/file-chart-column.js";
+import Info from "lucide-react/dist/esm/icons/info.js";
+import Lightbulb from "lucide-react/dist/esm/icons/lightbulb.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import ShieldAlert from "lucide-react/dist/esm/icons/shield-alert.js";
+import Target from "lucide-react/dist/esm/icons/target.js";
 import {
   Area,
   AreaChart,
@@ -36,7 +34,6 @@ import { CHART_COLORS, CHART_DASHES, CHART_SERIES, chartTooltipStyle } from "@/l
 import { correlationAssetLabel, correlationCellStyle } from "@/lib/correlation-labels";
 import { formatMoney, formatPercent, formatSignedMoney } from "@/lib/format";
 import { stockColor } from "@/lib/stock-appearance";
-import { cn } from "@/lib/utils";
 import type {
   AnalysisReport,
   ApiError,
@@ -54,23 +51,30 @@ const benchmarkStyle: Record<BenchmarkKey, { label: string; color: string; dash?
   SP500: { label: "S&P 500", color: CHART_SERIES[3], dash: CHART_DASHES[3] },
 };
 
+const REPORT_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+const REPORT_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 function displayDate(value: string): string {
   const date = new Date(`${value}T00:00:00+09:00`);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(date);
+  return REPORT_DATE_FORMATTER.format(date);
 }
 
 function displayDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return REPORT_DATE_TIME_FORMATTER.format(date);
 }
 
 function shortDate(value: string): string {

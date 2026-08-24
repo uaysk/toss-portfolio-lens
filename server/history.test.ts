@@ -1,8 +1,92 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { isHistoryDate, kstDateString, PortfolioHistoryStore } from "./history.js";
 import { openTestHistoryStore } from "../test-support/history-store.js";
+import { PGliteDatabase } from "../test-support/pglite-database.js";
+import type { DatabaseRow, RelationalDatabase, RunResult } from "./database.js";
 import { MarketDataRepository } from "./repositories/market-data-repository.js";
 import type { HistoricalOrder, Holding, Portfolio } from "./toss.js";
+
+class RecordingDatabase implements RelationalDatabase {
+  constructor(
+    private readonly delegate: RelationalDatabase,
+    readonly statements: string[] = [],
+    readonly queries: string[] = [],
+  ) {}
+
+  query<T extends DatabaseRow>(sql: string, parameters?: unknown[]): Promise<T[]> {
+    this.queries.push(sql);
+    return this.delegate.query<T>(sql, parameters);
+  }
+
+  run(sql: string, parameters?: unknown[]): Promise<RunResult> {
+    this.statements.push(sql);
+    return this.delegate.run(sql, parameters);
+  }
+
+  transaction<T>(work: (database: RelationalDatabase) => Promise<T>): Promise<T> {
+    return this.delegate.transaction((database) => work(new RecordingDatabase(database, this.statements, this.queries)));
+  }
+
+  close(): Promise<void> {
+    return this.delegate.close();
+  }
+}
+
+class TransactionCountingDatabase implements RelationalDatabase {
+  transactionCount = 0;
+
+  constructor(private readonly delegate: RelationalDatabase) {}
+
+  query<T extends DatabaseRow>(sql: string, parameters?: unknown[]): Promise<T[]> {
+    return this.delegate.query<T>(sql, parameters);
+  }
+
+  run(sql: string, parameters?: unknown[]): Promise<RunResult> {
+    return this.delegate.run(sql, parameters);
+  }
+
+  transaction<T>(work: (database: RelationalDatabase) => Promise<T>): Promise<T> {
+    this.transactionCount += 1;
+    return this.delegate.transaction((database) => work(new TransactionCountingDatabase(database)));
+  }
+
+  close(): Promise<void> {
+    return this.delegate.close();
+  }
+}
+
+class FailingMarketCandleDatabase implements RelationalDatabase {
+  constructor(private readonly delegate: RelationalDatabase) {}
+
+  query<T extends DatabaseRow>(sql: string, parameters?: unknown[]): Promise<T[]> {
+    return this.delegate.query<T>(sql, parameters);
+  }
+
+  run(sql: string, parameters?: unknown[]): Promise<RunResult> {
+    if (
+      sql.includes("INSERT INTO portfolio_market_candles")
+      && sql.includes("SELECT * FROM UNNEST")
+    ) {
+      throw new Error("simulated common-candle write failure");
+    }
+    return this.delegate.run(sql, parameters);
+  }
+
+  transaction<T>(work: (database: RelationalDatabase) => Promise<T>): Promise<T> {
+    return this.delegate.transaction((database) => work(new FailingMarketCandleDatabase(database)));
+  }
+
+  close(): Promise<void> {
+    return this.delegate.close();
+  }
+}
+
+function legacyCommonCandleBackfillCount(statements: readonly string[]): number {
+  return statements.filter((statement) => (
+    statement.includes("INSERT INTO portfolio_market_candles")
+    && statement.includes("SELECT")
+  )).length;
+}
 
 function holding(symbol: string, evaluationAmount: number, currency = "KRW"): Holding {
   return {
@@ -56,6 +140,114 @@ describe("PortfolioHistoryStore", () => {
     expect(isHistoryDate("2026-02-29")).toBe(false);
   });
 
+  it("빈 batch 저장은 PostgreSQL transaction 왕복 없이 즉시 반환한다", async () => {
+    const database = new TransactionCountingDatabase(new PGliteDatabase());
+    const store = await PortfolioHistoryStore.open(database);
+    stores.push(store);
+    database.transactionCount = 0;
+
+    await expect(store.upsertMarketCandles("stock", "EMPTY", "1d", false, []))
+      .resolves.toBe(0);
+    await expect(store.upsertOrders("account-1", [])).resolves.toBe(0);
+    await expect(store.upsertInstruments([])).resolves.toBe(0);
+    await expect(store.upsertDailyPrices("KRW:EMPTY", [])).resolves.toBe(0);
+    await expect(store.upsertBacktestPrices("KRW:EMPTY", [])).resolves.toBe(0);
+    await expect(store.upsertBenchmarkPrices("KOSPI", [])).resolves.toBe(0);
+
+    expect(database.transactionCount).toBe(0);
+  });
+
+  it("두 번째 startup에서는 legacy common-candle backfill을 다시 실행하지 않는다", async () => {
+    const database = new RecordingDatabase(new PGliteDatabase());
+    const first = await PortfolioHistoryStore.open(database);
+    stores.push(first);
+    expect(legacyCommonCandleBackfillCount(database.statements)).toBe(3);
+
+    database.statements.length = 0;
+    await PortfolioHistoryStore.open(database);
+
+    expect(legacyCommonCandleBackfillCount(database.statements)).toBe(0);
+  });
+
+  it("legacy 가격과 공통 candle 이중 쓰기를 한 트랜잭션으로 유지한다", async () => {
+    const database = new FailingMarketCandleDatabase(new PGliteDatabase());
+    const store = await PortfolioHistoryStore.open(database);
+    stores.push(store);
+    await store.upsertInstruments([{
+      symbol: "AAA",
+      name: "에이",
+      market: "KRX",
+      currency: "KRW",
+    }]);
+    const candle = [{
+      symbol: "AAA",
+      date: "2026-08-23",
+      timestamp: "2026-08-23T00:00:00+09:00",
+      currency: "KRW",
+      openPrice: 100,
+      highPrice: 110,
+      lowPrice: 90,
+      closePrice: 105,
+    }];
+
+    await expect(store.upsertDailyPrices("KRW:AAA", candle)).rejects.toThrow("common-candle");
+    await expect(store.upsertBacktestPrices("KRW:AAA", candle)).rejects.toThrow("common-candle");
+    await expect(store.upsertBenchmarkPrices("KOSPI", candle)).rejects.toThrow("common-candle");
+
+    for (const table of [
+      "portfolio_daily_prices",
+      "portfolio_backtest_prices",
+      "portfolio_benchmark_prices",
+      "portfolio_market_candles",
+    ]) {
+      const [{ count }] = await database.query<{ count: number | string }>(
+        `SELECT COUNT(*) AS count FROM ${table}`,
+      );
+      expect(Number(count), table).toBe(0);
+    }
+  });
+
+  it("여러 종목의 일봉 coverage를 한 쿼리로 조회하고 불완전 OHLC를 조기 판별한다", async () => {
+    const database = new RecordingDatabase(new PGliteDatabase());
+    const store = await PortfolioHistoryStore.open(database);
+    stores.push(store);
+    const candle = (symbol: string, date: string) => ({
+      symbol,
+      date,
+      timestamp: `${date}T00:00:00+09:00`,
+      currency: "KRW",
+      openPrice: 100,
+      highPrice: 110,
+      lowPrice: 90,
+      closePrice: 105,
+    });
+    await store.upsertInstruments([
+      { symbol: "AAA", name: "에이", market: "KRX", currency: "KRW" },
+      { symbol: "BBB", name: "비", market: "KRX", currency: "KRW" },
+    ]);
+    await store.upsertDailyPrices("KRW:AAA", [candle("AAA", "2026-08-21"), candle("AAA", "2026-08-22")]);
+    await store.upsertDailyPrices("KRW:BBB", [candle("BBB", "2026-08-20")]);
+    await database.run(`
+      UPDATE portfolio_daily_prices SET open_price = NULL
+      WHERE instrument_key = 'KRW:BBB'
+    `);
+
+    database.queries.length = 0;
+    await expect(store.getDailyPriceCoverage(["KRW:AAA", "KRW:BBB", "KRW:AAA"]))
+      .resolves.toEqual(new Map([
+        ["KRW:AAA", { earliest: "2026-08-21", latest: "2026-08-22", incompleteOhlc: false }],
+        ["KRW:BBB", { earliest: "2026-08-20", latest: "2026-08-20", incompleteOhlc: true }],
+      ]));
+    expect(database.queries).toHaveLength(1);
+    expect(database.queries[0]).toContain("instrument_key = ANY(?::text[])");
+    expect(database.queries[0]).toContain("GROUP BY instrument_key");
+
+    database.queries.length = 0;
+    await expect(store.hasIncompleteDailyOhlc()).resolves.toBe(true);
+    expect(database.queries).toHaveLength(1);
+    expect(database.queries[0]).toContain("LIMIT 1");
+  });
+
   it("같은 날 기록은 갱신하고 날짜별 종목 비중을 반환한다", async () => {
     const store = await openTestHistoryStore();
     stores.push(store);
@@ -89,7 +281,8 @@ describe("PortfolioHistoryStore", () => {
   });
 
   it("원본 주문·일봉·복원 상태와 계산된 과거 스냅샷을 저장한다", async () => {
-    const store = await openTestHistoryStore();
+    const database = new RecordingDatabase(new PGliteDatabase());
+    const store = await PortfolioHistoryStore.open(database);
     stores.push(store);
     const order: HistoricalOrder = {
       orderId: "order-1",
@@ -137,8 +330,45 @@ describe("PortfolioHistoryStore", () => {
     });
     expect((await store.getBacktestPrices(["KRW:AAA"], "2026-07-01", "2026-07-02")).get("KRW:AAA"))
       .toEqual([{ date: "2026-07-01", close: 108 }]);
-    await store.upsertExchangeRate("2026-07-01", 1387.25, "2026-07-01T15:30:00+09:00");
-    expect((await store.getExchangeRates("2026-07-01", "2026-07-02")).get("2026-07-01")).toBe(1387.25);
+    database.statements.length = 0;
+    await expect(store.upsertExchangeRates([], 1_000)).resolves.toBe(0);
+    expect(database.statements).toHaveLength(0);
+    await expect(store.upsertExchangeRates([
+      { date: "2026-07-01", rate: 1_387.25, timestamp: "2026-07-01T15:30:00+09:00" },
+      { date: "2026-07-02", rate: 1_382.5, timestamp: "2026-07-02T15:30:00+09:00" },
+      { date: "2026-07-03", rate: 1_379.75, timestamp: "2026-07-03T15:30:00+09:00" },
+    ], 1_000)).resolves.toBe(3);
+    expect(database.statements.filter((statement) => (
+      statement.includes("INSERT INTO portfolio_exchange_rates")
+      && statement.includes("FROM UNNEST")
+    ))).toHaveLength(1);
+    expect(await store.getExchangeRates("2026-07-01", "2026-07-03")).toEqual(new Map([
+      ["2026-07-01", 1_387.25],
+      ["2026-07-02", 1_382.5],
+      ["2026-07-03", 1_379.75],
+    ]));
+    database.statements.length = 0;
+    await store.upsertExchangeRates([
+      { date: "2026-07-03", rate: 1_380, timestamp: "2026-07-03T15:31:00+09:00" },
+      { date: "2026-07-03", rate: 1_381, timestamp: "2026-07-03T15:32:00+09:00" },
+    ], 2_222);
+    expect(database.statements.filter((statement) => (
+      statement.includes("INSERT INTO portfolio_exchange_rates")
+    ))).toHaveLength(2);
+    const [updatedRate] = await database.query<{
+      rate: number;
+      timestamp: string;
+      updated_at: number | string;
+    }>(`
+      SELECT rate, timestamp, updated_at
+      FROM portfolio_exchange_rates
+      WHERE rate_date = '2026-07-03'
+    `);
+    expect(updatedRate).toMatchObject({
+      rate: 1_381,
+      timestamp: "2026-07-03T15:32:00+09:00",
+    });
+    expect(Number(updatedRate?.updated_at)).toBe(2_222);
 
     expect(await store.replaceHistoricalSnapshots("account-1", [{
       date: "2026-07-01",

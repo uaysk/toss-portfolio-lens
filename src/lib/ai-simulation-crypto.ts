@@ -1,5 +1,16 @@
+export const AI_SIMULATION_CONTRACT_VERSION = "ai-paper-simulation/v9" as const;
+export const AI_SIMULATION_MARKETS = ["KR", "US"] as const;
+export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
+export const AI_SIMULATION_CASES = ["btc_eth", "high_vol_crypto", "us_etf_pair"] as const;
 export const AI_SIMULATION_MODEL_LANES = ["fincast", "chronos2"] as const;
 export const AI_SIMULATION_MAIN_MODEL_LANE = "fincast" as const;
+export const AI_SIMULATION_MODEL_ROLES = ["primary", "veto", "shadow"] as const;
+export const AI_SIMULATION_PRESETS = [
+  "trend",
+  "breakout",
+  "mean_reversion",
+  "risk_management",
+] as const;
 export const AI_SIMULATION_FINCAST_CANDLE_SECONDS = [60, 30, 15] as const;
 export const AI_SIMULATION_EXECUTION_MODES = ["paper"] as const;
 export const AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH = 100;
@@ -9,9 +20,10 @@ export type AiSimulationModelLane = (typeof AI_SIMULATION_MODEL_LANES)[number];
 export type AiSimulationFinCastCandleSeconds =
   (typeof AI_SIMULATION_FINCAST_CANDLE_SECONDS)[number];
 export type AiSimulationExecutionMode = (typeof AI_SIMULATION_EXECUTION_MODES)[number];
-export type AiSimulationCriterion = "trading_amount" | "volume" | "volatility";
-export type AiSimulationCase = "btc_eth" | "high_vol_crypto" | "us_etf_pair";
-export type AiSimulationModelRole = "primary" | "veto" | "shadow";
+export type AiSimulationCriterion = (typeof AI_SIMULATION_CRITERIA)[number];
+export type AiSimulationCase = (typeof AI_SIMULATION_CASES)[number];
+export type AiSimulationModelRole = (typeof AI_SIMULATION_MODEL_ROLES)[number];
+export type AiSimulationPreset = (typeof AI_SIMULATION_PRESETS)[number];
 export type AiSimulationModelPlanEntry = {
   symbol: string;
   modelLane: AiSimulationModelLane;
@@ -32,7 +44,7 @@ export type AiSimulationHighVolatilityScannerSettings = {
 };
 
 export type AiSimulationMarket =
-  | { kind: "stock"; country: "KR" | "US" }
+  | { kind: "stock"; country: (typeof AI_SIMULATION_MARKETS)[number] }
   | {
       kind: "crypto_futures";
       venue: "BINANCE_USDM";
@@ -70,12 +82,12 @@ export const DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS: Readonly<
 });
 
 export type AiSimulationCryptoRequest = {
-  contractVersion: "ai-paper-simulation/v9";
+  contractVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
   simulationCase: Extract<AiSimulationCase, "btc_eth" | "high_vol_crypto">;
   market: Extract<AiSimulationMarket, { kind: "crypto_futures" }>;
   initialCash: number;
   durationMinutes: number;
-  preset: "trend" | "breakout" | "mean_reversion" | "risk_management";
+  preset: AiSimulationPreset;
   riskTolerance: number;
   selection:
     | {
@@ -101,7 +113,7 @@ export type AiSimulationCryptoRequest = {
 };
 
 export const DEFAULT_AI_SIMULATION_CRYPTO_REQUEST: AiSimulationCryptoRequest = {
-  contractVersion: "ai-paper-simulation/v9",
+  contractVersion: AI_SIMULATION_CONTRACT_VERSION,
   simulationCase: "high_vol_crypto",
   market: { ...AI_SIMULATION_CRYPTO_FUTURES_MARKET },
   initialCash: 10_000,
@@ -558,7 +570,7 @@ export function normalizeAiSimulationCryptoStatus(payload: unknown): AiSimulatio
   const root = record(payload);
   const crypto = record(root.cryptoFutures);
   const source = Object.keys(crypto).length ? crypto : root;
-  if (source.schemaVersion !== "ai-paper-simulation/v9") {
+  if (source.schemaVersion !== AI_SIMULATION_CONTRACT_VERSION) {
     return {
       credentialsConfigured: false,
       signedReadSucceeded: false,
@@ -844,8 +856,8 @@ export function validateAiSimulationCryptoRequest(
       issues.push(`테스트 기간은 ${limits.maximumDurationMinutes}분 이하여야 합니다.`);
     }
   }
-  if (request.contractVersion !== "ai-paper-simulation/v9") {
-    issues.push("ai-paper-simulation/v9 계약만 지원합니다.");
+  if (request.contractVersion !== AI_SIMULATION_CONTRACT_VERSION) {
+    issues.push(`${AI_SIMULATION_CONTRACT_VERSION} 계약만 지원합니다.`);
   }
   if (!AI_SIMULATION_FINCAST_CANDLE_SECONDS.includes(request.fincastCandleSeconds)) {
     issues.push("FinCast 모델 봉은 1분, 30초, 15초 중 하나여야 합니다.");
@@ -853,7 +865,7 @@ export function validateAiSimulationCryptoRequest(
     issues.push("v9 canonical model plan은 1분 모델 봉만 지원합니다.");
   }
   if (request.execution.mode !== "paper") issues.push("현재 운영에서는 paper 실행만 허용됩니다.");
-  if (!["trend", "breakout", "mean_reversion", "risk_management"].includes(request.preset)) {
+  if (!AI_SIMULATION_PRESETS.includes(request.preset)) {
     issues.push("지원하는 판단 프리셋을 선택해 주세요.");
   }
   if (!Number.isSafeInteger(request.riskTolerance)

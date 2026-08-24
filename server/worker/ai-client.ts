@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
+import { canonicalJsonExceedsByteLimit } from "../json-byte-limit.js";
 import { AiRequestSchema, type AiRequest, type AiResponse } from "./ai-contract.js";
 import {
   AiServerTransportEnvelopeSchema,
@@ -104,10 +105,23 @@ function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("AI compute 요청이 취소되었습니다.");
 }
 
-function rawDataBuffer(data: RawData): Buffer {
+function rawDataBuffer(data: RawData, maximumBytes: number): Buffer {
   if (Buffer.isBuffer(data)) return data;
   if (data instanceof ArrayBuffer) return Buffer.from(data);
-  if (Array.isArray(data)) return Buffer.concat(data);
+  if (Array.isArray(data)) {
+    let totalBytes = 0;
+    for (const part of data) {
+      totalBytes += part.byteLength;
+      if (totalBytes > maximumBytes) {
+        throw new AiComputeTransportError(
+          "AI compute 응답이 크기 상한을 초과했습니다.",
+          "RESPONSE_LIMIT_EXCEEDED",
+          false,
+        );
+      }
+    }
+    return Buffer.concat(data, totalBytes);
+  }
   throw new AiComputeTransportError("AI compute 응답 frame 형식이 올바르지 않습니다.", "INVALID_FRAME_TYPE", false);
 }
 
@@ -218,8 +232,7 @@ export class AiComputeClient {
 
   request(input: AiRequest, signal?: AbortSignal): Promise<AiResponse> {
     const request = AiRequestSchema.parse(input);
-    const source = Buffer.from(JSON.stringify(request), "utf8");
-    if (source.byteLength === 0 || source.byteLength > this.maximumRequestBytes) {
+    if (canonicalJsonExceedsByteLimit(request, this.maximumRequestBytes)) {
       throw new Error("AI compute 요청이 크기 상한을 초과했습니다.");
     }
     if (this.closed) return Promise.reject(new AiComputeTransportError("AI compute client가 종료되었습니다.", "CLIENT_CLOSED", false));
@@ -375,7 +388,10 @@ export class AiComputeClient {
         return;
       }
       try {
-        this.handleMessage(rawDataBuffer(data));
+        this.handleMessage(rawDataBuffer(
+          data,
+          this.maximumResponseBytes + MAXIMUM_ENVELOPE_OVERHEAD_BYTES,
+        ));
       } catch (error) {
         const normalized = error instanceof AiComputeTransportError
           ? error
@@ -477,8 +493,7 @@ export class AiComputeClient {
       if (this.ignoredResponseIds.delete(parsed.data.request_id)) return;
       throw new AiComputeTransportError("등록되지 않은 AI compute 응답 request_id입니다.", "UNKNOWN_RESPONSE_ID", false);
     }
-    const payloadBytes = Buffer.byteLength(JSON.stringify(parsed.data.payload), "utf8");
-    if (payloadBytes === 0 || payloadBytes > this.maximumResponseBytes) {
+    if (canonicalJsonExceedsByteLimit(parsed.data.payload, this.maximumResponseBytes)) {
       throw new AiComputeTransportError("AI compute 응답 payload가 크기 상한을 초과했습니다.", "RESPONSE_LIMIT_EXCEEDED", false);
     }
     if (parsed.data.payload.request_id !== pending.request.request_id

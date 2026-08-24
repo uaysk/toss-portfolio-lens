@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import { SseConnectionTracker } from "../lifecycle.js";
 import {
   createScalpingRouter,
   parseStreamAnalysisOptions,
@@ -56,6 +57,73 @@ describe("scalping session-only router", () => {
     ]));
     expect(source.some((path) => String(path).includes("order"))).toBe(false);
     expect(router.stack[0]?.handle).toBe(authenticate);
+  });
+
+  it("rejects shared-capacity overflow before SSE headers or live subscriptions", async () => {
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const held = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false,
+      end: vi.fn(),
+    });
+    const releaseHeld = tracker.track(held as never, vi.fn());
+    const live = {
+      retain: vi.fn().mockResolvedValue(vi.fn()),
+      onEvent: vi.fn().mockReturnValue(vi.fn()),
+      eventsAfter: vi.fn().mockReturnValue([]),
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+    };
+    const router = createScalpingRouter({
+      authenticate: vi.fn((_request, _response, next) => next()),
+      service: { realtimeAnalysis: vi.fn() } as never,
+      live: live as never,
+      sseConnections: tracker,
+      config: {
+        enabled: true,
+        maximumSymbols: 50,
+        heartbeatMs: 15_000,
+        analysisDebounceMs: 250,
+        backpressureEventLimit: 100,
+      },
+    });
+    const route = router.stack.find(
+      (layer: { route?: { path?: string } }) => layer.route?.path === "/stream",
+    ) as any;
+    const handler = route.route.stack.at(-1).handle as (
+      request: unknown,
+      response: unknown,
+    ) => Promise<void>;
+    const request = Object.assign(new EventEmitter(), {
+      query: { symbols: "005930", interval: "1m", preset: "trend" },
+      get: vi.fn().mockReturnValue(undefined),
+    });
+    const response = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false,
+      status: vi.fn(),
+      setHeader: vi.fn(),
+      json: vi.fn(),
+      flushHeaders: vi.fn(),
+      write: vi.fn().mockReturnValue(true),
+      end: vi.fn(),
+    });
+    response.status.mockReturnValue(response);
+    response.json.mockReturnValue(response);
+
+    await handler(request, response);
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "SSE_CONNECTION_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(response.setHeader).not.toHaveBeenCalledWith(
+      "Content-Type",
+      "text/event-stream; charset=utf-8",
+    );
+    expect(live.onEvent).not.toHaveBeenCalled();
+    expect(live.retain).not.toHaveBeenCalled();
+    releaseHeld();
   });
 
   it("returns a session-protected recorder status without exposing provider credentials", () => {
@@ -239,6 +307,74 @@ describe("scalping session-only router", () => {
     request.emit("close");
     expect(analysisSignal.aborted).toBe(true);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one live-event serialization across synchronous SSE subscribers", async () => {
+    const listeners: Array<(event: Record<string, unknown>) => void> = [];
+    const live = {
+      retain: vi.fn().mockResolvedValue(vi.fn()),
+      onEvent: vi.fn((listener) => {
+        listeners.push(listener);
+        return vi.fn();
+      }),
+      eventsAfter: vi.fn().mockReturnValue([]),
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+    };
+    const router = createScalpingRouter({
+      authenticate: vi.fn((_request, _response, next) => next()),
+      service: { realtimeAnalysis: vi.fn() } as never,
+      live: live as never,
+      config: {
+        enabled: true,
+        maximumSymbols: 50,
+        heartbeatMs: 15_000,
+        analysisDebounceMs: 50,
+        backpressureEventLimit: 100,
+      },
+    });
+    const route = router.stack.find(
+      (layer: { route?: { path?: string } }) => layer.route?.path === "/stream",
+    ) as any;
+    const handler = route.route.stack.at(-1).handle as (
+      request: unknown,
+      response: unknown,
+    ) => Promise<void>;
+    const requests = Array.from({ length: 2 }, () => Object.assign(new EventEmitter(), {
+      query: { symbols: "005930", interval: "1m", preset: "trend" },
+      get: vi.fn().mockReturnValue(undefined),
+    }));
+    const responses = Array.from({ length: 2 }, () => {
+      const response = Object.assign(new EventEmitter(), {
+        destroyed: false,
+        writableEnded: false,
+        status: vi.fn(),
+        setHeader: vi.fn(),
+        flushHeaders: vi.fn(),
+        write: vi.fn().mockReturnValue(true),
+        end: vi.fn(),
+      });
+      response.status.mockReturnValue(response);
+      return response;
+    });
+    await Promise.all(requests.map((request, index) => handler(request, responses[index]!)));
+    responses.forEach((response) => response.write.mockClear());
+
+    const payloadToJson = vi.fn(() => ({ price: 100 }));
+    const event = {
+      schemaVersion: "scalping-live-event/v1",
+      id: 1,
+      emittedAt: "2026-07-21T03:00:00.000Z",
+      type: "trade",
+      symbol: "005930",
+      marketCountry: "KR",
+      payload: { toJSON: payloadToJson },
+    };
+    listeners.forEach((listener) => listener(event));
+
+    expect(payloadToJson).toHaveBeenCalledTimes(1);
+    expect(responses[0].write.mock.calls[0]?.[0])
+      .toBe(responses[1].write.mock.calls[0]?.[0]);
+    requests.forEach((request) => request.emit("close"));
   });
 
   it("skips stale replay for a fresh SSE connection and causally replays an explicit cursor", async () => {

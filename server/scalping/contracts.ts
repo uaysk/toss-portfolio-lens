@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const SCALPING_CONTRACT_VERSION = "scalping-market/v1" as const;
+export const MARKET_DATA_RECORDER_SCHEMA_VERSION = "scalping-market-recorder/v1" as const;
 
 export const MarketProviderSchema = z.enum(["toss", "kis", "derived", "binance"]);
 export type MarketProvider = z.infer<typeof MarketProviderSchema>;

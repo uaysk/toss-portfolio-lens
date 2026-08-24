@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGliteDatabase } from "../../test-support/pglite-database.js";
 import { ArtifactRepository } from "../repositories/artifact-repository.js";
 import { RunRepository } from "../repositories/run-repository.js";
@@ -15,10 +15,16 @@ import {
   type TechnicalAnalysisWorkerPayload,
 } from "./technical-analysis-service.js";
 
-const databases: PGliteDatabase[] = [];
+let database: PGliteDatabase;
 
+beforeAll(() => {
+  database = new PGliteDatabase();
+});
 afterEach(async () => {
-  await Promise.all(databases.splice(0).map((database) => database.close()));
+  await database.reset();
+});
+afterAll(async () => {
+  await database.close();
 });
 
 function series(
@@ -128,8 +134,6 @@ async function harness(input: {
   ) => Promise<MarketSeriesResult>;
   profileBucketCount?: number;
 } = {}) {
-  const database = new PGliteDatabase();
-  databases.push(database);
   const runRepository = new RunRepository(database);
   const artifactRepository = new ArtifactRepository(database);
   await runRepository.initialize();

@@ -7,7 +7,7 @@ import {
   convertUsdBenchmarkToKrw,
   parseBenchmarkKeys,
 } from "./analysis.js";
-import { PortfolioHistoryStore, type PortfolioHistory } from "./history.js";
+import type { PortfolioHistory } from "./history.js";
 import { openTestHistoryStore } from "../test-support/history-store.js";
 
 describe("portfolio analysis query", () => {

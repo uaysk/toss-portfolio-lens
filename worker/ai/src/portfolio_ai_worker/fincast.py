@@ -808,17 +808,25 @@ class FinCastAdapter:
                 max_len=self._context_bars,
                 return_forecast_on_context=False,
             )
-        values = full.float().cpu().tolist()
+        expected_shape = (len(series), native_horizon_steps, 1 + len(NATIVE_QUANTILES))
+        if tuple(full.shape) != expected_shape:
+            raise ValueError("FinCast returned an invalid forecast tensor")
+        native_indices = [
+            horizon * 60 // interval_seconds - 1
+            for horizon in requested_horizons
+        ]
+        # Decode produces every native cadence step, while the public contract
+        # consumes only the fixed minute horizons. Select those rows on-device
+        # before FP32 conversion and host/Python materialization.
+        values = full[:, native_indices, :].float().cpu().tolist()
         if len(values) != len(series):
             raise ValueError("FinCast returned a misaligned batch")
         output: list[RawPrediction] = []
         for item, forecast in zip(series, values, strict=True):
-            if len(forecast) != native_horizon_steps:
-                raise ValueError("FinCast returned an invalid native horizon length")
+            if len(forecast) != len(requested_horizons):
+                raise ValueError("FinCast returned an invalid forecast tensor")
             close_quantiles: dict[int, dict[float, float]] = {}
-            for horizon in requested_horizons:
-                native_step = horizon * 60 // interval_seconds
-                row = forecast[native_step - 1]
+            for horizon, row in zip(requested_horizons, forecast, strict=True):
                 if len(row) != 1 + len(NATIVE_QUANTILES) or not all(math.isfinite(float(value)) for value in row):
                     raise ValueError("FinCast returned an invalid forecast tensor")
                 close_quantiles[horizon] = project_native_quantiles(row[1:])

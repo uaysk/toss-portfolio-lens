@@ -264,6 +264,9 @@ export class TtlCache<K, V> {
     if (cached !== undefined) return cached;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
+    if (this.inFlight.size >= this.config.maximumEntries) {
+      throw new Error("TTL cache in-flight capacity exceeded.");
+    }
     const task = loader();
     this.inFlight.set(key, task);
     try {

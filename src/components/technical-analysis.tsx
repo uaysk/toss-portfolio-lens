@@ -6,23 +6,21 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  AlertCircle,
-  CandlestickChart,
-  Check,
-  ChevronDown,
-  LoaderCircle,
-  Minus,
-  Play,
-  Plus,
-  RefreshCw,
-  Save,
-  Search,
-  SlidersHorizontal,
-  Trash2,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import AlertCircle from "lucide-react/dist/esm/icons/circle-alert.js";
+import CandlestickChart from "lucide-react/dist/esm/icons/chart-candlestick.js";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
+import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import Minus from "lucide-react/dist/esm/icons/minus.js";
+import Play from "lucide-react/dist/esm/icons/play.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Save from "lucide-react/dist/esm/icons/save.js";
+import Search from "lucide-react/dist/esm/icons/search.js";
+import SlidersHorizontal from "lucide-react/dist/esm/icons/sliders-horizontal.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
+import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
+import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
 import {
   Area,
   Bar,
@@ -123,6 +121,11 @@ import { cn } from "@/lib/utils";
 import type { Holding, Portfolio, Theme } from "@/types";
 
 const CHART_SYNC_ID = "technical-analysis-shared-range";
+const TECHNICAL_CHART_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
 
 type PriceMode = "actual" | "starting100";
 type CurrencyMode = "local" | "KRW";
@@ -143,7 +146,7 @@ function toInstrument(holding: Holding): TechnicalInstrumentChoice {
 function displayDate(value: string): string {
   const parsed = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", { month: "short", day: "numeric", timeZone: "UTC" }).format(parsed);
+  return TECHNICAL_CHART_DATE_FORMATTER.format(parsed);
 }
 
 type PriceBandEntry = {
@@ -521,9 +524,13 @@ const TechnicalInstrumentCard = memo(function TechnicalInstrumentCard({
       </div>
 
       <details className="group mt-3 rounded-2xl bg-secondary p-3">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[11px] font-black">
-          <span className="flex items-center gap-2"><SlidersHorizontal className="size-3.5" />종목별 지표 {overrideIndicators ? "개별 설정" : "공통 설정"}</span>
-          <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+        <summary
+          className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-3 text-[11px] font-black"
+          data-technical-indicator-disclosure
+        >
+          <span className="sr-only">{series.symbol} </span>
+          <span className="flex items-center gap-2"><SlidersHorizontal className="size-3.5" aria-hidden="true" />종목별 지표 {overrideIndicators ? "개별 설정" : "공통 설정"}</span>
+          <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" />
         </summary>
         <div className="mt-3 flex flex-wrap gap-1.5">
           {TECHNICAL_BATCH_INDICATORS.map((option) => (
@@ -905,17 +912,21 @@ function TechnicalStrategyWorkspace({
     });
   }, [availableSymbolFingerprint]);
 
-  const loadStrategyPresets = useCallback(async () => {
+  const loadStrategyPresets = useCallback(async (signal?: AbortSignal) => {
     try {
-      const page = await listLibraryPresets({ onUnauthorized });
-      setStrategyPresets(page.items.filter((item) => normalizeTechnicalStrategyPresetConfig(item.config) !== undefined));
+      const page = await listLibraryPresets({ onUnauthorized, signal });
+      if (!signal?.aborted) {
+        setStrategyPresets(page.items.filter((item) => normalizeTechnicalStrategyPresetConfig(item.config) !== undefined));
+      }
     } catch {
-      setNotice("기술 신호 전략 프리셋 목록을 불러오지 못했습니다.");
+      if (!signal?.aborted) setNotice("기술 신호 전략 프리셋 목록을 불러오지 못했습니다.");
     }
   }, [onUnauthorized]);
 
   useEffect(() => {
-    void loadStrategyPresets();
+    const controller = new AbortController();
+    void loadStrategyPresets(controller.signal);
+    return () => controller.abort();
   }, [loadStrategyPresets]);
 
   const applyChartSource = () => {
@@ -1032,7 +1043,7 @@ export function TechnicalAnalysisView({
   onUnauthorized: () => void;
   onOpenTechnicalBacktest?: (handoff: TechnicalStrategyHandoff) => void;
 }) {
-  const today = useMemo(() => seoulDateString(), []);
+  const today = seoulDateString();
   const [customWatchlist, setCustomWatchlist] = useState<TechnicalInstrumentChoice[]>([]);
   const [historicalInstruments, setHistoricalInstruments] = useState<TechnicalInstrumentChoice[]>([]);
   const [excludedHistoricalSymbols, setExcludedHistoricalSymbols] = useState<Set<string>>(() => new Set());
@@ -1216,17 +1227,21 @@ export function TechnicalAnalysisView({
     };
   }, [onUnauthorized, searchQuery]);
 
-  const loadPresets = useCallback(async () => {
+  const loadPresets = useCallback(async (signal?: AbortSignal) => {
     try {
-      const page = await listLibraryPresets({ onUnauthorized });
-      setPresets(page.items.filter((item) => normalizeTechnicalPresetConfig(item.config) !== undefined));
+      const page = await listLibraryPresets({ onUnauthorized, signal });
+      if (!signal?.aborted) {
+        setPresets(page.items.filter((item) => normalizeTechnicalPresetConfig(item.config) !== undefined));
+      }
     } catch {
-      setPresetNotice("기술적 분석 프리셋 목록을 불러오지 못했습니다.");
+      if (!signal?.aborted) setPresetNotice("기술적 분석 프리셋 목록을 불러오지 못했습니다.");
     }
   }, [onUnauthorized]);
 
   useEffect(() => {
-    void loadPresets();
+    const controller = new AbortController();
+    void loadPresets(controller.signal);
+    return () => controller.abort();
   }, [loadPresets]);
 
   useEffect(() => () => {

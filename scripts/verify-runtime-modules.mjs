@@ -1,13 +1,17 @@
 import tls from "node:tls";
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { S3Client } from "@aws-sdk/client-s3";
+import { DerivativesTradingUsdsFutures } from "@binance/derivatives-trading-usds-futures";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
+import compression from "compression";
 import express from "express";
+import { decodeJwt } from "jose";
 import pg from "pg";
 import { WebSocket } from "ws";
+import { z } from "zod";
 
 tls.createSecureContext();
-express();
+express().use(compression());
 const runtimeDatabaseUrl = [
   "postgresql:",
   "//runtime:smoke",
@@ -22,6 +26,11 @@ const credentials = {
 };
 new S3Client({ region: "us-east-1", credentials }).destroy();
 new BedrockRuntimeClient({ region: "us-east-1", credentials }).destroy();
+
+if (typeof DerivativesTradingUsdsFutures !== "function" || typeof decodeJwt !== "function") {
+  throw new Error("Binance or JOSE runtime export is unavailable");
+}
+z.literal("runtime-smoke").parse("runtime-smoke");
 
 if (typeof WebSocket !== "function") {
   throw new Error("ws runtime export is unavailable");

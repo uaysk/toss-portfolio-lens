@@ -2,7 +2,10 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import { setNoStore } from "../auth.js";
 import type { SseConnectionTracker } from "../lifecycle.js";
+import { admitSseConnection } from "../routes/sse-admission.js";
+import { createTurnScopedFrameSerializer } from "../routes/sse-frame-cache.js";
 import {
+  MARKET_DATA_RECORDER_SCHEMA_VERSION,
   MarketCountrySchema,
   MinuteIntervalSchema,
   UsExchangeSchema,
@@ -10,10 +13,7 @@ import {
   type UsExchange,
 } from "./contracts.js";
 import type { ScalpingLiveEvent, ScalpingLiveRuntime } from "./live-runtime.js";
-import {
-  MARKET_DATA_RECORDER_SCHEMA_VERSION,
-  type MarketDataRecorder,
-} from "./market-data-recorder.js";
+import type { MarketDataRecorder } from "./market-data-recorder.js";
 import {
   ValidationError,
   mapScalpingError,
@@ -119,8 +119,8 @@ function lastEventId(request: Request): number | undefined {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function writeSse(response: Response, event: ScalpingLiveEvent): boolean {
-  return response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify({
+const scalpingEventFrame = createTurnScopedFrameSerializer((event: ScalpingLiveEvent) => (
+  `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify({
     schemaVersion: event.schemaVersion,
     id: event.id,
     emittedAt: event.emittedAt,
@@ -128,7 +128,11 @@ function writeSse(response: Response, event: ScalpingLiveEvent): boolean {
     symbol: event.symbol,
     marketCountry: event.marketCountry,
     data: event.payload,
-  })}\n\n`);
+  })}\n\n`
+));
+
+function writeSse(response: Response, event: ScalpingLiveEvent): boolean {
+  return response.write(scalpingEventFrame(event));
 }
 
 function writeAnalysisSse(response: Response, data: unknown): boolean {
@@ -246,13 +250,6 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
     } catch (error) {
       return sendError(response, error);
     }
-    response.status(200);
-    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    response.setHeader("Cache-Control", "no-store, no-transform");
-    response.setHeader("Connection", "keep-alive");
-    response.setHeader("X-Accel-Buffering", "no");
-    response.flushHeaders();
-
     let ended = false;
     const resumeAfter = lastEventId(request);
     let lastSent = resumeAfter ?? 0;
@@ -380,11 +377,26 @@ export function createScalpingRouter(dependencies: ScalpingRouterDependencies) {
         blocked = !writeAnalysisSse(response, analysis);
       }
     };
+
+    const registration = admitSseConnection(
+      dependencies.sseConnections,
+      response,
+      cleanup,
+    );
+    if (!registration) return;
+    untrack = registration;
+    if (ended) return;
+
+    response.status(200);
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.setHeader("X-Accel-Buffering", "no");
+    response.flushHeaders();
     response.on("drain", drain);
     request.on("close", cleanup);
     response.on("close", cleanup);
     removeListener = dependencies.live.onEvent(sendLive);
-    untrack = dependencies.sseConnections?.track(response, cleanup) ?? (() => undefined);
     if (resumeAfter !== undefined) {
       for (const event of dependencies.live.eventsAfter(resumeAfter).sort((left, right) => left.id - right.id)) send(event);
       replaying = false;

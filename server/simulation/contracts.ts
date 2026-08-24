@@ -534,7 +534,6 @@ export function createSimulationStartRequestSchema(limits: SimulationRequestLimi
     }
   }).transform((input): SimulationStartRequest => {
     const market = input.market;
-    const strategy = input.strategy;
     const simulationCase = input.simulationCase;
     const resolvedModelPlan = defaultModelPlanForCase(simulationCase, input.selection);
     const modelLanes = [...new Set(resolvedModelPlan.map((entry) => entry.modelLane))];

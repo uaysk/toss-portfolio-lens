@@ -8,7 +8,6 @@ import {
   lexicalRank,
   loadGraph,
   rerank,
-  reciprocalRankFusion,
   synthesizeWithModel,
   type RankedNode,
 } from "./core.js";

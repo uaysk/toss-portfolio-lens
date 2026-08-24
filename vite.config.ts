@@ -30,7 +30,6 @@ export default defineConfig({
             return "react";
           }
           if (id.includes("/node_modules/recharts/")) return "charts";
-          if (id.includes("/node_modules/@radix-ui/")) return "radix";
           if (id.includes("/node_modules/clsx/")
             || id.includes("/node_modules/tailwind-merge/")) {
             return "class-names";

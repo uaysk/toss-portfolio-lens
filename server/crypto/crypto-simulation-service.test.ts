@@ -442,6 +442,7 @@ function harness(input: {
     }),
     submit: vi.fn(),
     reconcileUnknown: vi.fn(),
+    releaseRun: vi.fn(),
   };
   const runtimeSnapshots = new Map<string, unknown>();
   const coordinator = new CryptoSimulationCoordinator({
@@ -466,6 +467,7 @@ function harness(input: {
     artifacts,
     scanner,
     runService,
+    execution,
     runtimeSnapshots,
   };
 }
@@ -693,6 +695,7 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       () => test.repository.runs.get(started.run.id)?.status === "completed",
     );
     expect(test.coordinator.status().activeSessions).toBe(0);
+    expect(test.execution.releaseRun).toHaveBeenCalledWith(started.run.id);
     expect(await test.coordinator.owns(started.run.id, "owner-a")).toBe(true);
     expect(await test.coordinator.owns(started.run.id, "owner-b")).toBe(false);
     expect(await test.coordinator.get(started.run.id, "owner-b")).toBeUndefined();
@@ -732,6 +735,8 @@ describe("CryptoSimulationCoordinator lifecycle", () => {
       run: PortfolioRunRecord;
     };
     await eventually(() => test.repository.runs.get(started.run.id)?.status === "failed");
+    await eventually(() => vi.mocked(test.execution.releaseRun!).mock.calls.length === 1);
+    expect(test.execution.releaseRun).toHaveBeenCalledWith(started.run.id);
     expect(test.repository.runs.get(started.run.id)?.error).toMatchObject({
       code: "CRYPTO_STREAM_DESYNC",
       retryable: true,

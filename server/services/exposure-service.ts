@@ -23,8 +23,12 @@ export type ExposureAsset = {
 
 type Dimension = "sector" | "industry" | "country" | "currency" | "assetType";
 
+const DIMENSIONS = ["sector", "industry", "country", "currency", "assetType"] as const;
+const ASSET_METADATA_DIMENSIONS = ["sector", "industry", "country", "assetType"] as const;
+
 function add(target: Record<string, number>, key: string | undefined, weight: number): void {
-  target[key?.trim() || "UNKNOWN"] = (target[key?.trim() || "UNKNOWN"] ?? 0) + weight;
+  const normalizedKey = key?.trim() || "UNKNOWN";
+  target[normalizedKey] = (target[normalizedKey] ?? 0) + weight;
 }
 
 function sorted(values: Record<string, number>): Array<{ name: string; weight: number }> {
@@ -72,19 +76,37 @@ export function analyzePortfolioExposures(assets: ExposureAsset[], lookThrough =
       lookThroughCoverage += asset.weight * constituentSum;
       for (const constituent of constituents) {
         const weight = asset.weight * constituent.weight;
-        for (const dimension of ["sector", "industry", "country", "currency", "assetType"] as const) {
-          const value = constituent[dimension];
-          add(totals[dimension], value, weight);
-          if (value) {
-            coverage[dimension] += weight;
-            effectiveMetadataCoverage[dimension] += weight;
-          }
+        add(totals.sector, constituent.sector, weight);
+        if (constituent.sector) {
+          coverage.sector += weight;
+          effectiveMetadataCoverage.sector += weight;
         }
-        for (const [factor, value] of Object.entries(constituent.factors ?? {})) {
-          factorTotals[factor] = (factorTotals[factor] ?? 0) + weight * value;
+        add(totals.industry, constituent.industry, weight);
+        if (constituent.industry) {
+          coverage.industry += weight;
+          effectiveMetadataCoverage.industry += weight;
+        }
+        add(totals.country, constituent.country, weight);
+        if (constituent.country) {
+          coverage.country += weight;
+          effectiveMetadataCoverage.country += weight;
+        }
+        add(totals.currency, constituent.currency, weight);
+        if (constituent.currency) {
+          coverage.currency += weight;
+          effectiveMetadataCoverage.currency += weight;
+        }
+        add(totals.assetType, constituent.assetType, weight);
+        if (constituent.assetType) {
+          coverage.assetType += weight;
+          effectiveMetadataCoverage.assetType += weight;
+        }
+        const factorNames = constituent.factors ? Object.keys(constituent.factors) : [];
+        for (const factor of factorNames) {
+          factorTotals[factor] = (factorTotals[factor] ?? 0) + weight * constituent.factors![factor];
           factorCoverage[factor] = (factorCoverage[factor] ?? 0) + weight;
         }
-        if (Object.keys(constituent.factors ?? {}).length) effectiveFactorCoverage += weight;
+        if (factorNames.length) effectiveFactorCoverage += weight;
         if (constituent.hedged === true) {
           hedgedWeight += weight;
           effectiveHedgeCoverage += weight;
@@ -97,12 +119,12 @@ export function analyzePortfolioExposures(assets: ExposureAsset[], lookThrough =
       }
       const residual = asset.weight * Math.max(0, 1 - constituentSum);
       if (residual > 1e-9) {
-        for (const dimension of Object.keys(totals) as Dimension[]) add(totals[dimension], undefined, residual);
+        for (const dimension of DIMENSIONS) add(totals[dimension], undefined, residual);
         unknownHedgeWeight += residual;
         warnings.push(`${asset.symbol} 구성종목 비중 ${Math.round(constituentSum * 10_000) / 100}%만 제공되어 나머지는 UNKNOWN입니다.`);
       }
     } else {
-      for (const dimension of ["sector", "industry", "country", "assetType"] as const) {
+      for (const dimension of ASSET_METADATA_DIMENSIONS) {
         add(totals[dimension], asset[dimension], asset.weight);
         if (asset[dimension]) {
           coverage[dimension] += asset.weight;
@@ -112,11 +134,12 @@ export function analyzePortfolioExposures(assets: ExposureAsset[], lookThrough =
       add(totals.currency, asset.currency, asset.weight);
       coverage.currency += asset.weight;
       effectiveMetadataCoverage.currency += asset.weight;
-      for (const [factor, value] of Object.entries(asset.factors ?? {})) {
-        factorTotals[factor] = (factorTotals[factor] ?? 0) + asset.weight * value;
+      const factorNames = asset.factors ? Object.keys(asset.factors) : [];
+      for (const factor of factorNames) {
+        factorTotals[factor] = (factorTotals[factor] ?? 0) + asset.weight * asset.factors![factor];
         factorCoverage[factor] = (factorCoverage[factor] ?? 0) + asset.weight;
       }
-      if (Object.keys(asset.factors ?? {}).length) effectiveFactorCoverage += asset.weight;
+      if (factorNames.length) effectiveFactorCoverage += asset.weight;
       if (asset.hedged === true) {
         hedgedWeight += asset.weight;
         effectiveHedgeCoverage += asset.weight;
@@ -149,7 +172,7 @@ export function analyzePortfolioExposures(assets: ExposureAsset[], lookThrough =
   }
 
   return {
-    exposures: Object.fromEntries((Object.keys(totals) as Dimension[]).map((dimension) => [dimension, sorted(totals[dimension])])),
+    exposures: Object.fromEntries(DIMENSIONS.map((dimension) => [dimension, sorted(totals[dimension])])),
     factorExposures: Object.entries(factorTotals).sort(([left], [right]) => left.localeCompare(right)).map(([factor, value]) => ({
       factor,
       value,

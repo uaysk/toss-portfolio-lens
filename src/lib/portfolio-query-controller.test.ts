@@ -242,6 +242,58 @@ describe("PortfolioQueryController", () => {
     expect(controller.applyPortfolioEvent(event(1))).toBe(false);
     expect(controller.getSnapshot().portfolio?.selectedAccountId).toBe("account-1");
     expect(controller.applyPortfolioEvent(event(3, "account-2"))).toBe(false);
+    expect(controller.streamRevision("account-2")).toBeUndefined();
     expect(controller.getSnapshot().portfolio?.selectedAccountId).toBe("account-1");
+  });
+
+  it("최신 portfolio의 활성 계좌 집합 밖 stream revision을 정리한다", async () => {
+    const { controller, requests } = harness();
+    const initial = controller.loadInitial();
+    requests[0].response.resolve(response(portfolio("account-1")));
+    await initial;
+
+    expect(controller.applyPortfolioEvent({
+      schemaVersion: 1,
+      accountId: "account-1",
+      revision: 4,
+      emittedAt: "2026-07-30T00:00:00.000Z",
+      type: "heartbeat",
+      payload: null,
+    })).toBe(true);
+    expect(controller.streamRevision("account-1")).toBe(4);
+
+    const switched = controller.changeAccount("account-2");
+    requests[1].response.resolve(response(portfolio("account-2")));
+    await switched;
+
+    expect(controller.streamRevision("account-1")).toBeUndefined();
+    expect(controller.applyPortfolioEvent({
+      schemaVersion: 1,
+      accountId: "account-1",
+      revision: 5,
+      emittedAt: "2026-07-30T00:00:01.000Z",
+      type: "heartbeat",
+      payload: null,
+    })).toBe(false);
+    expect(controller.streamRevision("account-1")).toBeUndefined();
+  });
+
+  it("dispose 시 stream revision도 함께 해제한다", async () => {
+    const { controller, requests } = harness();
+    const loading = controller.loadInitial();
+    requests[0].response.resolve(response(portfolio("account-1")));
+    await loading;
+    expect(controller.applyPortfolioEvent({
+      schemaVersion: 1,
+      accountId: "account-1",
+      revision: 2,
+      emittedAt: "2026-07-30T00:00:00.000Z",
+      type: "heartbeat",
+      payload: null,
+    })).toBe(true);
+
+    controller.dispose();
+
+    expect(controller.streamRevision("account-1")).toBeUndefined();
   });
 });

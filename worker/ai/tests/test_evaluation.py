@@ -192,6 +192,51 @@ def test_walk_forward_evaluation_is_causal_and_charges_next_bar_execution_costs(
     assert record.ai_filtered_net_return == expected_filtered
 
 
+def test_evaluation_points_share_index_without_rescanning_source_bars(tmp_path) -> None:
+    class CountingBars:
+        def __init__(self, values: tuple[PriceBar, ...]) -> None:
+            self.values = values
+            self.iteration_count = 0
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, key: int | slice) -> PriceBar | tuple[PriceBar, ...]:
+            return self.values[key]
+
+        def __iter__(self):
+            self.iteration_count += 1
+            return iter(self.values)
+
+    history = bars(170, drift=0.001)
+    request = _request(history, "shared-timestamp-index")
+    second_origin = EvaluationOrigin(
+        origin=history[89].timestamp,
+        future_timestamps=tuple(bar.timestamp for bar in history[90:150]),
+        technical_signal=1,
+        regime="trend",
+    )
+    source = request.series[0].model_copy(
+        update={"origins": (*request.series[0].origins, second_origin)}
+    )
+    counted_bars = CountingBars(history)
+    source = source.model_copy(update={"bars": counted_bars})
+    request = request.model_copy(update={"series": (source,)})
+
+    points, rejected = AIService(
+        settings(tmp_path),
+        DeterministicAdapter(),
+    )._evaluation_points(request)
+
+    assert rejected == []
+    assert len(points) == 2
+    assert counted_bars.iteration_count == 1
+    assert points[0].forecast.bars == history[:80]
+    assert points[1].forecast.bars == history[:90]
+    assert points[0].bars_by_time is points[1].bars_by_time
+    assert points[0].bars_by_time == {bar.timestamp: bar for bar in history}
+
+
 def test_future_price_changes_cannot_change_forecast_at_same_origin(tmp_path) -> None:
     original = bars(160, drift=0.001)
     changed = tuple(

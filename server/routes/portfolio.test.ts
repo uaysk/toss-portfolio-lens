@@ -1,6 +1,8 @@
+import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import type { PortfolioEventV1 } from "../contracts/portfolio-events.js";
 import { SseConnectionTracker } from "../lifecycle.js";
 import { PortfolioLiveHub } from "../portfolio/live-hub.js";
 import type { Portfolio } from "../toss.js";
@@ -36,6 +38,40 @@ async function startServer(routeRegistrars: Parameters<typeof createApp>[0]["rou
   return `http://127.0.0.1:${address.port}`;
 }
 
+function directSseRequest() {
+  return Object.assign(new EventEmitter(), {
+    destroyed: false,
+    query: { account: "account-1" },
+    get: vi.fn().mockReturnValue(undefined),
+  });
+}
+
+function directSseResponse() {
+  const response = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    status: vi.fn(),
+    setHeader: vi.fn(),
+    json: vi.fn(),
+    flushHeaders: vi.fn(),
+    write: vi.fn().mockReturnValue(true),
+    end: vi.fn(),
+  });
+  response.status.mockReturnValue(response);
+  response.json.mockReturnValue(response);
+  return response;
+}
+
+function portfolioEventHandler(router: ReturnType<typeof createPortfolioRouter>) {
+  const route = router.stack.find(
+    (layer: { route?: { path?: string } }) => layer.route?.path === "/api/portfolio/events",
+  ) as any;
+  return route.route.stack.at(-1).handle as (
+    request: unknown,
+    response: unknown,
+  ) => Promise<void>;
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
@@ -44,6 +80,125 @@ afterEach(async () => {
 });
 
 describe("portfolio route", () => {
+  it("shares event serialization across synchronous subscribers without retaining it", async () => {
+    const listeners: Array<(event: PortfolioEventV1) => void> = [];
+    const release = vi.fn();
+    const payloadToJson = vi.fn(() => portfolio);
+    const event: PortfolioEventV1 = {
+      schemaVersion: 1,
+      accountId: "account-1",
+      revision: 1,
+      emittedAt: "2026-07-24T00:00:00.000Z",
+      type: "changed",
+      payload: {
+        toJSON: payloadToJson,
+      } as unknown as Portfolio,
+    };
+    const live = {
+      subscribe: vi.fn((_owner, _account, listener: (value: PortfolioEventV1) => void) => {
+        listeners.push(listener);
+        return { ready: Promise.resolve(event), release };
+      }),
+      snapshotAfter: vi.fn().mockReturnValue(undefined),
+    };
+    const router = createPortfolioRouter({
+      authenticate: (_request, _response, next) => next(),
+      getPortfolio: vi.fn(async () => portfolio),
+      recordPortfolio: vi.fn(async () => undefined),
+      live: live as never,
+    });
+    const handler = portfolioEventHandler(router);
+    const requests = [directSseRequest(), directSseRequest()];
+    const responses = [directSseResponse(), directSseResponse()];
+    await Promise.all(requests.map((request, index) => handler(request, responses[index])));
+
+    listeners[0](event);
+    listeners[1](event);
+
+    expect(payloadToJson).toHaveBeenCalledTimes(1);
+    expect(responses[0].write).toHaveBeenCalledWith(responses[1].write.mock.calls[0][0]);
+
+    await Promise.resolve();
+    event.revision = 2;
+    listeners[0](event);
+    expect(payloadToJson).toHaveBeenCalledTimes(2);
+
+    requests.forEach((request) => request.emit("close"));
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns 503 before SSE headers or portfolio subscription when the shared cap is full", async () => {
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const held = directSseResponse();
+    const releaseHeld = tracker.track(held as never, vi.fn());
+    const live = {
+      subscribe: vi.fn(),
+      snapshotAfter: vi.fn(),
+    };
+    const router = createPortfolioRouter({
+      authenticate: (_request, _response, next) => next(),
+      getPortfolio: vi.fn(async () => portfolio),
+      recordPortfolio: vi.fn(async () => undefined),
+      live: live as never,
+      sseConnections: tracker,
+    });
+    const response = directSseResponse();
+
+    await portfolioEventHandler(router)(directSseRequest(), response);
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "SSE_CONNECTION_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(response.setHeader).not.toHaveBeenCalledWith(
+      "Content-Type",
+      "text/event-stream; charset=utf-8",
+    );
+    expect(live.subscribe).not.toHaveBeenCalled();
+    releaseHeld();
+  });
+
+  it("releases the shared slot before returning the portfolio hub capacity error", async () => {
+    const live = new PortfolioLiveHub({
+      getPortfolio: vi.fn(async () => portfolio),
+      refreshIntervalMs: 10_000,
+      maxListenersPerHub: 1,
+    });
+    const held = live.subscribe("owner", "account-1", vi.fn());
+    await held.ready;
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const router = createPortfolioRouter({
+      authenticate: (_request, _response, next) => next(),
+      getPortfolio: vi.fn(async () => portfolio),
+      recordPortfolio: vi.fn(async () => undefined),
+      live,
+      sseConnections: tracker,
+    });
+    const response = directSseResponse();
+    let activeAt503 = -1;
+    response.status.mockImplementation((status: number) => {
+      if (status === 503) activeAt503 = tracker.size;
+      return response;
+    });
+
+    await portfolioEventHandler(router)(directSseRequest(), response);
+
+    expect(activeAt503).toBe(0);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "PORTFOLIO_LIVE_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(tracker.telemetry).toMatchObject({
+      activeConnections: 0,
+      acceptedConnectionsTotal: 1,
+      rejectedConnectionsTotal: 0,
+    });
+    expect(live.telemetry.subscribers).toBe(1);
+    held.release();
+    await live.close();
+  });
+
   it("registers through createApp, forwards query flags, and preserves the exact response", async () => {
     const getPortfolio = vi.fn(async () => portfolio);
     const recordPortfolio = vi.fn(async () => undefined);

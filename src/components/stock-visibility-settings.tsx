@@ -1,4 +1,8 @@
-import { Eye, EyeOff, RotateCcw, Settings2, X } from "lucide-react";
+import Eye from "lucide-react/dist/esm/icons/eye.js";
+import EyeOff from "lucide-react/dist/esm/icons/eye-off.js";
+import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw.js";
+import Settings2 from "lucide-react/dist/esm/icons/settings-2.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { stockColor } from "@/lib/stock-appearance";

@@ -646,8 +646,8 @@ function predictionFromRow(row: PredictionRow): ScalpingPredictionRecord {
 export class ScalpingRepository {
   constructor(private readonly database: RelationalDatabase) {}
 
-  initialize(): Promise<unknown> {
-    return applyPortfolioMigrations(this.database);
+  async initialize(options: { migrationsAlreadyApplied?: boolean } = {}): Promise<void> {
+    if (!options.migrationsAlreadyApplied) await applyPortfolioMigrations(this.database);
   }
 
   async putBars(input: readonly StoredIntradayBarRecord[]): Promise<void> {
@@ -1127,20 +1127,20 @@ export class ScalpingRepository {
     const createdAt = input.createdAt ?? Date.now();
     if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new Error("createdAt 값이 올바르지 않습니다.");
     const payload = canonicalJson(input.payload);
-    await this.database.run(`
+    const [stored] = await this.database.query<PredictionRow>(`
       INSERT INTO portfolio_scalping_predictions (
         prediction_id, market_country, symbol, model_name, model_version, input_ended_at, generated_at,
         status, data_quality, retrospective, payload_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      RETURNING *
     `, [
       id, normalizedMarketCountry, normalizedSymbol, modelName, modelVersion, inputEndedAt, generatedAt,
       input.status, input.dataQuality,
       input.retrospective,
       payload, createdAt,
     ]);
-    const stored = await this.getPrediction(id);
     if (!stored) throw new Error("단타 예측을 저장하지 못했습니다.");
-    return stored;
+    return predictionFromRow(stored);
   }
 
   async getPrediction(id: string): Promise<ScalpingPredictionRecord | undefined> {

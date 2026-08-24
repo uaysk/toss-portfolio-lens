@@ -121,17 +121,23 @@ function normalizedComponentValues(
   candidates: WorkingCandidate[],
   component: VolatilityComponent,
 ): Map<string, number> {
-  const values = candidates.flatMap((candidate) => {
+  const values: Array<{ symbol: string; value: number }> = [];
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
     const value = candidate.volatilityInputs[component];
-    return finite(value) ? [{ symbol: candidate.symbol, value }] : [];
-  });
+    if (!finite(value)) continue;
+    values.push({ symbol: candidate.symbol, value });
+    if (value < minimum) minimum = value;
+    if (value > maximum) maximum = value;
+  }
   if (!values.length) return new Map();
-  const minimum = Math.min(...values.map(({ value }) => value));
-  const maximum = Math.max(...values.map(({ value }) => value));
-  return new Map(values.map(({ symbol, value }) => {
+  const normalizedValues = new Map<string, number>();
+  for (const { symbol, value } of values) {
     const normalized = maximum === minimum ? 0.5 : (value - minimum) / (maximum - minimum);
-    return [symbol, component === "spreadBps" ? 1 - normalized : normalized];
-  }));
+    normalizedValues.set(symbol, component === "spreadBps" ? 1 - normalized : normalized);
+  }
+  return normalizedValues;
 }
 
 function latestBySymbol<T extends { symbol: string; observedAt: string }>(values: T[]): Map<string, T> {
@@ -179,12 +185,17 @@ export class ScalpingScanner {
     const books = latestBySymbol(parsedBooks);
     const states = new Map(snapshot.instrumentStates.map((state) => [state.symbol, InstrumentStateSchema.parse(state)]));
     const warnings = new Map<string, NormalizedWarning[]>();
-    for (const warning of parsedWarnings) warnings.set(warning.symbol, [...(warnings.get(warning.symbol) ?? []), warning]);
+    for (const warning of parsedWarnings) {
+      const grouped = warnings.get(warning.symbol);
+      if (grouped) grouped.push(warning);
+      else warnings.set(warning.symbol, [warning]);
+    }
 
     const bySymbol = new Map<string, WorkingCandidate>();
+    const preferredProvider = this.config.providerPrecedence[0];
     const orderedRankings = [...parsedRankings].sort((left, right) => {
-      const providerOrder = this.config.providerPrecedence.indexOf(left.provider)
-        - this.config.providerPrecedence.indexOf(right.provider);
+      const providerOrder = Number(left.provider !== preferredProvider)
+        - Number(right.provider !== preferredProvider);
       return providerOrder || left.rank - right.rank;
     });
     for (const ranking of orderedRankings) {
@@ -284,21 +295,25 @@ export class ScalpingScanner {
       }
     }
 
-    const eligible = candidates.filter((candidate) => !candidate.filtered).sort((left, right) => this.compare(left, right, parsedRequest.criterion));
-    const excluded = candidates.filter((candidate) => candidate.filtered).sort((left, right) => this.compare(left, right, parsedRequest.criterion));
+    const eligible: WorkingCandidate[] = [];
+    const excluded: WorkingCandidate[] = [];
+    for (const candidate of candidates) {
+      (candidate.filtered ? excluded : eligible).push(candidate);
+    }
+    eligible.sort((left, right) => this.compare(left, right, parsedRequest.criterion));
+    excluded.sort((left, right) => this.compare(left, right, parsedRequest.criterion));
     const selected = eligible.slice(0, parsedRequest.topCount).map((candidate) => this.publicCandidate(candidate));
     const missingSources = Object.keys(snapshot.sourceErrors ?? {});
+    const rankingProviders = Array.from(new Set(parsedRankings.map(({ provider }) => provider)));
     const resultQuality = DataQualitySchema.parse({
       status: selected.length === 0 && missingSources.length ? "source_unavailable"
         : missingSources.length || selected.length < parsedRequest.topCount ? "partial" : "available",
       missing: missingSources.map((source) => `${source}_source`),
       reasons: [
-        ...Object.keys(snapshot.sourceErrors ?? {}).map((source) => `${source}_source_unavailable`),
+        ...missingSources.map((source) => `${source}_source_unavailable`),
         ...(selected.length < parsedRequest.topCount ? [`only ${selected.length}/${parsedRequest.topCount} eligible candidates`] : []),
       ],
-      sources: Array.from(new Set(parsedRankings.map(({ provider }) => provider))).length
-        ? Array.from(new Set(parsedRankings.map(({ provider }) => provider)))
-        : ["derived"],
+      sources: rankingProviders.length ? rankingProviders : ["derived"],
       observedAt: generatedAt,
     });
     return {

@@ -5,12 +5,10 @@ export type MarketLocalParts = {
   time: string;
 };
 
-const localPartsFormatters = new Map<string, Intl.DateTimeFormat>();
+export type MarketTimeZone = "Asia/Seoul" | "America/New_York";
 
-function localPartsFormatter(timeZone: string): Intl.DateTimeFormat {
-  const cached = localPartsFormatters.get(timeZone);
-  if (cached) return cached;
-  const formatter = new Intl.DateTimeFormat("en-CA", {
+function createLocalPartsFormatter(timeZone: MarketTimeZone): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",
@@ -20,20 +18,39 @@ function localPartsFormatter(timeZone: string): Intl.DateTimeFormat {
     second: "2-digit",
     hourCycle: "h23",
   });
-  localPartsFormatters.set(timeZone, formatter);
-  return formatter;
 }
 
-export function marketTimeZone(marketCountry: MarketCountry): "Asia/Seoul" | "America/New_York" {
+const localPartsFormatters: Record<MarketTimeZone, Intl.DateTimeFormat> = {
+  "Asia/Seoul": createLocalPartsFormatter("Asia/Seoul"),
+  "America/New_York": createLocalPartsFormatter("America/New_York"),
+};
+
+export function marketTimeZone(marketCountry: MarketCountry): MarketTimeZone {
   return marketCountry === "US" ? "America/New_York" : "Asia/Seoul";
 }
 
-export function localPartsAt(timestamp: number, timeZone: string): MarketLocalParts {
-  const parts = localPartsFormatter(timeZone).formatToParts(new Date(timestamp));
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+export function localPartsAt(timestamp: number, timeZone: MarketTimeZone): MarketLocalParts {
+  const parts = localPartsFormatters[timeZone].formatToParts(new Date(timestamp));
+  let year = "";
+  let month = "";
+  let day = "";
+  let hour = "";
+  let minute = "";
+  let second = "";
+  for (const part of parts) {
+    switch (part.type) {
+      case "year": year = part.value; break;
+      case "month": month = part.value; break;
+      case "day": day = part.value; break;
+      case "hour": hour = part.value; break;
+      case "minute": minute = part.value; break;
+      case "second": second = part.value; break;
+      default: break;
+    }
+  }
   return {
-    date: `${values.year}${values.month}${values.day}`,
-    time: `${values.hour}${values.minute}${values.second}`,
+    date: `${year}${month}${day}`,
+    time: `${hour}${minute}${second}`,
   };
 }
 
@@ -41,7 +58,11 @@ export function marketLocalParts(timestamp: number, marketCountry: MarketCountry
   return localPartsAt(timestamp, marketTimeZone(marketCountry));
 }
 
-export function zonedTimestamp(date: string, time: string, timeZone: string): string | undefined {
+export function zonedTimestamp(
+  date: string,
+  time: string,
+  timeZone: MarketTimeZone,
+): string | undefined {
   if (!/^\d{8}$/.test(date) || !/^\d{6}$/.test(time)) return undefined;
   const targetAsUtc = Date.UTC(
     Number(date.slice(0, 4)),
@@ -62,6 +83,7 @@ export function zonedTimestamp(date: string, time: string, timeZone: string): st
       Number(observed.time.slice(2, 4)),
       Number(observed.time.slice(4, 6)),
     );
+    if (observedAsUtc === targetAsUtc) return new Date(candidate).toISOString();
     candidate += targetAsUtc - observedAsUtc;
   }
   const resolved = localPartsAt(candidate, timeZone);

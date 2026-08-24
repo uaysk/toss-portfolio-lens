@@ -341,11 +341,13 @@ export type TechnicalAnalysisPrepareOptions = {
 
 function commonObservationDates(instruments: readonly TechnicalAnalysisWorkerInstrument[]): string[] {
   if (!instruments.length) return [];
-  const remaining = instruments.slice(1).map((instrument) => new Set(instrument.bars.map((bar) => bar.date)));
-  return instruments[0]!.bars
-    .map((bar) => bar.date)
-    .filter((date) => remaining.every((dates) => dates.has(date)))
-    .sort((left, right) => left.localeCompare(right));
+  let common = instruments[0]!.bars.map((bar) => bar.date);
+  for (const instrument of instruments.slice(1)) {
+    const dates = new Set(instrument.bars.map((bar) => bar.date));
+    common = common.filter((date) => dates.has(date));
+    if (!common.length) break;
+  }
+  return common.sort((left, right) => left.localeCompare(right));
 }
 
 function instrumentType(assetType: string): TechnicalAnalysisWorkerInstrument["instrument_type"] {
@@ -407,9 +409,10 @@ function technicalWorkUnits(
   indicators: readonly TechnicalAnalysisWorkerIndicator[],
 ): number {
   const observations = new Map(instruments.map((instrument) => [instrument.key, instrument.bars.length]));
+  const allObservations = instruments.reduce((total, instrument) => total + instrument.bars.length, 0);
   return indicators.reduce((total, indicator) => {
-    const targets = indicator.instrument_keys ?? instruments.map((instrument) => instrument.key);
-    return total + targets.reduce((sum, key) => sum + (observations.get(key) ?? 0), 0);
+    if (!indicator.instrument_keys) return total + allObservations;
+    return total + indicator.instrument_keys.reduce((sum, key) => sum + (observations.get(key) ?? 0), 0);
   }, 0);
 }
 

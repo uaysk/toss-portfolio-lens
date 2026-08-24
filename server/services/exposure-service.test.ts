@@ -56,4 +56,43 @@ describe("portfolio exposure service", () => {
       constituents: [{ symbol: "A", weight: 0.7 }, { symbol: "B", weight: 0.4 }],
     }])).toThrow("구성종목 비중 합계는 1을 초과할 수 없습니다");
   });
+
+  it("UI 최대 입력인 6개 ETF × 5,000개 구성종목을 빠짐없이 집계한다", () => {
+    const constituents = Array.from({ length: 5_000 }, (_, index) => ({
+      symbol: `C${index}`,
+      weight: 1 / 5_000,
+      sector: `Sector-${index % 12}`,
+      industry: `Industry-${index % 30}`,
+      country: `Country-${index % 20}`,
+      currency: ["USD", "KRW", "JPY", "EUR"][index % 4],
+      assetType: "STOCK",
+      hedged: index % 2 === 0,
+      factors: { value: 0.25, momentum: -0.1 },
+    }));
+    const result = analyzePortfolioExposures(Array.from({ length: 6 }, (_, index) => ({
+      symbol: `ETF${index}`,
+      weight: 1 / 6,
+      currency: "USD",
+      assetType: "ETF",
+      constituents,
+    })));
+
+    expect(result.exposures.sector).toHaveLength(12);
+    expect(result.exposures.industry).toHaveLength(30);
+    expect(result.exposures.country).toHaveLength(20);
+    expect(result.coverage).toMatchObject({
+      sector: expect.closeTo(1, 10),
+      industry: expect.closeTo(1, 10),
+      country: expect.closeTo(1, 10),
+      currency: expect.closeTo(1, 10),
+      assetType: expect.closeTo(1, 10),
+      lookThrough: expect.closeTo(1, 10),
+    });
+    expect(result.factorExposures).toEqual([
+      { factor: "momentum", value: expect.closeTo(-0.1, 10), coverage: expect.closeTo(1, 10) },
+      { factor: "value", value: expect.closeTo(0.25, 10), coverage: expect.closeTo(1, 10) },
+    ]);
+    expect(result.dataQuality.byAsset).toHaveLength(6);
+    expect(result.warnings).toEqual([]);
+  });
 });

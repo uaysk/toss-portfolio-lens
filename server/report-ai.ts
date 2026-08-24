@@ -64,6 +64,55 @@ export class ReportGenerationError extends Error {
 
 type FetchLike = typeof fetch;
 
+// The generated narrative is capped at 1,800 tokens. This also leaves ample
+// headroom for a compatible gateway's model catalog without permitting an
+// unbounded response body.
+const MAX_OPENAI_JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+class OpenAiResponseLimitError extends Error {
+  constructor() {
+    super("OpenAI response exceeded the configured byte limit.");
+    this.name = "OpenAiResponseLimitError";
+  }
+}
+
+function responseContentLength(response: Response): number | undefined {
+  const raw = response.headers.get("content-length");
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+async function readBoundedJson(response: Response): Promise<unknown> {
+  const contentLength = responseContentLength(response);
+  if (contentLength !== undefined && contentLength > MAX_OPENAI_JSON_RESPONSE_BYTES) {
+    const error = new OpenAiResponseLimitError();
+    void response.body?.cancel(error).catch(() => undefined);
+    throw error;
+  }
+
+  if (!response.body) throw new SyntaxError("Unexpected end of JSON input");
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_OPENAI_JSON_RESPONSE_BYTES) {
+        const error = new OpenAiResponseLimitError();
+        void reader.cancel(error).catch(() => undefined);
+        throw error;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8")) as unknown;
+}
+
 function responsesEndpoint(endpoint: string): string {
   const normalized = endpoint.replace(/\/+$/, "");
   return normalized.endsWith("/responses") ? normalized : `${normalized}/responses`;
@@ -191,7 +240,7 @@ export class OpenAiReportWriter {
             signal: AbortSignal.timeout(Math.min(this.config.timeoutMs, 15_000)),
           });
           if (!response.ok) return "gpt-5.6";
-          const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+          const payload = await readBoundedJson(response) as { data?: Array<{ id?: unknown }> };
           const ids = (payload.data ?? []).map((item) => typeof item.id === "string" ? item.id : "").filter(Boolean);
           const preferred = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"];
           return preferred.find((candidate) => ids.includes(candidate))
@@ -212,6 +261,7 @@ export class OpenAiReportWriter {
     let usedChatCompletions = false;
     const model = await this.model();
     try {
+      const inputJson = JSON.stringify(input);
       response = await this.fetcher(responsesEndpoint(this.config.endpoint), {
         method: "POST",
         headers: {
@@ -224,7 +274,7 @@ export class OpenAiReportWriter {
           instructions: REPORT_EVALUATION_INSTRUCTIONS,
           input: [{
             role: "user",
-            content: [{ type: "input_text", text: JSON.stringify(input) }],
+            content: [{ type: "input_text", text: inputJson }],
           }],
           reasoning: { effort: "low" },
           max_output_tokens: 1_800,
@@ -239,7 +289,7 @@ export class OpenAiReportWriter {
         }),
         signal: AbortSignal.timeout(this.config.timeoutMs),
       });
-      payload = await response.json() as unknown;
+      payload = await readBoundedJson(response);
       if (!response.ok && responsesApiUnsupported(response.status, payload)) {
         usedChatCompletions = true;
         response = await this.fetcher(chatCompletionsEndpoint(this.config.endpoint), {
@@ -252,7 +302,7 @@ export class OpenAiReportWriter {
             model,
             messages: [
               { role: "system", content: REPORT_EVALUATION_INSTRUCTIONS },
-              { role: "user", content: JSON.stringify(input) },
+              { role: "user", content: inputJson },
             ],
             max_tokens: 1_800,
             response_format: {
@@ -266,10 +316,13 @@ export class OpenAiReportWriter {
           }),
           signal: AbortSignal.timeout(this.config.timeoutMs),
         });
-        payload = await response.json() as unknown;
+        payload = await readBoundedJson(response);
       }
     } catch (error) {
       const timeout = error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);
+      if (error instanceof OpenAiResponseLimitError) {
+        throw new ReportGenerationError("AI 응답 크기가 허용 범위를 초과했습니다.", true);
+      }
       if (error instanceof SyntaxError) throw new ReportGenerationError("AI 응답을 해석하지 못했습니다.", true);
       throw new ReportGenerationError(timeout ? "AI 평가 생성 시간이 초과되었습니다." : "AI 평가 서비스에 연결하지 못했습니다.", true);
     }

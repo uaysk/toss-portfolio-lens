@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthRouteRuntime } from "./routes/auth.js";
 import {
@@ -50,7 +50,17 @@ async function fixture(mcpEnabled = false) {
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function listen(app: ReturnType<typeof createApp>): Promise<string> {
+  const server = createServer(app);
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Test server address is unavailable.");
+  return `http://127.0.0.1:${address.port}`;
+}
+
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
   })));
@@ -58,6 +68,95 @@ afterEach(async () => {
 });
 
 describe("application route ordering", () => {
+  it("compresses large responses while leaving event streams unbuffered", async () => {
+    const largePayload = { value: "compressible-payload-".repeat(1_024) };
+    const app = createApp({
+      trustProxy: [],
+      routeRegistrars: [
+        (application) => application.get("/api/large", (_request, response) => {
+          response.json(largePayload);
+        }),
+        (application) => application.get("/api/small", (_request, response) => {
+          response.json({ status: "ok" });
+        }),
+        (application) => application.get("/api/events", (_request, response) => {
+          response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          response.end(`data: ${"stream-payload-".repeat(1_024)}\n\n`);
+        }),
+      ],
+    });
+    const baseUrl = await listen(app);
+
+    const compressed = await fetch(`${baseUrl}/api/large`, {
+      headers: { "Accept-Encoding": "gzip" },
+    });
+    expect(compressed.headers.get("content-encoding")).toBe("gzip");
+    expect(compressed.headers.get("vary")).toContain("Accept-Encoding");
+    expect(await compressed.json()).toEqual(largePayload);
+
+    const brotli = await fetch(`${baseUrl}/api/large`, {
+      headers: { "Accept-Encoding": "br" },
+    });
+    expect(brotli.headers.get("content-encoding")).toBe("br");
+    expect(await brotli.json()).toEqual(largePayload);
+
+    const identity = await fetch(`${baseUrl}/api/large`, {
+      headers: { "Accept-Encoding": "identity" },
+    });
+    expect(identity.headers.get("content-encoding")).toBeNull();
+    expect(await identity.json()).toEqual(largePayload);
+
+    const belowThreshold = await fetch(`${baseUrl}/api/small`, {
+      headers: { "Accept-Encoding": "br, gzip" },
+    });
+    expect(belowThreshold.headers.get("content-encoding")).toBeNull();
+    expect(await belowThreshold.json()).toEqual({ status: "ok" });
+
+    const eventStream = await fetch(`${baseUrl}/api/events`, {
+      headers: { "Accept-Encoding": "gzip" },
+    });
+    expect(eventStream.headers.get("content-type")).toContain("text/event-stream");
+    expect(eventStream.headers.get("content-encoding")).toBeNull();
+    expect((await eventStream.text()).length).toBeGreaterThan(1_024);
+  });
+
+  it("returns a sanitized JSON envelope for uncaught API errors", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const app = createApp({
+      trustProxy: [],
+      routeRegistrars: [
+        (application) => application.get("/api/throws", async () => {
+          throw new Error("database password must never reach the client");
+        }),
+      ],
+    });
+    const baseUrl = await listen(app);
+    for (const requestPath of ["/api/throws", "/API/THROWS"]) {
+      const response = await fetch(`${baseUrl}${requestPath}`);
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const requestId = response.headers.get("x-request-id");
+      expect(requestId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "internal-error",
+          message: "요청을 처리하는 중 오류가 발생했습니다.",
+          requestId,
+        },
+      });
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringContaining(`(${requestId}):`),
+        expect.objectContaining({
+          message: "database password must never reach the client",
+          stack: expect.stringContaining("database password must never reach the client"),
+        }),
+      );
+    }
+    expect(logged).toHaveBeenCalledTimes(2);
+  });
+
   it("returns JSON 404 for unknown API methods without reaching the SPA", async () => {
     const baseUrl = await fixture();
     for (const request of [
@@ -117,6 +216,24 @@ describe("application route ordering", () => {
     });
     expect(validTrailingSlash.status).toBe(200);
     expect(await validTrailingSlash.json()).toEqual({ authenticated: true });
+
+    const validCaseVariant = await fetch(`${baseUrl}/API/AUTH/LOGIN`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "dashboard-password" }),
+    });
+    expect(validCaseVariant.status).toBe(200);
+    expect(await validCaseVariant.json()).toEqual({ authenticated: true });
+
+    const oversizedCaseVariant = await fetch(`${baseUrl}/API/AUTH/LOGIN`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "x".repeat(32 * 1024) }),
+    });
+    expect(oversizedCaseVariant.status).toBe(413);
+    expect(await oversizedCaseVariant.json()).toMatchObject({
+      error: { code: "request-too-large" },
+    });
   });
 
   it("preserves the SPA deep link and normal health/auth routes", async () => {

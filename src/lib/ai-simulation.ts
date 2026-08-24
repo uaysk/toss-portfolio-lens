@@ -4,7 +4,11 @@ import {
   type AiSimulationModelForecast,
 } from "./ai-simulation-forecast";
 import {
+  AI_SIMULATION_CONTRACT_VERSION,
+  AI_SIMULATION_CRITERIA,
+  AI_SIMULATION_MARKETS,
   AI_SIMULATION_MODEL_LANES,
+  AI_SIMULATION_PRESETS,
   normalizeAiSimulationCryptoStatus,
   normalizeAiSimulationFuturesPositions,
   normalizeAiSimulationFuturesRisk,
@@ -16,7 +20,6 @@ import {
   type AiSimulationFuturesRisk,
   type AiSimulationMarket,
   type AiSimulationCase,
-  type AiSimulationHighVolatilityScannerSettings,
   type AiSimulationModelPlanEntry,
   type AiSimulationModelRole,
   type AiSimulationModelComparison,
@@ -24,13 +27,19 @@ import {
 } from "./ai-simulation-crypto";
 
 export {
+  AI_SIMULATION_CASES,
+  AI_SIMULATION_CONTRACT_VERSION,
+  AI_SIMULATION_CRITERIA,
   AI_SIMULATION_FINCAST_CANDLE_SECONDS,
   AI_SIMULATION_CRYPTO_MAXIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_MINIMUM_INITIAL_CASH,
   AI_SIMULATION_CRYPTO_FUTURES_MARKET,
   AI_SIMULATION_EXECUTION_MODES,
   AI_SIMULATION_MAIN_MODEL_LANE,
+  AI_SIMULATION_MARKETS,
   AI_SIMULATION_MODEL_LANES,
+  AI_SIMULATION_MODEL_ROLES,
+  AI_SIMULATION_PRESETS,
   DEFAULT_AI_SIMULATION_CRYPTO_RISK_LIMITS,
   DEFAULT_AI_SIMULATION_CRYPTO_REQUEST,
   normalizeAiSimulationCandidates,
@@ -64,9 +73,6 @@ export type {
   AiSimulationWorkerStatus,
 } from "./ai-simulation-crypto";
 
-export const AI_SIMULATION_MARKETS = ["KR", "US"] as const;
-export const AI_SIMULATION_CRITERIA = ["trading_amount", "volume", "volatility"] as const;
-export const AI_SIMULATION_PRESETS = ["trend", "breakout", "mean_reversion", "risk_management"] as const;
 export const AI_SIMULATION_SELECTION_MODES = ["auto", "manual"] as const;
 export const AI_SIMULATION_PAIR_IDS = [
   "semiconductor-soxl-soxs",
@@ -224,7 +230,7 @@ export function usesDefaultAiSimulationCosts(
 }
 
 export type AiSimulationRequest = {
-  contractVersion: "ai-paper-simulation/v9";
+  contractVersion: typeof AI_SIMULATION_CONTRACT_VERSION;
   simulationCase: "us_etf_pair";
   market: { kind: "stock"; country: "US" };
   initialCash: number;
@@ -598,7 +604,7 @@ export type AiSimulationRunReport = {
 };
 
 export const DEFAULT_AI_SIMULATION_REQUEST: AiSimulationRequest = {
-  contractVersion: "ai-paper-simulation/v9",
+  contractVersion: AI_SIMULATION_CONTRACT_VERSION,
   simulationCase: "us_etf_pair",
   market: { kind: "stock", country: "US" },
   initialCash: 100_000,
@@ -980,7 +986,7 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const pairEnabled = pairCatalogCurrent && pairStrategy.enabled === true;
   const hasPairStrategy = Object.keys(pairStrategy).length > 0;
   const rawCostProfiles = asRecord(first(source, "costProfiles", "cost_profiles"));
-  const costProfiles = Object.fromEntries((["KR", "US"] as const).flatMap((market) => {
+  const costProfiles = Object.fromEntries(AI_SIMULATION_MARKETS.flatMap((market) => {
     const profile = normalizeCostProfile(
       first(rawCostProfiles, market, market.toLowerCase()),
       market,
@@ -991,7 +997,7 @@ export function normalizeAiSimulationStatus(payload: unknown): AiSimulationStatu
   const cryptoMarket = asRecord(source.market);
   const hasCryptoStatus = Object.keys(asRecord(cryptoStatusValue)).length > 0
     || (
-      source.schemaVersion === "ai-paper-simulation/v9"
+      source.schemaVersion === AI_SIMULATION_CONTRACT_VERSION
       && cryptoMarket.kind === "crypto_futures"
       && Object.keys(asRecord(source.credentials)).length > 0
       && Object.keys(asRecord(source.executionGates)).length > 0
@@ -2403,8 +2409,8 @@ export function validateAiSimulationRequest(
   limits: AiSimulationLimits = {},
 ): string[] {
   const issues: string[] = [];
-  if (request.contractVersion !== "ai-paper-simulation/v9") {
-    issues.push("ai-paper-simulation/v9 계약만 지원합니다.");
+  if (request.contractVersion !== AI_SIMULATION_CONTRACT_VERSION) {
+    issues.push(`${AI_SIMULATION_CONTRACT_VERSION} 계약만 지원합니다.`);
   }
   if (request.market.kind !== "stock" || request.market.country !== "US") {
     issues.push("미국 ETF 페어 시장만 지원합니다.");

@@ -1,4 +1,5 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import path from "node:path";
 import {
   QualificationEventSchema,
@@ -11,6 +12,20 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAXIMUM_STATE_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_EVENTS_BYTES = 8 * 1024 * 1024;
 const MAXIMUM_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+export type QualificationEventCursor = Readonly<{
+  runId: string;
+  device: number;
+  inode: number;
+  offset: number;
+}>;
+
+type BoundedRegularRead = {
+  payload: Buffer;
+  device: number;
+  inode: number;
+  startOffset: number;
+};
 
 export class QualificationRunNotFoundError extends Error {
   constructor() {
@@ -37,20 +52,93 @@ function safeArtifactPath(value: string): string {
   return value;
 }
 
-async function readBoundedRegularFile(filePath: string, maximumBytes: number): Promise<string> {
-  let stats;
+function invalidEvidenceFile(): Error {
+  return new Error("Qualification evidence file is invalid.");
+}
+
+async function readBoundedRegularRange(
+  filePath: string,
+  maximumBytes: number,
+  invalidFile: () => Error = invalidEvidenceFile,
+  cursor?: Pick<QualificationEventCursor, "device" | "inode" | "offset">,
+): Promise<BoundedRegularRead> {
+  let pathStats;
   try {
-    stats = await lstat(filePath);
+    pathStats = await lstat(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new QualificationRunNotFoundError();
     }
     throw error;
   }
-  if (!stats.isFile() || stats.isSymbolicLink() || stats.size > maximumBytes) {
-    throw new Error("Qualification evidence file is invalid.");
+  if (!pathStats.isFile() || pathStats.isSymbolicLink() || pathStats.size > maximumBytes) {
+    throw invalidFile();
   }
-  return readFile(filePath, "utf8");
+
+  let handle;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new QualificationRunNotFoundError();
+    if (code === "ELOOP") throw invalidFile();
+    throw error;
+  }
+  try {
+    const openedStats = await handle.stat();
+    if (
+      !openedStats.isFile()
+      || openedStats.size > maximumBytes
+      || openedStats.dev !== pathStats.dev
+      || openedStats.ino !== pathStats.ino
+    ) {
+      throw invalidFile();
+    }
+
+    // Read exactly the size observed on the opened descriptor. An events file
+    // may be appended while an SSE poll is in progress; a path-level readFile
+    // could otherwise continue past the validated limit and amplify memory.
+    const expectedBytes = openedStats.size;
+    const canResume = cursor !== undefined
+      && cursor.device === openedStats.dev
+      && cursor.inode === openedStats.ino
+      && Number.isSafeInteger(cursor.offset)
+      && cursor.offset >= 0
+      && cursor.offset <= expectedBytes;
+    const startOffset = canResume ? cursor.offset : 0;
+    const buffer = Buffer.allocUnsafe(expectedBytes - startOffset);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        buffer.length - offset,
+        startOffset + offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return {
+      payload: buffer.subarray(0, offset),
+      device: openedStats.dev,
+      inode: openedStats.ino,
+      startOffset,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readBoundedRegularBuffer(
+  filePath: string,
+  maximumBytes: number,
+  invalidFile: () => Error = invalidEvidenceFile,
+): Promise<Buffer> {
+  return (await readBoundedRegularRange(filePath, maximumBytes, invalidFile)).payload;
+}
+
+async function readBoundedRegularFile(filePath: string, maximumBytes: number): Promise<string> {
+  return (await readBoundedRegularBuffer(filePath, maximumBytes)).toString("utf8");
 }
 
 export class QualificationRunStore {
@@ -93,22 +181,40 @@ export class QualificationRunStore {
     return state;
   }
 
-  async events(runId: string, afterSequence = 0): Promise<QualificationEvent[]> {
+  async eventBatch(
+    runId: string,
+    afterSequence = 0,
+    cursor?: QualificationEventCursor,
+  ): Promise<{
+    events: QualificationEvent[];
+    cursor: QualificationEventCursor | undefined;
+  }> {
     const { normalizedRunId, directory } = await this.runDirectory(runId);
-    let raw: string;
+    let read: BoundedRegularRead;
     try {
-      raw = await readBoundedRegularFile(
+      read = await readBoundedRegularRange(
         path.join(directory, "events.jsonl"),
         MAXIMUM_EVENTS_BYTES,
+        invalidEvidenceFile,
+        cursor?.runId === normalizedRunId ? cursor : undefined,
       );
     } catch (error) {
-      if (error instanceof QualificationRunNotFoundError && afterSequence === 0) return [];
+      if (error instanceof QualificationRunNotFoundError && afterSequence === 0) {
+        return { events: [], cursor: undefined };
+      }
       throw error;
     }
     const events: QualificationEvent[] = [];
-    const lines = raw.split("\n");
-    if (!raw.endsWith("\n")) lines.pop();
-    for (const line of lines) {
+    let start = 0;
+    let completedOffset = read.startOffset;
+    for (
+      let end = read.payload.indexOf(0x0a, start);
+      end >= 0;
+      end = read.payload.indexOf(0x0a, start)
+    ) {
+      const line = read.payload.subarray(start, end).toString("utf8");
+      start = end + 1;
+      completedOffset = read.startOffset + start;
       if (!line.trim()) continue;
       const event = QualificationEventSchema.parse(JSON.parse(line));
       if (event.runId !== normalizedRunId) {
@@ -116,7 +222,19 @@ export class QualificationRunStore {
       }
       if (event.sequence > afterSequence) events.push(event);
     }
-    return events.sort((left, right) => left.sequence - right.sequence);
+    return {
+      events: events.sort((left, right) => left.sequence - right.sequence),
+      cursor: {
+        runId: normalizedRunId,
+        device: read.device,
+        inode: read.inode,
+        offset: completedOffset,
+      },
+    };
+  }
+
+  async events(runId: string, afterSequence = 0): Promise<QualificationEvent[]> {
+    return (await this.eventBatch(runId, afterSequence)).events;
   }
 
   async artifact(
@@ -126,26 +244,17 @@ export class QualificationRunStore {
     const { directory } = await this.runDirectory(runId);
     const normalized = safeArtifactPath(relativePath);
     const artifactPath = path.join(directory, normalized);
-    let stats;
-    try {
-      stats = await lstat(artifactPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new QualificationRunNotFoundError();
-      }
-      throw error;
-    }
-    if (
-      !stats.isFile()
-      || stats.isSymbolicLink()
-      || stats.size < 1
-      || stats.size > MAXIMUM_ARTIFACT_BYTES
-      || path.relative(directory, artifactPath).startsWith("..")
-    ) {
+    if (path.relative(directory, artifactPath).startsWith("..")) {
       throw new QualificationRunNotFoundError();
     }
+    const payload = await readBoundedRegularBuffer(
+      artifactPath,
+      MAXIMUM_ARTIFACT_BYTES,
+      () => new QualificationRunNotFoundError(),
+    );
+    if (payload.length < 1) throw new QualificationRunNotFoundError();
     return {
-      payload: await readFile(artifactPath),
+      payload,
       path: normalized,
     };
   }

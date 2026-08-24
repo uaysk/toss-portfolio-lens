@@ -8,6 +8,8 @@ import {
 
 type UnknownRecord = Record<string, unknown>;
 
+const MAX_TOSS_UPSTREAM_RESPONSE_BYTES = 8 * 1_024 * 1_024;
+
 export type Account = {
   id: string;
   name: string;
@@ -163,6 +165,46 @@ export class TossApiError extends Error {
     super(message);
     this.name = "TossApiError";
   }
+}
+
+function oversizedUpstreamResponseError(): TossApiError {
+  return new TossApiError(
+    "토스증권 응답이 허용된 크기를 초과했습니다.",
+    502,
+    "upstream-response-too-large",
+  );
+}
+
+async function readBoundedResponseText(response: Response): Promise<string> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_TOSS_UPSTREAM_RESPONSE_BYTES) {
+    const error = oversizedUpstreamResponseError();
+    await response.body?.cancel(error).catch(() => undefined);
+    throw error;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_TOSS_UPSTREAM_RESPONSE_BYTES) {
+        const error = oversizedUpstreamResponseError();
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (chunks.length === 0) return "";
+  if (chunks.length === 1) return chunks[0]!.toString("utf8");
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -571,8 +613,11 @@ export function normalizeHoldingsPayload(payload: unknown): {
 
 export class TossClient {
   private tokenCache?: TokenCache;
+  private tokenInFlight?: Promise<string>;
   private accountsCache?: CacheEntry<Account[]>;
+  private accountsInFlight?: Promise<Account[]>;
   private readonly portfolioCache = new Map<string, CacheEntry<Portfolio>>();
+  private readonly portfolioInFlight = new Map<string, Promise<Portfolio>>();
 
   private readonly upstreamBaseUrl: string;
 
@@ -596,10 +641,22 @@ export class TossClient {
       return this.tokenCache.accessToken;
     }
 
+    if (this.tokenInFlight) return this.tokenInFlight;
+
+    const inFlight = this.requestAccessToken(this.config.clientId, this.config.clientSecret);
+    this.tokenInFlight = inFlight;
+    try {
+      return await inFlight;
+    } finally {
+      if (this.tokenInFlight === inFlight) this.tokenInFlight = undefined;
+    }
+  }
+
+  private async requestAccessToken(clientId: string, clientSecret: string): Promise<string> {
     const body = new URLSearchParams({
       grant_type: "client_credentials",
-      client_id: this.config.clientId,
-      client_secret: this.config.clientSecret,
+      client_id: clientId,
+      client_secret: clientSecret,
     });
     const response = await fetch(this.upstreamUrl("/oauth2/token"), { // nosemgrep: nodejs_scan.javascript-ssrf-rule-node_ssrf
       method: "POST",
@@ -624,7 +681,7 @@ export class TossClient {
   }
 
   private async readResponse(response: Response): Promise<unknown> {
-    const text = await response.text();
+    const text = await readBoundedResponseText(response);
     if (!text) return {};
     try {
       return JSON.parse(text) as unknown;
@@ -704,7 +761,7 @@ export class TossClient {
           && attempt === 0
           && this.config.tossApiAuthMode === "oauth_client_credentials"
         ) {
-          this.tokenCache = undefined;
+          if (this.tokenCache?.accessToken === accessToken) this.tokenCache = undefined;
           continue;
         }
         if ((response.status === 429 || response.status >= 500) && attempt < 3) {
@@ -729,21 +786,43 @@ export class TossClient {
     return (await this.request(path, accountId)).data;
   }
 
+  private prunePortfolioCache(accounts: readonly Account[], now = Date.now()): void {
+    const activeAccountIds = new Set(accounts.map((account) => account.id));
+    for (const [accountId, cached] of this.portfolioCache) {
+      if (cached.expiresAt <= now || !activeAccountIds.has(accountId)) {
+        this.portfolioCache.delete(accountId);
+      }
+    }
+  }
+
   async getAccounts(force = false): Promise<Account[]> {
     if (!force && this.accountsCache && this.accountsCache.expiresAt > Date.now()) {
       return this.accountsCache.value;
     }
-    const payload = await this.get("/api/v1/accounts");
-    const accounts = bestArray(payload, "account").map(normalizeAccount);
-    if (!accounts.length) {
-      throw new TossApiError("조회 가능한 토스증권 계좌가 없습니다.", 404, "accounts-empty");
+
+    if (this.accountsInFlight) return this.accountsInFlight;
+
+    const inFlight = (async () => {
+      const payload = await this.get("/api/v1/accounts");
+      const accounts = bestArray(payload, "account").map(normalizeAccount);
+      if (!accounts.length) {
+        throw new TossApiError("조회 가능한 토스증권 계좌가 없습니다.", 404, "accounts-empty");
+      }
+      this.prunePortfolioCache(accounts);
+      this.accountsCache = { value: accounts, expiresAt: Date.now() + 60_000 };
+      return accounts;
+    })();
+    this.accountsInFlight = inFlight;
+    try {
+      return await inFlight;
+    } finally {
+      if (this.accountsInFlight === inFlight) this.accountsInFlight = undefined;
     }
-    this.accountsCache = { value: accounts, expiresAt: Date.now() + 60_000 };
-    return accounts;
   }
 
   async getPortfolio(requestedAccountId?: string, force = false, refreshAccounts = force): Promise<Portfolio> {
     const accounts = await this.getAccounts(refreshAccounts);
+    this.prunePortfolioCache(accounts);
     const account = requestedAccountId
       ? accounts.find((candidate) => candidate.id === requestedAccountId)
       : accounts[0];
@@ -752,20 +831,33 @@ export class TossClient {
     const cached = this.portfolioCache.get(account.id);
     if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
 
-    const payload = await this.get("/api/v1/holdings", account.id);
-    const normalized = normalizeHoldingsPayload(payload);
+    const existing = this.portfolioInFlight.get(account.id);
+    if (existing) return existing;
 
-    const portfolio: Portfolio = {
-      asOf: new Date().toISOString(),
-      accounts,
-      selectedAccountId: account.id,
-      account,
-      summary: normalized.summary,
-      holdings: normalized.holdings,
-    };
+    const inFlight = (async () => {
+      const payload = await this.get("/api/v1/holdings", account.id);
+      const normalized = normalizeHoldingsPayload(payload);
 
-    this.portfolioCache.set(account.id, { value: portfolio, expiresAt: Date.now() + 4_000 });
-    return portfolio;
+      const portfolio: Portfolio = {
+        asOf: new Date().toISOString(),
+        accounts,
+        selectedAccountId: account.id,
+        account,
+        summary: normalized.summary,
+        holdings: normalized.holdings,
+      };
+
+      this.portfolioCache.set(account.id, { value: portfolio, expiresAt: Date.now() + 4_000 });
+      return portfolio;
+    })();
+    this.portfolioInFlight.set(account.id, inFlight);
+    try {
+      return await inFlight;
+    } finally {
+      if (this.portfolioInFlight.get(account.id) === inFlight) {
+        this.portfolioInFlight.delete(account.id);
+      }
+    }
   }
 
   async getClosedOrders(accountId: string, cursor?: string): Promise<OrderPage> {

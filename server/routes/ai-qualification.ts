@@ -9,8 +9,10 @@ import {
 import {
   QualificationRunNotFoundError,
   QualificationRunStore,
+  type QualificationEventCursor,
 } from "../qualification/store.js";
 import type { SseConnectionTracker } from "../lifecycle.js";
+import { admitSseConnection } from "./sse-admission.js";
 
 export type AiQualificationRouterDependencies = {
   authenticate: RequestHandler;
@@ -116,25 +118,19 @@ export function createAiQualificationRouter(
 
   router.get("/api/ai-qualification/runs/:runId/events", async (request, response) => {
     const runId = request.params.runId ?? "";
-    let state: QualificationState;
+    let initialState: QualificationState;
     try {
-      state = await store.state(runId);
+      initialState = await store.state(runId);
     } catch (error) {
       sendError(response, error);
       return;
     }
 
-    response.status(200);
-    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    response.setHeader("Cache-Control", "no-store, no-transform");
-    response.setHeader("Connection", "keep-alive");
-    response.setHeader("X-Accel-Buffering", "no");
-    response.flushHeaders();
-
     let ended = false;
     let blocked = false;
     let sequence = lastEventSequence(request);
     let updatedAt = "";
+    let eventCursor: QualificationEventCursor | undefined;
     let polling = false;
     let pollTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -146,6 +142,8 @@ export function createAiQualificationRouter(
       if (pollTimer) clearInterval(pollTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       response.off("drain", onDrain);
+      request.off("close", cleanup);
+      response.off("close", cleanup);
       const unregister = untrack;
       untrack = () => undefined;
       unregister();
@@ -153,28 +151,34 @@ export function createAiQualificationRouter(
     const onDrain = () => {
       blocked = false;
     };
-    const update = async () => {
+    const update = async (knownState?: QualificationState) => {
       if (ended || blocked || polling) return;
       polling = true;
       try {
-        const nextState = await store.state(runId);
+        // Reuse the state that admitted the stream. This avoids opening and
+        // validating the same file twice during every new connection's first
+        // update while later polls still observe fresh state.
+        const nextState = knownState ?? await store.state(runId);
         if (nextState.updatedAt !== updatedAt) {
           blocked = !writeSnapshot(response, nextState);
           updatedAt = nextState.updatedAt;
         }
         if (!blocked) {
-          const events = await store.events(runId, sequence);
-          for (const event of events) {
+          const batch = await store.eventBatch(runId, sequence, eventCursor);
+          for (const event of batch.events) {
             if (ended || blocked) break;
             blocked = !writeEvent(response, event);
             sequence = event.sequence;
           }
+          if (!ended && !blocked) eventCursor = batch.cursor;
         }
         if (isTerminalQualificationStatus(nextState.status) && !blocked) {
           response.write(`event: terminal\ndata: ${JSON.stringify({
             runId,
             status: nextState.status,
           })}\n\n`);
+          cleanup();
+          response.end();
         }
       } catch (error) {
         if (!ended) {
@@ -188,11 +192,25 @@ export function createAiQualificationRouter(
       }
     };
 
+    const registration = admitSseConnection(
+      dependencies.sseConnections,
+      response,
+      cleanup,
+    );
+    if (!registration) return;
+    untrack = registration;
+    if (ended) return;
+
+    response.status(200);
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.setHeader("X-Accel-Buffering", "no");
+    response.flushHeaders();
     response.on("drain", onDrain);
     request.on("close", cleanup);
     response.on("close", cleanup);
-    untrack = dependencies.sseConnections?.track(response, cleanup) ?? (() => undefined);
-    await update();
+    await update(initialState);
     if (ended) return;
     pollTimer = setInterval(() => void update(), pollIntervalMs);
     pollTimer.unref();

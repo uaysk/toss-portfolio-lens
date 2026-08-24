@@ -250,6 +250,45 @@ describe("MarketDataRecorder", () => {
     await recorder.close();
   });
 
+  it("preserves FIFO order while committing batches across internal chunk boundaries", async () => {
+    let listener: ((event: ScalpingLiveEvent) => void) | undefined;
+    const live = {
+      onEvent: vi.fn((next: (event: ScalpingLiveEvent) => void) => {
+        listener = next;
+        return vi.fn();
+      }),
+      retain: vi.fn().mockResolvedValue(vi.fn()),
+    };
+    const store = {
+      putTrades: vi.fn().mockResolvedValue(undefined),
+      putOrderbooks: vi.fn().mockResolvedValue(undefined),
+      putRecordingEvents: vi.fn().mockResolvedValue(undefined),
+    };
+    const recorder = new MarketDataRecorder(
+      live as never,
+      store as never,
+      config({ batchSize: 500, maximumQueueSize: 3_000 }),
+    );
+    await recorder.start();
+
+    for (let id = 1; id <= 2_050; id += 1) listener!(tradeEvent(id));
+    await recorder.flushNow();
+
+    const persisted = store.putTrades.mock.calls.flatMap(([records]) => records);
+    expect(persisted).toHaveLength(2_050);
+    expect(persisted.map((record) => record.eventId)).toEqual(
+      Array.from(
+        { length: 2_050 },
+        (_, index) => `kis:HDFSCNT0:standard:NAS:TSLA:${index + 1}`,
+      ),
+    );
+    expect(recorder.status.counters).toMatchObject({
+      persistedTrades: 2_050,
+      pendingTrades: 0,
+    });
+    await recorder.close();
+  });
+
   it("filters shared day-feed traffic and rejects payload identity mismatches", async () => {
     let listener: ((event: ScalpingLiveEvent) => void) | undefined;
     const live = {

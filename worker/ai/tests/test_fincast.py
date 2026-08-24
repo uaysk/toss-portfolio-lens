@@ -573,10 +573,34 @@ def test_fincast_mixed_runtime_keeps_high_raw_prices_fp32_until_model_normalizat
 ) -> None:
     tensor_calls: list[dict[str, object]] = []
     zero_calls: list[dict[str, object]] = []
+    selected_horizon_indices: list[tuple[int, ...]] = []
 
     class FakeTensor:
         def __init__(self, values: object) -> None:
             self.values = values
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            values = self.values
+            shape: list[int] = []
+            while isinstance(values, list):
+                shape.append(len(values))
+                if not values:
+                    break
+                values = values[0]
+            return tuple(shape)
+
+        def __getitem__(self, key: object) -> "FakeTensor":
+            batch_slice, horizon_indices, quantile_slice = key  # type: ignore[misc]
+            assert batch_slice == slice(None)
+            assert quantile_slice == slice(None)
+            selected_horizon_indices.append(tuple(horizon_indices))
+            return FakeTensor(
+                [
+                    [forecast[index] for index in horizon_indices]
+                    for forecast in self.values  # type: ignore[union-attr]
+                ]
+            )
 
         def float(self) -> "FakeTensor":
             return self
@@ -707,6 +731,9 @@ def test_fincast_mixed_runtime_keeps_high_raw_prices_fp32_until_model_normalizat
     assert model.call["freq"].values == [[0]]  # type: ignore[union-attr]
     assert model.call["horizon_len"] == expected_horizon_steps
     assert model.call["max_len"] == 512
+    assert selected_horizon_indices == [
+        tuple(horizon * 60 // seconds - 1 for horizon in (5, 15, 30, 60))
+    ]
     assert result[0].close_quantiles is not None
 
 

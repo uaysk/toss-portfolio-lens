@@ -130,13 +130,18 @@ export class PortfolioQueryController {
 
   applyPortfolioEvent(event: PortfolioEventV1): boolean {
     if (this.disposed) return false;
+    const selectedAccountId = this.state.portfolio?.selectedAccountId;
+    if (!selectedAccountId || selectedAccountId !== event.accountId) return false;
     const knownRevision = this.streamRevisions.get(event.accountId) ?? 0;
     if (event.revision <= knownRevision) return false;
-    this.streamRevisions.set(event.accountId, event.revision);
-    if (event.type === "heartbeat" || !event.payload) return true;
+    if (event.type === "heartbeat") {
+      this.streamRevisions.set(event.accountId, event.revision);
+      return true;
+    }
+    if (!event.payload) return false;
     if (event.payload.selectedAccountId !== event.accountId) return false;
-    const selectedAccountId = this.state.portfolio?.selectedAccountId;
-    if (selectedAccountId && selectedAccountId !== event.accountId) return false;
+    this.streamRevisions.set(event.accountId, event.revision);
+    this.pruneStreamRevisions(event.payload);
     this.update({ portfolio: event.payload, error: undefined });
     return true;
   }
@@ -148,6 +153,7 @@ export class PortfolioQueryController {
     this.background?.controller.abort();
     this.foreground = undefined;
     this.background = undefined;
+    this.streamRevisions.clear();
   }
 
   private startForeground(
@@ -200,6 +206,7 @@ export class PortfolioQueryController {
         throw Object.assign(new Error(error.message), error);
       }
 
+      this.pruneStreamRevisions(payload);
       this.update({ portfolio: payload, error: undefined });
     } catch (caught) {
       if (!this.isCurrent(request) || isAbortError(caught)) return;
@@ -227,6 +234,13 @@ export class PortfolioQueryController {
     return request.kind === "background"
       ? this.background === request
       : this.foreground === request;
+  }
+
+  private pruneStreamRevisions(portfolio: Portfolio): void {
+    const activeAccountIds = new Set(portfolio.accounts.map(({ id }) => id));
+    for (const accountId of this.streamRevisions.keys()) {
+      if (!activeAccountIds.has(accountId)) this.streamRevisions.delete(accountId);
+    }
   }
 
   private update(patch: Partial<PortfolioQueryState>): void {

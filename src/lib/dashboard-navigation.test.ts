@@ -1,15 +1,13 @@
 import { isValidElement, type ReactElement } from "react";
-import {
-  Activity,
-  BarChart3,
-  Bot,
-  CandlestickChart,
-  FlaskConical,
-  LayoutDashboard,
-  LibraryBig,
-  Sparkles,
-  TimerReset,
-} from "lucide-react";
+import Activity from "lucide-react/dist/esm/icons/activity.js";
+import BarChart3 from "lucide-react/dist/esm/icons/chart-column.js";
+import Bot from "lucide-react/dist/esm/icons/bot.js";
+import CandlestickChart from "lucide-react/dist/esm/icons/chart-candlestick.js";
+import FlaskConical from "lucide-react/dist/esm/icons/flask-conical.js";
+import LayoutDashboard from "lucide-react/dist/esm/icons/layout-dashboard.js";
+import LibraryBig from "lucide-react/dist/esm/icons/library-big.js";
+import Sparkles from "lucide-react/dist/esm/icons/sparkles.js";
+import TimerReset from "lucide-react/dist/esm/icons/timer-reset.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   DASHBOARD_VIEW_REGISTRY,

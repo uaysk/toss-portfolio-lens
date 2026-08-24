@@ -34,6 +34,25 @@ function tick(
 }
 
 describe("IntradayBarAggregator", () => {
+  it("releases one symbol state and accepts a clean resubscription", () => {
+    const aggregator = new IntradayBarAggregator(config({ allowedLatenessMs: 0 }));
+    const first = tick("reused-id", "2026-07-21T09:00:10+09:00", 100);
+    expect(aggregator.ingest(first).accepted).toBe(true);
+    aggregator.advanceWatermark("005930", "2026-07-21T09:01:00+09:00");
+    expect(aggregator.recentFinalBars("005930", "1m")).toHaveLength(1);
+
+    expect(aggregator.releaseSymbol("005930")).toBe(true);
+    expect(aggregator.releaseSymbol("005930")).toBe(false);
+    expect(aggregator.recentFinalBars("005930", "1m")).toEqual([]);
+
+    expect(aggregator.ingest(first).accepted).toBe(true);
+    aggregator.advanceWatermark("005930", "2026-07-21T09:01:00+09:00");
+    expect(aggregator.recentFinalBars("005930", "1m")[0]).toMatchObject({
+      close: 100,
+      status: "final",
+    });
+  });
+
   it("builds event-time OHLC and rejects duplicate events", () => {
     const aggregator = new IntradayBarAggregator(config());
     aggregator.ingest(tick("later", "2026-07-21T09:00:20+09:00", 102, 2));

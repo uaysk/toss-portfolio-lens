@@ -136,7 +136,7 @@ export class ArtifactRepository {
       input.dataRevision,
     ];
     const storageStartedAt = performance.now();
-    await this.database.run(`
+    const [storedRow] = await this.database.query<ArtifactDescriptorRow>(`
       INSERT INTO portfolio_backtest_artifacts (
         artifact_id, run_id, artifact_type, content_json, row_count, byte_count,
         checksum, generated_at, schema_version, data_revision
@@ -146,28 +146,17 @@ export class ArtifactRepository {
         byte_count = excluded.byte_count, checksum = excluded.checksum,
         generated_at = excluded.generated_at, schema_version = excluded.schema_version,
         data_revision = excluded.data_revision
+      RETURNING artifact_id, run_id, artifact_type, row_count, byte_count,
+                checksum, generated_at, schema_version, data_revision
     `, values);
-    const stored = await this.getDescriptor(input.runId, input.type);
-    if (!stored) throw new Error("artifact를 저장하지 못했습니다.");
+    if (!storedRow) throw new Error("artifact를 저장하지 못했습니다.");
     this.telemetry?.recordArtifactWrite({
       byteCount: encoded.byteCount,
       serializationMs,
       storageMs: performance.now() - storageStartedAt,
       offloaded: encoded.offloaded,
     });
-    return stored;
-  }
-
-  private async getDescriptor(
-    runId: string,
-    type: ArtifactType,
-  ): Promise<ArtifactDescriptor | undefined> {
-    const [row] = await this.database.query<ArtifactDescriptorRow>(`
-      SELECT artifact_id, run_id, artifact_type, row_count, byte_count,
-             checksum, generated_at, schema_version, data_revision
-      FROM portfolio_backtest_artifacts WHERE run_id = ? AND artifact_type = ?
-    `, [runId, type]);
-    return row ? descriptor(row) : undefined;
+    return descriptor(storedRow);
   }
 
   async get(runId: string, type: ArtifactType): Promise<{

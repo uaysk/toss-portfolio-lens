@@ -1,4 +1,6 @@
-import { AlertTriangle, CheckCircle2, GitCompareArrows } from "lucide-react";
+import AlertTriangle from "lucide-react/dist/esm/icons/triangle-alert.js";
+import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check.js";
+import GitCompareArrows from "lucide-react/dist/esm/icons/git-compare-arrows.js";
 import { Card } from "@/components/ui/card";
 import type {
   AiSimulationCurrency,

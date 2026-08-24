@@ -344,14 +344,16 @@ export class HistoricalPortfolioBackfill {
         phase: "prices",
         message: `일봉을 불러오는 중입니다 · 0/${keys.length}`,
       });
+      const dailyPriceCoverage = await this.store.getDailyPriceCoverage(keys);
       for (const key of keys) {
         const symbol = key.slice(key.indexOf(":") + 1);
-        const cachedFirstDate = await this.store.getEarliestDailyPriceDate(key);
-        const cachedLastDate = await this.store.getLatestDailyPriceDate(key);
+        const coverage = dailyPriceCoverage.get(key);
+        const cachedFirstDate = coverage?.earliest;
+        const cachedLastDate = coverage?.latest;
         const cacheCoversHistory = Boolean(
           cachedFirstDate
           && cachedFirstDate <= firstTradeDate
-          && !await this.store.hasIncompleteDailyOhlc(key),
+          && !coverage?.incompleteOhlc,
         );
         const seenBefore = new Set<string>();
         let before: string | undefined;
@@ -360,7 +362,12 @@ export class HistoricalPortfolioBackfill {
             await sleep(API_PACING_MS);
             const page = await this.toss.getDailyCandles(symbol, before);
             pricesImported += await this.store.upsertDailyPrices(key, page.candles);
-            const oldestDate = page.candles.map((candle) => candle.date).sort()[0];
+            let oldestDate: string | undefined;
+            for (const candle of page.candles) {
+              if (oldestDate === undefined || candle.date < oldestDate) {
+                oldestDate = candle.date;
+              }
+            }
             const reachedCache = cacheCoversHistory
               && cachedLastDate
               && page.candles.some((candle) => candle.date <= cachedLastDate);

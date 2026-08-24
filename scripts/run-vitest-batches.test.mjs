@@ -2,13 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   HEAP_LIMIT_MB,
+  PGLITE_PROCESS_RESERVATION_MB,
   classifyTestFile,
+  isSerialBatch,
   memoryPlan,
   nodeOptionsWithHeapLimit,
+  parseSerialFiles,
   planBatches,
+  planPgliteGroups,
   positiveInteger,
+  shouldIgnoreTestDirectory,
+  terminateTestProcesses,
   vitestArguments,
 } from "./run-vitest-batches.mjs";
+
+test("skips generated language and browser caches during test discovery", () => {
+  for (const directory of [
+    ".cache",
+    ".git",
+    ".playwright-mcp",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "coverage",
+    "dist",
+    "graphify-out",
+    "node_modules",
+    "target",
+    "venv",
+  ]) {
+    assert.equal(shouldIgnoreTestDirectory(directory), true, directory);
+  }
+  assert.equal(shouldIgnoreTestDirectory("server"), false);
+  assert.equal(shouldIgnoreTestDirectory("src"), false);
+});
 
 test("classifies PGlite before crypto and isolates crypto or large tests as heavy", () => {
   assert.deepEqual(
@@ -72,9 +99,12 @@ test("caps light parallelism by the smaller detected or explicit memory budget",
     explicitBudgetMb: 4_096,
     effectiveBudgetMb: 3_500,
     processReservationMb: 1_024,
+    pgliteProcessReservationMb: PGLITE_PROCESS_RESERVATION_MB,
     headroomMb: 512,
     requestedMaxParallel: 4,
+    requestedPgliteParallel: 1,
     lightParallelism: 2,
+    pgliteParallelism: 1,
   });
   assert.equal(memoryPlan({
     detectedAvailableMb: 8_000,
@@ -82,6 +112,32 @@ test("caps light parallelism by the smaller detected or explicit memory budget",
     requestedMaxParallel: 3,
   }).lightParallelism, 1);
   assert.throws(() => positiveInteger("0", "memory budget"), /Invalid memory budget/u);
+});
+
+test("bounds PGlite parallelism by its larger process reservation", () => {
+  const result = memoryPlan({
+    detectedAvailableMb: 4_096,
+    explicitBudgetMb: 4_096,
+    requestedMaxParallel: 2,
+    requestedPgliteParallel: 3,
+  });
+  assert.equal(result.pgliteParallelism, 2);
+  assert.equal(result.pgliteProcessReservationMb, 1_536);
+});
+
+test("groups PGlite batches in bounded pairs while isolating known high-memory files", () => {
+  const batches = [1, 2, 3, 4].map((ordinal) => ({
+    ordinal,
+    name: `pglite-${ordinal}`,
+    lane: "pglite",
+    files: [`server/test-${ordinal}.test.ts`],
+  }));
+  const serialFiles = parseSerialFiles(" server/test-3.test.ts ");
+  assert.equal(isSerialBatch(batches[2], serialFiles), true);
+  assert.deepEqual(
+    planPgliteGroups(batches, serialFiles, 2).map((group) => group.map(({ ordinal }) => ordinal)),
+    [[1, 2], [3], [4]],
+  );
 });
 
 test("replaces inherited heap flags with the fixed 768MB child limit", () => {
@@ -116,4 +172,24 @@ test("adds isolated JUnit and coverage outputs without increasing Vitest workers
   assert.ok(arguments_.includes(
     "--coverage.reportsDirectory=/tmp/toss-vitest-coverage/light-2",
   ));
+});
+
+test("forwards termination only to active Vitest children", () => {
+  const activeSignals = [];
+  const finishedSignals = [];
+  terminateTestProcesses([
+    {
+      exitCode: null,
+      signalCode: null,
+      kill: (signal) => activeSignals.push(signal),
+    },
+    {
+      exitCode: 0,
+      signalCode: null,
+      kill: (signal) => finishedSignals.push(signal),
+    },
+  ], "SIGTERM");
+
+  assert.deepEqual(activeSignals, ["SIGTERM"]);
+  assert.deepEqual(finishedSignals, []);
 });

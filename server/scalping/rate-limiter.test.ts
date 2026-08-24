@@ -131,4 +131,32 @@ describe("TtlCache", () => {
     now = 101;
     expect(cache.get("a")).toBeUndefined();
   });
+
+  it("bounds distinct in-flight loads and releases capacity after settlement", async () => {
+    const cache = new TtlCache<string, number>({ maximumEntries: 1 });
+    let resolveFirst!: (value: number) => void;
+    const firstLoader = vi.fn(() => new Promise<number>((resolve) => {
+      resolveFirst = resolve;
+    }));
+    const secondLoader = vi.fn(async () => 2);
+
+    const first = cache.getOrLoad("a", 100, firstLoader);
+    const coalesced = cache.getOrLoad("a", 100, firstLoader);
+    resolveFirst(1);
+    await expect(Promise.all([first, coalesced])).resolves.toEqual([1, 1]);
+    expect(firstLoader).toHaveBeenCalledTimes(1);
+
+    let releaseOccupied!: (value: number) => void;
+    const occupied = cache.getOrLoad("occupied", 0, () => new Promise<number>((resolve) => {
+      releaseOccupied = resolve;
+    }));
+    await expect(cache.getOrLoad("b", 100, secondLoader))
+      .rejects.toThrow("TTL cache in-flight capacity exceeded");
+    expect(secondLoader).not.toHaveBeenCalled();
+
+    releaseOccupied(3);
+    await expect(occupied).resolves.toBe(3);
+    await expect(cache.getOrLoad("b", 100, secondLoader)).resolves.toBe(2);
+    expect(secondLoader).toHaveBeenCalledTimes(1);
+  });
 });

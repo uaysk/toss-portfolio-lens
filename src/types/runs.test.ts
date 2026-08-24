@@ -1,7 +1,9 @@
 import { describe, expectTypeOf, it } from "vitest";
+import type { BacktestAdvancedAnalytics as ServerBacktestAdvancedAnalytics } from "../../server/contracts/backtest";
 import type {
   AdvancedRunError,
   AdvancedRunSnapshot,
+  BacktestAdvancedAnalytics,
   BacktestResult,
   CompletedAdvancedRunSnapshot,
   Portfolio,
@@ -11,6 +13,7 @@ describe("public type barrel", () => {
   it("keeps existing domain exports available from @/types", () => {
     expectTypeOf<Portfolio["holdings"]>().toBeArray();
     expectTypeOf<BacktestResult["warnings"]>().toEqualTypeOf<string[]>();
+    expectTypeOf<BacktestAdvancedAnalytics>().toEqualTypeOf<ServerBacktestAdvancedAnalytics>();
   });
 
   it("narrows run payloads and failures by status", () => {

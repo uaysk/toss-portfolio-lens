@@ -859,16 +859,17 @@ export class RunService {
 
   private async materializeExternalArtifacts(run: PortfolioRunRecord): Promise<void> {
     const jobs = this.options.jobRepository;
-    if (!jobs || !await jobs.get(run.id)) return;
+    if (!jobs) return;
     const stored = await jobs.getOutput(run.id);
     if (!stored?.value.artifacts?.length) return;
+    const existingTypes = new Set((await this.artifacts.list(run.id)).map((artifact) => artifact.type));
     for (const artifact of stored.value.artifacts) {
       if (artifact.type.startsWith("worker-")) continue;
       if (!ARTIFACT_TYPES.has(artifact.type as ArtifactType)) {
         throw new Error(`지원하지 않는 worker artifact type입니다: ${artifact.type}`);
       }
       const type = artifact.type as ArtifactType;
-      if (await this.artifacts.get(run.id, type)) continue;
+      if (existingTypes.has(type)) continue;
       await this.artifacts.put({
         runId: run.id,
         dataRevision: run.dataRevision,
@@ -876,6 +877,7 @@ export class RunService {
         content: artifact.content,
         rowCount: artifact.row_count,
       });
+      existingTypes.add(type);
     }
     if (run.kind === "optimization" && this.options.optimizationRepository) {
       const input = await jobs.getInput(run.id);

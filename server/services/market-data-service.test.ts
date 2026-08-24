@@ -299,23 +299,34 @@ describe("MarketDataService", () => {
         new TossApiError("환율정보가 존재하지 않아요", 404, "exchange-rate-not-found"),
       ),
     } as unknown as TossClient;
+    const fallbackRates = [
+      { date: "2022-08-02", rate: 1_310, timestamp: "2022-08-02T15:30:00+09:00" },
+      { date: "2022-08-03", rate: 1_312, timestamp: "2022-08-03T15:30:00+09:00" },
+      { date: "2022-08-04", rate: 1_315, timestamp: "2022-08-04T15:30:00+09:00" },
+    ];
     const fallback = {
-      getUsdKrwExchangeRates: vi.fn().mockResolvedValue([
-        { date: "2022-08-02", rate: 1_310, timestamp: "2022-08-02T15:30:00+09:00" },
-        { date: "2022-08-03", rate: 1_312, timestamp: "2022-08-03T15:30:00+09:00" },
-        { date: "2022-08-04", rate: 1_315, timestamp: "2022-08-04T15:30:00+09:00" },
-      ]),
+      getUsdKrwExchangeRates: vi.fn().mockResolvedValue(fallbackRates),
     } satisfies KisExchangeRateProvider;
     const store = await openTestHistoryStore();
     stores.push(store);
-
-    const result = await new MarketDataService(toss, store, fallback).getPriceSeries({
+    const upsertExchangeRates = vi.spyOn(store, "upsertExchangeRates");
+    upsertExchangeRates.mockRejectedValueOnce(new Error("exchange-rate storage unavailable"));
+    const service = new MarketDataService(toss, store, fallback);
+    const request = {
       symbol: "AAPL", fromDate: "2022-08-03", toDate: "2022-08-04",
-      interval: "1d", adjusted: true, currencyMode: "KRW",
+      interval: "1d" as const, adjusted: true, currencyMode: "KRW" as const,
+    };
+
+    await expect(service.getPriceSeries(request)).rejects.toMatchObject({
+      detail: { code: "FX_RATE_FETCH_FAILED", retryable: true },
     });
+    const result = await service.getPriceSeries(request);
 
     expect(result.points.map((point) => point.fxRate)).toEqual([1_312, 1_315]);
-    expect(fallback.getUsdKrwExchangeRates).toHaveBeenCalledWith("2022-07-27", "2022-08-04");
+    expect(fallback.getUsdKrwExchangeRates).toHaveBeenCalledTimes(2);
+    expect(fallback.getUsdKrwExchangeRates).toHaveBeenLastCalledWith("2022-07-27", "2022-08-04");
+    expect(upsertExchangeRates).toHaveBeenCalledTimes(2);
+    expect(upsertExchangeRates).toHaveBeenLastCalledWith(fallbackRates);
     expect(await store.getExchangeRates("2022-08-02", "2022-08-04")).toEqual(new Map([
       ["2022-08-02", 1_310],
       ["2022-08-03", 1_312],

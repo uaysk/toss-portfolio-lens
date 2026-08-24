@@ -239,6 +239,33 @@ describe("Binance USER_DATA maintenance-margin brackets", () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
+  it("bounds cached schedules with least-recently-used eviction", async () => {
+    const read = vi.fn(async ({ symbol }: { symbol: string }) => ({
+      data: () => ({ ...bracketFixture(), symbol }),
+    }));
+    const provider = new BinanceMaintenanceMarginProvider({
+      credentials: credentials(),
+      rest: { notionalAndLeverageBrackets: read },
+      maximumCacheEntries: 2,
+    });
+
+    await provider.schedule("BTCUSDT");
+    await provider.schedule("ETHUSDT");
+    await provider.schedule("BTCUSDT");
+    await provider.schedule("SOLUSDT");
+    expect(read).toHaveBeenCalledTimes(3);
+
+    await provider.schedule("BTCUSDT");
+    expect(read).toHaveBeenCalledTimes(3);
+    await provider.schedule("ETHUSDT");
+    expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  it("rejects invalid cache bounds", () => {
+    expect(() => new BinanceMaintenanceMarginProvider({ maximumCacheEntries: 0 }))
+      .toThrow("Binance bracket cache size must be between 1 and 10000 entries.");
+  });
+
   it("clears cached schedules and exposes enum/boolean status after refresh failure", async () => {
     let now = 1_000;
     const { rest, read } = restFixture();

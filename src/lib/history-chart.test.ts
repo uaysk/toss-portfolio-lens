@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildValueChartData,
   filterPortfolioHistory,
+  HISTORY_BACKFILL_IDLE_POLL_MS,
+  HISTORY_BACKFILL_MAX_RETRY_MS,
+  HISTORY_BACKFILL_RUNNING_POLL_MS,
+  portfolioHistoryBackfillPollDelay,
+  portfolioHistoryBackfillRetryDelay,
   shouldPollPortfolioHistoryBackfill,
 } from "./history-chart";
 import type { PortfolioHistory } from "@/types";
@@ -15,6 +20,28 @@ describe("buildValueChartData", () => {
     ["error", false],
   ] as const)("backfill %s 상태의 polling 여부를 고정한다", (status, expected) => {
     expect(shouldPollPortfolioHistoryBackfill(status)).toBe(expected);
+  });
+
+  it("브라우저 탭이 숨겨지면 진행 중인 backfill polling을 멈춘다", () => {
+    expect(shouldPollPortfolioHistoryBackfill("running", "hidden")).toBe(false);
+    expect(shouldPollPortfolioHistoryBackfill("idle", "hidden")).toBe(false);
+    expect(shouldPollPortfolioHistoryBackfill("running", "visible")).toBe(true);
+  });
+
+  it("진행 중 상태는 2초, 유휴 상태는 5초 간격으로 조회한다", () => {
+    expect(portfolioHistoryBackfillPollDelay("running")).toBe(HISTORY_BACKFILL_RUNNING_POLL_MS);
+    expect(portfolioHistoryBackfillPollDelay("idle")).toBe(HISTORY_BACKFILL_IDLE_POLL_MS);
+    expect(portfolioHistoryBackfillPollDelay("complete")).toBeUndefined();
+    expect(portfolioHistoryBackfillPollDelay("partial")).toBeUndefined();
+    expect(portfolioHistoryBackfillPollDelay("error")).toBeUndefined();
+  });
+
+  it("상태 조회 실패는 5초부터 지수 backoff하고 30초로 제한한다", () => {
+    expect(portfolioHistoryBackfillRetryDelay(1)).toBe(HISTORY_BACKFILL_IDLE_POLL_MS);
+    expect(portfolioHistoryBackfillRetryDelay(2)).toBe(10_000);
+    expect(portfolioHistoryBackfillRetryDelay(3)).toBe(20_000);
+    expect(portfolioHistoryBackfillRetryDelay(4)).toBe(HISTORY_BACKFILL_MAX_RETRY_MS);
+    expect(portfolioHistoryBackfillRetryDelay(20)).toBe(HISTORY_BACKFILL_MAX_RETRY_MS);
   });
 
   it("종목 비중을 평가금으로 변환해 스택 합계가 전체 평가금이 되게 한다", () => {

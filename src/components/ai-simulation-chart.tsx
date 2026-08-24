@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { Maximize2, Minimize2 } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import Maximize2 from "lucide-react/dist/esm/icons/maximize-2.js";
+import Minimize2 from "lucide-react/dist/esm/icons/minimize-2.js";
 import {
   Area,
   Bar,
@@ -40,6 +41,26 @@ import { cn } from "@/lib/utils";
 export const AI_SIMULATION_CHART_MAX_BARS = 180;
 const AI_SIMULATION_CHART_MAX_PATTERN_BADGES = 12;
 const AI_SIMULATION_CHART_SYNC_ID = "ai-simulation-shared-time";
+const AI_SIMULATION_CHART_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const AI_SIMULATION_CHART_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const AI_SIMULATION_CHART_COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  notation: "compact",
+  maximumFractionDigits: 2,
+});
+const AI_SIMULATION_CHART_DECIMAL_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  maximumFractionDigits: 3,
+});
 
 export type AiSimulationChartBarStatus = "forming" | "final" | "unknown";
 export type AiSimulationChartPatternBias = "bullish" | "bearish" | "neutral";
@@ -599,36 +620,20 @@ function chartTradePoints(
 function chartTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return AI_SIMULATION_CHART_TIME_FORMATTER.format(date);
 }
 
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return AI_SIMULATION_CHART_TIMESTAMP_FORMATTER.format(date);
 }
 
 function formatIndicatorValue(value: number): string {
   if (Math.abs(value) >= 1_000) {
-    return new Intl.NumberFormat("ko-KR", {
-      notation: "compact",
-      maximumFractionDigits: 2,
-    }).format(value);
+    return AI_SIMULATION_CHART_COMPACT_NUMBER_FORMATTER.format(value);
   }
-  return new Intl.NumberFormat("ko-KR", {
-    maximumFractionDigits: 3,
-  }).format(value);
+  return AI_SIMULATION_CHART_DECIMAL_FORMATTER.format(value);
 }
 
 function indicatorStatusClass(status: string): string {
@@ -770,6 +775,10 @@ export function AiSimulationChart({
 }: AiSimulationChartProps) {
   const [expanded, setExpanded] = useState(false);
   const [selectedTime, setSelectedTime] = useState<number>();
+  const chartId = useId();
+  const chartTitleId = useId();
+  const expandedChartRef = useRef<HTMLDivElement>(null);
+  const expandButtonRef = useRef<HTMLButtonElement>(null);
   const visibleBars = useMemo(() => normalizedBars(bars), [bars]);
   const actualRows = useMemo(
     () => chartRowsFromNormalizedBars(visibleBars),
@@ -853,7 +862,26 @@ export function AiSimulationChart({
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpanded(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setExpanded(false);
+        window.requestAnimationFrame(() => expandButtonRef.current?.focus());
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...(expandedChartRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      ) ?? [])].filter((element) => !element.hidden && element.getClientRects().length > 0);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && (document.activeElement === first || !expandedChartRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -864,17 +892,22 @@ export function AiSimulationChart({
 
   return (
     <Card
+      id={chartId}
+      ref={expandedChartRef}
       className={cn(
         "min-w-0 overflow-hidden p-4 sm:p-5",
         expanded && "fixed inset-2 z-[100] overflow-y-auto bg-background shadow-2xl sm:inset-4",
         className,
       )}
+      role={expanded ? "dialog" : undefined}
+      aria-modal={expanded ? true : undefined}
+      aria-labelledby={expanded ? chartTitleId : undefined}
       data-ai-simulation-chart={symbol}
       data-ai-simulation-chart-expanded={expanded}
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-black">{name ? `${name} · ${symbol}` : symbol}</h3>
+          <h3 id={chartTitleId} className="truncate text-sm font-black">{name ? `${name} · ${symbol}` : symbol}</h3>
           <p className="mt-1 text-[9px] font-bold text-muted-foreground">
             OHLC · 최근 {actualRows.length}/{AI_SIMULATION_CHART_MAX_BARS}개 봉
             {availableForecasts.length ? ` · 예측 ${availableForecasts.length}개 lane 연속 표시` : ""}
@@ -916,10 +949,14 @@ export function AiSimulationChart({
           </dl>
         ) : null}
           <button
+            ref={expandButtonRef}
             type="button"
             className="grid size-9 shrink-0 place-items-center rounded-xl bg-secondary text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => setExpanded((value) => !value)}
             aria-label={expanded ? `${symbol} 차트 축소` : `${symbol} 차트 전체화면 확대`}
+            aria-controls={chartId}
+            aria-expanded={expanded}
+            aria-haspopup="dialog"
             title={expanded ? "차트 축소 (Esc)" : "차트 전체화면 확대"}
           >
             {expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}

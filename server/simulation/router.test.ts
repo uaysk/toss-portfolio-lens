@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import { SseConnectionTracker } from "../lifecycle.js";
 import {
   createSimulationRouter,
   type SimulationRouterDependencies,
@@ -185,6 +186,113 @@ describe("AI paper simulation session-only router", () => {
     requestEvents.emit("close");
     expect(events.telemetry.activeConnections).toBe(0);
     expect(unregister).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one live-event serialization across synchronous SSE subscribers", async () => {
+    const events = new SimulationRunEventHub();
+    const created = router({ service: service(), events });
+    const handler = routeHandler(created.value, "/runs/:runId/events", "get");
+    const requests = Array.from({ length: 2 }, () => Object.assign(new EventEmitter(), {
+      params: { runId: RUN_ID },
+      query: {},
+      get: vi.fn().mockReturnValue(undefined),
+    }));
+    const responses = [mockResponse(), mockResponse()];
+    await Promise.all(requests.map((request, index) => handler(
+      request as unknown as Record<string, unknown>,
+      responses[index]!,
+    )));
+    responses.forEach((current) => current.write.mockClear());
+
+    const payloadToJson = vi.fn(() => ({ progress: 0.5 }));
+    events.publishProgress({
+      runId: RUN_ID,
+      ownerSubject: "owner",
+      status: "running",
+      payload: { toJSON: payloadToJson },
+    });
+
+    expect(payloadToJson).toHaveBeenCalledTimes(1);
+    expect(responses[0].write.mock.calls[0]?.[0])
+      .toBe(responses[1].write.mock.calls[0]?.[0]);
+
+    requests.forEach((request) => request.emit("close"));
+    expect(events.telemetry.activeConnections).toBe(0);
+  });
+
+  it("returns 503 before SSE headers when the shared connection tracker is full", async () => {
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const held = mockResponse();
+    const releaseHeld = tracker.track(held as never, vi.fn());
+    const events = new SimulationRunEventHub();
+    const api = service();
+    const created = router({ service: api, events, sseConnections: tracker });
+    const request = Object.assign(new EventEmitter(), {
+      params: { runId: RUN_ID },
+      query: {},
+      get: vi.fn().mockReturnValue(undefined),
+    });
+    const response = mockResponse();
+
+    await routeHandler(created.value, "/runs/:runId/events", "get")(
+      request as unknown as Record<string, unknown>,
+      response,
+    );
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "SSE_CONNECTION_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(response.setHeader).not.toHaveBeenCalledWith(
+      "Content-Type",
+      "text/event-stream; charset=utf-8",
+    );
+    expect(events.telemetry.activeConnections).toBe(0);
+    expect(tracker.telemetry.rejectedConnectionsTotal).toBe(1);
+    releaseHeld();
+  });
+
+  it("releases the shared slot before returning the simulation hub capacity error", async () => {
+    const events = new SimulationRunEventHub({ connectionLimit: 1 });
+    events.publishSnapshot({
+      runId: RUN_ID,
+      ownerSubject: "owner",
+      status: "running",
+      payload: { snapshot: { progress: 0 } },
+    });
+    const releaseHeld = events.subscribe(RUN_ID, "owner", vi.fn());
+    const tracker = new SseConnectionTracker({ maximumConnections: 1 });
+    const created = router({ service: service(), events, sseConnections: tracker });
+    const request = Object.assign(new EventEmitter(), {
+      params: { runId: RUN_ID },
+      query: {},
+      get: vi.fn().mockReturnValue(undefined),
+    });
+    const response = mockResponse();
+    let activeAt503 = -1;
+    response.status.mockImplementation((status: number) => {
+      if (status === 503) activeAt503 = tracker.size;
+      return response;
+    });
+
+    await routeHandler(created.value, "/runs/:runId/events", "get")(
+      request as unknown as Record<string, unknown>,
+      response,
+    );
+
+    expect(activeAt503).toBe(0);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: "SIMULATION_SSE_BUSY", retryable: true }),
+    }));
+    expect(response.flushHeaders).not.toHaveBeenCalled();
+    expect(tracker.telemetry).toMatchObject({
+      activeConnections: 0,
+      acceptedConnectionsTotal: 1,
+      rejectedConnectionsTotal: 0,
+    });
+    expect(events.telemetry.activeConnections).toBe(1);
+    releaseHeld();
   });
 
   it("reports disabled status without invoking a service and returns 503 for execution", async () => {

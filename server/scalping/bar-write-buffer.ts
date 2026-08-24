@@ -81,8 +81,12 @@ export class BarWriteBuffer {
         continue;
       }
       if (this.queued.size >= this.maximumEntries) {
-        const formingKey = [...this.queued]
-          .find(([, value]) => value.record.state !== "final")?.[0];
+        let formingKey: string | undefined;
+        for (const [queuedKey, value] of this.queued) {
+          if (value.record.state === "final") continue;
+          formingKey = queuedKey;
+          break;
+        }
         if (record.state === "final" && formingKey) {
           this.queued.delete(formingKey);
           this.rejectedTotal += 1;
@@ -99,8 +103,10 @@ export class BarWriteBuffer {
   }
 
   snapshot(): BarWriteBufferSnapshot {
-    const oldest = [...this.queued.values()]
-      .reduce((value, item) => Math.min(value, item.queuedAt), Number.POSITIVE_INFINITY);
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const item of this.queued.values()) {
+      oldest = Math.min(oldest, item.queuedAt);
+    }
     return {
       queueDepth: this.queued.size,
       oldestAgeMs: Number.isFinite(oldest) ? Math.max(0, this.now() - oldest) : 0,

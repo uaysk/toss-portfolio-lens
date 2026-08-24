@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildRunLibraryUrl,
   createLibraryPreset,
@@ -31,6 +31,10 @@ function json(value: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("research library normalization", () => {
   it("direct와 result envelope run 목록을 같은 camelCase 모델로 정규화한다", () => {
@@ -98,6 +102,18 @@ describe("research library normalization", () => {
 });
 
 describe("research library fetch contracts", () => {
+  it("호출자가 전달한 abort signal을 모든 일반 library 요청에 전달한다", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn(async () => json({ result: { items: [] } }));
+
+    await listLibraryPresets({ fetcher, signal: controller.signal });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/portfolio/presets",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
   it("목록·patch·action이 지정 REST 경로와 body를 사용한다", async () => {
     const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
@@ -185,6 +201,39 @@ describe("research library fetch contracts", () => {
       "/api/portfolio/advanced/runs/report-run",
       "/api/portfolio/advanced/runs/report-run/result",
     ]);
+  });
+
+  it("abort 시 대기 timer와 후속 연구 보고서 polling을 중단한다", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetcher = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => (
+      String(input) === "/api/portfolio/tools/generate_research_report"
+        ? json({ result: { run_id: "report-run", status: "queued" } })
+        : json({ runId: "report-run", status: "running" })
+    ));
+    const task = generateLibraryResearchReport("run-1", "markdown", {
+      fetcher,
+      executionMode: "async",
+      pollIntervalMs: 1_000,
+      signal: controller.signal,
+    });
+    const rejected = expect(task).rejects.toMatchObject({ name: "AbortError" });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([, init]) => init?.signal === controller.signal)).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller.abort();
+    await rejected;
+    await vi.runAllTimersAsync();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("대용량 async 연구 보고서는 lazy artifact에서 읽는다", async () => {

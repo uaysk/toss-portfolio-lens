@@ -5,6 +5,7 @@ import type {
 } from "./binance-market-data.js";
 
 export const MAX_MARKET_EVENT_QUEUE_DEPTH = 256;
+export const MAX_PRESERVED_MARK_RISK_BARRIERS = 4_096;
 
 export type MarketEventQueueClock = {
   sleep(milliseconds: number, signal: AbortSignal): Promise<void>;
@@ -122,9 +123,8 @@ export class AsyncMarketEventQueue {
     if (
       event.kind === "mark_price"
       && metadata?.markRiskBarrierKey
-      && !this.preservedMarkRiskBarrierKeys.has(metadata.markRiskBarrierKey)
+      && this.rememberMarkRiskBarrier(metadata.markRiskBarrierKey)
     ) {
-      this.preservedMarkRiskBarrierKeys.add(metadata.markRiskBarrierKey);
       this.preservedCriticalMarkPrices += 1;
       this.coalescingSegment += 1;
       return this.enqueue({
@@ -398,6 +398,21 @@ export class AsyncMarketEventQueue {
 
   private coalescedKey(kind: CoalescedMarketEventKind, segment: number): string {
     return `${segment}:${kind}`;
+  }
+
+  private rememberMarkRiskBarrier(key: string): boolean {
+    if (this.preservedMarkRiskBarrierKeys.has(key)) {
+      this.preservedMarkRiskBarrierKeys.delete(key);
+      this.preservedMarkRiskBarrierKeys.add(key);
+      return false;
+    }
+    this.preservedMarkRiskBarrierKeys.add(key);
+    while (this.preservedMarkRiskBarrierKeys.size > MAX_PRESERVED_MARK_RISK_BARRIERS) {
+      const oldest = this.preservedMarkRiskBarrierKeys.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.preservedMarkRiskBarrierKeys.delete(oldest);
+    }
+    return true;
   }
 
   private sortByIngress(): void {

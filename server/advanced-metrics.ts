@@ -187,8 +187,12 @@ function correlation(left: number[], right: number[]): number | null {
   if (length < 2) return null;
   const leftValues = left.slice(0, length);
   const rightValues = right.slice(0, length);
-  const denominator = sampleStandardDeviation(leftValues) * sampleStandardDeviation(rightValues);
-  return denominator > 0 ? round(sampleCovariance(leftValues, rightValues) / denominator, 6) : null;
+  return correlationFromCovariance(leftValues, rightValues, sampleCovariance(leftValues, rightValues));
+}
+
+function correlationFromCovariance(left: number[], right: number[], covariance: number): number | null {
+  const denominator = sampleStandardDeviation(left) * sampleStandardDeviation(right);
+  return denominator > 0 ? round(covariance / denominator, 6) : null;
 }
 
 function compoundedReturn(values: number[]): number | null {
@@ -491,14 +495,18 @@ function buildTailRisk(returns: DailyReturnPoint[]): AdvancedAnalytics["tailRisk
 function buildAttribution(detail: PortfolioReturnDetail): AdvancedAnalytics["attributionByKey"] {
   const result: AdvancedAnalytics["attributionByKey"] = {};
   for (const day of detail.daily) {
-    const keys = new Set([...Object.keys(result), ...day.assets.map((asset) => asset.key)]);
+    const assetsByKey = new Map<string, AssetDailyReturnDetail>();
+    for (const asset of day.assets) {
+      if (!assetsByKey.has(asset.key)) assetsByKey.set(asset.key, asset);
+    }
+    const keys = new Set([...Object.keys(result), ...assetsByKey.keys()]);
     for (const key of keys) {
       const previous = result[key] ?? {
         timeLinkedContributionPercent: 0,
         localPriceContributionPercent: 0,
         fxContributionPercent: 0,
       };
-      const asset = day.assets.find((candidate) => candidate.key === key);
+      const asset = assetsByKey.get(key);
       result[key] = {
         timeLinkedContributionPercent: previous.timeLinkedContributionPercent * (1 + day.value)
           + (asset?.contribution ?? 0) * 100,
@@ -542,26 +550,48 @@ function buildRiskAnalytics(
   const activeSeries = history.series
     .filter((series) => (weights.get(series.key) ?? 0) > 0)
     .sort((left, right) => (weights.get(right.key) ?? 0) - (weights.get(left.key) ?? 0));
+  const activeWeights = activeSeries.map((series) => weights.get(series.key) ?? 0);
   const returnMaps = seriesReturnMaps(detail);
-  const covariance = (leftKey: string, rightKey: string): number => {
-    const left = returnMaps.get(leftKey);
-    const right = returnMaps.get(rightKey);
-    if (!left || !right) return 0;
-    const [leftValues, rightValues] = pairedReturns(left, right);
-    return sampleCovariance(leftValues, rightValues);
-  };
+  const correlationCount = Math.min(10, activeSeries.length);
+  const covarianceMatrix = Array.from(
+    { length: activeSeries.length },
+    () => new Float64Array(activeSeries.length),
+  );
+  const assetCorrelationMatrix = Array.from(
+    { length: correlationCount },
+    () => Array<number | null>(correlationCount).fill(null),
+  );
+  for (let leftIndex = 0; leftIndex < activeSeries.length; leftIndex += 1) {
+    const leftReturns = returnMaps.get(activeSeries[leftIndex].key);
+    for (let rightIndex = leftIndex; rightIndex < activeSeries.length; rightIndex += 1) {
+      const rightReturns = returnMaps.get(activeSeries[rightIndex].key);
+      if (!leftReturns || !rightReturns) continue;
+      const [leftValues, rightValues] = pairedReturns(leftReturns, rightReturns);
+      const pairCovariance = sampleCovariance(leftValues, rightValues);
+      covarianceMatrix[leftIndex][rightIndex] = pairCovariance;
+      covarianceMatrix[rightIndex][leftIndex] = pairCovariance;
+      if (leftIndex < correlationCount && rightIndex < correlationCount) {
+        const pairCorrelation = correlationFromCovariance(leftValues, rightValues, pairCovariance);
+        assetCorrelationMatrix[leftIndex][rightIndex] = pairCorrelation;
+        assetCorrelationMatrix[rightIndex][leftIndex] = pairCorrelation;
+      }
+    }
+  }
   let portfolioVariance = 0;
-  for (const left of activeSeries) {
-    for (const right of activeSeries) {
-      portfolioVariance += (weights.get(left.key) ?? 0) * (weights.get(right.key) ?? 0) * covariance(left.key, right.key);
+  for (let leftIndex = 0; leftIndex < activeSeries.length; leftIndex += 1) {
+    for (let rightIndex = 0; rightIndex < activeSeries.length; rightIndex += 1) {
+      portfolioVariance += activeWeights[leftIndex]
+        * activeWeights[rightIndex]
+        * covarianceMatrix[leftIndex][rightIndex];
     }
   }
   const portfolioMap = new Map(detail.returns.map((item) => [item.date, item.value]));
-  const riskContributions = activeSeries.map((series) => {
-    const weight = weights.get(series.key) ?? 0;
-    const marginalVariance = activeSeries.reduce((sum, other) => (
-      sum + (weights.get(other.key) ?? 0) * covariance(series.key, other.key)
-    ), 0);
+  const riskContributions = activeSeries.map((series, seriesIndex) => {
+    const weight = activeWeights[seriesIndex];
+    let marginalVariance = 0;
+    for (let otherIndex = 0; otherIndex < activeSeries.length; otherIndex += 1) {
+      marginalVariance += activeWeights[otherIndex] * covarianceMatrix[seriesIndex][otherIndex];
+    }
     const ownReturns = returnMaps.get(series.key) ?? new Map();
     const [assetValues, portfolioValues] = pairedReturns(ownReturns, portfolioMap);
     const volatility = sampleStandardDeviation(Array.from(ownReturns.values()));
@@ -578,13 +608,9 @@ function buildRiskAnalytics(
   const correlationSeries = activeSeries.slice(0, 10);
   const correlations: CorrelationMatrix = {
     assets: correlationSeries.map((series) => ({ key: series.key, symbol: series.symbol, name: series.name })),
-    values: correlationSeries.map((left) => correlationSeries.map((right) => {
+    values: correlationSeries.map((left, leftIndex) => correlationSeries.map((right, rightIndex) => {
       if (left.key === right.key) return 1;
-      const leftReturns = returnMaps.get(left.key);
-      const rightReturns = returnMaps.get(right.key);
-      if (!leftReturns || !rightReturns) return null;
-      const [leftValues, rightValues] = pairedReturns(leftReturns, rightReturns);
-      return correlation(leftValues, rightValues);
+      return assetCorrelationMatrix[leftIndex][rightIndex];
     })),
   };
   const sortedWeights = activeSeries.map((series) => weights.get(series.key) ?? 0).sort((left, right) => right - left);

@@ -393,9 +393,16 @@ export class TechnicalTradeMarkerService {
       this.portfolioAnalysis.getCombinedHistory({ accountId, range: "all" }),
       this.store.getBackfillStatus(accountId).catch(() => undefined),
     ]);
-    const orderDates = orders.flatMap((order) => technicalTradeDate(order) ?? []);
-    const firstDate = history.points[0]?.date ?? orderDates.sort()[0];
-    const lastDate = history.points.at(-1)?.date ?? orderDates.sort().at(-1);
+    let firstOrderDate: string | undefined;
+    let lastOrderDate: string | undefined;
+    for (const order of orders) {
+      const date = technicalTradeDate(order);
+      if (!date) continue;
+      if (firstOrderDate === undefined || date < firstOrderDate) firstOrderDate = date;
+      if (lastOrderDate === undefined || date > lastOrderDate) lastOrderDate = date;
+    }
+    const firstDate = history.points[0]?.date ?? firstOrderDate;
+    const lastDate = history.points.at(-1)?.date ?? lastOrderDate;
     const exchangeRates = firstDate && lastDate
       ? await this.store.getExchangeRates(firstDate, lastDate)
       : new Map<string, number>();

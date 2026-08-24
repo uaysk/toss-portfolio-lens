@@ -17,7 +17,6 @@ import type { TechnicalTradeMarkerService } from "../services/technical-trade-ma
 import type {
   IntradayBarRecord,
   ScalpingInterval,
-  ScalpingPredictionRecord,
   ScalpingRepository,
 } from "../repositories/scalping-repository.js";
 import {
@@ -54,7 +53,6 @@ import {
   marketLocalTimestamp,
   marketSessionEffectiveMinute,
   marketSessionWindows,
-  marketTradingSessionDate,
   sessionWindowForBarClose,
   sessionWindowForTrade,
   validateSessionWindows,
@@ -161,7 +159,7 @@ type KisMarket = Pick<
   | "getOverseasVolumeRanking"
   | "getOverseasTradingAmountRanking"
 >;
-type RustCompute = Pick<RustComputeClient, "compute">;
+type RustCompute = Pick<RustComputeClient, "compute"> & Partial<Pick<RustComputeClient, "snapshot">>;
 type AiService = Pick<ScalpingAiService, "forecast" | "evaluate">;
 type PortfolioSource = {
   getPortfolio(accountId?: string, force?: boolean, refreshAccounts?: boolean): Promise<Portfolio>;
@@ -179,10 +177,6 @@ type AnalysisPosition = Pick<CausalPosition, "symbol" | "quantity" | "averagePri
 
 function record(value: unknown): UnknownRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : undefined;
-}
-
-function finite(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function string(value: unknown): string | undefined {
@@ -764,7 +758,7 @@ export class ScalpingService {
   private readonly forecastRequestSchema: ReturnType<typeof createScalpingForecastRequestSchema>;
   private readonly realtimeAnalysisRequestSchema: ReturnType<typeof createScalpingRealtimeAnalysisRequestSchema>;
   private readonly evaluationRequestSchema: ReturnType<typeof createScalpingEvaluationRequestSchema>;
-  private readonly realtimeAnalysisComputations = new SharedComputationRegistry();
+  private readonly realtimeAnalysisComputations: SharedComputationRegistry;
   private readonly workspaceContexts: WorkspaceContextCache<WorkspaceContext>;
   private readonly candidateUniverse: CandidateUniverseSelector;
 
@@ -809,6 +803,15 @@ export class ScalpingService {
     if (config.forecastMinimumBars < 1 || config.forecastMaximumBars < config.forecastMinimumBars) throw new Error("forecast bar limits are invalid.");
     validateSessionWindows(configuredKrSessionWindows(config));
     this.now = config.now ?? Date.now;
+    // Do not let distinct SSE batches retain more bar/model inputs than the
+    // downstream Rust scheduler could admit (active slots plus its queue).
+    const rustSnapshot = this.rust?.snapshot?.();
+    const rustCapacity = rustSnapshot
+      ? rustSnapshot.capacity + rustSnapshot.maxQueued
+      : undefined;
+    this.realtimeAnalysisComputations = new SharedComputationRegistry({
+      ...(rustCapacity ? { maximumEntries: rustCapacity } : {}),
+    });
     this.workspaceSchema = createScalpingWorkspaceRequestSchema(config);
     this.forecastRequestSchema = createScalpingForecastRequestSchema(config.maximumTopCount);
     this.realtimeAnalysisRequestSchema = createScalpingRealtimeAnalysisRequestSchema(config.maximumTopCount);
@@ -1033,7 +1036,14 @@ export class ScalpingService {
       ? await this.repository.latestPredictions(selectedSymbols, false, marketCountry).catch(() => [])
       : [];
     const predictionBySymbol = new Map(predictions.map((prediction) => [prediction.symbol, prediction]));
-    const markerFromDate = Array.from(barsBySymbol.values()).flat().map((bar) => bar.sessionDate).sort()[0];
+    let markerFromDate: string | undefined;
+    for (const bars of barsBySymbol.values()) {
+      for (const bar of bars) {
+        if (markerFromDate === undefined || bar.sessionDate < markerFromDate) {
+          markerFromDate = bar.sessionDate;
+        }
+      }
+    }
     const markerResult = selectedSymbols.length && portfolioValue && this.tradeMarkers
       ? await this.safe(() => this.tradeMarkers!.getMarkers({
         accountId: portfolioValue.selectedAccountId,
@@ -1975,6 +1985,7 @@ export class ScalpingService {
     };
   }
 
+  // @ts-expect-error -- This private test seam is exercised through structural casts in scalping-service.test.ts.
   private async fetchMinuteHistory(
     symbol: string,
     existing: readonly IntradayBarRecord[],
