@@ -46450,6 +46450,7 @@ async function loadChronos2DerivativeCovariates(rest, bars, signal) {
 }
 
 // server/worker/ai-contract.ts
+import { isDeepStrictEqual } from "node:util";
 var SCALPING_AI_SCHEMA_VERSION = "scalping-ai/v2";
 var SCALPING_AI_HORIZONS = [5, 15, 30, 60];
 var SCALPING_AI_REALTIME_HORIZONS = [5, 15];
@@ -47345,7 +47346,7 @@ var AiResponseSchema = external_exports.object({
         message: "top-level model identity must match the independent model lane"
       });
     }
-    if (JSON.stringify(response.model) !== JSON.stringify(independentRun.model) || JSON.stringify(response.series) !== JSON.stringify(independentRun.raw_series) || response.status !== independentRun.status) {
+    if (!isDeepStrictEqual(response.model, independentRun.model) || !isDeepStrictEqual(response.series, independentRun.raw_series) || response.status !== independentRun.status) {
       context.addIssue({
         code: "custom",
         path: ["model_runs", 0],
@@ -47616,6 +47617,145 @@ import {
   unlink
 } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+
+// server/json-byte-limit.ts
+function jsonPath(path) {
+  return path.reduce(
+    (result, segment) => typeof segment === "number" ? `${result}[${segment}]` : `${result}.${segment}`,
+    "$"
+  );
+}
+function addBytes(counter, byteCount) {
+  counter.bytes += byteCount;
+  return counter.bytes >= counter.threshold;
+}
+function countJsonString(value, counter) {
+  if (addBytes(counter, 2)) return true;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 34 || code === 92) {
+      if (addBytes(counter, 2)) return true;
+      continue;
+    }
+    if (code < 32) {
+      const escapedBytes = code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6;
+      if (addBytes(counter, escapedBytes)) return true;
+      continue;
+    }
+    if (code < 128) {
+      if (addBytes(counter, 1)) return true;
+      continue;
+    }
+    if (code < 2048) {
+      if (addBytes(counter, 2)) return true;
+      continue;
+    }
+    if (code >= 55296 && code <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 56320 && next <= 57343) {
+        index += 1;
+        if (addBytes(counter, 4)) return true;
+      } else if (addBytes(counter, 6)) {
+        return true;
+      }
+      continue;
+    }
+    if (code >= 56320 && code <= 57343) {
+      if (addBytes(counter, 6)) return true;
+      continue;
+    }
+    if (addBytes(counter, 3)) return true;
+  }
+  return false;
+}
+function countCanonicalJson(value, counter, path = []) {
+  if (value === null) return addBytes(counter, 4);
+  if (typeof value === "string") return countJsonString(value, counter);
+  if (typeof value === "boolean") return addBytes(counter, value ? 4 : 5);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`worker payload\uC758 ${jsonPath(path)} \uAC12\uC740 \uC720\uD55C\uD55C \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+    return addBytes(counter, String(Object.is(value, -0) ? 0 : value).length);
+  }
+  if (Array.isArray(value)) {
+    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
+    counter.ancestors.add(value);
+    try {
+      if (addBytes(counter, 1)) return true;
+      for (let index = 0; index < value.length; index += 1) {
+        if (index > 0 && addBytes(counter, 1)) return true;
+        if (!(index in value)) {
+          if (addBytes(counter, 4)) return true;
+          continue;
+        }
+        path.push(index);
+        const exceeds = countCanonicalJson(value[index], counter, path);
+        path.pop();
+        if (exceeds) return true;
+      }
+      return addBytes(counter, 1);
+    } finally {
+      counter.ancestors.delete(value);
+    }
+  }
+  if (value instanceof Map) {
+    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
+    counter.ancestors.add(value);
+    try {
+      const normalized = /* @__PURE__ */ new Map();
+      for (const [key, item] of value.entries()) normalized.set(String(key), item);
+      if (addBytes(counter, 1)) return true;
+      let index = 0;
+      for (const [key, item] of normalized) {
+        if (index > 0 && addBytes(counter, 1)) return true;
+        if (countJsonString(key, counter) || addBytes(counter, 1)) return true;
+        path.push(key);
+        const exceeds = countCanonicalJson(item, counter, path);
+        path.pop();
+        if (exceeds) return true;
+        index += 1;
+      }
+      return addBytes(counter, 1);
+    } finally {
+      counter.ancestors.delete(value);
+    }
+  }
+  if (typeof value === "object" && value) {
+    if (counter.ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
+    counter.ancestors.add(value);
+    try {
+      const record3 = value;
+      if (addBytes(counter, 1)) return true;
+      let index = 0;
+      for (const key of Object.keys(record3)) {
+        const item = record3[key];
+        if (item === void 0) continue;
+        if (index > 0 && addBytes(counter, 1)) return true;
+        if (countJsonString(key, counter) || addBytes(counter, 1)) return true;
+        path.push(key);
+        const exceeds = countCanonicalJson(item, counter, path);
+        path.pop();
+        if (exceeds) return true;
+        index += 1;
+      }
+      return addBytes(counter, 1);
+    } finally {
+      counter.ancestors.delete(value);
+    }
+  }
+  throw new Error(`worker payload\uC758 ${jsonPath(path)} \uAC12\uC740 JSON\uC73C\uB85C \uC9C1\uB82C\uD654\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+}
+function canonicalJsonExceedsByteLimit(value, maximumBytes) {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes === Number.MAX_SAFE_INTEGER) {
+    throw new Error("canonical JSON byte limit must be a non-negative safe integer below MAX_SAFE_INTEGER");
+  }
+  return countCanonicalJson(value, {
+    bytes: 0,
+    threshold: maximumBytes + 1,
+    ancestors: /* @__PURE__ */ new WeakSet()
+  });
+}
+
+// server/crypto/fincast-raw-artifact.ts
 var RAW_INPUT_SCHEMA = "fincast-raw-input/v1";
 var RAW_CONTEXT_BARS = 512;
 var RAW_HORIZONS = [5, 15, 30, 60];
@@ -47744,7 +47884,7 @@ async function writeFinCastRawInputArtifact(input) {
   }
   const metadata = input.metadata ?? {};
   validateMetadata(metadata);
-  if (Buffer.byteLength(JSON.stringify(metadata), "utf8") > MAXIMUM_METADATA_BYTES) {
+  if (canonicalJsonExceedsByteLimit(metadata, MAXIMUM_METADATA_BYTES)) {
     throw new Error("FinCast raw artifact metadata exceeds its size bound.");
   }
   const directory = await prepareOutputDirectory(input.directory);
